@@ -1,0 +1,64 @@
+{
+  "ollama_base_url": "http://127.0.0.1:11434",
+  "qwen_api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "qwen_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "anthropic_api_key": "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "google_api_key": "AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "mimo_api_key": "tp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "mimo_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic",
+  "deepseek_api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "deepseek_base_url": "https://api.deepseek.com",
+
+  "mimo_models":      ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni"],
+  "qwen_cloud_models":["qwen3.5-plus", "qwen-max", "qwen-plus", "qwen-turbo"],
+  "ollama_models":    ["qwen3.5:latest"],
+  "anthropic_models": ["claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+  "gemini_models":    [],
+  "deepseek_models":  ["deepseek-v4-flash", "deepseek-v4-pro"],
+  "claude_code_model": "",
+  "vision_model_id":   "",
+  "default_model_id":  "mimo-v2.5-pro",
+
+  "web_search_api_key": "",
+  "_web_search_说明": "web_search 工具用 Tavily 搜网络（tavily.com 免费申请 key）。留空 = web_search 不可用（会优雅提示），不影响 fetch_url 抓网址（fetch_url 无需 key）。",
+
+  "notify": {
+    "enabled": false,
+    "levels": ["error", "action_needed", "done"],
+    "throttle_seconds": 10,
+    "telegram_bot_token": "",
+    "telegram_chat_id": ""
+  },
+  "remote_control": {
+    "enabled": false,
+    "mode": "chat_only",
+    "readonly_blocklist": [],
+    "telegram_confirm": true
+  },
+  "_remote_control_说明": "手机 Telegram 遥控 PC 灵犀 Code。enabled=开关。mode 三档安全分级：chat_only（默认，禁所有工具纯对话，最安全）/ safe_readonly（可读代码，但 config/密钥/记忆等敏感文件黑名单拦截，写工具命令仍禁）/ unrestricted（不设防全开，仅在完全信任时用）。readonly_blocklist：safe_readonly 下在内置黑名单外再追加的敏感文件名/后缀。telegram_confirm：是否把操作确认（run_command/edit_file/MCP）推到手机 Telegram inline 按钮（不分电脑/手机发起，都推，人走开也能用手机批），PC 卡与手机按钮双向竞争先点先到，推荐开启。",
+
+  "mcp_enabled": true,
+  "mcp_servers": {},
+
+  "_mcp_servers_说明": "MCP 是可选的高级功能，默认关闭（mcp_servers 为空）。灵犀 Code 的内置工具已覆盖日常使用，不配 MCP 也完全可用。想用就把下面 _示例 里的条目挪进 mcp_servers 并改成真实参数。支持三种传输：stdio（需 Node.js）、sse（显式指定 SSE）、streamable_http（显式指定）、auto（自动检测 SSE/HTTP，推荐）。",
+  "_mcp_servers_示例": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:/换成你的真实目录"],
+      "env": {}
+    },
+    "context7-sse": {
+      "transport": "sse",
+      "url": "http://localhost:8010/sse"
+    },
+    "my-server-streamable": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8080/mcp"
+    },
+    "my-server-auto": {
+      "transport": "auto",
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}

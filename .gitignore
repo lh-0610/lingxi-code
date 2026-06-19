@@ -1,0 +1,89 @@
+# ─── Python ───
+__pycache__/
+.venv/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+.pytest_tmp*/
+.codex_tmp_pytest*/
+
+# ─── 打包产物 ───
+dist/
+build/
+# PyInstaller 自动生成的 .spec 可能含本机路径，默认忽略；
+# 但 lingxi.spec 是手维护的发布配置（已清洗，无本机路径），需要提交
+*.spec
+!lingxi.spec
+*.exe
+
+# ─── 编辑器 / IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+# Claude Code 内部配置
+.claude/
+
+# ─── 备份 ───
+*.bak
+*.orig
+
+# ─── 本应用：含密钥 / 个人数据 ───
+# API 密钥
+config.json
+# 会话历史
+chat_memory/
+# 运行日志
+logs/
+
+# ─── 桌宠立绘 / GIF / sprite ───
+# 默认忽略用户自行替换的素材；下面白名单例外的是仓库自带的默认桌宠
+# （作者用 AI 生成，随仓库分发）。换成你自己的同名文件即可覆盖显示。
+assets/desktop_pet/*.png
+assets/desktop_pet/*.gif
+assets/desktop_pet/*.jpg
+assets/desktop_pet/*.webp
+assets/desktop_pet/sprites/
+!assets/desktop_pet/idle_desktop_pet_final.gif
+!assets/desktop_pet/thinking_desktop_pet_final.gif
+!assets/desktop_pet/wave_desktop_pet_final.gif
+!assets/desktop_pet/lingxi_pet.png
+# 桌宠源视频(AI 生成的 MP4，本地留着重新抠图生成 GIF 用，不进仓库)
+assets/*.mp4
+
+# 角色卡（特定 IP，自行加入；example.md 例外保留作模板）
+roles/*.md
+!roles/example.md
+
+# ─── 项目文档（规格 / 方案 / 临时，不进仓库）───
+# 给 AI agent 读的实现规格、修复方案、设计讨论等。
+# TODO.md 已 tracked，gitignore 不会让它被取消跟踪。
+docs/
+
+# 临时输出
+output/
+outputs/
+tmp/
+*.tmp
+
+# Git worktree isolation workspaces
+.lingxi-worktrees/
+
+# 官网源码（部署在服务器，不进仓库 —— 用户决定）
+website/
+
+# 设计稿 handoff（HTML 设计参考，不进仓库）
+design_handoff_lingxi_chat/
+design_handoff*/
+
+# Web 多用户：账号表 / token / 各用户数据（含密码哈希，绝不进仓库）
+web_users.json
+web_tokens.json
+web_token.json
+users/

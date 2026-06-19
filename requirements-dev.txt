@@ -1,0 +1,6 @@
+-r requirements.txt
+jedi>=0.19
+pytest>=8.0
+# check_code / 改后自动校验的 lint 后端（ruff check --select F,E9）。
+# 缺它时退化为内置 compile() 只查语法，拿不到 pyflakes 正确性检查。
+ruff>=0.6

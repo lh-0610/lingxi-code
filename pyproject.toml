@@ -1,0 +1,16 @@
+# 仓库级工程配置。目前只配 ruff —— 灵犀是 PyInstaller 桌面应用、不作为 pip 包发布，
+# 故没有 [build-system] / [project]。
+
+# ── ruff: 仓库级 lint ──
+# 规则集沿用「改后自动校验门禁」(check_code / _run_code_check 用 ruff --select F,E9) 的思路：
+# 只收【正确性 + 轻量可读性】，**故意不开 E501(行宽) / 风格类规则**——项目刻意避开风格噪声，
+# 否则模型会去追无意义的格式问题（见 CLAUDE.md 自我校验闭环一节）。
+#   F  = pyflakes（未用 import / 未定义名 / 重复定义等正确性）
+#   E9 = 语法 / IO 错
+#   E4 = import 规范（E401 一行多 import、E402 import 不在文件顶部）
+#   E7 = 语句规范（E701 单行复合、E711/E712 与 None/True 用 == 比较、E722 裸 except、E741 歧义名 l 等）
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["F", "E4", "E7", "E9"]

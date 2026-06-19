@@ -1,0 +1,46 @@
+# ═══════════════════════════════════════════════════════
+# 核心依赖（必装）
+# ═══════════════════════════════════════════════════════
+
+# AI / LangChain 生态
+langchain>=0.3
+langchain-core>=0.3
+langchain-ollama>=0.2
+langchain-openai>=0.2
+langchain-anthropic>=0.3
+langchain-google-genai>=2.0
+
+# GUI
+PySide6>=6.7
+
+# Markdown 渲染 + HTTP + 图片处理（图片输入/视觉用）
+markdown>=3.5
+requests>=2.31
+pillow>=10.0
+numpy>=1.24
+
+# ═══════════════════════════════════════════════════════
+# 可选：打包
+# ═══════════════════════════════════════════════════════
+pyinstaller>=6.0
+
+# ═══════════════════════════════════════════════════════
+# 可选：tree-sitter 多语言代码分析（code_map / related_files 增强）
+# 不装时自动回退到内置正则提取，不影响核心功能
+# ═══════════════════════════════════════════════════════
+tree-sitter>=0.23
+tree-sitter-python>=0.23
+tree-sitter-javascript>=0.23
+tree-sitter-typescript>=0.23
+
+# ═══════════════════════════════════════════════════════
+# 可选：MCP（Model Context Protocol）远程工具
+# ═══════════════════════════════════════════════════════
+mcp>=1.9
+
+# ═══════════════════════════════════════════════════════
+# 可选：代码导航（find_definition / find_references）
+# 装了语言服务器走 LSP（懂作用域/import/继承，最准）→ 没有则退 jedi → 都没有退回 search_files
+# ═══════════════════════════════════════════════════════
+jedi>=0.19
+python-lsp-server>=1.9   # 完整 LSP（纯 Python）；或 pip install pyright（需 Node）

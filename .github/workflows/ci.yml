@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-test:
+    # 灵犀是 Windows 桌面应用（taskkill / Windows Job Object / PySide6），CI 也跑 Windows 对齐真机
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      # ── ruff 仓库级 lint：轻量、稳定，主门禁（规则集见 pyproject.toml）──
+      - name: Install ruff
+        run: pip install "ruff>=0.6"
+      - name: Ruff check
+        run: python -m ruff check src/
+
+      # ── pytest：只装核心依赖跑测试套件 ──
+      # 可选依赖（mcp / tree-sitter / lsp）不装——代码在缺失时优雅降级，测试覆盖降级路径。
+      - name: Install core deps
+        run: >-
+          pip install langchain langchain-core langchain-ollama langchain-openai
+          langchain-anthropic langchain-google-genai PySide6 markdown requests
+          pillow numpy jedi pytest
+      - name: Pytest
+        run: python -m pytest scripts/ -q
