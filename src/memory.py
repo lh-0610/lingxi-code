@@ -452,15 +452,14 @@ def move_sessions_to_no_project(old_path):
     failed_ids = []
     with _LOCK:
         from . import session as _session_mod
-        # 1. 同步内存中所有已打开会话的项目锚点（最关键的一步）
-        try:
-            _open = list(_session_mod.sessions.values())
-            _open.append(_session_mod.get_active())   # active 可能未注册
-            for _sess in _open:
-                if getattr(_sess, "project", _session_mod._UNSET) == old_path:
-                    _sess.project = None
-        except Exception as e:
-            logger.warning(f"同步内存会话项目锚点失败: {e}")
+        # 1. 同步内存中所有已打开会话的项目锚点（最关键的一步）。
+        #    用 live_sessions() 在 session._lock 内取一致快照——直接 list(sessions.values())
+        #    在后台会话并发 register/rekey/drop 时可能抛 RuntimeError，原来被宽 except 吞成
+        #    warning → 锚点同步被静默跳过 → "移除项目不复发"的修复在并发下原样失效。
+        #    锁序：此处持 memory._LOCK 再取 session._lock，与 save_session→rekey 一致，无死锁。
+        for _sess in _session_mod.live_sessions():
+            if getattr(_sess, "project", _session_mod._UNSET) == old_path:
+                _sess.project = None
 
         # 2 + 3. 磁盘 index.json + 各会话文件
         if not os.path.exists(memory_index()):

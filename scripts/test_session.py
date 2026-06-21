@@ -332,6 +332,19 @@ class TestMoveSessionsToNoProject:
         sessions = list_sessions(project_filter="__all__")
         assert [s for s in sessions if s["id"] == sid][0]["project"] is None
 
+    def test_move_syncs_registered_background_session(self, isolated_memory):
+        """注册表里的(非 active)后台会话锚点也必须被同步——锁内快照修复后的回归。
+        live_sessions() 应覆盖注册表会话，否则后台会话下次 save 会把它写回已删项目。"""
+        bg = _session.Session()
+        bg.project = "/old/project"
+        _session.register(bg)
+        try:
+            assert bg in _session.live_sessions()       # 快照覆盖注册表会话
+            move_sessions_to_no_project("/old/project")
+            assert bg.project is None                   # 后台会话内存锚点已同步
+        finally:
+            _session.drop(bg.key)                       # 别泄漏到别的测试
+
     def test_move_raises_on_session_write_failure(self, isolated_memory, monkeypatch):
         """单个会话文件改写失败 → 抛 SessionMigrationError，不再静默吞掉。"""
         state.chat_history.clear()

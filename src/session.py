@@ -220,3 +220,16 @@ def rekey(sess: Session, new_key: str) -> None:
             sessions.pop(sess.key, None)
         sess.key = new_key
         sessions[new_key] = sess
+
+
+def live_sessions() -> list["Session"]:
+    """所有"已打开"会话的【一致快照】：注册表里的 + 当前 active（可能未注册）。
+
+    在 _lock 内一次性取、返回普通 list，调用方可安全迭代——否则并发 register/rekey/drop
+    改 sessions 时直接迭代它可能抛 "dictionary changed size during iteration"。
+    """
+    with _lock:
+        result = list(sessions.values())
+        if _active is not None and _active not in result:
+            result.append(_active)
+        return result
