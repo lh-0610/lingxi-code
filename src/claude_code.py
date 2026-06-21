@@ -7,6 +7,7 @@ import json as _json
 import os
 import signal
 import subprocess
+import tempfile
 import threading as _threading
 import time
 
@@ -14,9 +15,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from . import state
 from .paths import logger
-from .config import CLAUDE_CODE_MODEL
+from .config import CLAUDE_CODE_MODEL, CLAUDE_CODE_SKIP_PERMISSIONS
 from .memory import save_session, maybe_generate_session_title
-from .roles import get_system_prompt, get_current_role_name, get_role_card_content
+from .roles import get_external_agent_context, get_current_role_name
 
 
 def _kill_proc_tree(proc):
@@ -40,6 +41,34 @@ def _kill_proc_tree(proc):
         proc.kill()
     except Exception:
         pass
+
+
+def _build_claude_cmd(*, agent_mode, skip_permissions, model, system_prompt_file):
+    """构造 claude CLI 参数列表（纯函数，便于测权限映射）。
+
+    权限模式（三者互斥，分支只给其一；claude -p 非交互必须显式给，否则遇写操作会挂起）：
+      灵犀 Plan        → --permission-mode plan：claude 只读探索、不改源文件（内核级强制）
+      灵犀 Act + skip开 → --dangerously-skip-permissions：绕过全部检查、全自动
+      灵犀 Act + skip关 → --permission-mode acceptEdits：自动批准编辑+常见文件命令、不挂起
+
+    **prompt 一律走 stdin、system prompt 走 --append-system-prompt-file**，命令行只留 flag +
+    文件路径——避开 Windows CreateProcess ~32K 命令行长度限制（项目规则可达 40K + 记忆 +
+    角色卡，内联到命令行必然可能超限、导致 Claude Code 启动失败）。--append-system-prompt-file
+    是【追加】（保留 claude 自带编码提示），不像 --system-prompt 整个替换。
+    """
+    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
+    if agent_mode == "plan":
+        cmd += ["--permission-mode", "plan"]
+    elif skip_permissions:
+        cmd += ["--dangerously-skip-permissions"]
+    else:
+        cmd += ["--permission-mode", "acceptEdits"]
+    if model:
+        cmd += ["--model", model]
+    if system_prompt_file:
+        cmd += ["--append-system-prompt-file", system_prompt_file]
+    # 用户 prompt 不作位置参数，由调用方写进 stdin（claude -p 默认从 stdin 读文本 prompt）。
+    return cmd
 
 
 def claude_code_loop(ui):
@@ -91,6 +120,9 @@ def claude_code_loop(ui):
     display_name = get_current_role_name() or "Claude Code"
     ui.show_message("\n", "spacer")
     ui.show_message(f"{display_name}\n", "ai_label")
+    # Claude Code 的 -p 模式没有受支持的图片传入方式，明确告知而非静默丢弃图片。
+    if has_images:
+        ui.show_message("（注：Claude Code 模式暂不支持图片输入，本条仅按文本处理）\n", "ai_msg")
     ui.show_message(f"等待{display_name}回复...\n", "thinking_indicator")
 
     logger.info(f"Claude Code 调用: {last_user_msg[:100]}")
@@ -99,39 +131,45 @@ def claude_code_loop(ui):
     heartbeat_stop = _threading.Event()
     heartbeat_started = False
     proc = None
+    sys_prompt_file = None
     try:
-        cmd = [
-            "claude", "-p",
-            "--dangerously-skip-permissions",
-            "--output-format", "stream-json",
-            "--verbose",
-        ]
-        if CLAUDE_CODE_MODEL:
-            cmd += ["--model", CLAUDE_CODE_MODEL]
-        # 角色卡作为系统提示词
-        system_prompt = get_system_prompt()
-        if get_role_card_content():
-            cmd += ["--system-prompt", system_prompt]
-        # 如果消息包含图片，使用 stdin 传递并启用图片支持
-        if has_images:
-            cmd += ["--stdin-format", "text"]
-            stdin_data = full_prompt
-        else:
-            stdin_data = None
-            cmd.append(full_prompt)
+        # 精简上下文：只给角色/项目规则/记忆，不注入灵犀自己的工具说明（claude 有自己的
+        # 工具，注入会让它调用不存在的工具）。Plan/Act 的只读约束交给 --permission-mode 强制。
+        # 写进临时文件用 --append-system-prompt-file 传，prompt 走 stdin —— 避开 32K 命令行限制。
+        system_prompt = get_external_agent_context()
+        if system_prompt:
+            _tf = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", prefix="lingxi_cc_sys_",
+                delete=False, encoding="utf-8")
+            _tf.write(system_prompt)
+            _tf.close()
+            sys_prompt_file = _tf.name
+        cmd = _build_claude_cmd(
+            agent_mode=getattr(state, "agent_mode", "act"),
+            skip_permissions=CLAUDE_CODE_SKIP_PERMISSIONS,
+            model=CLAUDE_CODE_MODEL,
+            system_prompt_file=sys_prompt_file,
+        )
+        stdin_data = full_prompt   # 用户 prompt 一律走 stdin，绝不进命令行
+
+        # 在项目根/worktree 里跑 claude CLI，和其它工具的 cwd 语义一致；
+        # 否则它会落到灵犀进程的启动目录（可能是 exe 所在处），无视当前项目。
+        from .tools_common import _project_cwd
+        run_cwd = _project_cwd() or None
 
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.PIPE if stdin_data else None,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
+            cwd=run_cwd,
             start_new_session=(os.name != "nt"),
         )
         if stdin_data:
             proc.stdin.write(stdin_data)
-            proc.stdin.close()
+        proc.stdin.close()
 
         stream_start = time.time()
 
@@ -269,3 +307,8 @@ def claude_code_loop(ui):
         ui.show_retry(str(e)[:100])
     finally:
         _kill_proc_tree(proc)
+        if sys_prompt_file:
+            try:
+                os.remove(sys_prompt_file)   # 清理 system prompt 临时文件
+            except OSError:
+                pass

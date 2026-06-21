@@ -280,6 +280,44 @@ def get_system_prompt(web_search=None):
     return base
 
 
+def get_external_agent_context() -> str:
+    """给【外部 agent】（如 Claude Code CLI，自带成套工具）用的精简上下文。
+
+    只含：角色卡 / 当前项目根 / 项目规则（CLAUDE.md·AGENTS.md·.lingxirules）/ 长期记忆。
+    **不含**灵犀自己的工具说明（edit_file / run_command / update_plan 等）——外部 agent 有
+    它自己的工具，注入灵犀工具指令会让它调用根本不存在的工具、造成混乱。Plan/Act 的只读
+    约束由调用方用 --permission-mode 强制（见 claude_code.py），不在这里靠提示词重复。
+    """
+    from . import session as _session
+    parts: list[str] = []
+
+    # 角色卡（优先本轮快照，回退全局）
+    _sess = _session.current_session()
+    _snap = getattr(_sess, "role_snapshot", None)
+    role_content = _snap["content"] if _snap is not None else _role_card_content
+    if role_content:
+        parts.append("# 角色设定（必须严格遵守）\n\n" + role_content)
+
+    # 当前项目根 + 分层项目规则
+    project_root = _session.current_project()
+    if project_root and os.path.isdir(project_root):
+        parts.append(f"# 项目\n当前项目根目录: `{project_root}`")
+        rules = load_project_rules(project_root)
+        if rules:
+            parts.append(
+                "# 项目指令（来自 CLAUDE.md / AGENTS.md / .lingxirules，优先级最高）\n" + rules
+            )
+
+    # 长期记忆（无条件注入）
+    from .memory_store import render_memories_for_prompt
+    from .limits import MEMORY_MAX_CHARS
+    mem = render_memories_for_prompt(max_chars=MEMORY_MAX_CHARS)
+    if mem:
+        parts.append(mem)
+
+    return "\n\n".join(parts)
+
+
 # 项目规则文件读取上限（单文件 / 合并后总量）
 _RULE_FILENAMES = ("CLAUDE.md", "AGENTS.md", ".lingxirules")
 _SINGLE_RULE_MAX = 20000

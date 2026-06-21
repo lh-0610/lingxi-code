@@ -16,10 +16,14 @@
   "gemini_models":    [],
   "deepseek_models":  ["deepseek-v4-flash", "deepseek-v4-pro"],
   "claude_code_model": "",
+  "claude_code_skip_permissions": false,
+  "_claude_code_skip_permissions_说明": "Claude Code 模式 Act 时是否绕过 claude 全部权限检查（全自动）。默认 false 更安全：Act 走 acceptEdits（自动批准编辑、不挂起、不绕过全部检查），Plan 恒为只读。需要任意命令都免确认的真·全自动才设 true。",
   "vision_model_id":   "",
   "default_model_id":  "mimo-v2.5-pro",
 
   "web_search_api_key": "",
+  "fetch_url_allow_proxy": false,
+  "_fetch_url_allow_proxy_说明": "fetch_url 是否走系统代理。默认 false（直连，SSRF 防线完整、能校验目标真实 IP）。必须靠代理才能访问外网时设 true，但此时跳过防 DNS 重绑定的 peer 校验。",
   "_web_search_说明": "web_search 工具用 Tavily 搜网络（tavily.com 免费申请 key）。留空 = web_search 不可用（会优雅提示），不影响 fetch_url 抓网址（fetch_url 无需 key）。",
 
   "notify": {

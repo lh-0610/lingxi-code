@@ -370,9 +370,19 @@ class SidebarMixin:
             )
             if reply != QMessageBox.Yes:
                 return
-            # 先把这个项目下的所有会话改成"无项目"，再从注册表移除项目
-            agent.move_sessions_to_no_project(project_path)
-            _projects.remove_project(project_path)
+            # 先从注册表移除项目；【成功后】再把它名下会话归到"无项目"。顺序反过来能避免
+            # 移除存盘失败时出现"会话已归无项目、项目却还在列表"的不一致。
+            if not _projects.remove_project(project_path):
+                QMessageBox.warning(
+                    self, "移除项目",
+                    "移除未能保存（磁盘 / 权限问题），项目保持不变，请稍后重试。")
+                return
+            try:
+                agent.move_sessions_to_no_project(project_path)
+            except Exception:
+                QMessageBox.warning(
+                    self, "移除项目",
+                    "项目已移除；个别会话的归类文件未能即时写入，已在内存中修正，下次保存会自动写正。")
             # 如果删除的是当前激活项目，切到无项目
             if _projects.get_current() is None:
                 self._switch_project(None)
@@ -471,7 +481,10 @@ class SidebarMixin:
         session_project = self._get_session_project(session_id)
         project_changed = session_project != _projects.get_current()
         if project_changed:
-            _projects.set_current(session_project)
+            if not _projects.set_current(session_project):
+                from ..paths import logger
+                logger.warning(
+                    f"切会话时项目切换未能持久化（重启后可能不一致）: {session_project}")
             state.current_project = session_project
             state.shell_cwd = None  # 切项目时 cd 上下文回新项目根
             from ..roles import get_system_prompt
@@ -593,8 +606,13 @@ class SidebarMixin:
         # 1. 先存当前会话（用它自己锚定的 project；set_current 不会影响它的 tag）
         agent.save_session()
 
-        # 2. 切换项目（全局当前项目 + tools 项目根）
-        _projects.set_current(path)
+        # 2. 切换项目（全局当前项目 + tools 项目根）。持久化失败时提醒用户：内存里仍切
+        #    过去（不打断操作），但重启可能回到旧项目，让用户知情而非静默不一致。
+        if not _projects.set_current(path):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "项目切换",
+                "项目切换未能保存（磁盘 / 权限问题）。本次仍会切换，但重启后可能恢复为原项目。")
         state.current_project = path
         state.shell_cwd = None  # 切项目时 cd 上下文回新项目根
         # 切到的项目自动展开（点项目名 = 切换并展开;折叠靠左侧 ▸ 箭头）
@@ -649,6 +667,16 @@ class SidebarMixin:
         )
         if reply != QMessageBox.Yes:
             return
-        agent.move_sessions_to_no_project(current)
-        _projects.remove_project(current)
+        # 先移除项目；成功后再迁移会话——避免移除存盘失败时"会话已归无项目、项目仍在"的不一致。
+        if not _projects.remove_project(current):
+            QMessageBox.warning(
+                self, "移除项目",
+                "移除未能保存（磁盘 / 权限问题），项目保持不变，请稍后重试。")
+            return
+        try:
+            agent.move_sessions_to_no_project(current)
+        except Exception:
+            QMessageBox.warning(
+                self, "移除项目",
+                "项目已移除；个别会话的归类文件未能即时写入，已在内存中修正，下次保存会自动写正。")
         self._switch_project(None)

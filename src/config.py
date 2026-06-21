@@ -37,6 +37,11 @@ ANTHROPIC_MODELS  = _config.get("anthropic_models", ["claude-sonnet-4-20250514",
 GEMINI_MODELS     = _config.get("gemini_models", [])
 DEEPSEEK_MODELS   = _config.get("deepseek_models", ["deepseek-v4-flash", "deepseek-v4-pro"])
 CLAUDE_CODE_MODEL = _config.get("claude_code_model", "")
+# Claude Code 模式 Act 时是否给 CLI 带 --dangerously-skip-permissions（绕过 claude 全部
+# 权限检查、全自动）。**默认 False，更安全**：此时 Act 走 --permission-mode acceptEdits
+# （自动批准编辑+常见文件命令、不挂起，但不绕过全部检查）。需要真·全自动（任意命令免确认）
+# 再在 config.json 设为 true。注：Plan 模式恒为 --permission-mode plan（只读），不受此开关影响。
+CLAUDE_CODE_SKIP_PERMISSIONS: bool = bool(_config.get("claude_code_skip_permissions", False))
 VISION_MODEL_ID   = _config.get("vision_model_id", "")
 # 启动默认选中的模型（按 model_id 匹配；找不到退回列表第一个）
 # 用 `or` 而非 .get 默认值：键存在但为空串（设置页空着保存过）时也回退，
@@ -105,6 +110,10 @@ REMOTE_TELEGRAM_CONFIRM: bool = _remote_cfg.get("telegram_confirm", True)
 
 # 网络搜索（Tavily）
 WEB_SEARCH_API_KEY: str = _config.get("web_search_api_key", "")
+# fetch_url 是否走系统代理。**默认 False（直连）**：直连才能校验实际 peer IP、SSRF 防线完整。
+# 设 true 后按系统代理抓取（适合必须靠代理访问外网的环境），但此时无法校验目标真实 IP，
+# 防 DNS 重绑定的 peer 检查会跳过——属于用代理换可达性的显式取舍。
+FETCH_URL_ALLOW_PROXY: bool = bool(_config.get("fetch_url_allow_proxy", False))
 
 # MCP Servers 配置（字典，key=server 名，value=启动参数）
 MCP_SERVERS: dict = _config.get("mcp_servers", {}) or {}

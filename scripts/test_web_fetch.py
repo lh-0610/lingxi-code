@@ -27,7 +27,16 @@ class FakeResp:
         self.status_code = status
         self.headers = headers or {}
         self.text = text
+        self.encoding = "utf-8"
         self._json = json_data
+
+    def iter_content(self, chunk_size=8192):
+        data = self.text.encode("utf-8")
+        for i in range(0, len(data), chunk_size):
+            yield data[i:i + chunk_size]
+
+    def close(self):
+        pass
 
     def json(self):
         if self._json is None:
@@ -91,6 +100,80 @@ class TestFetchUrl:
             raise requests.Timeout()
         monkeypatch.setattr(requests, "get", _raise)
         assert "超时" in fetch_url.func("http://x")
+
+    def test_redirect_to_internal_blocked(self, monkeypatch):
+        """重定向 SSRF：初始 host 公网放行，但 302 跳到内网地址必须在第二跳被拦。"""
+        import ipaddress
+
+        def _dns(host, *a, **k):
+            try:
+                ipaddress.ip_address(host)   # 数字 IP 原样返回
+                ip = host
+            except ValueError:
+                ip = "93.184.216.34"          # 域名 → 公网
+            return [(socket.AF_INET, None, None, "", (ip, 0))]
+        monkeypatch.setattr(socket, "getaddrinfo", _dns)
+        # 只会被请求一次（第一跳）；内网目标在发请求前就被 SSRF 检查拦下
+        routes = {"http://evil.com/": FakeResp(
+            302, {"Location": "http://169.254.169.254/latest/meta-data/"})}
+        monkeypatch.setattr(requests, "get", lambda url, *a, **k: routes[url])
+        out = fetch_url.func("http://evil.com/")
+        assert "拒绝" in out and "169.254.169.254" in out
+
+    def test_redirect_to_public_followed(self, monkeypatch):
+        """正常重定向（公网 → 公网）应被手动跟随，最终返回目标页内容。"""
+        routes = {
+            "http://a.com/": FakeResp(301, {"Location": "http://b.com/page"}),
+            "http://b.com/page": FakeResp(200, {"Content-Type": "text/html"}, "<p>final</p>"),
+        }
+        monkeypatch.setattr(requests, "get", lambda url, *a, **k: routes[url])
+        out = fetch_url.func("http://a.com/")
+        assert "final" in out
+
+    def test_redirect_loop_aborted(self, monkeypatch):
+        """无限重定向（始终 302）超过最大跳数后中止，不挂死。"""
+        monkeypatch.setattr(
+            requests, "get",
+            lambda url, *a, **k: FakeResp(302, {"Location": "/next"}))
+        out = fetch_url.func("http://loop.com/")
+        assert "重定向次数过多" in out
+
+    def test_ssrf_check_failclosed(self, monkeypatch):
+        """SSRF 校验本身抛异常（非 gaierror）时 fail-closed 拒绝，不放行、不发请求。"""
+        def _boom(*a, **k):
+            raise RuntimeError("resolver exploded")
+        monkeypatch.setattr(socket, "getaddrinfo", _boom)
+        called = []
+        monkeypatch.setattr(requests, "get", lambda *a, **k: called.append(1))
+        out = fetch_url.func("http://x.com/")
+        assert "已拒绝" in out and not called
+
+    def test_dns_rebinding_peer_blocked(self, monkeypatch):
+        """DNS 重绑定：DNS 校验放行（公网），但实际连到的 peer IP 是内网 → 第二道防线拦下。"""
+        # 固定为"无代理"，确保 peer 检查真的运行（不被测试机的代理环境变量跳过）
+        monkeypatch.setattr("src.tools_web._proxy_applies", lambda url: False)
+
+        class _Sock:
+            def getpeername(self):
+                return ("10.0.0.5", 443)
+
+        class _Conn:
+            sock = _Sock()
+
+        class _Raw:
+            connection = _Conn()
+
+        class _Resp(FakeResp):
+            def __init__(self):
+                super().__init__(200, {"Content-Type": "text/html"}, "<p>secret</p>")
+                self.raw = _Raw()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp())
+        out = fetch_url.func("http://looks-public.com/")
+        assert "拒绝" in out and "10.0.0.5" in out
 
 
 class TestWebSearch:

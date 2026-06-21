@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 
 from src import state
+from src import session as _session
 from src.memory import (
     save_session,
     load_session,
@@ -23,6 +24,7 @@ from src.memory import (
     delete_session,
     reset_history,
     move_sessions_to_no_project,
+    SessionMigrationError,
     _msg_to_dict,
     _dict_to_msg,
     _sanitize_title,
@@ -309,6 +311,50 @@ class TestMoveSessionsToNoProject:
     def test_no_move_for_empty_path(self, isolated_memory):
         assert move_sessions_to_no_project("") == 0
         assert move_sessions_to_no_project(None) == 0
+
+    def test_move_syncs_inmemory_anchor(self, isolated_memory):
+        """迁移必须同步【内存】Session.project，否则下次 save 会按旧锚点把它写回已删项目。"""
+        state.chat_history.clear()
+        state.chat_history.append(SystemMessage(content="s"))
+        state.chat_history.append(HumanMessage(content="hi"))
+        state.current_session_id = None
+        state.current_session_title = None
+        state.current_project = "/old/project"
+        save_session()
+        sid = state.current_session_id
+        assert _session.get_active().project == "/old/project"   # 锚点此刻=旧项目
+
+        move_sessions_to_no_project("/old/project")
+        assert _session.get_active().project is None             # 关键：内存锚点已同步
+
+        # 再次 save 不会复发把它写回 /old/project
+        save_session()
+        sessions = list_sessions(project_filter="__all__")
+        assert [s for s in sessions if s["id"] == sid][0]["project"] is None
+
+    def test_move_raises_on_session_write_failure(self, isolated_memory, monkeypatch):
+        """单个会话文件改写失败 → 抛 SessionMigrationError，不再静默吞掉。"""
+        state.chat_history.clear()
+        state.chat_history.append(SystemMessage(content="s"))
+        state.chat_history.append(HumanMessage(content="hi"))
+        state.current_session_id = None
+        state.current_session_title = None
+        state.current_project = "/old/project"
+        save_session()
+
+        import builtins
+        _real_open = builtins.open
+
+        def _open(path, mode="r", *a, **k):
+            # 只让"非 index 的 .json 文件写"失败，模拟单个会话文件改写出错
+            p = str(path)
+            if p.endswith(".json") and "index" not in os.path.basename(p) and "w" in mode:
+                raise OSError("disk full")
+            return _real_open(path, mode, *a, **k)
+        monkeypatch.setattr(builtins, "open", _open)
+
+        with pytest.raises(SessionMigrationError):
+            move_sessions_to_no_project("/old/project")
 
 
 # ── reset_history ───────────────────────────────────────

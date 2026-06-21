@@ -26,6 +26,18 @@ from .limits import SESSION_HISTORY_LIMIT
 _LOCK = threading.RLock()
 
 
+class SessionMigrationError(Exception):
+    """move_sessions_to_no_project 在【部分】会话文件改写失败时抛出。
+
+    迁移已尽力完成（index + 内存锚点 + 能写的文件都已改），failed_ids 是没能落盘的会话——
+    它们的内存锚点已置 None、会在下次 save 自愈；caller 可据此提示用户而非静默吞掉。
+    """
+    def __init__(self, moved, failed_ids):
+        self.moved = moved
+        self.failed_ids = list(failed_ids)
+        super().__init__(f"{len(self.failed_ids)} 个会话文件改写失败: {self.failed_ids}")
+
+
 def _ensure_memory_dir():
     with _LOCK:
         os.makedirs(memory_dir(), exist_ok=True)
@@ -425,15 +437,34 @@ def move_sessions_to_no_project(old_path):
     用于：用户从列表移除一个项目时，把该项目下的历史会话也一起转到无项目，
     避免它们以"游离项目"的形式继续显示在侧栏。
 
-    同时改 index.json 里的索引项 和 每个 <id>.json 里的 project 字段——
-    后者保证下次重启或重新载入会话时也是 None。
+    三处一起改，缺一不可：
+      1. **内存里已打开的 Session.project**（关键）：只改磁盘的话，移除当前项目后
+         _switch_project 的 save_session 会按旧内存锚点把刚迁移的会话写回已删项目，
+         后台会话下次 save 同样复发——这是正常流程必现、非罕见磁盘错。
+      2. index.json 的索引项；3. 每个 <id>.json 的 project 字段（保证重启后也是 None）。
+
+    部分会话文件改写失败 → 抛 SessionMigrationError（内存锚点已置 None、可自愈，
+    且让 caller 能提示用户，而非静默吞掉）。返回成功迁移的会话数。
     """
     if not old_path:
         return 0
     moved = 0
+    failed_ids = []
     with _LOCK:
+        from . import session as _session_mod
+        # 1. 同步内存中所有已打开会话的项目锚点（最关键的一步）
+        try:
+            _open = list(_session_mod.sessions.values())
+            _open.append(_session_mod.get_active())   # active 可能未注册
+            for _sess in _open:
+                if getattr(_sess, "project", _session_mod._UNSET) == old_path:
+                    _sess.project = None
+        except Exception as e:
+            logger.warning(f"同步内存会话项目锚点失败: {e}")
+
+        # 2 + 3. 磁盘 index.json + 各会话文件
         if not os.path.exists(memory_index()):
-            return 0
+            return moved
         with open(memory_index(), "r", encoding="utf-8") as f:
             index = json.load(f)
 
@@ -448,7 +479,6 @@ def move_sessions_to_no_project(old_path):
             with open(memory_index(), "w", encoding="utf-8") as f:
                 json.dump(index, f, ensure_ascii=False, indent=2)
 
-            # 同步改每个会话文件里的 project 字段
             for sid in affected_ids:
                 session_file = os.path.join(memory_dir(), f"{sid}.json")
                 if not os.path.exists(session_file):
@@ -461,9 +491,12 @@ def move_sessions_to_no_project(old_path):
                         json.dump(data, f, ensure_ascii=False, indent=2)
                 except Exception as e:
                     logger.warning(f"改写会话 {sid} project 字段失败: {e}")
+                    failed_ids.append(sid)
 
     if moved:
         logger.info(f"已把 {moved} 个会话从 {old_path} 转到无项目")
+    if failed_ids:
+        raise SessionMigrationError(moved, failed_ids)
     return moved
 
 
