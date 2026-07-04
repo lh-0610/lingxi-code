@@ -93,6 +93,11 @@ def long_term_memory_file():
     return os.path.join(memory_dir(), "long_term_memory.json")
 
 
+def rag_index_dir():
+    """RAG 向量索引目录（按当前上下文）。存 embeddings.npy + meta.jsonl + 向量缓存。"""
+    return os.path.join(memory_dir(), "rag_index")
+
+
 os.makedirs(APP_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 

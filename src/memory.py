@@ -158,9 +158,21 @@ def save_session(*, session=None):
     # （拿到 id 那一刻）锚定为当时的全局项目，之后即使切了项目也不变。修"无项目会话被
     # 切项目后误归到新项目"——根因是 worker 的 save 可能晚于主线程 set_current，取全局
     # 就被打上新 tag。（兜底：已有 id 但 project 未锚定，如异常路径，也用当时全局。）
-    if is_first_save or getattr(sess, "project", _session_mod._UNSET) is _session_mod._UNSET:
-        sess.project = state.current_project
-    current_project = sess.project
+    # 会话分类（持久化）+ rag 目录锚点。rag 会话与代码项目彻底解耦：project 恒为 None。
+    session_kind = getattr(sess, "session_kind", "code")
+    if session_kind not in ("code", "rag"):
+        logger.warning(f"未知 session_kind={session_kind!r}，按 code 处理")
+        session_kind = "code"
+        sess.session_kind = "code"
+    rag_kb_dir = getattr(sess, "rag_kb_dir", "") or ""
+
+    if session_kind == "rag":
+        sess.project = None            # 清理可能残留的 project；rag 不锚代码项目
+        current_project = None
+    else:
+        if is_first_save or getattr(sess, "project", _session_mod._UNSET) is _session_mod._UNSET:
+            sess.project = state.current_project
+        current_project = sess.project
 
     title = current_session_title or "新对话"
     for msg in chat_history:
@@ -179,6 +191,8 @@ def save_session(*, session=None):
         "title": title,
         "updated": datetime.now().isoformat(),
         "project": current_project,
+        "session_kind": session_kind,
+        "rag_kb_dir": rag_kb_dir,
         # list() 先快照：worker 线程可能正在 append（切会话时主线程存后台会话），
         # 直接迭代会撞 "list changed size during iteration"。
         "messages": [_msg_to_dict(m) for m in list(chat_history)],
@@ -186,7 +200,8 @@ def save_session(*, session=None):
     with _LOCK:
         with open(session_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        _update_index(current_session_id, title, current_project)
+        _update_index(current_session_id, title, current_project,
+                       session_kind=session_kind, rag_kb_dir=rag_kb_dir)
     logger.info(f"会话已保存: {current_session_id} - {title}")
 
     # 新会话存盘拿到 id 后，把注册表里的临时 key（_new_N）迁移成 id；
@@ -311,15 +326,18 @@ def maybe_generate_session_title():
     # project tag 用【本会话】锚定的归属，不取全局 current_project：标题生成是后台线程，
     # 跑的时候用户可能已切到别的项目，取全局会把这个会话的 tag 写错。
     from . import session as _session_mod
-    _proj = _session_mod.current_session().project
+    _sess = _session_mod.current_session()
+    _kind = getattr(_sess, "session_kind", "code")
+    _proj = None if _kind == "rag" else _sess.project
     if _proj is _session_mod._UNSET:
         _proj = state.current_project
-    _update_index(state.current_session_id, title, _proj)
+    _update_index(state.current_session_id, title, _proj,
+                  session_kind=_kind, rag_kb_dir=getattr(_sess, "rag_kb_dir", "") or "")
     _write_session_title(state.current_session_id, title)
     logger.info(f"自动标题已生成: {state.current_session_id} - {title}")
 
 
-def _update_index(session_id, title, project=None):
+def _update_index(session_id, title, project=None, session_kind="code", rag_kb_dir=""):
     with _LOCK:
         with open(memory_index(), "r", encoding="utf-8") as f:
             index = json.load(f)
@@ -329,6 +347,8 @@ def _update_index(session_id, title, project=None):
                 item["title"] = title
                 item["updated"] = datetime.now().isoformat()
                 item["project"] = project
+                item["session_kind"] = session_kind
+                item["rag_kb_dir"] = rag_kb_dir
                 break
         else:
             index.insert(0, {
@@ -336,6 +356,8 @@ def _update_index(session_id, title, project=None):
                 "title": title,
                 "updated": datetime.now().isoformat(),
                 "project": project,
+                "session_kind": session_kind,
+                "rag_kb_dir": rag_kb_dir,
             })
 
         kept_ids = {item["id"] for item in index[:SESSION_HISTORY_LIMIT]}
@@ -368,6 +390,7 @@ def load_session(session_id, *, session=None):
     session=None → 写当前前台 Session（经 state 代理）；
     session=<Session> → 直接写目标 Session 对象（用于加载后台会话，避免污染前台）。
     """
+    from . import session as _session_mod
     session_file = os.path.join(memory_dir(), f"{session_id}.json")
     with _LOCK:
         if not os.path.exists(session_file):
@@ -375,9 +398,17 @@ def load_session(session_id, *, session=None):
         with open(session_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+    # 分类字段：旧会话缺失 → 默认 code / 空；未知 kind → 按 code 处理并告警。
+    _kind = data.get("session_kind", "code")
+    if _kind not in ("code", "rag"):
+        logger.warning(f"会话 {session_id} 的 session_kind={_kind!r} 未知，按 code 处理")
+        _kind = "code"
+    _rag_dir = data.get("rag_kb_dir", "") or ""
+    # rag 会话与项目彻底解耦：忽略磁盘上可能残留的 project（下次保存会清成 None）。
+    _proj = None if _kind == "rag" else data.get("project")
+
+    tgt = _session_mod.current_session() if session is None else session
     if session is None:
-        # 穿透 state 代理 → 当前活跃 Session（兼容旧调用）
-        from . import session as _session_mod
         state.session_token_usage = {"input": 0, "output": 0, "total": 0}
         state.chat_history.clear()
         for d in data["messages"]:
@@ -388,11 +419,8 @@ def load_session(session_id, *, session=None):
         state.task_ledger = state.new_task_ledger()
         state.compaction["summary"] = ""
         state.compaction["covered_upto"] = 0
-        # 锚定会话所属项目为磁盘记录值（而非当前全局），切项目后再 save 不会改它
-        _session_mod.current_session().project = data.get("project")
-        _session_mod.current_session().worktree = None
+        tgt = _session_mod.current_session()
     else:
-        # 直接写目标 Session（可能是后台会话，不能经过 state 代理）
         session.session_token_usage = {"input": 0, "output": 0, "total": 0}
         session.chat_history.clear()
         for d in data["messages"]:
@@ -402,20 +430,26 @@ def load_session(session_id, *, session=None):
         session.current_plan = []
         session.task_ledger = state.new_task_ledger()
         session.compaction = {"summary": "", "covered_upto": 0}
-        session.project = data.get("project")  # 锚定为磁盘记录的项目归属
-        session.worktree = None
 
-    logger.info(f"会话已加载: {session_id}")
+    # 分类 / 项目 / rag 锚点 / rag_mode（对两条路径统一设置在目标 Session 上）
+    tgt.session_kind = _kind
+    tgt.rag_kb_dir = _rag_dir
+    tgt.project = _proj
+    tgt.rag_mode = (_kind == "rag")
+    tgt.worktree = None
+
+    logger.info(f"会话已加载: {session_id}（kind={_kind}）")
     return True
 
 
-def list_sessions(project_filter="__current__"):
-    """读取索引并按项目过滤。
+def list_sessions(project_filter="__current__", *, kind=None):
+    """读取索引并按项目过滤（仅读 index.json，不逐个加载会话文件）。
     project_filter:
       - "__current__"（默认）：按 state.current_project 过滤
       - None：仅返回无项目的会话
       - "<path>"：返回该项目的会话
       - "__all__"：不过滤，返回全部
+    kind: None=不按分类过滤；"code"/"rag"=只返回该分类（旧条目缺字段默认 code）。
     """
     _ensure_memory_dir()
     with _LOCK:
@@ -424,12 +458,23 @@ def list_sessions(project_filter="__current__"):
         with open(memory_index(), "r", encoding="utf-8") as f:
             index = json.load(f)
 
+    if kind is not None:
+        index = [s for s in index if s.get("session_kind", "code") == kind]
     if project_filter == "__all__":
         return index
     if project_filter == "__current__":
         project_filter = state.current_project
     # None 和具体路径都用同样的相等判断（旧会话没 project 字段 → 默认 None → 归"无项目"）
     return [s for s in index if s.get("project") == project_filter]
+
+
+def session_kind_of(session_id) -> str:
+    """从 index 取会话分类（缺失/未知 → code）。不逐个读会话文件。"""
+    for s in list_sessions("__all__"):
+        if s["id"] == session_id:
+            k = s.get("session_kind", "code")
+            return k if k in ("code", "rag") else "code"
+    return "code"
 
 
 def move_sessions_to_no_project(old_path):
@@ -458,6 +503,9 @@ def move_sessions_to_no_project(old_path):
         #    warning → 锚点同步被静默跳过 → "移除项目不复发"的修复在并发下原样失效。
         #    锁序：此处持 memory._LOCK 再取 session._lock，与 save_session→rekey 一致，无死锁。
         for _sess in _session_mod.live_sessions():
+            # rag 会话与代码项目无关，项目迁移必须跳过（它 project 恒 None，防御性再判 kind）
+            if getattr(_sess, "session_kind", "code") == "rag":
+                continue
             if getattr(_sess, "project", _session_mod._UNSET) == old_path:
                 _sess.project = None
 
@@ -469,6 +517,8 @@ def move_sessions_to_no_project(old_path):
 
         affected_ids = []
         for item in index:
+            if item.get("session_kind", "code") == "rag":
+                continue                       # rag 会话不参与项目迁移
             if item.get("project") == old_path:
                 item["project"] = None
                 affected_ids.append(item["id"])

@@ -33,6 +33,10 @@ from .widgets import HistoryRow
 class SidebarMixin:
     """左侧栏所有 UI + 会话/项目状态管理。"""
 
+    # RAG「知识库对话」分组的折叠键：它和编码「历史会话」都以 project_path=None 渲染，
+    # 但折叠状态必须独立（含 \x00，绝不与任何真实项目路径相撞）。
+    _RAG_FOLD_KEY = "\x00rag-workspace"
+
     # ── 构造 ──
 
     def _build_sidebar(self):
@@ -77,11 +81,15 @@ class SidebarMixin:
         brand_layout.addWidget(brand_text, 1)
         layout.addWidget(brand)
 
+        # 编码/知识库 模式入口 + 知识库管理卡片（RagSidebarMixin，Logo 下方、新对话上方）
+        self._build_rag_sidebar(layout)
+
         new_btn = QPushButton("+ 新对话")
         new_btn.setObjectName("newChatBtn")
         new_btn.setCursor(Qt.PointingHandCursor)
         new_btn.clicked.connect(self._new_chat)
         layout.addWidget(new_btn)
+        self.new_chat_btn = new_btn   # 知识库模式下文案切换为「+ 新知识库对话」
 
         label = QLabel("历史记录")
         label.setObjectName("historyLabel")
@@ -150,7 +158,20 @@ class SidebarMixin:
                 item.widget().deleteLater()
 
         from .. import projects as _projects
-        all_sessions = agent.list_sessions("__all__")
+        from .. import session as _session
+
+        # 按当前工作区（活动会话的 session_kind）过滤——两个工作区各显示各自会话，互不串。
+        active_kind = getattr(_session.get_active(), "session_kind", "code")
+        if active_kind == "rag":
+            # 知识库工作区：扁平列表、独立标题、按更新时间倒序，不做项目分组/项目节点。
+            rag_sessions = agent.list_sessions("__all__", kind="rag")
+            rag_sessions.sort(key=lambda e: e.get("updated", ""), reverse=True)
+            self._render_project_group(None, "知识库对话", rag_sessions, is_active=True,
+                                        collapse_key=self._RAG_FOLD_KEY)
+            self.history_widget.setStyleSheet(self.history_widget.styleSheet())
+            return
+
+        all_sessions = agent.list_sessions("__all__", kind="code")
 
         # 按 project 分组
         grouped = {}  # path -> list[session]
@@ -188,12 +209,19 @@ class SidebarMixin:
         # 刷新样式
         self.history_widget.setStyleSheet(self.history_widget.styleSheet())
 
-    def _render_project_group(self, project_path, project_name, sessions, is_active):
-        """渲染一个项目分组：标题 + 该项目下的会话列表。"""
-        # 折叠状态(按项目,内存级,默认展开)。收起时标题带个数量,提示藏了几条会话。
+    def _render_project_group(self, project_path, project_name, sessions, is_active,
+                              collapse_key=None):
+        """渲染一个项目分组：标题 + 该项目下的会话列表。
+
+        collapse_key：折叠状态用的键，默认用 project_path。RAG「知识库对话」与编码
+        「历史会话」都以 project_path=None 渲染，折叠状态却必须各自独立——RAG 传入
+        独立的 collapse_key，避免折叠其一连带折叠另一个。
+        """
+        # 折叠状态(按 key,内存级,默认展开)。收起时标题带个数量,提示藏了几条会话。
         if not hasattr(self, "_collapsed_projects"):
             self._collapsed_projects = set()
-        collapsed = project_path in self._collapsed_projects
+        fold_key = project_path if collapse_key is None else collapse_key
+        collapsed = fold_key in self._collapsed_projects
 
         title_text = project_name + (f" ({len(sessions)})" if collapsed and sessions else "")
         title_btn = QPushButton(title_text)
@@ -210,7 +238,7 @@ class SidebarMixin:
         title_btn.setToolTip(project_path or "无项目（全局）")
 
         # 点击项目名 = 折叠/展开它的会话(不再切换项目;切项目用顶栏的项目按钮)
-        title_btn.clicked.connect(lambda checked=False, p=project_path: self._toggle_project_fold(p))
+        title_btn.clicked.connect(lambda checked=False, k=fold_key: self._toggle_project_fold(k))
 
         if project_path:
             # 项目标题右键菜单（移除项目）
@@ -468,6 +496,7 @@ class SidebarMixin:
             target.current_model_index = _prev.current_model_index
             target.agent_mode = _prev.agent_mode
             target.reasoning_enabled = _prev.reasoning_enabled
+            target.rag_mode = _prev.rag_mode
             if not agent.load_session(session_id, session=target):
                 return
             _session.register(target)
@@ -476,20 +505,31 @@ class SidebarMixin:
         self._sync_header_from_session()  # 顶栏 model/Plan-Act/思考 同步到该会话
         self._refresh_token_label_from_session()  # 底部 token 刷成该会话的累计用量
 
-        # 加载的会话属于另一个项目 → 跟随切项目（同步 current_project + system prompt）
+        # 分类感知：rag 会话与代码项目彻底解耦——不激活/不修改全局编码项目，只校验知识库
+        # 锚点；code 会话保持原有"跟随切项目"行为。
         from .. import projects as _projects
-        session_project = self._get_session_project(session_id)
-        project_changed = session_project != _projects.get_current()
-        if project_changed:
-            if not _projects.set_current(session_project):
-                from ..paths import logger
-                logger.warning(
-                    f"切会话时项目切换未能持久化（重启后可能不一致）: {session_project}")
-            state.current_project = session_project
-            state.shell_cwd = None  # 切项目时 cd 上下文回新项目根
-            from ..roles import get_system_prompt
-            if state.chat_history and isinstance(state.chat_history[0], SystemMessage):
-                state.chat_history[0] = SystemMessage(content=get_system_prompt())
+        is_rag = (getattr(target, "session_kind", "code") == "rag")
+        if is_rag:
+            # rag 不能用 Claude Code（CLI 无 search_knowledge）。历史会话不持久化 model、
+            # 会继承切换前会话的 model——若继承到 CC，换成兼容 API 模型并刷新下拉。
+            ci = self._compatible_model_index(target.current_model_index)
+            if ci != target.current_model_index:
+                target.current_model_index = ci
+                self._sync_header_from_session()
+            self._check_rag_session_anchor(target)
+        else:
+            session_project = self._get_session_project(session_id)
+            if session_project != _projects.get_current():
+                if not _projects.set_current(session_project):
+                    from ..paths import logger
+                    logger.warning(
+                        f"切会话时项目切换未能持久化（重启后可能不一致）: {session_project}")
+                state.current_project = session_project
+                state.shell_cwd = None  # 切项目时 cd 上下文回新项目根
+        # 系统提示词按【目标会话】的 kind 重建（此刻 state.rag_mode 已随 active）
+        from ..roles import get_system_prompt
+        if state.chat_history and isinstance(state.chat_history[0], SystemMessage):
+            state.chat_history[0] = SystemMessage(content=get_system_prompt())
 
         # 重绘目标会话（state.chat_history 已代理到新 active=target）
         self._reset_render_state()
@@ -534,30 +574,24 @@ class SidebarMixin:
         return None
 
     def _new_chat(self):
+        """新建对话，类型 = 当前工作区（编码/知识库）。存旧会话、建新会话、切过去。
+        创建 + 激活复用 RagSidebarMixin 的共享 helper，不复制会话构造/激活逻辑。"""
         from .. import session as _session
-        from ..roles import get_system_prompt
-        _prev = _session.get_active()  # 新会话继承当前会话的 model/mode
-        # 存当前 active（不打断正在后台跑的会话），再新建一个空会话切过去；
-        # 旧会话留在注册表，可从侧栏切回（若在跑则继续后台跑）。
+        _prev = _session.get_active()
         agent.save_session()
-        new_sess = _session.Session()
-        new_sess.chat_history.append(SystemMessage(content=get_system_prompt()))
-        new_sess.current_model_index = _prev.current_model_index  # 继承 model/mode/思考
-        new_sess.agent_mode = _prev.agent_mode
-        new_sess.reasoning_enabled = _prev.reasoning_enabled
-        _session.register(new_sess)   # 临时 key（无 id，存盘后由 save 的 re-key 换成 id）
-        _session.set_active(new_sess)
-        self.chat_area.clear()
-        self._reset_render_state()
-        self._refresh_session_list()
-        self._show_empty_state()
-        self._update_btn_state("enabled" if self._has_input else "disabled")
-        self._sync_header_from_session()
-        self._refresh_token_label_from_session()
+        self._remember_ws_active(_prev)
+        kind = getattr(_prev, "session_kind", "code")   # 新会话沿用当前工作区
+        self._activate_session(self.create_session_for_kind(kind))
 
     # ── 项目切换器 ──
 
     def _show_project_menu(self):
+        # 知识库工作区禁用项目切换：切项目属于编码工作区，混着切会产生
+        # session_kind="code" 却仍是 RAG 提示词的混合会话。先切回编码再切项目。
+        from .. import session as _session
+        if getattr(_session.get_active(), "session_kind", "code") == "rag":
+            self._show_toast("📚 知识库模式下不切换项目——请先在左侧切回「💻 编码」工作区")
+            return
         from .. import projects as _projects
         menu = QMenu(self)
 
@@ -623,13 +657,14 @@ class SidebarMixin:
         #    若正在后台跑则继续——不再 _force_stop_generation、也不清空它的 chat_history
         #    （那会和正在跑的 worker 抢同一个 list，正是"无项目对话被归到新项目"的来源）。
         _prev = _session.get_active()  # 继承当前会话的 model/mode（切项目不改这些）
-        new_sess = _session.Session()
-        new_sess.chat_history.append(SystemMessage(content=get_system_prompt()))
+        new_sess = _session.Session()  # 默认 session_kind="code"
         new_sess.current_model_index = _prev.current_model_index
         new_sess.agent_mode = _prev.agent_mode
         new_sess.reasoning_enabled = _prev.reasoning_enabled
+        new_sess.rag_mode = False      # 切项目 = 编码工作区，绝不继承 rag_mode（防混合会话）
         _session.register(new_sess)
-        _session.set_active(new_sess)
+        _session.set_active(new_sess)  # 先激活，get_system_prompt 才按新会话（code + 新项目）生成
+        new_sess.chat_history.append(SystemMessage(content=get_system_prompt()))
 
         # 4. UI
         self.chat_area.clear()

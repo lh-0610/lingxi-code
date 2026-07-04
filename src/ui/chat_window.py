@@ -38,6 +38,7 @@ from .markdown_render import MarkdownRenderMixin
 from .search_overlay import SearchOverlayMixin
 from .sidebar import SidebarMixin
 from .header import HeaderMixin
+from .rag_sidebar import RagSidebarMixin
 
 
 # 聊天区 HTML 文本里的彩色 emoji → icons/ 下的 SVG 文件（见 docs/emoji_inventory.md）。
@@ -62,7 +63,7 @@ _EMOJI_ICON = {
 
 
 class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
-             SidebarMixin, HeaderMixin, QMainWindow):
+             SidebarMixin, HeaderMixin, RagSidebarMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("灵犀")
@@ -105,6 +106,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.bridge.remote_submit.connect(self._on_remote_submit)
         self.bridge.dismiss_confirm.connect(self._on_dismiss_confirm)
         self.bridge.show_plan.connect(self._render_plan_panel)
+        self.bridge.kb_status.connect(self._on_kb_status)
 
         # 让 tools.py 在 worker 线程里能找到主窗口（弹确认框用）
         state.ui_ref = self
@@ -1038,10 +1040,26 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             return
         from .. import projects as _projects
         from .. import session as _sess
+        from .. import config
         current = _projects.get_current()
         # 会话级隔离状态
         active = _sess.get_active()
         is_isolated = bool(getattr(active, "worktree", None))
+        # 知识库工作区：底栏改显"当前知识库：目录名"，与代码项目彻底解耦（隔离按钮隐藏）
+        if getattr(active, "session_kind", "code") == "rag":
+            kb = config.RAG_KB_DIR
+            if kb:
+                import os as _os
+                name = _os.path.basename(kb.rstrip("/\\")) or kb
+                self.project_btn.setText(f"当前知识库：{name}")
+                self.project_btn.setToolTip(f"知识库目录：{kb}")
+            else:
+                self.project_btn.setText("当前知识库：未配置")
+                self.project_btn.setToolTip("知识库模式：请在左侧「选择目录」并重建索引")
+            self._style_project_indicator()
+            if hasattr(self, "isolation_btn"):
+                self.isolation_btn.setVisible(False)
+            return
         if current:
             display = self._abbreviate_path(current, max_chars=60)
             if is_isolated:
@@ -1056,7 +1074,17 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         else:
             self.project_btn.setText("无项目 · 全局工作区")
             self.project_btn.setToolTip("当前不在任何项目中\n（点击选择 / 添加项目）")
-        # 内联样式（用 footer 的颜色 token，跟随主题）
+        self._style_project_indicator()
+        # 隔离按钮可见性跟随"有无项目"(隔离=git worktree,必须有项目)。本方法在 __init__、
+        # 切项目、切隔离时都会调,所以启动恢复了默认项目时这里就让隔离按钮出现——修"启动有
+        # 默认项目却没有隔离按钮,要切一次会话才冒出来"。
+        if hasattr(self, "isolation_btn"):
+            self.isolation_btn.setVisible(bool(current))
+            if current:
+                self._style_isolation_btn(active=is_isolated)
+
+    def _style_project_indicator(self):
+        """底栏项目/知识库指示按钮的内联样式（用 footer 颜色 token，跟随主题）。"""
         self.project_btn.setStyleSheet(
             f"QPushButton#projectIndicatorBtn {{"
             f"  background: transparent; border: 1px solid transparent; border-radius: 8px;"
@@ -1069,13 +1097,6 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             f"  border-color: {self._t('sidebar_border')};"
             f"}}"
         )
-        # 隔离按钮可见性跟随"有无项目"(隔离=git worktree,必须有项目)。本方法在 __init__、
-        # 切项目、切隔离时都会调,所以启动恢复了默认项目时这里就让隔离按钮出现——修"启动有
-        # 默认项目却没有隔离按钮,要切一次会话才冒出来"。
-        if hasattr(self, "isolation_btn"):
-            self.isolation_btn.setVisible(bool(current))
-            if current:
-                self._style_isolation_btn(active=is_isolated)
 
     @staticmethod
     def _abbreviate_path(path, max_chars=60):
@@ -1564,8 +1585,36 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         text = self.entry.toPlainText().strip()
         images = self._pending_images[:]
         from .. import session as _session
-        if (not text and not images) or _session.get_active().is_generating:
+        active = _session.get_active()
+        if (not text and not images) or active.is_generating:
             return
+        # 知识库模式：未配置目录 / 索引不可用时拦截发送，避免无意义的模型 API 调用；
+        # 索引恢复可用后自然放行（每次发送即时校验）。
+        if getattr(active, "session_kind", "code") == "rag":
+            from .. import config
+            if not config.RAG_KB_DIR:
+                self._show_toast("请先在左侧「选择目录」并「重建索引」，再开始知识库提问")
+                return
+            # 会话锚点：已锚定别的库 → 直接拒发（不静默检索别的库）
+            cur_kb = self._normalized_kb_dir()
+            anchor = getattr(active, "rag_kb_dir", "") or ""
+            if anchor and anchor != cur_kb:
+                self._show_toast("本对话的知识库与当前目录不同，请切回原目录或新建知识库对话再提问")
+                return
+            try:
+                from ..rag.retriever import index_status
+                st = index_status(kb_dir=config.RAG_KB_DIR, embed_model=config.RAG_EMBED_MODEL,
+                                  embed_base_url=config.RAG_EMBED_BASE_URL,
+                                  chunk_size=config.RAG_CHUNK_SIZE,
+                                  chunk_overlap=config.RAG_CHUNK_OVERLAP)
+            except Exception:
+                st = {"ok": False, "reason": "索引状态读取失败"}
+            if not st.get("ok"):
+                self._show_toast(f"知识库{st.get('reason', '不可用')}——请先「重建索引」再提问")
+                return
+            # 索引确认可用后才绑定空锚点——被拦下的发送不该把空会话提前钉死在某个库
+            if not anchor:
+                active.rag_kb_dir = cur_kb
         # GUI 专属清理
         self.entry.clear()
         self._pending_images.clear()

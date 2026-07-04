@@ -35,6 +35,7 @@ class SignalBridge(QObject):
     # 手机端点完确认后，让主线程隐藏可能还挂着的 PC 确认卡（仅 UI，result/done 已由远程写好）
     dismiss_confirm = Signal()
     show_plan = Signal(object)         # 传 list[{text,status}]：update_plan → 主线程
+    kb_status = Signal(str, str, bool)  # 知识库重建进度：(状态键 ok/stale/error, 文本, 是否已结束)
 
 
 class DragDropTextBrowser(QTextBrowser):

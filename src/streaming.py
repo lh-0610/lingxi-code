@@ -80,6 +80,7 @@ PLAN_MODE_READONLY_TOOLS = {
     "check_code",  # 静态检查只读分析（lint/语法），不改文件
     "fetch_url",  # 抓取网页只读
     "web_search",  # 网络搜索只读
+    "search_knowledge",  # 知识库语义检索只读
     "find_definition", "find_references",  # jedi 代码导航，只读分析
     "find_tests", "related_files",  # 测试发现 / 关联文件，只读分析
     "get_project_instructions",  # 读取项目规则文件，只读
@@ -1112,6 +1113,7 @@ def _can_parallel(tool_calls):
     return (
         len(tool_calls) > 1
         and getattr(state, "agent_mode", "act") != "plan"
+        and not getattr(state, "rag_mode", False)   # 知识库模式只有检索，不并行预取
         and not getattr(state, "remote_session", False)
         and all(
             tc.get("name") in PARALLEL_SAFE_TOOLS
@@ -1158,6 +1160,20 @@ def _execute_tool(tc, ui, _preinvoked=None):
         ui.show_message(f"\n⚠️ 未知工具: {name}\n", "tool_tag")
         state.chat_history.append(ToolMessage(content=f"未知工具: {name}", tool_call_id=call_id))
         logger.warning(f"未知工具: {name}")
+        return
+
+    # 知识库(RAG)模式硬拦截：纯检索问答，只允许 search_knowledge（正常情况下模型根本
+    # 看不到别的工具——resolve_bound_llm 只绑了它；这里是双保险，防缓存/继承的旧绑定）
+    if getattr(state, "rag_mode", False) and name != "search_knowledge":
+        ui.show_message(f"\n⛔ 知识库模式拒绝调用 {name}（只允许检索）\n", "tool_tag")
+        state.chat_history.append(ToolMessage(
+            content=(
+                f"已拒绝执行 `{name}`：当前是**知识库模式**，只能用 `search_knowledge` 检索资料并"
+                "据实回答。若用户需要执行编码/文件操作，请提示切回「编码」模式。"
+            ),
+            tool_call_id=call_id,
+        ))
+        logger.info(f"知识库模式拒绝调用 {name}")
         return
 
     # Plan 模式硬拦截：AI 不听话非要调写工具时，挡住并把拒绝信息回灌给 AI

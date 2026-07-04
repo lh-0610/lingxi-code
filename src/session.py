@@ -40,6 +40,8 @@ _SESSION_FIELDS = {
     "current_model_index": lambda: 0,
     "agent_mode": lambda: "act",
     "reasoning_enabled": lambda: True,
+    # 知识库(RAG)模式 —— 会话级：前台切知识库不影响正在后台跑的编码会话的工具绑定/拦截
+    "rag_mode": lambda: False,
     # 验证状态（会话级）：编码任务完成闸门——确保 AI 在声称"已完成"前先验证。
     # 延迟 import 避免循环依赖（verification.py 不 import session）。
     "verification": lambda: __import__("src.verification", fromlist=["new_verification"]).new_verification(),
@@ -62,7 +64,7 @@ class Session:
         "is_generating", "thread", "key", "needs_redraw", "project",
         "command_allowlist", "command_prefix_allowlist", "edit_path_allowlist",
         "pending_confirm", "render_log", "render_lock", "is_subagent",
-        "role_snapshot",
+        "role_snapshot", "session_kind", "rag_kb_dir",
     )
 
     def __init__(self):
@@ -97,6 +99,12 @@ class Session:
         # 影响。修"无项目会话被切项目后误归到新项目"——worker 的 save 可能晚于主线程
         # 切项目，若取全局 current_project 就会被打上新项目 tag。
         self.project = _UNSET
+        # 会话分类（持久化）：编码工作区 "code" / 知识库工作区 "rag"。创建后不变——
+        # 切工作区是"切到另一个会话"，不是改这个会话的 kind。旧会话缺该字段默认 code。
+        self.session_kind = "code"
+        # rag 会话创建时锚定的（规范化）知识库目录；code 会话为空。加载 rag 历史会话时
+        # 与当前配置目录比对，不一致则提示，不静默改全局目录/不静默用别的库回答。
+        self.rag_kb_dir = ""
 
 
 # ── 当前会话路由 ──

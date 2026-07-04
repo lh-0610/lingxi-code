@@ -49,3 +49,9 @@ COMPACTION_SUMMARY_MAX_CHARS = 1500  # 压缩摘要长度上限（字符）
 # 长期记忆相关
 MEMORY_MAX_CHARS = 4000  # 注入 system prompt 的记忆文本上限
 MEMORY_FACT_MAX_LENGTH = 200  # 单条事实最大长度
+
+# RAG 知识库切块/索引（防天量付费 embedding 请求）
+RAG_MIN_CHUNK_SIZE = 100        # 切块下限：太小（如 1）会把 1MB 文档切成百万块 → 十万级 embedding 请求
+RAG_MAX_TOTAL_CHUNKS = 100_000  # 单次重建的切片总数上限：超出直接拒绝（增大 chunk_size / 缩减目录）
+RAG_MAX_SOURCE_FILE_BYTES = 50 * 1024 * 1024   # 单个 Markdown 最大 50 MiB，防 f.read() 先把进程打爆
+RAG_MAX_TOTAL_SOURCE_BYTES = 200 * 1024 * 1024  # 单次扫描源文件总量上限

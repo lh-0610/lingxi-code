@@ -199,6 +199,12 @@ class SettingsDialog(QDialog):
         r.addStretch()
         tabs.addTab(r_scroll, self._settings_icon("smartphone.svg"), "远程")
 
+        # ── 🔎 知识库 tab ──
+        kb_scroll, kb = self._make_tab()
+        self._add_rag_section(kb)
+        kb.addStretch()
+        tabs.addTab(kb_scroll, self._settings_icon("search.svg"), "知识库")
+
         # ── ⚙ 高级 tab ──
         a_scroll, a = self._make_tab()
 
@@ -334,11 +340,20 @@ class SettingsDialog(QDialog):
         return cur if cur != {} else default
 
     def _set_nested(self, dotted_key, value):
-        """往 self.config 写嵌套值，自动创建中间层 dict。"""
+        """往 self.config 写嵌套值，自动创建中间层 dict。
+
+        中间节点若已存在但不是 dict（如损坏配置 "rag": "oops"）→ 替换成 {}，
+        否则 setdefault 会拿回那个字符串、随后下标赋值抛 TypeError（保存直接失败）。
+        用户能在设置页把损坏的嵌套配置改回来。
+        """
         parts = dotted_key.split(".")
         cur = self.config
         for p in parts[:-1]:
-            cur = cur.setdefault(p, {})
+            nxt = cur.get(p)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cur[p] = nxt
+            cur = nxt
         cur[parts[-1]] = value
 
     def _add_section(self, layout, title):
@@ -585,9 +600,14 @@ class SettingsDialog(QDialog):
         cb = QCheckBox(label_text)
         cb.setObjectName("settingsCheck")
         if "." in key:
-            cb.setChecked(bool(self._get_nested(key, default)))
+            raw = self._get_nested(key, default)
         else:
-            cb.setChecked(bool(self.config.get(key, default)))
+            raw = self.config.get(key, default)
+        # 与 config.py 运行时加载共用严格解析：字符串 "false" 不能因为 bool("false")
+        # 在设置页显示成已开启，继而保存为 true（RAG rerank 会产生额外付费调用）。
+        from ..config import _parse_bool
+        parsed = _parse_bool(raw)
+        cb.setChecked(default if parsed is None else parsed)
         cb.setCursor(Qt.PointingHandCursor)
         layout.addWidget(cb)
         self.fields[key] = cb
@@ -636,6 +656,58 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(wrapper)
         self.fields[key] = edit
+
+    def _add_rag_section(self, layout):
+        """知识库（RAG）配置：Embedding / 检索 / 重排。字段走 rag.* 嵌套 key。
+
+        知识库【目录】不放这里——它和「重建索引」按钮绑在侧栏卡片里更顺手，
+        改目录立刻能重建，不用来回切设置窗。
+        """
+        self._add_section(layout, "Embedding（向量化模型）")
+        self._add_text(layout, "rag.embed_model", "Embedding 模型 ID",
+                       "text-embedding-v3", default="text-embedding-v3")
+        self._add_text(layout, "rag.embed_base_url",
+                       "Embedding 端点（留空 = 复用「模型」页的通义千问）",
+                       "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self._add_text(layout, "rag.embed_api_key",
+                       "Embedding API Key（留空 = 复用通义千问 Key）",
+                       "sk-...", password=True)
+        embed_hint = QLabel(
+            "走 OpenAI 兼容的 /embeddings 接口；留空则复用「模型」页的通义千问端点 / Key。\n"
+            "⚠ 改 Embedding 模型 / 端点后，旧索引不再匹配 —— 需【重启】并在侧栏知识库卡片点「重建索引」。")
+        embed_hint.setObjectName("providerCardHint")
+        embed_hint.setWordWrap(True)
+        layout.addWidget(embed_hint)
+
+        self._add_section(layout, "检索")
+        self._add_text(layout, "rag.top_k", "返回片段数 top_k", "5", default="5")
+        self._add_text(layout, "rag.chunk_size", "切块大小（字符）", "800", default="800")
+        self._add_text(layout, "rag.chunk_overlap", "切块重叠字符数（0 = 关闭）", "120", default="120")
+        self._add_text(layout, "rag.min_score", "相似度下限 min_score（0 = 不过滤）", "0.0", default="0.0")
+        retr_hint = QLabel("改 chunk_size / chunk_overlap 同样需要重建索引才生效。")
+        retr_hint.setObjectName("providerCardHint")
+        retr_hint.setWordWrap(True)
+        layout.addWidget(retr_hint)
+
+        self._add_section(layout, "重排 Rerank（两阶段精排，可选）")
+        self._add_bool(layout, "rag.rerank", "启用重排：先向量粗召回 rerank_top_n 条，再交叉编码器精排到 top_k")
+        self._add_text(layout, "rag.rerank_model", "重排模型 ID", "gte-rerank-v2", default="gte-rerank-v2")
+        self._add_text(layout, "rag.rerank_top_n", "重排候选数 rerank_top_n", "20", default="20")
+
+        kb_hint = QLabel("知识库【目录】在左侧栏「知识库」卡片里选择并重建（改目录即可当场重建，无需重启）。")
+        kb_hint.setObjectName("providerCardHint")
+        kb_hint.setWordWrap(True)
+        layout.addWidget(kb_hint)
+
+    # rag.* 数值字段 → (类型, 缺省值)：_save 时把文本框内容 coerce 成数字后写盘，
+    # 避免 config.json 里存成字符串（config._cfg_num 虽能兜住字符串，但存成数字更干净）
+    _RAG_NUM_DEFAULTS = {
+        "rag.top_k": (int, 5),
+        "rag.chunk_size": (int, 800),
+        "rag.chunk_overlap": (int, 120),
+        "rag.rerank_top_n": (int, 20),
+        "rag.min_score": (float, 0.0),
+    }
 
     # model 列表字段 → config.py 中对应的常量名（用于回填默认值）
     _LIST_DEFAULTS = {
@@ -796,6 +868,14 @@ class SettingsDialog(QDialog):
                     val = text
             else:
                 val = widget.text().strip()
+
+            # rag.* 数值字段：文本 → 数字（空/非法回落缺省），存进 config.json 更干净
+            if key in self._RAG_NUM_DEFAULTS and not isinstance(widget, (QCheckBox, QComboBox)):
+                caster, dflt = self._RAG_NUM_DEFAULTS[key]
+                try:
+                    val = caster(val)
+                except (TypeError, ValueError):
+                    val = dflt
 
             # 嵌套 key（含 '.'）走 _set_nested，否则走平铺赋值
             if "." in key:

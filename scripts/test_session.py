@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Tool
 
 from src import state
 from src import session as _session
+from src.paths import memory_dir, memory_index
 from src.memory import (
     save_session,
     load_session,
@@ -24,6 +25,7 @@ from src.memory import (
     delete_session,
     reset_history,
     move_sessions_to_no_project,
+    session_kind_of,
     SessionMigrationError,
     _msg_to_dict,
     _dict_to_msg,
@@ -368,6 +370,126 @@ class TestMoveSessionsToNoProject:
 
         with pytest.raises(SessionMigrationError):
             move_sessions_to_no_project("/old/project")
+
+
+# ── session_kind / rag_kb_dir 分类与持久化 ──────────────
+class TestSessionKind:
+    def _save_active(self, kind, *, project=None, rag_dir=""):
+        state.chat_history.clear()
+        state.chat_history.append(SystemMessage(content="s"))
+        state.chat_history.append(HumanMessage(content="hi"))
+        state.current_session_id = None
+        state.current_session_title = "t"
+        state.current_project = project
+        sess = _session.get_active()
+        sess.session_kind = kind
+        sess.rag_kb_dir = rag_dir
+        save_session()
+        return state.current_session_id
+
+    def test_default_kind_is_code(self):
+        assert _session.Session().session_kind == "code"
+        assert _session.Session().rag_kb_dir == ""
+
+    def test_roundtrip_code_and_rag(self, isolated_memory):
+        code_id = self._save_active("code", project="/proj")
+        rag_id = self._save_active("rag", rag_dir="/kb/x")
+
+        # 单会话文件写入两字段
+        with open(os.path.join(memory_dir(), f"{rag_id}.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["session_kind"] == "rag" and data["rag_kb_dir"] == "/kb/x"
+        assert data["project"] is None                       # rag 会话 project 恒 None
+
+        # index.json 写入两字段
+        idx = {s["id"]: s for s in list_sessions("__all__")}
+        assert idx[code_id]["session_kind"] == "code"
+        assert idx[rag_id]["session_kind"] == "rag" and idx[rag_id]["rag_kb_dir"] == "/kb/x"
+
+        # 加载 roundtrip
+        tgt = _session.Session()
+        load_session(rag_id, session=tgt)
+        assert tgt.session_kind == "rag" and tgt.rag_kb_dir == "/kb/x"
+        assert tgt.project is None and tgt.rag_mode is True
+
+    def test_rag_save_forces_project_none(self, isolated_memory):
+        """即使 rag 会话内存里残留 project，保存时也强制 None。"""
+        state.chat_history.clear()
+        state.chat_history.append(SystemMessage(content="s"))
+        state.chat_history.append(HumanMessage(content="hi"))
+        state.current_session_id = None
+        state.current_project = "/proj"
+        sess = _session.get_active()
+        sess.session_kind = "rag"
+        sess.project = "/leftover/proj"          # 残留
+        save_session()
+        sid = state.current_session_id
+        assert [s for s in list_sessions("__all__") if s["id"] == sid][0]["project"] is None
+
+    def test_old_session_defaults_to_code(self, isolated_memory):
+        """旧会话文件缺 session_kind → 默认 code，rag_kb_dir 空。"""
+        sid = "20200101_000000_000000"
+        p = os.path.join(memory_dir(), f"{sid}.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"id": sid, "title": "old", "project": None,
+                       "messages": [{"type": "system", "content": "s"},
+                                    {"type": "human", "content": "hi"}]}, f)
+        tgt = _session.Session()
+        assert load_session(sid, session=tgt)
+        assert tgt.session_kind == "code" and tgt.rag_kb_dir == ""
+
+    def test_unknown_kind_falls_back_to_code(self, isolated_memory):
+        sid = "20200101_000000_000001"
+        p = os.path.join(memory_dir(), f"{sid}.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"id": sid, "title": "x", "session_kind": "banana",
+                       "messages": [{"type": "system", "content": "s"},
+                                    {"type": "human", "content": "hi"}]}, f)
+        tgt = _session.Session()
+        load_session(sid, session=tgt)
+        assert tgt.session_kind == "code"        # 未知值安全回退
+
+    def test_load_rag_ignores_residual_project(self, isolated_memory):
+        """rag 会话文件里残留 project → 加载时忽略（清成 None）。"""
+        sid = "20200101_000000_000002"
+        p = os.path.join(memory_dir(), f"{sid}.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"id": sid, "title": "x", "session_kind": "rag",
+                       "project": "/leftover", "rag_kb_dir": "/kb",
+                       "messages": [{"type": "system", "content": "s"},
+                                    {"type": "human", "content": "hi"}]}, f)
+        tgt = _session.Session()
+        load_session(sid, session=tgt)
+        assert tgt.project is None
+
+    def test_list_sessions_kind_filter(self, isolated_memory):
+        self._save_active("code", project=None)
+        self._save_active("rag", rag_dir="/kb")
+        assert all(s.get("session_kind", "code") == "code"
+                   for s in list_sessions("__all__", kind="code"))
+        rag = list_sessions("__all__", kind="rag")
+        assert len(rag) == 1 and rag[0]["session_kind"] == "rag"
+
+    def test_move_skips_rag_sessions(self, isolated_memory):
+        """删项目的会话迁移必须跳过 rag 会话（rag 不归任何代码项目）。"""
+        # 一个 code 会话在 /proj，一个 rag 会话（project 恒 None）
+        code_id = self._save_active("code", project="/proj")
+        rag_id = self._save_active("rag", rag_dir="/kb")
+        # 人为把 rag 的 index/文件 project 篡改成 /proj（模拟脏数据），move 也不该动它
+        idx_path = memory_index()
+        with open(idx_path, encoding="utf-8") as f:
+            idx = json.load(f)
+        for it in idx:
+            if it["id"] == rag_id:
+                it["project"] = "/proj"
+        with open(idx_path, "w", encoding="utf-8") as f:
+            json.dump(idx, f)
+
+        move_sessions_to_no_project("/proj")
+        after = {s["id"]: s for s in list_sessions("__all__")}
+        assert after[code_id]["project"] is None      # code 被迁移
+        assert after[rag_id]["session_kind"] == "rag"  # rag 未被 move 触碰（跳过）
+        assert session_kind_of(rag_id) == "rag"
 
 
 # ── reset_history ───────────────────────────────────────

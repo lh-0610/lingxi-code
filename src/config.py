@@ -79,8 +79,19 @@ LSP_SERVERS: list[str] = _config.get("lsp_servers", ["pyright-langserver", "pyls
 if not isinstance(LSP_SERVERS, list) or not all(isinstance(s, str) for s in LSP_SERVERS):
     LSP_SERVERS = ["pyright-langserver", "pylsp"]
 
+
+def _cfg_dict(root: dict, key: str) -> dict:
+    """安全取配置里的 dict 段：写成字符串/数组等（如 "rag": "oops"）时按未配置处理并告警，
+    **不抛异常**——后续 .get() 若在非 dict 上调用会 AttributeError 直接炸启动。"""
+    v = root.get(key) or {}
+    if not isinstance(v, dict):
+        logger.warning(f"config.json 的 {key} 段应是对象（实为 {type(v).__name__}），按未配置处理")
+        return {}
+    return v
+
+
 # 通知（Telegram 推送）
-_notify_cfg = _config.get("notify", {}) or {}
+_notify_cfg = _cfg_dict(_config, "notify")
 NOTIFY_ENABLED: bool = _notify_cfg.get("enabled", False)
 NOTIFY_LEVELS: list = _notify_cfg.get("levels", ["error", "action_needed", "done"])
 NOTIFY_THROTTLE_SECONDS: int = _notify_cfg.get("throttle_seconds", 10)
@@ -88,7 +99,7 @@ TELEGRAM_BOT_TOKEN: str = _notify_cfg.get("telegram_bot_token", "")
 TELEGRAM_CHAT_ID: str = _notify_cfg.get("telegram_chat_id", "")
 
 # 遥控（Telegram 远程发送消息给桌面端）
-_remote_cfg = _config.get("remote_control", {}) or {}
+_remote_cfg = _cfg_dict(_config, "remote_control")
 REMOTE_CONTROL: bool = _remote_cfg.get("enabled", False)
 # 遥控安全分级（mode 三选一，默认最安全的 chat_only）：
 #   chat_only     —— 禁所有工具，纯对话（默认；不懂/不配时最安全，不会意外泄露）
@@ -116,4 +127,122 @@ WEB_SEARCH_API_KEY: str = _config.get("web_search_api_key", "")
 FETCH_URL_ALLOW_PROXY: bool = bool(_config.get("fetch_url_allow_proxy", False))
 
 # MCP Servers 配置（字典，key=server 名，value=启动参数）
-MCP_SERVERS: dict = _config.get("mcp_servers", {}) or {}
+MCP_SERVERS: dict = _cfg_dict(_config, "mcp_servers")
+
+
+def set_rag_kb_dir(path: str) -> bool:
+    """把知识库目录写回 config.json 的 rag.kb_dir，并同步更新本模块的 RAG_KB_DIR。
+    供 UI「选择知识库目录」用。成功 True / 失败 False。"""
+    global RAG_KB_DIR
+    try:
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}   # 没有配置文件 → 新建（无数据可丢）
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # fail-closed：config.json 损坏时绝不用 {} 重写整个文件——那会把 API key
+            # 等全部配置清掉。留给用户手工修复，本次设置目录失败。
+            logger.error(f"config.json 损坏，拒绝改写（防清空全部配置）: {e}")
+            return False
+        data.setdefault("rag", {})["kb_dir"] = path
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        import os
+        os.replace(tmp, CONFIG_PATH)
+        RAG_KB_DIR = path
+        logger.info(f"知识库目录已设为: {path}")
+        return True
+    except Exception as e:
+        logger.warning(f"写入 rag.kb_dir 失败: {e}")
+        return False
+
+# ── RAG 知识库检索（可选功能）──
+# 对一个本地 md 资料库做语义检索。embedding 默认复用千问（DashScope 兼容端点）。
+# kb_dir 为空 = 未启用；search_knowledge 工具会提示先配置。
+_rag_cfg = _cfg_dict(_config, "rag")
+
+
+def _cfg_num(cfg: dict, key: str, default, cast=int):
+    """安全读数值配置：写错不能让程序起不来，也不能混进毒值。挡四类：
+      非数字（top_k: "five"）→ ValueError；
+      布尔（chunk_size: true）→ bool 是 int 子类，int(True)=1 会产出海量单字块，显式拒绝；
+      Infinity → 转 int 抛 OverflowError；
+      NaN/Infinity 过 float cast → isfinite 兜底（作 min_score 会产生异常过滤）。
+    注意不用 `or default`：那会把合法的 0 吞掉（chunk_overlap: 0 = 关闭重叠）。"""
+    import math
+    v = cfg.get(key, default)
+    if isinstance(v, bool):
+        logger.warning(f"rag.{key}={v!r} 是布尔值不是数字，回退默认 {default}")
+        return default
+    try:
+        r = cast(v)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning(f"rag.{key}={v!r} 不是有效数字，回退默认 {default}")
+        return default
+    if not math.isfinite(r):
+        logger.warning(f"rag.{key}={v!r} 非有限数值，回退默认 {default}")
+        return default
+    return r
+
+
+def _parse_bool(v):
+    """严格解析单个布尔配置值；无法识别返回 None。
+
+    config 加载和设置页回填共用这一层，避免运行时把 ``"false"`` 解析成 False，
+    设置页却因 ``bool("false")`` 显示为已开启、保存后反写成 true。
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off", ""):
+            return False
+    return None
+
+
+def _cfg_bool(cfg: dict, key: str, default: bool) -> bool:
+    """严格布尔：bool("false") == True 的坑——手改配置写字符串 "false" 会**静默开启付费重排**。
+    只认真正的 bool，或明确识别的字符串（true/false/1/0/yes/no/on/off，大小写无关）；
+    其余（含乱写）回退默认并告警，绝不把非空字符串当 True。"""
+    v = cfg.get(key, default)
+    parsed = _parse_bool(v)
+    if parsed is not None:
+        return parsed
+    logger.warning(f"rag.{key}={v!r} 不是有效布尔（true/false），回退默认 {default}")
+    return default
+
+
+RAG_KB_DIR: str = _rag_cfg.get("kb_dir", "")                       # 知识库根目录（放 .md）
+RAG_EMBED_MODEL: str = _rag_cfg.get("embed_model", "text-embedding-v3")
+RAG_EMBED_BASE_URL: str = _rag_cfg.get("embed_base_url", "") or CLOUD_BASE_URL   # 复用千问兼容端点
+RAG_EMBED_API_KEY: str = _rag_cfg.get("embed_api_key", "") or CLOUD_API_KEY      # 复用千问 key
+RAG_TOP_K: int = _cfg_num(_rag_cfg, "top_k", 5)                   # 检索返回片段数
+RAG_CHUNK_SIZE: int = _cfg_num(_rag_cfg, "chunk_size", 800)       # 每块目标字符数
+RAG_CHUNK_OVERLAP: int = _cfg_num(_rag_cfg, "chunk_overlap", 120)  # 0 = 合法（关闭重叠）
+RAG_MIN_SCORE: float = _cfg_num(_rag_cfg, "min_score", 0.0, cast=float)  # cosine 下限（0=不过滤）
+RAG_RERANK: bool = _cfg_bool(_rag_cfg, "rerank", False)           # 是否两阶段重排（DashScope gte-rerank，付费）
+RAG_RERANK_MODEL: str = _rag_cfg.get("rerank_model", "gte-rerank-v2")
+RAG_RERANK_TOP_N: int = _cfg_num(_rag_cfg, "rerank_top_n", 20)    # 重排前向量粗召回的候选数
+# rerank 走 DashScope 原生端点（非 compatible-mode），复用同一个 key
+RAG_RERANK_URL: str = _rag_cfg.get("rerank_url", "") or \
+    "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+
+# ── RAG 参数清洗：非法值回退默认并告警（防切块数量/API 请求量爆炸、切块除零等）──
+if RAG_TOP_K <= 0:
+    logger.warning(f"rag.top_k={RAG_TOP_K} 非法（须 >0），回退 5")
+    RAG_TOP_K = 5
+from .limits import RAG_MIN_CHUNK_SIZE as _RAG_MIN_CHUNK_SIZE
+if RAG_CHUNK_SIZE < _RAG_MIN_CHUNK_SIZE:
+    # 下限保护：chunk_size 太小（如 1）会把文档切成海量块 → 天量付费 embedding 请求
+    logger.warning(f"rag.chunk_size={RAG_CHUNK_SIZE} 过小（须 >={_RAG_MIN_CHUNK_SIZE}），回退 800")
+    RAG_CHUNK_SIZE = 800
+if not (0 <= RAG_CHUNK_OVERLAP < RAG_CHUNK_SIZE):
+    logger.warning(f"rag.chunk_overlap={RAG_CHUNK_OVERLAP} 非法（须 0<=overlap<chunk_size），回退")
+    RAG_CHUNK_OVERLAP = max(0, min(120, RAG_CHUNK_SIZE - 1))
+if RAG_RERANK_TOP_N <= 0:
+    logger.warning(f"rag.rerank_top_n={RAG_RERANK_TOP_N} 非法（须 >0），回退 20")
+    RAG_RERANK_TOP_N = 20

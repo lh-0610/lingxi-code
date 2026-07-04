@@ -2176,6 +2176,7 @@ from .tools_git import (  # noqa: E402
 from .tools_codemap import code_map, find_tests, related_files  # noqa: E402
 # codemap 私有 helper：test_related_files 直接 import，tools.py 不直接用 → noqa 防 ruff 删
 from .tools_codemap import _extract_imports_py, _find_test_files, _module_name_for_py, _module_to_path, _score_test_candidate  # noqa: F401,E402
+from .tools_rag import search_knowledge  # noqa: E402
 
 # 导出
 ALL_TOOLS = [
@@ -2197,7 +2198,16 @@ ALL_TOOLS = [
     run_tests, check_code,
     apply_patch,
     fetch_url, web_search,
+    search_knowledge,
 ]
+
+
+def build_rag_tools() -> list:
+    """知识库（RAG）模式的工具集：只有 search_knowledge。
+
+    纯检索问答——不给文件/命令/git 等编码工具（模型看不见就不会调），
+    双保险是 streaming._execute_tool 的 rag_mode 硬拦截。"""
+    return [search_knowledge]
 
 
 def get_mcp_tools() -> list:
@@ -2261,6 +2271,7 @@ TOOL_DISPLAY_NAMES = {
     "apply_patch": "📦 批量补丁",
     "fetch_url": "🌐 抓取网页",
     "web_search": "🔍 网络搜索",
+    "search_knowledge": "📚 知识库检索",
     "get_project_instructions": "📜 项目规则",
 }
 

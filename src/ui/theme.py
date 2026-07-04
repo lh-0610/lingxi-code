@@ -567,6 +567,59 @@ QMainWindow, QDialog {{
     border-color: {p['new_chat_hover_border']};
     color: {p['new_chat_hover_text']};
 }}
+/* 侧栏 编码|知识库 模式段控（撑满侧栏宽度，复用顶栏段控配色） */
+#ragModeSeg {{
+    background: {p['seg_bg']};
+    border: 1px solid {p['seg_border']};
+    border-radius: 9px;
+}}
+#ragModeSeg QPushButton[class="segBtn"] {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 9px 0;
+    font-size: 13px;
+    color: {p['seg_idle_text']};
+}}
+#ragModeSeg QPushButton[class="segBtn"]:hover {{
+    color: {p['seg_hover_text']};
+}}
+#ragModeSeg QPushButton[class="segBtn"]:checked {{
+    background: {p['seg_active_bg']};
+    border: 1px solid {p['seg_active_border']};
+    color: {p['seg_active_text']};
+    font-weight: 600;
+}}
+/* 知识库管理卡片：轻背景 + 圆角，不堆边框 */
+#kbCard {{
+    background: {p['seg_bg']};
+    border-radius: 10px;
+}}
+#kbCard QLabel#kbCardStatus {{
+    font-size: 12px;
+    color: {p['history_label']};
+    padding: 1px 2px;
+}}
+/* 状态圆点颜色（kbState 属性驱动；中间调在浅/深主题都可读） */
+#kbCard QLabel#kbCardStatus[kbState="ok"] {{ color: #21a366; }}
+#kbCard QLabel#kbCardStatus[kbState="indexing"] {{ color: {p['seg_active_text']}; }}
+#kbCard QLabel#kbCardStatus[kbState="stale"] {{ color: #d97706; }}
+#kbCard QLabel#kbCardStatus[kbState="error"] {{ color: #dc2626; }}
+#kbCard QPushButton[class="kbCardBtn"] {{
+    background: transparent;
+    border: 1px solid {p['seg_border']};
+    border-radius: 6px;
+    padding: 5px 0;
+    font-size: 12px;
+    color: {p['seg_idle_text']};
+}}
+#kbCard QPushButton[class="kbCardBtn"]:hover {{
+    color: {p['seg_hover_text']};
+    background: {p['history_hover_bg']};
+}}
+#kbCard QPushButton[class="kbCardBtn"]:disabled {{
+    color: {p['seg_border']};
+}}
 #sidebar QPushButton#projectHeader {{
     background: transparent;
     border: none;

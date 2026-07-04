@@ -42,6 +42,9 @@ ui_ref = None
 # Telegram 遥控：回复完成后是否自动发 Telegram 通知（可由命令开关）
 telegram_stop: bool = False
 
+# 注：知识库(RAG)模式 rag_mode 是**会话级**（session._SESSION_FIELDS）——前台切知识库
+# 不会改变后台编码会话的工具绑定/拦截。state.rag_mode 经代理落到当前线程的当前会话。
+
 # 注：current_model_index / agent_mode / reasoning_enabled 已改为**会话级**
 # （在 session._SESSION_FIELDS）——切会话时 模型 / Plan-Act / 思考 跟随该会话。
 # 这几个 state.X 的读写经文件末尾的代理落到"当前线程的当前会话"。

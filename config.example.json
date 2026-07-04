@@ -26,6 +26,19 @@
   "_fetch_url_allow_proxy_说明": "fetch_url 是否走系统代理。默认 false（直连，SSRF 防线完整、能校验目标真实 IP）。必须靠代理才能访问外网时设 true，但此时跳过防 DNS 重绑定的 peer 校验。",
   "_web_search_说明": "web_search 工具用 Tavily 搜网络（tavily.com 免费申请 key）。留空 = web_search 不可用（会优雅提示），不影响 fetch_url 抓网址（fetch_url 无需 key）。",
 
+  "rag": {
+    "kb_dir": "",
+    "embed_model": "text-embedding-v3",
+    "top_k": 5,
+    "chunk_size": 800,
+    "chunk_overlap": 120,
+    "min_score": 0.0,
+    "rerank": false,
+    "rerank_model": "gte-rerank-v2",
+    "rerank_top_n": 20
+  },
+  "_rag_说明": "RAG 知识库检索：把 kb_dir 指向一个放 .md 的目录，重建索引后 search_knowledge 工具/知识库 tab 就能语义检索。embedding 默认复用 qwen_api_key（DashScope 兼容端点 text-embedding-v3）。kb_dir 为空=未启用。rerank=true 开启两阶段重排（先向量召回 rerank_top_n 条，再用 gte-rerank 精排成 top_k，更准、多一次 API 调用）。",
+
   "notify": {
     "enabled": false,
     "levels": ["error", "action_needed", "done"],

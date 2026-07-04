@@ -49,7 +49,7 @@ from .memory import (
     move_sessions_to_no_project,    # noqa: F401  facade 出口 → sidebar 删项目
     _build_ai_message,
 )
-from .tools import ALL_TOOLS, build_all_tools  # noqa: F401  ALL_TOOLS 为 facade 出口
+from .tools import ALL_TOOLS, build_all_tools, build_rag_tools  # noqa: F401  ALL_TOOLS 为 facade 出口
 from .streaming import _stream_with_tools, _execute_tool, _extract_thinking
 from .claude_code import claude_code_loop as _claude_code_loop
 from . import session as _session_mod
@@ -83,10 +83,15 @@ def resolve_bound_llm(session):
     mi = session.current_model_index
     _, mtype, model_id, supports_think = MODEL_LIST[mi]
     effective_reasoning = bool(session.reasoning_enabled and supports_think)
-    key = (mi, mtype, model_id, effective_reasoning)
+    # 知识库(RAG)模式绑不同工具集（只有 search_knowledge），故进缓存键。
+    # 读【目标会话】的 rag_mode（会话级）——前台切知识库不影响后台编码会话的绑定；
+    # streaming 每轮都调这里，切模式后下一条消息自动换绑定。
+    rag = bool(getattr(session, "rag_mode", False))
+    key = (mi, mtype, model_id, effective_reasoning, rag)
     if key not in _BOUND_LLM_CACHE:
         llm = _create_llm(mi, effective_reasoning)
-        _BOUND_LLM_CACHE[key] = (llm, llm.bind_tools(build_all_tools()))
+        tools = build_rag_tools() if rag else build_all_tools()
+        _BOUND_LLM_CACHE[key] = (llm, llm.bind_tools(tools))
     return _BOUND_LLM_CACHE[key]
 
 
@@ -177,6 +182,14 @@ def agent_loop(ui):
 
         # Claude Code 模式：直接调 CLI
         if mtype == "claude-code":
+            # 知识库(RAG)模式不支持 Claude Code：CLI 没有 search_knowledge、也不吃 RAG
+            # 提示词——放行等于变回完整编码 agent，静默绕过知识库约束。明确拦下。
+            if getattr(state, "rag_mode", False):
+                ui.show_message(
+                    "\n⚠️ 知识库模式不支持 Claude Code 模型（它走本地 CLI、无法使用知识库检索）。"
+                    "请在顶栏换一个 API 模型，或切回「编码」模式再用 Claude Code。\n",
+                    "ai_msg")
+                return
             _claude_code_loop(ui)
             return
 

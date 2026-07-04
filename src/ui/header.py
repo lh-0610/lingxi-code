@@ -116,6 +116,7 @@ class HeaderMixin:
         self.plan_btn.clicked.connect(lambda: self._set_agent_mode("plan"))
         self.act_btn.clicked.connect(lambda: self._set_agent_mode("act"))
         layout.addWidget(self.mode_seg, 0, Qt.AlignVCenter)
+        # 注：「编码/知识库」模式入口和知识库管理控件在左侧栏（rag_sidebar.py），顶栏不放
 
         # 思考模式开关
         self.think_btn = QPushButton("思考")
@@ -270,11 +271,21 @@ class HeaderMixin:
         if hasattr(self, "plan_btn"):
             self.plan_btn.setChecked(sess.agent_mode == "plan")
             self.act_btn.setChecked(sess.agent_mode != "plan")
-        # 隔离按钮：有项目时可见，根据会话 worktree 状态高亮
+        # 侧栏「编码/知识库」入口跟随该会话的 session_kind（逻辑在 rag_sidebar.py）
+        if hasattr(self, "_sync_rag_sidebar_from_session"):
+            self._sync_rag_sidebar_from_session()
+        # 知识库工作区是纯只读检索问答：隐藏编码专属控件（Plan/Act、撤销、角色卡）。
+        # 项目/隔离由 _refresh_project_indicator 处理；模型/思考/主题保留。
+        is_rag = getattr(sess, "session_kind", "code") == "rag"
+        for _attr in ("mode_seg", "undo_btn", "role_btn"):
+            _w = getattr(self, _attr, None)
+            if _w is not None:
+                _w.setVisible(not is_rag)
+        # 隔离按钮：知识库模式恒隐藏；编码模式跟随"有无项目"+ worktree 高亮
         if hasattr(self, "isolation_btn"):
-            has_project = bool(_state.current_project)
-            self.isolation_btn.setVisible(has_project)
-            self._style_isolation_btn(active=bool(sess.worktree))
+            self.isolation_btn.setVisible((not is_rag) and bool(_state.current_project))
+            if not is_rag:
+                self._style_isolation_btn(active=bool(sess.worktree))
         if hasattr(self, "_refresh_header_compactness"):
             self._refresh_header_compactness()
 
