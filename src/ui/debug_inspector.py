@@ -257,15 +257,16 @@ class DebugInspector(QDialog):
             content = m.get("content", "")
             if isinstance(content, list):
                 parts = []
+                from ..content_blocks import is_text_block, is_think_block, block_text, block_thinking
                 for blk in content:
                     if isinstance(blk, dict):
                         bt = blk.get("type", "?")
-                        if bt == "text":
-                            parts.append(f"text: {esc(blk.get('text','')[:300])}")
+                        if is_text_block(blk):
+                            parts.append(f"text: {esc(block_text(blk)[:300])}")
+                        elif is_think_block(blk):
+                            parts.append(f"thinking: {esc(block_thinking(blk)[:200])}")
                         elif bt in ("image", "image_url"):
                             parts.append(f"[{bt}]")
-                        elif bt == "thinking":
-                            parts.append(f"thinking: {esc((blk.get('thinking') or '')[:200])}")
                         else:
                             parts.append(f"[{bt}]")
                 content_view = "<br>".join(parts)

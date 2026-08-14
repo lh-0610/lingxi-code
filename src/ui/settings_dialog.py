@@ -162,6 +162,17 @@ class SettingsDialog(QDialog):
             models_key="deepseek_models",
         )
         self._add_provider_card(
+            m, "DeepSeek (Responses API)",
+            [
+                ("responses_api_key",  "API Key",  "sk-...（留空复用 DeepSeek key）", True),
+                ("responses_base_url", "Base URL", "https://api.deepseek.com",       False),
+            ],
+            hint="OpenAI Responses 协议（DeepSeek V4-Flash 等挂在 /responses 端点）。"
+                 "目前仅支持 deepseek-v4-flash；思考链规整、支持语义化工具调用。"
+                 "挂其它支持 /responses 的网关就改 Base URL。",
+            models_key="responses_models",
+        )
+        self._add_provider_card(
             m, "Google Gemini",
             [("google_api_key", "API Key", "AIza...", True)],
             models_key="gemini_models",
@@ -412,7 +423,7 @@ class SettingsDialog(QDialog):
         # 拷贝出来本地编辑，避免直接改 config 模块全局
         self._custom_models = [dict(cm) for cm in (_cfg.CUSTOM_MODELS or [])]
 
-        self._add_section(layout, "自定义模型（OpenAI / Anthropic 兼容）")
+        self._add_section(layout, "自定义模型（OpenAI / Anthropic / Responses 兼容）")
 
         # 容器：动态摆放每个 model 卡片
         self._custom_container = QWidget()
@@ -717,6 +728,7 @@ class SettingsDialog(QDialog):
         "anthropic_models":  "ANTHROPIC_MODELS",
         "gemini_models":     "GEMINI_MODELS",
         "deepseek_models":   "DEEPSEEK_MODELS",
+        "responses_models":  "RESPONSES_MODELS",
     }
 
     def _add_textarea(self, layout, key, label_text, placeholder="", min_height=70):
@@ -849,7 +861,7 @@ class SettingsDialog(QDialog):
     # 这些 key 在 QTextEdit 里是"每行一个"的数组，保存时要 split 成 list
     _LIST_KEYS = frozenset({
         "mimo_models", "qwen_cloud_models", "ollama_models",
-        "anthropic_models", "gemini_models", "deepseek_models",
+        "anthropic_models", "gemini_models", "deepseek_models", "responses_models",
         "remote_control.readonly_blocklist",
     })
 
@@ -950,7 +962,7 @@ class SettingsDialog(QDialog):
             "<p style='color:#888;margin:4px 0 14px 0'>多模型 AI 桌面客户端</p>"
             f"<p><b>版本</b>：{_ver}</p>"
             "<p><b>技术栈</b>：LangChain + PySide6</p>"
-            "<p><b>支持上游</b>：MiMo · Qwen · Claude · DeepSeek · Ollama · Claude Code</p>"
+            "<p><b>支持上游</b>：MiMo · Qwen · Claude · DeepSeek · Responses(DeepSeek V4) · Ollama · Claude Code</p>"
             "<p><b>本地能力</b>：多角色卡 · 持久化记忆 · MCP 工具</p>"
             "<p style='margin-top:16px'><a href='https://github.com/'>GitHub 源码</a></p>"
             "</div>"
@@ -1078,6 +1090,7 @@ class _CustomModelEditor(QDialog):
         self.f_protocol = _NoScrollComboBox()
         self.f_protocol.addItem("OpenAI 兼容（默认 — 适配大多数第三方 API）", "openai")
         self.f_protocol.addItem("Anthropic 兼容（Claude 系 / MiMo 风）", "anthropic")
+        self.f_protocol.addItem("OpenAI Responses（/responses 端点，如 DeepSeek V4）", "responses")
         # 设当前值
         protocol_val = (initial.get("protocol") or "openai").lower()
         idx = self.f_protocol.findData(protocol_val)

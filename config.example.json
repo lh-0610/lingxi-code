@@ -8,6 +8,9 @@
   "mimo_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic",
   "deepseek_api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "deepseek_base_url": "https://api.deepseek.com",
+  "responses_api_key": "",
+  "responses_base_url": "https://api.deepseek.com",
+  "_responses_说明": "OpenAI Responses API 通道（DeepSeek V4-Flash 挂在 /responses 端点）。responses_api_key 留空则复用 deepseek_api_key；responses_base_url 默认 DeepSeek 官方。想要走其它挂 /responses 的网关就改 base_url。Responses 目前仅支持 deepseek-v4-flash（v4-pro 预计 2026-08 上线）。",
 
   "mimo_models":      ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni"],
   "qwen_cloud_models":["qwen3.5-plus", "qwen-max", "qwen-plus", "qwen-turbo"],
@@ -15,6 +18,7 @@
   "anthropic_models": ["claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
   "gemini_models":    [],
   "deepseek_models":  ["deepseek-v4-flash", "deepseek-v4-pro"],
+  "responses_models": ["deepseek-v4-flash"],
   "claude_code_model": "",
   "claude_code_skip_permissions": false,
   "_claude_code_skip_permissions_说明": "Claude Code 模式 Act 时是否绕过 claude 全部权限检查（全自动）。默认 false 更安全：Act 走 acceptEdits（自动批准编辑、不挂起、不绕过全部检查），Plan 恒为只读。需要任意命令都免确认的真·全自动才设 true。",

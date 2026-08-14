@@ -18,7 +18,7 @@ def test_config_issue_points_to_settings(monkeypatch):
 
 def _blank_all_cloud_keys(monkeypatch):
     for k in ("CLOUD_API_KEY", "ANTHROPIC_API_KEY", "MIMO_API_KEY",
-              "GOOGLE_API_KEY", "DEEPSEEK_API_KEY"):
+              "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "RESPONSES_API_KEY"):
         monkeypatch.setattr(models, k, "")
     monkeypatch.setattr(models, "CUSTOM_MODELS", [])
 

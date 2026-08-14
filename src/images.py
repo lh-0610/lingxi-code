@@ -26,6 +26,15 @@ def _normalize_image_blocks_for_current_model(history):
     if not history:
         return history
     mtype = MODEL_LIST[state.current_model_index][1]
+    # 视觉块协议归属：
+    #   - anthropic / mimo → Anthropic 风格 image content block
+    #   - 其余（openai 兼容 / deepseek / **responses** / custom-openai / custom-responses）
+    #     → OpenAI 风格 image_url data URI。
+    # Responses 协议（DeepSeek V4 端点）沿用 OpenAI 的 image_url 形态——虽然 DeepSeek 的
+    # /responses 目前不支持真实图片（input_image 会被替换成占位文本），但放在"剥图"流程
+    # 外统一为 image_url 形态，将来挂支持视觉的 Responses 网关（如 OpenAI 官方）即开即用。
+    # 用户没把该模型选为图片识别模型时，`_strip_images_for_text_only_model` 会把历史里的
+    # 图片剥成文本占位，不会真把 image_url 发给 DeepSeek。
     is_anthropic = mtype in ("anthropic", "mimo")
 
     def _convert(part):

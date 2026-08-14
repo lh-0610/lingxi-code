@@ -22,6 +22,7 @@ from langchain_core.messages import HumanMessage
 
 from .. import agent
 from .. import state
+from ..content_blocks import block_text
 from ._base import BASE_DIR
 from .theme import THEMES, build_stylesheet, load_saved_theme, save_theme_choice
 from .widgets import (
@@ -364,12 +365,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 # content 可能是 str 或 list（含 thinking + text blocks）
                 _ai_content = msg.content
                 if isinstance(_ai_content, list):
-                    # 从 content blocks 中提取纯文本部分用于显示
-                    _text_parts = []
-                    for _blk in _ai_content:
-                        if isinstance(_blk, dict) and _blk.get('type') == 'text' and _blk.get('text'):
-                            _text_parts.append(_blk['text'])
-                    _ai_content = "\n".join(_text_parts)
+                    # 从 content blocks 提取正文(兼容 Anthropic text / Responses output_text)
+                    _ai_content = "\n".join(
+                        t for t in (block_text(_blk) for _blk in _ai_content) if t
+                    )
                 _has_text = bool(_ai_content and _ai_content.strip())
                 _tool_names = [tc.get('name', '?') for tc in (getattr(msg, 'tool_calls', None) or [])
                                if isinstance(tc, dict)]
@@ -2107,10 +2106,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             _c = agent.chat_history[-1].content
             # content 可能是 str 或 list（含 thinking blocks）
             if isinstance(_c, list):
-                _text = "".join(
-                    b.get("text", "") for b in _c
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
+                # 兼容 Responses 的 output_text——否则有正文的回复会被误判为空而弹掉
+                _text = "".join(block_text(b) for b in _c)
                 if not _text.strip():
                     agent.chat_history.pop()
             elif isinstance(_c, str) and not _c.strip():

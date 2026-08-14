@@ -18,6 +18,7 @@ from . import state
 from .paths import logger, memory_dir, memory_index
 from .roles import get_system_prompt
 from .limits import SESSION_HISTORY_LIMIT
+from .content_blocks import is_text_block, is_think_block, block_text
 
 
 # 串行化 chat_memory/ 下所有文件的读-改-写。
@@ -97,10 +98,11 @@ def _build_ai_message(gathered, clean_text, tool_calls):
         for block in gathered.content:
             if not isinstance(block, dict):
                 continue
-            btype = block.get('type')
-            if btype == 'thinking' and block.get('thinking'):
+            # 思考块整块保留：Anthropic thinking 带 signature、Responses reasoning 带 id，
+            # 都要原样回传给服务端（尤其工具调用回合缺 reasoning item 会 400），故不看是否有可见文本。
+            if is_think_block(block):
                 content_blocks.append(block)
-            elif btype == 'text' and block.get('text'):
+            elif is_text_block(block) and block.get('text'):
                 content_blocks.append(block)
 
     if content_blocks:
@@ -244,12 +246,13 @@ def _extract_text_content(resp):
     if isinstance(content, list):
         parts = []
         for block in content:
-            if isinstance(block, dict):
-                # 只取正文 text，跳过 thinking / 其它块
-                if block.get("type") == "text" and block.get("text"):
-                    parts.append(block["text"])
-            elif isinstance(block, str):
+            if isinstance(block, str):
                 parts.append(block)
+            else:
+                # 正文块(Anthropic text / Responses output_text)，跳过思考 / 其它块
+                t = block_text(block)
+                if t:
+                    parts.append(t)
         return "\n".join(parts)
     return str(content)
 

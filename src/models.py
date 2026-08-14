@@ -26,6 +26,8 @@ from .config import (
     MIMO_BASE_URL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
+    RESPONSES_API_KEY,
+    RESPONSES_BASE_URL,
     CUSTOM_MODELS,
     MODEL_CONTEXT_WINDOWS,
     MIMO_MODELS,
@@ -34,6 +36,7 @@ from .config import (
     ANTHROPIC_MODELS,
     GEMINI_MODELS,
     DEEPSEEK_MODELS,
+    RESPONSES_MODELS,
 )
 
 
@@ -60,6 +63,12 @@ def _build_builtin_model_list():
         out.append((mid, "gemini", mid, False))
     for mid in DEEPSEEK_MODELS:
         out.append((mid, "deepseek", mid, False))
+    # Responses API 模型（OpenAI Responses 协议：DeepSeek V4 等）
+    # 与 deepseek（Chat Completions）是同族姐妹通道——走 output_version="responses/v1"
+    # 的语义化格式（reasoning item / 内置 web_search / call_id 配对）。默认支持思考
+    # （DeepSeek Responses 默认开启思考模式，reasoning 参数控制强度）。
+    for mid in RESPONSES_MODELS:
+        out.append((mid, "responses", mid, True))
     return out
 
 
@@ -129,11 +138,13 @@ def get_model_config_issues(model_index=None):
         require_key("google_api_key", GOOGLE_API_KEY)
     elif mtype == "deepseek":
         require_key("deepseek_api_key", DEEPSEEK_API_KEY)
+    elif mtype == "responses":
+        require_key("responses_api_key", RESPONSES_API_KEY)
     elif mtype == "custom":
         cm = _lookup_custom_model(model_id) or {}
         require_key(f"{name} 的 api_key（设置 → 自定义模型）", cm.get("api_key", ""))
         protocol = (cm.get("protocol") or "openai").lower()
-        if protocol not in {"openai", "anthropic"}:
+        if protocol not in {"openai", "anthropic", "responses"}:
             issues.append(f"{name} 的 custom protocol 暂不支持：{protocol}")
 
     return issues
@@ -142,7 +153,7 @@ def get_model_config_issues(model_index=None):
 # 这些模型类型靠 API key 直接可用（新用户只要填 key 就能聊）。
 # 排除 ollama（要本机起服务+拉模型）、claude-code（要本机装 claude CLI）——
 # 新用户多半没搭这些，不该算作"已有可用模型"。
-_KEYED_MODEL_TYPES = {"cloud", "anthropic", "mimo", "gemini", "deepseek", "custom"}
+_KEYED_MODEL_TYPES = {"cloud", "anthropic", "mimo", "gemini", "deepseek", "responses", "custom"}
 
 
 def has_usable_model() -> bool:
@@ -209,6 +220,11 @@ def _max_tokens_for(mtype, model_id):
     mid = (model_id or "").lower()
     if mtype == "mimo":
         return 16384                      # MiMo 大型 reasoning,思考耗 token,给足余量
+    if mtype == "responses":
+        # Responses 协议（DeepSeek V4 等）思考链 token 和正文共用 max_output_tokens 额度
+        if "flash" in mid:
+            return 16384                  # flash：思考 + 正文，给足余量
+        return 32768                      # 未来 v4-pro 等，思考对额度的占用更大
     if mtype == "anthropic":
         if "haiku" in mid:
             return 8192                   # Haiku 3.5 输出上限就是 8192,不能超
@@ -312,6 +328,25 @@ def _create_llm(model_index=None, reasoning=None):
         if "v4" in model_id.lower():
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         return ChatOpenAI(**kwargs)
+    elif mtype == "responses":
+        # OpenAI Responses API 协议（DeepSeek V4-Flash 等挂在 /responses 端点）。
+        # ChatOpenAI 的 output_version="responses/v1" 让 LangChain 用 Responses 语义化的
+        # 输入 item / 输出 item（reasoning 思考项、function_call 工具、web_search 内置工具，
+        # call_id 配对 function_call_output）取代 Chat Completions 的 content/role 那套。
+        # system 走 instructions 字段、多轮历史放 input，均交由 SDK 内部处理。
+        kwargs = {
+            "model": model_id,
+            "api_key": RESPONSES_API_KEY,
+            "base_url": RESPONSES_BASE_URL,
+            "output_version": "responses/v1",
+            "timeout": LONG_TIMEOUT,
+        }
+        # Responses API 的思考模式由 reasoning.effort 控制（none 关 / low~max 开，
+        # 默认开启）。与灵犀顶栏「思考」开关联动：关掉思考时显式 reasoning={"effort": "none"}
+        # 关闭服务端思考（否则 DeepSeek 默认思考会每个请求白耗 reasoning token）。
+        if supports_think and not reasoning:
+            kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
+        return ChatOpenAI(**kwargs)
     elif mtype == "custom":
         # 用户自定义模型：从 CUSTOM_MODELS 反查完整配置，按 protocol 选 SDK
         cm = _lookup_custom_model(model_id) or {}
@@ -326,6 +361,21 @@ def _create_llm(model_index=None, reasoning=None):
                 max_tokens=_max_tokens_for(mtype, model_id),
                 default_request_timeout=LONG_TIMEOUT,
             )
+        if protocol == "responses":
+            # 自定义 Responses API 端点（OpenAI 官方新模型 / 第三方挂 /responses 的网关）。
+            # 与内置 responses provider 同路：output_version="responses/v1" 走语义化格式。
+            ckwargs = {
+                "model": model_id,
+                "api_key": api_key,
+                "output_version": "responses/v1",
+                "timeout": LONG_TIMEOUT,
+            }
+            if base_url:
+                ckwargs["base_url"] = base_url
+            # 思考开关联动同上：关闭思考时显式 reasoning.effort=none（仅当声明支持思考）
+            if supports_think and not reasoning:
+                ckwargs["extra_body"] = {"reasoning": {"effort": "none"}}
+            return ChatOpenAI(**ckwargs)
         # 默认 OpenAI 兼容协议（适配大多数第三方 API：OpenAI / 月之暗面 /
         # 火山引擎 / 智谱 / 硅基流动 / 自部署 vLLM 等都走这个）
         kwargs = {

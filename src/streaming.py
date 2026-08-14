@@ -14,6 +14,7 @@ from . import state
 from . import debug_log
 from .paths import logger
 from .models import MODEL_LIST, current_model_supports_vision
+from .content_blocks import is_text_block, is_think_block, block_text, block_thinking
 from .tools import TOOL_DISPLAY_NAMES, build_git_write_confirmation, get_tool_map
 from .limits import (
     COMPACTION_SUMMARY_MAX_CHARS,
@@ -494,7 +495,7 @@ def _wrap_system_for_cache(messages, fresh_system_text: str, provider: str):
         return messages
 
     # 判断是否能用 cache_control：内置 anthropic/mimo 直接进；custom 类型要看
-    # 用户配的 protocol 是不是 anthropic
+    # 用户配的 protocol 是不是 anthropic（openai / responses 均走纯字符串）
     use_anthropic_cache = provider in ("anthropic", "mimo")
     if provider == "custom":
         from .models import MODEL_LIST as _ML, _lookup_custom_model
@@ -515,7 +516,10 @@ def _wrap_system_for_cache(messages, fresh_system_text: str, provider: str):
             }
         ])
     else:
-        # 其它 provider：纯字符串（兼容 OpenAI / Ollama / DeepSeek 等）
+        # 其它 provider：纯字符串（兼容 OpenAI / Ollama / DeepSeek /
+        # **responses** 等）。responses 协议的 SDK 会把 system message 映射到
+        # instructions 字段、历史放 input——不能传 content block + cache_control
+        # （Responses 无 Anthropic 式缓存块，深链模型也不认）。
         new_head = _SM(content=fresh_system_text)
 
     return [new_head] + list(messages[1:])
@@ -837,9 +841,10 @@ def _handle_stream_chunk(st, chunk, ui, heartbeat_stop, heartbeat_phase):
         for block in chunk.content:
             if not isinstance(block, dict):
                 continue
-            btype = block.get('type')
-            if btype == 'thinking':
-                r = block.get('thinking', '')
+            # 正文 / 思考的 block 类型判定统一走 content_blocks（兼容 Anthropic 的
+            # text/thinking 和 Responses 的 output_text/reasoning），别处漏认会静默丢内容。
+            if is_think_block(block):
+                r = block_thinking(block)
                 if r:
                     if not st.think_started:
                         st.think_started = True
@@ -851,8 +856,8 @@ def _handle_stream_chunk(st, chunk, ui, heartbeat_stop, heartbeat_phase):
                         ui.remove_thinking_indicator()
                         ui.show_message("Thinking...\n", "think_header")
                     ui.show_message(r, "think_msg")
-            elif btype == 'text':
-                t = block.get('text', '')
+            elif is_text_block(block):
+                t = block_text(block)
                 if t:
                     if st.first_token:
                         st.first_token = False
@@ -976,9 +981,9 @@ def _extract_thinking(gathered):
     _thinking = ""
     try:
         if gathered is not None and isinstance(gathered.content, list):
+            # 兼容 Anthropic thinking 与 Responses reasoning（summary_text）
             _thinking = "\n".join(
-                b.get("thinking", "") for b in gathered.content
-                if isinstance(b, dict) and b.get("type") == "thinking"
+                t for t in (block_thinking(b) for b in gathered.content) if t
             )
         if not _thinking and gathered is not None:
             _thinking = (getattr(gathered, "additional_kwargs", {}) or {}).get("reasoning_content", "") or ""
