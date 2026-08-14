@@ -567,6 +567,38 @@ BLOCKED_COMMANDS = [
 ]
 
 
+# 判定"这个环境变量名看起来装着密钥"的模式。子串匹配（不是前缀），因为真实世界的名字
+# 五花八门：ANTHROPIC_API_KEY / AWS_SECRET_ACCESS_KEY / GH_TOKEN / MYSQL_ROOT_PASSWORD。
+_SECRET_ENV_PARTS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL")
+
+
+def _scrubbed_env():
+    """给 run_command 子进程用的环境变量副本：剔掉名字像密钥的那些。
+
+    返回 None 表示"不脱敏、直接继承"（config 关掉了），此时调用方不传 env 参数，
+    保持与脱敏前完全一致的行为。
+
+    为什么要做：命令串是模型拼的，`env` / `echo $XXX_TOKEN` 的输出会进工具结果 →
+    进上下文 → 落进 chat_memory 的会话 JSON。灵犀自己的密钥读的是 config.json 不走
+    环境变量，但用户机器上通常有 ANTHROPIC_API_KEY / GITHUB_TOKEN 之类。
+    """
+    from . import config as _cfg
+    if not getattr(_cfg, "RUN_COMMAND_SCRUB_ENV", True):
+        return None
+    keep = {k.upper() for k in getattr(_cfg, "RUN_COMMAND_ENV_KEEP", [])}
+    env = {}
+    dropped = []
+    for k, v in os.environ.items():
+        ku = k.upper()
+        if ku not in keep and any(p in ku for p in _SECRET_ENV_PARTS):
+            dropped.append(k)
+            continue
+        env[k] = v
+    if dropped:
+        logger.debug(f"run_command 环境脱敏，未传递 {len(dropped)} 个变量: {', '.join(sorted(dropped)[:8])}")
+    return env
+
+
 def _kill_proc_tree(proc):
     """跨平台杀整个进程树。
 
@@ -702,12 +734,14 @@ def run_command(command: str, timeout: int | None = None, background: bool = Fal
 
     # stderr 合并进 stdout 走同一管道，按时间顺序输出（不再分开拼接）
     try:
+        _env = _scrubbed_env()          # None = 配置关了脱敏 → 不传 env，继承宿主环境
         proc = subprocess.Popen(
             command, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             cwd=run_cwd,
             bufsize=0,
+            **({"env": _env} if _env is not None else {}),
         )
     except Exception as e:
         return f"启动失败: {e}"
@@ -820,24 +854,12 @@ def run_command(command: str, timeout: int | None = None, background: bool = Fal
     except Exception:
         pass
 
-    if timed_out:
-        if ui is not None:
-            try:
-                ui.show_message(f"\n⏱️ 超时强杀（{effective_timeout}s）\n", "tool_result")
-            except Exception:
-                pass
-        return f"命令执行超时（{effective_timeout} 秒），已强杀进程"
-    if interrupted:
-        if ui is not None:
-            try:
-                ui.show_message("\n⏹ 用户中断\n", "tool_result")
-            except Exception:
-                pass
-        return "用户中断执行"
-
+    # 「超时 / 被中断 / 退出码 / 已产生的输出」是四个**互相独立**的事实，必须各报各的：
+    # 早先版本把输出的读取放在超时分支之后，于是超时/中断时模型一个字都拿不到——而跑
+    # 测试套件超时时，超时前已经打出来的失败用例恰恰是最有诊断价值的部分（用户在 UI 上
+    # 看得见，只有模型瞎，所以很难发现）。
     with chunks_lock:
         output = "".join(output_chunks)
-
     if not output:
         output = "(无输出)"
     if len(output) > RUN_COMMAND_MAX_OUTPUT_CHARS:
@@ -845,6 +867,22 @@ def run_command(command: str, timeout: int | None = None, background: bool = Fal
             output[:RUN_COMMAND_MAX_OUTPUT_CHARS]
             + f"\n... [输出过长，已截断；UI 上能看到全量约 {len(output)} 字符]"
         )
+
+    if timed_out:
+        if ui is not None:
+            try:
+                ui.show_message(f"\n⏱️ 超时强杀（{effective_timeout}s）\n", "tool_result")
+            except Exception:
+                pass
+        return (f"命令执行超时（{effective_timeout} 秒），已强杀进程。"
+                f"以下是超时前已产生的输出：\n{output}")
+    if interrupted:
+        if ui is not None:
+            try:
+                ui.show_message("\n⏹ 用户中断\n", "tool_result")
+            except Exception:
+                pass
+        return f"用户中断执行。以下是中断前已产生的输出：\n{output}"
 
     # 完成标记一行（让 UI 上能看到"结束了"，不会和上一段输出粘在一起）
     if ui is not None:
@@ -1252,8 +1290,14 @@ def stop_background_command(bg_id: str) -> str:
     return f"已停止 [{bg_id}]: {info['command']}（运行 {elapsed}s）"
 
 
-def stop_all_background():
-    """停止所有后台命令（应用退出时调用）。"""
+def stop_all_background(wait_timeout: float = 5.0):
+    """停止所有后台命令（应用退出时调用）。
+
+    先全部发杀、再统一等它们**真的**退出：只发不等的话函数返回时进程可能还活着，
+    端口也还占着（这个清理本来就是为了防端口残留），紧接着重启应用就会撞端口。
+    先杀后等而不是逐个 kill+wait，是为了让多个进程的退出时间重叠，总耗时取最慢的
+    那个而不是求和。等不到就记 warning 放行——退出流程不能被一个赖着不死的进程卡住。
+    """
     with _bg_lock:
         procs = list(_bg_procs.items())
         _bg_procs.clear()
@@ -1261,6 +1305,17 @@ def stop_all_background():
         try:
             _kill_proc_tree(info["proc"])
             logger.info(f"退出清理：停止 [{bg_id}] {info['command']}")
+        except Exception:
+            pass
+    deadline = time.time() + wait_timeout
+    for bg_id, info in procs:
+        proc = info.get("proc")
+        if proc is None:
+            continue
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            logger.warning(f"退出清理：[{bg_id}] {info['command']} 在 {wait_timeout}s 内未退出，放弃等待")
         except Exception:
             pass
 

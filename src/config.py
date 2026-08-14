@@ -132,6 +132,16 @@ WEB_SEARCH_API_KEY: str = _config.get("web_search_api_key", "")
 # 防 DNS 重绑定的 peer 检查会跳过——属于用代理换可达性的显式取舍。
 FETCH_URL_ALLOW_PROXY: bool = bool(_config.get("fetch_url_allow_proxy", False))
 
+# run_command 子进程是否脱敏环境变量。**默认 True**：模型自己拼命令串，一个 `env` /
+# `echo $XXX_TOKEN` 就能把宿主的密钥读进工具结果 → 进上下文 → 落进会话文件。名字里含
+# KEY/SECRET/TOKEN/PASSWORD/PASSWD/CREDENTIAL 的变量默认不传给子进程。
+# 副作用是需要这些变量的命令会失败（`aws s3 ls`、要 NPM_TOKEN 的 npm publish 等）——
+# 用 run_command_env_keep 精确放行，不要为了个别命令整个关掉。
+RUN_COMMAND_SCRUB_ENV: bool = bool(_config.get("run_command_scrub_env", True))
+RUN_COMMAND_ENV_KEEP: list = [
+    str(x) for x in (_config.get("run_command_env_keep") or []) if str(x).strip()
+]
+
 # MCP Servers 配置（字典，key=server 名，value=启动参数）
 MCP_SERVERS: dict = _cfg_dict(_config, "mcp_servers")
 

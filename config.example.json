@@ -30,6 +30,10 @@
   "_fetch_url_allow_proxy_说明": "fetch_url 是否走系统代理。默认 false（直连，SSRF 防线完整、能校验目标真实 IP）。必须靠代理才能访问外网时设 true，但此时跳过防 DNS 重绑定的 peer 校验。",
   "_web_search_说明": "web_search 工具用 Tavily 搜网络（tavily.com 免费申请 key）。留空 = web_search 不可用（会优雅提示），不影响 fetch_url 抓网址（fetch_url 无需 key）。",
 
+  "run_command_scrub_env": true,
+  "run_command_env_keep": [],
+  "_run_command_env_说明": "run_command 起子进程时是否剔除名字含 KEY/SECRET/TOKEN/PASSWORD/PASSWD/CREDENTIAL 的环境变量。默认 true：命令串是模型拼的，一个 `env` 或 `echo $XXX_TOKEN` 就会把宿主密钥读进工具结果 → 进上下文 → 落进 chat_memory 的会话文件。副作用是依赖这些变量的命令会失败（aws / 需要 NPM_TOKEN 的 npm publish 等）——把需要的变量名写进 run_command_env_keep 精确放行（大小写不敏感），不要为个别命令把 run_command_scrub_env 整个关掉。",
+
   "rag": {
     "kb_dir": "",
     "embed_model": "text-embedding-v3",
