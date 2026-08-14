@@ -28,6 +28,10 @@ _SESSION_FIELDS = {
     "stop_flag": lambda: False,
     "session_token_usage": lambda: {"input": 0, "output": 0, "total": 0},
     "compaction": lambda: {"summary": "", "covered_upto": 0},
+    # 上下文溢出的"收紧档位"：provider 明确报告超窗时 +1，让下次的历史预算按 1/2^n 收缩，
+    # 强制更狠的压缩后重发。不在成功后清零——溢出说明我们对该模型窗口的估算偏乐观，这个
+    # 教训应当在本会话内保持，否则每轮都要重新撞一次墙、白付一个往返。
+    "overflow_squeeze": lambda: 0,
     "current_plan": list,
     "task_ledger": lambda: {"files": {}, "commands": []},   # ← 新增，自动任务台账（M1）
     "shell_cwd": lambda: None,

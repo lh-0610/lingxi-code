@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from ._base import BASE_DIR, CONFIG_PATH
 from ..paths import APP_DIR as _APP_DIR
+from ..limits import AGENT_MAX_ROUNDS_DEFAULT as _AGENT_MAX_ROUNDS_DEFAULT
 
 
 class _NoScrollComboBox(QComboBox):
@@ -218,6 +219,20 @@ class SettingsDialog(QDialog):
 
         # ── ⚙ 高级 tab ──
         a_scroll, a = self._make_tab()
+
+        self._add_section(a, "Agent 主循环")
+        self._add_text(a, "agent_max_rounds", "单次交互的最大轮次（0 = 不限）",
+                       placeholder="50", default=str(_AGENT_MAX_ROUNDS_DEFAULT))
+        rounds_hint = QLabel(
+            "一轮 = 一次模型调用 + 它请求的工具执行。到达上限会自动停下并说明原因。\n"
+            "• 正常编码任务 10~20 轮封顶，触顶通常意味着模型陷进了循环\n"
+            "• **设 0 = 不限轮次**：一直调用到模型自己停或你点停止。此时没有任何自动刹车，\n"
+            "  模型打转时 token 会一直烧下去——只在需要超长自主任务、且你会盯着时才这么设\n"
+            "• 改动需重启应用才生效"
+        )
+        rounds_hint.setObjectName("providerCardHint")
+        rounds_hint.setWordWrap(True)
+        a.addWidget(rounds_hint)
 
         self._add_section(a, "MCP（高级 · 可选）")
         self._add_bool(a, "mcp_enabled",
@@ -712,12 +727,15 @@ class SettingsDialog(QDialog):
 
     # rag.* 数值字段 → (类型, 缺省值)：_save 时把文本框内容 coerce 成数字后写盘，
     # 避免 config.json 里存成字符串（config._cfg_num 虽能兜住字符串，但存成数字更干净）
-    _RAG_NUM_DEFAULTS = {
+    # 数值型字段 → (转换器, 非法/空值时的回落默认)。文本框存的是字符串，保存时按这里
+    # 转成数字写进 config.json，避免 "50" 这种字符串进配置后各处再各转一遍。
+    _NUM_DEFAULTS = {
         "rag.top_k": (int, 5),
         "rag.chunk_size": (int, 800),
         "rag.chunk_overlap": (int, 120),
         "rag.rerank_top_n": (int, 20),
         "rag.min_score": (float, 0.0),
+        "agent_max_rounds": (int, _AGENT_MAX_ROUNDS_DEFAULT),
     }
 
     # model 列表字段 → config.py 中对应的常量名（用于回填默认值）
@@ -882,8 +900,8 @@ class SettingsDialog(QDialog):
                 val = widget.text().strip()
 
             # rag.* 数值字段：文本 → 数字（空/非法回落缺省），存进 config.json 更干净
-            if key in self._RAG_NUM_DEFAULTS and not isinstance(widget, (QCheckBox, QComboBox)):
-                caster, dflt = self._RAG_NUM_DEFAULTS[key]
+            if key in self._NUM_DEFAULTS and not isinstance(widget, (QCheckBox, QComboBox)):
+                caster, dflt = self._NUM_DEFAULTS[key]
                 try:
                     val = caster(val)
                 except (TypeError, ValueError):

@@ -3,6 +3,14 @@
 
 SESSION_HISTORY_LIMIT = 50
 
+# agent 主循环单次交互的最大轮数**默认值**（一轮 = 一次模型调用 + 它请求的工具执行）。
+# 实际生效值是 config.AGENT_MAX_ROUNDS（config.json 的 agent_max_rounds 可覆盖，
+# 设置弹窗「高级」页可改；**设 0 = 不限轮次**）。
+# 没有上限时主循环是裸 while True：模型只要一直返回 tool_calls 就一直跑，唯一的刹车是
+# 用户点停止。50 对正常编码任务绰绰有余（实测复杂任务 10~20 轮封顶），触顶基本意味着
+# 模型陷在循环里——此时停下来把情况告诉用户，比继续烧 token 有用。
+AGENT_MAX_ROUNDS_DEFAULT = 50
+
 HISTORY_TOKEN_BUDGET = 80_000
 
 # M3: 按模型上下文窗口动态计算预算时的参数

@@ -191,7 +191,13 @@ def _sanitize_tool_pairs(messages):
 
 
 def _stream_chunks_with_retry(llm_with_tools, messages, ui=None):
-    """Retry transient stream startup failures before any chunk is displayed."""
+    """流式请求；开始吐 chunk 之前的失败按**错误类别**决定怎么办（见 llm_errors）。
+
+    已经吐过 chunk 就直接抛：此时 UI 上已经显示了半截回复，重试会让内容重复。
+    上下文溢出转成 ContextOverflowError 抛出，由 agent 主循环压缩后重发——在这里
+    原样退避重试是纯粹的浪费，必然再溢出。
+    """
+    from .llm_errors import ContextOverflowError, CONTEXT_OVERFLOW, classify, retry_plan
     for attempt in range(STREAM_RETRY_ATTEMPTS):
         yielded = False
         try:
@@ -199,14 +205,28 @@ def _stream_chunks_with_retry(llm_with_tools, messages, ui=None):
                 yielded = True
                 yield chunk
             return
-        except Exception:
-            if yielded or state.stop_flag or attempt >= STREAM_RETRY_ATTEMPTS - 1:
+        except Exception as exc:
+            if yielded or state.stop_flag:
                 raise
-            delay = 2 ** attempt
-            logger.warning(f"模型流式请求失败，{delay}s 后重试（{attempt + 1}/{STREAM_RETRY_ATTEMPTS}）", exc_info=True)
+            kind = classify(exc)
+            if kind == CONTEXT_OVERFLOW:
+                logger.warning(f"模型报告上下文溢出，转交压缩重试: {exc}", exc_info=True)
+                raise ContextOverflowError(str(exc)) from exc
+            should_retry, delay, reason = retry_plan(exc, attempt, STREAM_RETRY_ATTEMPTS)
+            if not should_retry:
+                logger.warning(f"模型请求失败，不再重试（{kind}）：{reason}", exc_info=True)
+                if ui is not None and kind == "auth":
+                    try:
+                        ui.show_message(f"\n❌ {reason}\n", "tool_result")
+                    except Exception:
+                        pass
+                raise
+            logger.warning(
+                f"{reason}（{kind}），{delay:.1f}s 后重试（{attempt + 1}/{STREAM_RETRY_ATTEMPTS}）",
+                exc_info=True)
             if ui is not None:
                 try:
-                    ui.show_message(f"\n⚠️ 模型请求失败，{delay}s 后自动重试...\n", "tool_result")
+                    ui.show_message(f"\n⚠️ {reason}，{delay:.1f}s 后自动重试...\n", "tool_result")
                 except Exception:
                     pass
             time.sleep(delay)
@@ -622,9 +642,19 @@ def _current_history_budget() -> int:
         cwin = context_window_for(mtype, model_id)
         max_out = _max_tokens_for(mtype, model_id)
         budget = cwin - max_out - HISTORY_SAFETY_MARGIN
-        return min(budget, MAX_HISTORY_BUDGET)
+        budget = min(budget, MAX_HISTORY_BUDGET)
     except Exception:
-        return HISTORY_TOKEN_BUDGET
+        budget = HISTORY_TOKEN_BUDGET
+    # provider 报过上下文溢出 → 说明上面这套估算（窗口大小 / token 估算系数）对当前模型
+    # 偏乐观，按档位折半收紧。留 8k 地板，别把预算压到没法工作。
+    squeeze = 0
+    try:
+        squeeze = int(getattr(state, "overflow_squeeze", 0) or 0)
+    except Exception:
+        squeeze = 0
+    if squeeze > 0:
+        budget = max(8_000, budget // (2 ** min(squeeze, 4)))
+    return budget
 
 
 def _prepare_stream_history(ui):

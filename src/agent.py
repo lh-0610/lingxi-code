@@ -11,7 +11,7 @@ import re
 import contextlib
 import threading as _threading
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from . import state as _state
 from . import state  # 公开给 ui.py 直接用：ui 里所有"写入"改成 src.state.X = ...
@@ -53,6 +53,11 @@ from .tools import ALL_TOOLS, build_all_tools, build_rag_tools  # noqa: F401  AL
 from .streaming import _stream_with_tools, _execute_tool, _extract_thinking
 from .claude_code import claude_code_loop as _claude_code_loop
 from . import session as _session_mod
+from .llm_errors import ContextOverflowError as _ContextOverflowError
+
+# 上下文溢出后"收紧预算再发"的最大次数。每次收紧折半，4 次已经砍到 1/16，
+# 还溢出说明不是历史长度的问题（例如单条消息本身就超窗），继续试只是烧钱。
+_MAX_OVERFLOW_RETRIES = 3
 from . import projects as _projects
 
 _BOUND_LLM_CACHE = {}
@@ -213,6 +218,22 @@ def agent_loop(ui):
                 logger.info("用户停止生成")
                 break
 
+            # 轮次上限：模型持续返回 tool_calls 时主循环没有自然终点，触顶就停下来说明情况。
+            # 每轮重读 config（而不是 import 时定长），设置里改完重启即生效、测试也好 patch。
+            # **0 = 不限**（用户在设置里显式关掉了刹车）。
+            from . import config as _cfg_mod
+            _max_rounds = getattr(_cfg_mod, "AGENT_MAX_ROUNDS", 50)
+            # 把结论写进 chat_history（而不是只弹 UI 提示）——否则用户接着发消息时，模型看不到
+            # 上一轮"被截断"这件事，会以为自己顺利做完了。
+            if _max_rounds > 0 and round_i >= _max_rounds:
+                _msg = (f"⚠️ 已达单次交互轮次上限（{_max_rounds} 轮）并自动停止。"
+                        "模型可能陷入了循环。请查看上面的执行记录，把任务拆小后重新提出。"
+                        "（如需不限轮次，可在设置 → 高级里把上限设为 0）")
+                logger.warning(f"agent_loop 触顶 {_max_rounds} 轮，强制停止")
+                state.chat_history.append(AIMessage(content=_msg))
+                ui.show_message(f"\n{_msg}\n", "tool_result")
+                break
+
             # 只在第一轮显示标签
             if round_i == 0:
                 ui.show_message("\n", "spacer")
@@ -222,10 +243,32 @@ def agent_loop(ui):
 
             # 全流式调用，实时显示思考过程 + 收集 tool_calls（Ollama 解析错误自动重试）
             retries = 0
+            overflow_retries = 0
+            overflow_fatal = False
             while True:
                 try:
                     raw_text, tool_calls, round_usage, gathered = _stream_with_tools(ui)
                     break
+                except _ContextOverflowError as of_err:
+                    # provider 明确说超窗了。原样重试必然再溢出——收紧预算档位，让下一次
+                    # _prepare_stream_history 压得更狠，然后重发。封顶 _MAX_OVERFLOW_RETRIES：
+                    # 收紧到地板还溢出说明不是历史长度的问题（比如单条消息本身就超窗），
+                    # 再试下去只是烧钱，把原始错误交给用户。
+                    overflow_retries += 1
+                    if overflow_retries > _MAX_OVERFLOW_RETRIES:
+                        logger.error(f"上下文溢出，收紧 {_MAX_OVERFLOW_RETRIES} 次后仍失败: {of_err}")
+                        ui.show_retry(
+                            "对话超出模型上下文窗口，自动压缩后仍然放不下。"
+                            "请新建对话，或换一个上下文窗口更大的模型。"
+                        )
+                        overflow_fatal = True
+                        break
+                    state.overflow_squeeze = int(getattr(state, "overflow_squeeze", 0) or 0) + 1
+                    logger.warning(
+                        f"上下文溢出，收紧档位 → {state.overflow_squeeze}，压缩后重试"
+                        f"（{overflow_retries}/{_MAX_OVERFLOW_RETRIES}）"
+                    )
+                    ui.show_message("\n⚠️ 超出上下文窗口，正在压缩历史后重试…\n", "tool_result")
                 except Exception as stream_err:
                     retries += 1
                     err_msg = str(stream_err)
@@ -234,6 +277,10 @@ def agent_loop(ui):
                         ui.show_message(f"\n⚠️ 模型输出格式异常，正在重试({retries}/2)...\n", "tool_result")
                     else:
                         raise
+
+            if overflow_fatal:
+                # 压到地板仍装不下：本轮没有任何结果变量可用，直接结束整个 agent_loop。
+                break
 
             # 累计本轮 token 用量并通知 UI
             if round_usage and round_usage['total'] > 0:

@@ -145,7 +145,6 @@ RUN_COMMAND_ENV_KEEP: list = [
 # MCP Servers 配置（字典，key=server 名，value=启动参数）
 MCP_SERVERS: dict = _cfg_dict(_config, "mcp_servers")
 
-
 def set_rag_kb_dir(path: str) -> bool:
     """把知识库目录写回 config.json 的 rag.kb_dir，并同步更新本模块的 RAG_KB_DIR。
     供 UI「选择知识库目录」用。成功 True / 失败 False。"""
@@ -262,3 +261,11 @@ if not (0 <= RAG_CHUNK_OVERLAP < RAG_CHUNK_SIZE):
 if RAG_RERANK_TOP_N <= 0:
     logger.warning(f"rag.rerank_top_n={RAG_RERANK_TOP_N} 非法（须 >0），回退 20")
     RAG_RERANK_TOP_N = 20
+
+# ── agent 主循环轮次上限 ──
+# 一轮 = 一次模型调用 + 它请求的工具执行。**0 = 不限**：一直调用到模型自己停或用户点停止。
+# 关掉上限意味着模型陷入循环时没有任何自动刹车，token 会一直烧下去——只在明确需要超长
+# 自主任务、且你会盯着它时才设 0。负数按 0（不限）处理。
+# 放在文件末尾是因为 _cfg_num（负责非法值回退默认）定义在上面的 RAG 段里。
+from .limits import AGENT_MAX_ROUNDS_DEFAULT as _AGENT_MAX_ROUNDS_DEFAULT  # noqa: E402
+AGENT_MAX_ROUNDS: int = max(0, _cfg_num(_config, "agent_max_rounds", _AGENT_MAX_ROUNDS_DEFAULT))

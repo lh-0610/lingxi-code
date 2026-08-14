@@ -252,7 +252,7 @@ def create(session, project_path: str, session_id: str = None) -> str | None:
         subprocess.run(
             ["git", "branch", "-D", branch],
             cwd=project_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", timeout=30,
         )
 
         # 创建 worktree + 分支
@@ -271,11 +271,17 @@ def create(session, project_path: str, session_id: str = None) -> str | None:
     except Exception as e:
         logger.error(f"创建 worktree 失败: {e}")
         _cleanup_worktree(wt_path)
-        subprocess.run(
-            ["git", "branch", "-D", branch],
-            cwd=project_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
+        # 收尾删分支是 best-effort：它自己失败（含 timeout=30 抛 TimeoutExpired）绝不能
+        # 穿透出去——本函数的契约是"失败返回 None"，抛异常会让调用方走上完全不同的路径，
+        # 而且会盖掉上面那个真正有诊断价值的原始错误 e。
+        try:
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                cwd=project_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30,
+            )
+        except Exception as _ce:
+            logger.debug(f"清理残留分支 {branch} 失败（不影响返回）: {_ce}")
         return None
 
 
