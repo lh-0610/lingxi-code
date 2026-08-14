@@ -1,0 +1,11 @@
+{
+  "name": "找符号的所有引用",
+  "fixture": "small-proj",
+  "mode": "act",
+  "prompt": "normalize_path 这个函数在本项目里被哪些文件引用了？把文件名都列出来。",
+  "assert": [
+    {"type": "output_contains", "contains": ["handlers.py", "cli.py"]},
+    {"type": "no_file_modified"}
+  ],
+  "_why": "只读任务，考代码导航（find_references / search_files 的降级链）。附带 no_file_modified：查引用不该改动任何东西。"
+}

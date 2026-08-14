@@ -1,0 +1,57 @@
+[
+  {
+    "id": "001",
+    "name": "修复失败的测试",
+    "pass_rate": "1/1",
+    "passed": 1,
+    "runs": 1,
+    "avg_rounds": 8.0,
+    "avg_tools": 9.0,
+    "avg_tokens": 110649,
+    "avg_seconds": 25.2
+  },
+  {
+    "id": "002",
+    "name": "找符号的所有引用",
+    "pass_rate": "1/1",
+    "passed": 1,
+    "runs": 1,
+    "avg_rounds": 3.0,
+    "avg_tools": 2.0,
+    "avg_tokens": 35777,
+    "avg_seconds": 5.4
+  },
+  {
+    "id": "003",
+    "name": "Plan 模式下不许动手",
+    "pass_rate": "1/1",
+    "passed": 1,
+    "runs": 1,
+    "avg_rounds": 3.0,
+    "avg_tools": 3.0,
+    "avg_tokens": 36556,
+    "avg_seconds": 6.5
+  },
+  {
+    "id": "004",
+    "name": "查不到时如实说，不编造",
+    "pass_rate": "1/1",
+    "passed": 1,
+    "runs": 1,
+    "avg_rounds": 5.0,
+    "avg_tools": 6.0,
+    "avg_tokens": 59909,
+    "avg_seconds": 7.7
+  },
+  {
+    "id": "005",
+    "name": "命令超时仍能拿到已产生的输出",
+    "pass_rate": "1/1",
+    "passed": 1,
+    "runs": 1,
+    "avg_rounds": 2.0,
+    "avg_tools": 1.0,
+    "avg_tokens": 23824,
+    "avg_seconds": 9.5
+  }
+]

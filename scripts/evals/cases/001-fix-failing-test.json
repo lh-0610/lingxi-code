@@ -1,0 +1,11 @@
+{
+  "name": "修复失败的测试",
+  "fixture": "broken-calc",
+  "mode": "act",
+  "prompt": "test_calc.py 里有一个用例失败了。找到根本原因并修好，然后跑一遍确认全绿。",
+  "assert": [
+    {"type": "command", "run": "python -m pytest -q", "exit_code": 0},
+    {"type": "file_unchanged", "path": "test_calc.py"}
+  ],
+  "_why": "file_unchanged 是防作弊：让模型'修好失败的测试'，它很可能直接删断言或改期望值——那样 pytest 也会绿。评测集踩的第一个坑就是这个。"
+}

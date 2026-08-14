@@ -1,0 +1,10 @@
+{
+  "name": "命令超时仍能拿到已产生的输出",
+  "fixture": "small-proj",
+  "mode": "act",
+  "prompt": "用 run_command 执行这条命令，timeout 传 5：python -c \"import sys,time; print('MARKER_ABC'); sys.stdout.flush(); time.sleep(60)\"  然后告诉我它在超时前打印了什么。",
+  "assert": [
+    {"type": "output_contains", "contains": ["MARKER_ABC"]}
+  ],
+  "_why": "回归 d78040a 修的 bug：run_command 超时分支原本直接 return 不带 output_chunks，模型一个字都拿不到。UI 上用户看得见（流式输出过了），只有模型瞎——所以必须用 agent 级评测才能守住。"
+}

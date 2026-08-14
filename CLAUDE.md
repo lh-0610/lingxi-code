@@ -31,6 +31,7 @@ src/                     # 主代码
   tools_git.py           # git 工具：git_diff/log/status/stage/unstage/commit（写操作弹确认、无 push）
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
+  llm_errors.py          # 模型请求错误分类（限流/上下文溢出/鉴权/瞬时）+ Retry-After 解析 + 重试策略
   tools_rag.py           # search_knowledge（知识库语义检索，只读、Plan 放行、带 scope 分域参数）
   rag/                   # RAG 知识库引擎（详见「RAG 知识库检索」节）
     chunk.py             # 切块：iter_markdown_chunks（按标题分层）/ iter_plain_chunks（PDF 页，不解析 Markdown）
@@ -75,6 +76,10 @@ src/                     # 主代码
     _base.py             # 共享 BASE_DIR / CONFIG_PATH / THEME_CONFIG_PATH 常量
 
 scripts/                 # pytest 测试套件 + conftest fixtures
+  evals/                 # **agent 行为评测集**（真调 API、不进 pytest；详见 evals/README.md）
+    runner.py            #   fixture 全新副本 + HeadlessUI 驱动 + 7 类判定 + 多次取通过率
+    cases/*.json         #   任务 + 判定 + 预算；含防作弊（file_unchanged）与负面用例
+    fixtures/            #   给 agent 修的素材（broken-calc 必须是坏的；已从 pytest 收集排除）
 
 roles/                   # 角色卡 .md（启动自动恢复上次激活）
   example.md             # 角色卡模板
@@ -160,6 +165,12 @@ python main.py
 - **线程路由**（`session.current_session()`）：worker 线程进 `agent_loop` 时 `bind_thread(sess)` 把自己绑到该会话 → 该线程所有 `state.X` 都落到这个会话；主线程（UI）/ 未绑定线程 → `get_active()`（前台显示的会话）。这就是「后台会话边跑、前台切到别的会话」不互串的根基
 - **注册表** `session.sessions`（key→Session）：`register` / `rekey`（存盘拿到 id 后把临时 `_new_N` 换成 id）/ `drop`
 - **会话锚定项目** `Session.project`：首次 save 时锚定为当时的全局 `current_project`，之后不被切项目影响（`_UNSET` 哨兵区别于合法的 `None`=无项目）。修「后台会话 save 晚于主线程切项目、被打上新项目 tag」的 bug
+
+### 主循环边界与错误恢复（src/agent.py + llm_errors.py）
+- **轮次上限** `config.AGENT_MAX_ROUNDS`（config.json 的 `agent_max_rounds`，设置弹窗「高级」页可改，默认 50；**设 0 = 不限**）：主循环原本是裸 `while True`，模型只要一直返回 tool_calls 就一直跑，唯一刹车是用户点停止。触顶后停下并把结论**写进 chat_history**（只弹 UI 的话，用户接着发消息时模型看不到自己被截断，会以为任务做完了）
+- **错误分类**（`llm_errors.classify`）：原来所有异常一视同仁地退避重试，对三类是错的——**上下文溢出**重试必然再溢出；**鉴权失败**等再久 key 也不会变对；**限流**服务端通常在 `Retry-After` 里给了确切秒数，盲目 2^n 要么继续撞墙要么白等。分类不 import 任何 provider SDK（各家异常类型不同、自定义模型协议还是用户配的），改用三层判据：状态码 → 异常类名 → 消息特征词，认不出一律退化成 UNKNOWN（= 保持原行为），宁可漏判不可误判
+- **溢出恢复**：provider 报超窗 → `_stream_chunks_with_retry` 抛 `ContextOverflowError` → 主循环把会话的 `overflow_squeeze` +1（`_current_history_budget` 按 1/2^n 收紧、8k 地板）→ 压缩后重发，封顶 `_MAX_OVERFLOW_RETRIES=3`。**不在成功后清零**：溢出说明对该模型窗口的估算偏乐观，这个教训该在本会话内保持，否则每轮都要重新撞一次墙
+- 子 Agent 递归深度天然封顶：`spawn_agents` 里 `is_subagent` 的会话不许再派生
 
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过
