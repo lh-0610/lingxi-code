@@ -87,3 +87,8 @@ web_users.json
 web_tokens.json
 web_token.json
 users/
+
+# 知识库的第三方语料（书 / 论文 / PDF 等）：本地 RAG 用，不入库。
+# 版权归原作者；且二进制进了 git 历史就删不掉，会让每次 clone 都背上体积。
+# 分域功能按目录名运行时计算，不依赖文件进仓库——自己的资料放 knowledge_base/project/。
+knowledge_base/learning/
