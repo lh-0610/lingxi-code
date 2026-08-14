@@ -230,7 +230,6 @@ def get_system_prompt(web_search=None):
     # 注：必须用 isdir 校验（不能只看非空），否则项目目录被删后还会注入失效的上下文，
     # AI 会按一个不存在的路径推理。tools.py:_project_cwd() 同样有 isdir 兜底。
     from . import session as _session
-    from . import state as _state  # 下面 Plan 模式判断等仍用 _state
     project_root = _session.current_project()  # 会话级：与 tools._project_cwd 同源，
     # 后台会话生成中、前台切了项目，也不会让该会话的 system prompt 串到别的项目
     if project_root and os.path.isdir(project_root):
@@ -275,13 +274,48 @@ def get_system_prompt(web_search=None):
                     + rules_text
                 )
 
-    # ── Plan / Act mode ──
-    # Plan 模式：AI 只调研、给方案，**不允许动手改**任何东西。强制提示比单纯
-    # 工具白名单更稳——很多模型会试图用"伪工具"绕过限制。
-    agent_mode = getattr(_state, "agent_mode", "act")
-    if agent_mode == "plan":
-        base = base + (
-            "\n\n# ⚠ 当前是 Plan（计划）模式\n"
+    # 长期记忆（无条件，全局）。放在 system prompt 里而不是易变块：它只在模型调
+    # remember/forget 时才变，属于"这个助手是谁"的一部分，不是每轮都动的运行态。
+    from .memory_store import render_memories_for_prompt
+    from .limits import MEMORY_MAX_CHARS
+    mem = render_memories_for_prompt(max_chars=MEMORY_MAX_CHARS)
+    if mem:
+        base = base + "\n\n" + mem
+
+    # ⚠ 到此为止都是**跨轮稳定**的内容。Plan/Act 提示、任务计划、任务台账已经挪到
+    #   get_volatile_context()，由 streaming 追加到发送历史尾部——原因见那个函数的注释。
+
+    return base
+
+
+def get_volatile_context() -> str:
+    """**每轮都可能变**的运行态：Plan/Act 模式、当前任务计划、任务台账。
+
+    为什么单独拎出来、由 streaming 追加到发送历史的**尾部**，而不是像以前那样拼进
+    system prompt：
+
+    `task_ledger` 在每次工具执行后都会更新（streaming 里 record_tool_in_ledger），
+    `current_plan` 在每次 update_plan/set_step_status 后更新。把它们拼进 system prompt，
+    意味着**每一轮的 system prompt 都不同**——而 _wrap_system_for_cache 把整个 system
+    塞进一个 `cache_control: ephemeral` 块，块内容一变缓存前缀就失效。结果是 Anthropic /
+    MiMo 的 prompt caching **每轮必然 miss**：缓存机制写对了，却被里面装的东西废掉了，
+    每轮都在按全价重算角色卡 + 项目上下文 + 项目规则 + 长期记忆。
+
+    挪到历史尾部后，system 块跨轮逐字节稳定（角色卡/项目/规则/记忆都不常变），缓存能真正
+    命中；这些运行态则作为一条 user 消息追加在最后，模型照样每轮都看得到最新值。
+    这也是 DeepSeek Harness 的做法（PromptSection vs 追加到 history 的 PromptContext）。
+
+    返回空串表示本轮没有易变内容（无计划、无台账、Act 模式）→ 调用方不追加任何东西。
+    """
+    from . import state as _st
+    parts = []
+
+    # Plan 模式：AI 只调研、给方案，**不允许动手改**任何东西。强制提示比单纯工具白名单
+    # 更稳——很多模型会试图用"伪工具"绕过限制。放这里还有个好处：切 Plan/Act 不再让
+    # system 块变化，来回切模式也不会打掉缓存。
+    if getattr(_st, "agent_mode", "act") == "plan":
+        parts.append(
+            "# ⚠ 当前是 Plan（计划）模式\n"
             "**你只能调研、阅读、给出执行方案，不允许直接动手改任何东西**。\n"
             "- ✅ 允许：`read_file` / `list_directory` / `search_in_file` / `search_files` / `get_project_instructions`（只读工具）\n"
             "- ❌ 禁止：`write_file` / `edit_file` / `append_file` / `run_command`\n"
@@ -290,35 +324,31 @@ def get_system_prompt(web_search=None):
             "- 如果用户在 Plan 模式下问『快帮我改 X』，**先给方案不要直接改**，提醒他切到 Act 模式"
         )
 
-    # 长期记忆（无条件，全局）
-    from .memory_store import render_memories_for_prompt
-    from .limits import MEMORY_MAX_CHARS
-    mem = render_memories_for_prompt(max_chars=MEMORY_MAX_CHARS)
-    if mem:
-        base = base + "\n\n" + mem
-
-    # 当前任务计划（会话级，由 update_plan 维护）——每轮注入让模型看到进度，防"做一半"
-    from . import state as _st
     plan = getattr(_st, "current_plan", None)
     if plan:
-        base = base + (
-            "\n\n# 当前任务计划（你之前用 update_plan 列的）\n"
+        parts.append(
+            "# 当前任务计划（你之前用 update_plan 列的）\n"
             "按这个清单推进，每开始/完成一步就调 update_plan 更新状态。"
             "**所有步骤都标 [x] 之前，不要当任务已完成而收尾**：\n\n"
             + _st.render_plan(plan)
         )
 
-    # 当前任务台账（自动记录的已改文件/已跑命令）——逐轮重新渲染注入，survive 压缩
     ledger = getattr(_st, "task_ledger", None)
     ledger_text = _st.render_task_ledger(ledger) if ledger else ""
     if ledger_text:
-        base = base + (
-            "\n\n# 当前任务进度（自动记录，供你参考）\n"
+        parts.append(
+            "# 当前任务进度（自动记录，供你参考）\n"
             "以下是本次任务里你已经改过的文件 / 跑过的命令，用来帮你记住进度、避免重复改或漏步。\n\n"
             + ledger_text
         )
 
-    return base
+    if not parts:
+        return ""
+    # 用 system-reminder 包起来，跟用户真正说的话区分开——这段是系统注入的运行态，
+    # 不是用户的要求，模型不该把它当成新指令去"执行"。
+    return ("<system-reminder>\n以下是当前会话的运行状态，供你参考，不是用户的新要求。\n\n"
+            + "\n\n".join(parts)
+            + "\n</system-reminder>")
 
 
 def get_external_agent_context() -> str:

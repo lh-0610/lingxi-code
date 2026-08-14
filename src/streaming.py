@@ -558,9 +558,34 @@ def _llm_endpoint() -> str:
     return ""
 
 
+def _extract_cache_tokens(um) -> tuple[int, int]:
+    """从 usage_metadata 里挖出缓存读/写 token 数，返回 (cache_read, cache_write)。
+
+    为什么要采集：prompt caching 省的是**钱**不是 token——被缓存的输入照样计进
+    input_tokens，只是按约 10% 计费。只看 input/output 的话，缓存命中与否完全看不出来，
+    "system prompt 保持稳定"这件事就成了无法验证的信条。
+
+    各家字段名不同，都兜一遍：LangChain 归一化到 input_token_details（Anthropic 的
+    cache_read / cache_creation 也落在这里），OpenAI 兼容协议走 prompt_tokens_details
+    的 cached_tokens，DeepSeek 直接给 prompt_cache_hit_tokens。
+    """
+    if not isinstance(um, dict):
+        return 0, 0
+    det = um.get("input_token_details") or um.get("prompt_tokens_details") or {}
+    if not isinstance(det, dict):
+        det = {}
+    read = (det.get("cache_read") or det.get("cache_read_input_tokens")
+            or det.get("cached_tokens") or um.get("prompt_cache_hit_tokens") or 0)
+    write = (det.get("cache_creation") or det.get("cache_creation_input_tokens") or 0)
+    try:
+        return int(read or 0), int(write or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
 def _extract_usage(gathered):
-    """从累加的 AIMessageChunk 提取 token 用量"""
-    usage = {"input": 0, "output": 0, "total": 0}
+    """从累加的 AIMessageChunk 提取 token 用量（含 prompt cache 命中情况）"""
+    usage = {"input": 0, "output": 0, "total": 0, "cache_read": 0, "cache_write": 0}
     if gathered is None:
         return usage
 
@@ -571,6 +596,7 @@ def _extract_usage(gathered):
             usage["input"] = um.get("input_tokens", 0) or 0
             usage["output"] = um.get("output_tokens", 0) or 0
             usage["total"] = um.get("total_tokens", 0) or 0
+            usage["cache_read"], usage["cache_write"] = _extract_cache_tokens(um)
             if usage["total"] == 0 and (usage["input"] or usage["output"]):
                 usage["total"] = usage["input"] + usage["output"]
             return usage
@@ -582,6 +608,7 @@ def _extract_usage(gathered):
             usage["input"] = tu.get("prompt_tokens", tu.get("input_tokens", 0)) or 0
             usage["output"] = tu.get("completion_tokens", tu.get("output_tokens", 0)) or 0
             usage["total"] = tu.get("total_tokens", 0) or 0
+            usage["cache_read"], usage["cache_write"] = _extract_cache_tokens(tu)
             if usage["total"] == 0 and (usage["input"] or usage["output"]):
                 usage["total"] = usage["input"] + usage["output"]
             return usage
@@ -593,6 +620,7 @@ def _extract_usage(gathered):
             usage["input"] = tu.get("prompt_tokens", tu.get("input_tokens", 0)) or 0
             usage["output"] = tu.get("completion_tokens", tu.get("output_tokens", 0)) or 0
             usage["total"] = tu.get("total_tokens", 0) or 0
+            usage["cache_read"], usage["cache_write"] = _extract_cache_tokens(tu)
             if usage["total"] == 0 and (usage["input"] or usage["output"]):
                 usage["total"] = usage["input"] + usage["output"]
             return usage
@@ -657,6 +685,30 @@ def _current_history_budget() -> int:
     return budget
 
 
+def _append_volatile_context(messages):
+    """把 roles.get_volatile_context() 作为一条 HumanMessage 追加到发送历史末尾。
+
+    位置必须是**最末尾**：前面任何一条消息变了，Anthropic 的前缀缓存就从那里断掉，
+    追加在最后才能让整段前缀保持可复用。
+
+    追加 HumanMessage 而不是塞进已有消息：Anthropic / OpenAI 都允许连续的 user 轮次，
+    而修改已有消息的内容会改变用户真正说过的话（也会打掉那条消息之前的缓存）。
+    历史以 ToolMessage 结尾（工具刚跑完、模型要继续）时也安全——tool_result 之后接一条
+    user 消息是合法的，不会破坏 tool_use/tool_result 的配对。
+    """
+    if not messages:
+        return messages
+    from .roles import get_volatile_context
+    try:
+        text = get_volatile_context()
+    except Exception as e:      # 运行态渲染失败绝不能让整轮请求发不出去
+        logger.warning(f"渲染易变上下文失败（本轮跳过）: {e}")
+        return messages
+    if not text:
+        return messages
+    return list(messages) + [HumanMessage(content=text)]
+
+
 def _prepare_stream_history(ui):
     """构造本轮真正发给 LLM 的 history + 建 Debug record。
 
@@ -697,6 +749,13 @@ def _prepare_stream_history(ui):
         history_for_send = _wrap_system_for_cache(
             history_for_send, fresh_system, provider=MODEL_LIST[state.current_model_index][1],
         )
+
+    # ── 易变运行态（Plan/Act 提示 / 任务计划 / 任务台账）追加到**尾部** ──
+    # 它们每轮都在变（台账每执行一个工具就更新），拼进 system prompt 会让那个
+    # cache_control 块每轮都不同 → prompt caching 必然 miss。放尾部则 system + 前面
+    # 整段历史保持逐字节稳定，缓存能真正命中，而模型照样每轮看到最新值。
+    # 只改发送副本，不动 state.chat_history（跟压缩同一个原则：UI/持久化保留原始对话）。
+    history_for_send = _append_volatile_context(history_for_send)
 
     # 先做便宜的工具结果回收（超预算时把旧的大工具结果截成存根，模型要详情可重新调工具）。
     # 常常回收完就压回预算内，下面的 LLM 压缩自然 no-op，省钱省延迟。

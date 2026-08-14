@@ -39,7 +39,11 @@ class TestSystemPrompt:
 
         assert f"`{tmp_path}`" in result
         assert "必须运行 pytest" in result
-        assert "当前是 Plan" in result
+        # Plan 提示已挪出 system prompt（它每次切模式都变，会打掉 prompt cache），
+        # 现在由 get_volatile_context() 追加到发送历史尾部。
+        # 详见 test_prompt_cache_stability.py。
+        assert "当前是 Plan" not in result
+        assert "当前是 Plan" in roles.get_volatile_context()
 
 
 class TestRoleSnapshot:

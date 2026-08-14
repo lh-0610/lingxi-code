@@ -287,8 +287,17 @@ def agent_loop(ui):
                 state.session_token_usage['input'] += round_usage['input']
                 state.session_token_usage['output'] += round_usage['output']
                 state.session_token_usage['total'] += round_usage['total']
+                # 缓存命中量（会话级字段可能是老结构，用 setdefault 兼容）
+                for _k in ("cache_read", "cache_write"):
+                    state.session_token_usage[_k] = (
+                        state.session_token_usage.get(_k, 0) + round_usage.get(_k, 0))
                 ui.show_token_usage(state.session_token_usage.copy(), round_usage)
-                logger.info(f"Token 用量 - 输入: {round_usage['input']}, 输出: {round_usage['output']}, 总计: {round_usage['total']}")
+                # 缓存命中率进日志：prompt caching 省的是钱不是 token（命中部分照样计进
+                # input，只是按约 10% 计费），不单独打出来就完全看不见有没有生效。
+                _cr = round_usage.get("cache_read", 0)
+                _hit = f"，缓存命中 {_cr}（{_cr * 100 // max(round_usage['input'], 1)}%）" if _cr else ""
+                logger.info(f"Token 用量 - 输入: {round_usage['input']}, 输出: {round_usage['output']}, "
+                            f"总计: {round_usage['total']}{_hit}")
 
             if state.stop_flag:
                 # 被中断，保存已有内容（保留 thinking blocks 以便回传）

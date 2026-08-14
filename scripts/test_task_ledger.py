@@ -130,21 +130,26 @@ class TestSessionField:
 class TestInjection:
     """roles.get_system_prompt() 末尾包含台账内容。"""
 
-    def test_ledger_in_system_prompt(self):
-        """手动写入台账后，system prompt 包含文件名和'当前任务进度'。"""
+    def test_ledger_in_volatile_context(self):
+        """台账注入的是**易变上下文**（追加到发送历史尾部），不是 system prompt。
+
+        台账每执行一个工具就更新，拼进 system prompt 会让那个 cache_control 块每轮
+        都不同 → prompt caching 必然 miss。见 test_prompt_cache_stability.py。
+        """
         state.task_ledger["files"]["x.py"] = "已编辑"
         from src import roles
-        prompt = roles.get_system_prompt()
-        assert "x.py" in prompt
-        assert "当前任务进度" in prompt
-        assert "已改动的文件" in prompt
+        v = roles.get_volatile_context()
+        assert "x.py" in v
+        assert "当前任务进度" in v
+        assert "已改动的文件" in v
+        assert "当前任务进度" not in roles.get_system_prompt()
 
     def test_empty_ledger_not_injected(self):
         """空台账不注入。"""
         state.task_ledger = state.new_task_ledger()
         from src import roles
-        prompt = roles.get_system_prompt()
-        assert "当前任务进度" not in prompt
+        assert "当前任务进度" not in roles.get_volatile_context()
+        assert "当前任务进度" not in roles.get_system_prompt()
 
 
 # ──────────────────────────────────────
