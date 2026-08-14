@@ -1,6 +1,7 @@
 # 灵犀 Code (lingxi-code)
 
-基于 LangChain + PySide6 的 **多模型 AI 编码助手**（Windows 原生桌面应用，"Codex 体验、模型无关"）。
+基于 LangChain + PySide6 的 **Windows 原生 AI 编码助手**（桌面应用）。
+Agent 工具调用 · 写盘确认闸门 · 改完自检的验证闭环 · RAG 知识库 · MCP · worktree 隔离的并行子 Agent；任意模型可切。
 
 > 专注代码助手；桌面宠物等娱乐属性已移除，以后另开独立应用。
 > 角色卡放 `roles/*.md` 加载（仓库附 `example.md` 模板）。
@@ -30,6 +31,14 @@ src/                     # 主代码
   tools_git.py           # git 工具：git_diff/log/status/stage/unstage/commit（写操作弹确认、无 push）
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
+  tools_rag.py           # search_knowledge（知识库语义检索，只读、Plan 放行、带 scope 分域参数）
+  rag/                   # RAG 知识库引擎（详见「RAG 知识库检索」节）
+    chunk.py             # 切块：iter_markdown_chunks（按标题分层）/ iter_plain_chunks（PDF 页，不解析 Markdown）
+    index.py             # 摄取 .md/.pdf → 切块 → embed → 建索引；顶层子目录名 → category 分域
+    embed.py             # embedding API 调用（DashScope 兼容端点；响应严格校验防向量错位）
+    store.py             # Chroma 向量库：hash 当 doc ID（增量复用 + 天然去重）+ staging 改名式事务提交
+    retriever.py         # 检索：索引锚校验（fail-closed）+ 相似度阈值 + 分域配额轮转合并
+    rerank.py            # 可选 cross-encoder 重排（gte-rerank-v2），失败回退向量顺序
   codeintel.py           # 代码智能（tree-sitter 符号提取 / 导入追踪，多语言）
   lsp_client.py          # find_definition/find_references 的后端：LSP → jedi → 降级链
   subagent.py            # 并行子 Agent（spawn_agents 实现：各自在隔离 worktree 跑、合并改动；HeadlessUI 内部协议）
@@ -83,7 +92,10 @@ build/, dist/            # PyInstaller 产物（已 .gitignore）
 
 ```bash
 # 主依赖（完整清单见 requirements.txt）
-pip install langchain langchain-ollama langchain-openai langchain-anthropic langchain-google-genai PySide6 markdown requests pillow numpy
+pip install langchain langchain-ollama langchain-openai langchain-anthropic langchain-google-genai PySide6 markdown requests pillow numpy chromadb
+
+# 知识库 PDF 摄取（可选；没装则只收 .md，目录里有 .pdf 会在重建索引时明确报错）
+pip install pypdf
 
 # MCP 客户端（可选；没装则 MCP 功能静默跳过）
 pip install mcp
@@ -188,6 +200,18 @@ python main.py
 - 启动时 `agent.py` 后台线程调 `init_mcp()`，工具就绪后清 `_BOUND_LLM_CACHE` 让下次 stream 重新 `bind_tools`；关窗 `main.py` 调 `shutdown()`
 - 打包：`lingxi.spec` 用 `collect_submodules('mcp')` + `collect_data_files('jsonschema_specifications')`（懒导入 + 数据文件，静态分析抓不到）
 
+### RAG 知识库检索（src/rag/ + tools_rag.py）
+- 对一个本地资料目录（`config.json` 的 `rag.kb_dir`）做语义检索，`search_knowledge` 工具返回带 `[n]` 编号和出处的片段，模型据实回答并标来源。`kb_dir` 为空 = 未启用
+- **摄取**：`.md` / `.markdown` 走标题分层切块（标题路径拼进 embedding 文本提升召回）；`.pdf` 用 pypdf **按页切**、`heading` 填「第 N 页」（引用能定位页码），且**不做 Markdown 解析**——PDF 正文里的 `#` 和 ``` 只是普通字符，当成语法会凭空造出错误标题、还会因围栏状态翻转让后续切块全错
+- **分域（category）**：`kb_dir` 下的**顶层子目录名**即分域名，根目录下的文件归 `default`。检索时 `scope="all"` 且索引里有多个域 → **每域各查一遍、按名次轮转合并**（`retriever._balanced_search`），某域取完名额自动让给其它域。解决「同一个库里放了两批同题材资料」时的相互挤占——比如项目实现文档与通用学习资料都在讲 MCP/RAG/Agent 主循环，标题几乎一样、向量空间里天然难分，不分域的话 top-k 会被其中一批占满，模型据此把别人的做法当成你的（**张冠李戴**，比返回噪声更难发现）
+- **`min_score` 是必须设的**：`retriever` 里 `if min_score > 0` 才过滤，设成 0 等于**整个阈值机制关闭**——无论问什么都硬凑满 `top_k` 条，`tools_rag` 里「知识库中没有相关内容」那条兜底路径变成死代码。分域配额会保证另一个域也拿到名额，正是靠 `min_score` 把其中不相关的那些剔掉，两者配套
+- **向量库 = Chroma**（`store.py`），落盘 `chat_memory/rag_index/chroma/`。三项关键保证：
+  - **chunk hash 当 document ID** → 「哪些块已 embed 过」退化成「哪些 ID 已存在」，不需要单独的向量缓存文件；附赠内容去重（同一份资料的多个副本不会各占一个 top-k 名额）
+  - **staging + 改名式事务提交**：数据先全写进 `kb_x_v1__staging`，提交时 main→`__old`、staging→main、删 old。Chroma 没有事务，靠 `load()` 的 `_recover` 从残留状态推断该回滚（main 不在、old 在）还是该前滚（main 在、有残留），绝不出现「新向量 + 旧元数据」或索引凭空消失
+  - **索引锚**：manifest 整体 `json.dumps` 存进 collection metadata 的 `lingxi_manifest` 键（存字符串绕开 Chroma 的 metadata 取值类型限制 + 保留键前缀）。换目录/换模型/换端点/改切块参数没重建 → `anchor_mismatch` **fail-closed** 抛 `IndexMismatchError`，绝不拿旧索引答题。`index_status`（UI 状态行）与 `retrieve`（实际检索）共用同一判据，杜绝两处漂移
+- **会话锚定知识库** `Session.rag_kb_dir`：首次成功检索时绑定当时的 `kb_dir`，之后配置切库不影响该会话——历史会话不会静默检索到另一个库。空锚点只在**检索确实跑在有效索引上**之后才绑定（未建索引的失败检索不该钉死一个空会话）
+- 旧版 numpy 散文件索引（`rag_index/<name>/*.npy`）不兼容，检测到只提示重建
+
 ### 长期记忆（src/memory_store.py，跨会话）
 - 让角色"天生记得"用户：`remember(fact)` / `forget(query)` 两个工具存取，`get_system_prompt()` 末尾**无条件注入**全部记忆（不靠 AI 主动查，开口就记得）
 - 存 `chat_memory/long_term_memory.json`（`{memories: [{id, text, created, scope}]}`，scope 默认 global）。独立 `RLock`，跟 `memory.py`（会话历史）分开
@@ -200,6 +224,7 @@ python main.py
 |------|------|
 | `chat_memory/index.json` | 会话列表（id + title + 时间 + project tag） |
 | `chat_memory/long_term_memory.json` | 跨会话长期记忆（remember/forget 存取，自动注入 system prompt） |
+| `chat_memory/rag_index/chroma/` | RAG 向量库（Chroma PersistentClient 数据目录；collection 名 `kb_<store>_v1`） |
 | `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化）+ project 字段 |
 | `chat_memory/projects.json` | 注册的项目列表 + 当前激活项目（`{current, projects: [{path, name}]}`） |
 | `chat_memory/role_config.json` | 当前激活的角色卡名 |
@@ -235,6 +260,7 @@ python main.py
 | `git_stage` / `git_unstage` / `git_commit` | git 写操作（暂存/取消暂存/本地提交，**无 push**）；**执行前强制弹确认卡**（按危险操作处理、不给"记住"选项）；路径白名单防注入，commit 不自动暂存、校验信息非空 |
 | `check_code` | 静态检查单文件（lint/语法）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`），其它语言用 config 的 `check_command`；只读不弹确认、Plan 放行 |
 | `apply_patch` | 多文件原子补丁（Codex 风格 `*** Begin Patch`）：一次建/改/删多文件；hunk 复用 `_locate_edit` 连续块匹配（拒绝模糊猜测）；全量校验通过才落盘，任一失败整体中止；写工具、Plan/遥控自动拦 |
+| `search_knowledge` | 知识库语义检索（`query` + `scope` 分域，默认 all 各域按配额取；只读、Plan 放行、不弹确认；`kb_dir` 未配置/索引未建/索引锚不一致都返回明确提示而非空结果） |
 | `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、HTML 去标签转文本、二进制拒绝、无需 key）；`web_search` 用 Tavily（config `web_search_api_key`，没配优雅降级）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
 
 > 写盘类工具（edit/write/append）共用 `tools.py:_confirm_file_write()`：算 unified diff → `ui.confirm_edit` 弹蓝色卡片 → worker 阻塞等审批。CLI/测试无 UI 时直接放行。

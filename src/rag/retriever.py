@@ -1,4 +1,9 @@
-"""检索：query → embed → 向量库 top-k（+ 相似度阈值）→ 拼成带编号引用的上下文。"""
+"""检索：query → embed → 向量库 top-k（+ 相似度阈值 + 分域配额）→ 拼成带编号引用的上下文。
+
+分域配额（scope="all" 且索引里有多个 category 时）：不是一把捞 top-k 让所有域混着抢，
+而是**每个域各查一遍，再按名次轮转合并**。这样两批同题材资料（如「本项目的实现」与
+「通用学习资料」）不会互相挤占——某个域没内容时名额自动让给其它域，不浪费。
+"""
 from .embed import embed_query
 from .store import VectorStore
 
@@ -45,15 +50,37 @@ def index_status(*, kb_dir, embed_model, embed_base_url,
     reason = anchor_mismatch(store.manifest, kb_dir=kb_dir, embed_model=embed_model,
                              embed_base_url=embed_base_url,
                              chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    return {"chunks": n, "ok": not reason, "reason": reason}
+    return {"chunks": n, "ok": not reason, "reason": reason,
+            "categories": store.categories()}
+
+
+def _balanced_search(store, qv, top_k: int, categories: list[str], pool: int):
+    """按名次轮转合并各域的检索结果：先取每域第 1 名，再取每域第 2 名……直到凑够 top_k。
+
+    同一轮内按分数高低决定谁先进（凑不满整轮时优先留给更相关的那条）；某域提前取完，
+    剩下的名额自然被其它域用掉（不留空位）。
+    """
+    ranked = {c: store.search(qv, pool, where={"category": c}) for c in categories}
+    out: list[tuple[float, dict]] = []
+    rank = 0
+    while len(out) < top_k:
+        round_hits = [ranked[c][rank] for c in categories if rank < len(ranked[c])]
+        if not round_hits:
+            break
+        round_hits.sort(key=lambda x: -x[0])
+        out.extend(round_hits[:top_k - len(out)])
+        rank += 1
+    out.sort(key=lambda x: -x[0])
+    return out
 
 
 def retrieve(query: str, *, embed_model, embed_base_url, embed_api_key,
              top_k=5, min_score=0.0, name="default", kb_dir="",
-             chunk_size=None, chunk_overlap=None,
+             chunk_size=None, chunk_overlap=None, scope="all",
              rerank=False, rerank_model="gte-rerank", rerank_url="", rerank_top_n=20) -> list[dict]:
-    """返回命中片段列表 [{score, text, heading, source, chunk_id, hash, [rerank_score]}, ...]。
+    """返回命中片段列表 [{score, text, heading, source, chunk_id, hash, category, [rerank_score]}, ...]。
 
+    scope: "all"（默认，多域时走分域配额）或某个具体分域名（只在该域内检索）。
     rerank=True 时走两阶段：向量先粗召回 rerank_top_n 条，再用 cross-encoder 精排成 top_k；
     rerank 调用失败则回退到向量顺序，保证"总能出结果"。
 
@@ -74,10 +101,21 @@ def retrieve(query: str, *, embed_model, embed_base_url, embed_api_key,
                              chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     if reason:
         raise IndexMismatchError(reason + "——请先「重建索引」。")
+    # 分域范围：scope 指定了具体域就只查它；"all" 且索引里确实有多个域才走配额合并
+    # （单域库——比如根目录平铺放 md——走原来的单次查询，行为不变）。
+    cats = store.categories()
+    scope = (scope or "all").strip() or "all"
     qv = embed_query(query, model=embed_model, base_url=embed_base_url, api_key=embed_api_key)
     # 开 rerank 时召回更大的候选池，给精排留空间
     pool_k = max(top_k, rerank_top_n) if rerank else top_k
-    hits = store.search(qv, pool_k)
+    if scope != "all":
+        if cats and scope not in cats:
+            return []       # 指定了不存在的域：如实返回空，不静默退回全库
+        hits = store.search(qv, pool_k, where={"category": scope})
+    elif len(cats) > 1:
+        hits = _balanced_search(store, qv, pool_k, cats, pool_k)
+    else:
+        hits = store.search(qv, pool_k)
     if min_score > 0:
         hits = [(s, m) for s, m in hits if s >= min_score]
     cand = [{"score": round(s, 4), **m} for s, m in hits]

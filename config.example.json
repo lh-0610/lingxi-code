@@ -36,12 +36,12 @@
     "top_k": 5,
     "chunk_size": 800,
     "chunk_overlap": 120,
-    "min_score": 0.0,
+    "min_score": 0.32,
     "rerank": false,
     "rerank_model": "gte-rerank-v2",
     "rerank_top_n": 20
   },
-  "_rag_说明": "RAG 知识库检索：把 kb_dir 指向一个放 .md 的目录，重建索引后 search_knowledge 工具/知识库 tab 就能语义检索。embedding 默认复用 qwen_api_key（DashScope 兼容端点 text-embedding-v3）。kb_dir 为空=未启用。rerank=true 开启两阶段重排（先向量召回 rerank_top_n 条，再用 gte-rerank 精排成 top_k，更准、多一次 API 调用）。",
+  "_rag_说明": "RAG 知识库检索：把 kb_dir 指向一个放 .md / .pdf 的目录，重建索引后 search_knowledge 工具/知识库 tab 就能语义检索。embedding 默认复用 qwen_api_key（DashScope 兼容端点 text-embedding-v3），向量存 Chroma（chat_memory/rag_index/chroma）。kb_dir 为空=未启用。分域：kb_dir 下的顶层子目录名即分域名（根目录下的文件归 default），检索时各域按配额取名额、互不挤占，适合同一个库里放多批同题材但立场不同的资料（如本项目实现 vs 通用教程）。min_score 是相关性下限，低于它的片段直接丢弃；设 0 等于关闭该过滤，无论问什么都会硬凑满 top_k 条（噪声会被当依据）。0.32 是 text-embedding-v3 下的保守起点，建索引后按实际命中分数微调。rerank=true 开启两阶段重排（先向量召回 rerank_top_n 条，再用 gte-rerank 精排成 top_k，更准、多一次 API 调用）。",
 
   "notify": {
     "enabled": false,

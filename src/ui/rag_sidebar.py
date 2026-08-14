@@ -68,10 +68,12 @@ class RagSidebarMixin:
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(6)
         self.kb_dir_btn = QPushButton("选择目录")
-        self.kb_dir_btn.setToolTip("选择知识库目录（放 .md 的文件夹）")
+        self.kb_dir_btn.setToolTip("选择知识库目录（放 .md / .pdf 的文件夹）")
         self.kb_dir_btn.clicked.connect(self._kb_pick_dir)
         self.kb_reindex_btn = QPushButton("重建索引")
-        self.kb_reindex_btn.setToolTip("扫描目录下所有 .md，切块 + embedding 建索引")
+        self.kb_reindex_btn.setToolTip(
+            "扫描目录下所有 .md / .pdf，切块 + embedding 建索引\n"
+            "顶层子目录名即分域，检索时各域按配额取名额，互不挤占")
         self.kb_reindex_btn.clicked.connect(self._kb_reindex)
         for _b in (self.kb_dir_btn, self.kb_reindex_btn):
             _b.setCursor(Qt.PointingHandCursor)
@@ -114,7 +116,7 @@ class RagSidebarMixin:
         from .. import config
         kb = config.RAG_KB_DIR
         if not kb:
-            self._set_kb_status("none", "未配置知识库", "点「选择目录」指向存放 .md 的文件夹")
+            self._set_kb_status("none", "未配置知识库", "点「选择目录」指向存放 .md / .pdf 的文件夹")
             return
         name = os.path.basename(kb.rstrip("/\\")) or kb
         try:
@@ -127,7 +129,10 @@ class RagSidebarMixin:
             self._set_kb_status("error", f"{name} · 状态读取失败", kb)
             return
         if st["ok"]:
-            self._set_kb_status("ok", f"{name} · {st['chunks']} 块", kb)
+            # 分域信息进 tooltip：多域库检索时按域配额取，用户该能一眼看到库里分了哪几域
+            cats = st.get("categories") or []
+            tip = kb if len(cats) <= 1 else f"{kb}\n分域：{'、'.join(cats)}"
+            self._set_kb_status("ok", f"{name} · {st['chunks']} 块", tip)
         else:
             self._set_kb_status("stale", f"{name} · {st['reason']}", f"{st['reason']}\n{kb}")
 
@@ -344,9 +349,14 @@ class RagSidebarMixin:
                     self.bridge.kb_status.emit(
                         "stale", "重建期间配置已变更，该索引已过期，请重新重建", True)
                 else:
+                    _dup = f"·去重 {s['duplicates']}" if s.get("duplicates") else ""
+                    _cats = s.get("categories") or {}
+                    _cat_txt = ("　分域：" + "、".join(f"{k} {v}" for k, v in sorted(_cats.items()))
+                                if len(_cats) > 1 else "")
                     self.bridge.kb_status.emit(
                         "ok",
-                        f"完成：{s['files']} 文件 / {s['chunks']} 块（新 {s['embedded']}·复用 {s['reused']}）",
+                        f"完成：{s['files']} 文件 / {s['chunks']} 块"
+                        f"（新 {s['embedded']}·复用 {s['reused']}{_dup}）{_cat_txt}",
                         True)
             except Exception as e:
                 self.bridge.kb_status.emit("error", f"重建失败: {e}", True)

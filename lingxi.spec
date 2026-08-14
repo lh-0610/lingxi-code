@@ -28,6 +28,26 @@ except Exception:
     _mcp_hiddenimports = []
     _mcp_datas = []
 
+# RAG 向量库 Chroma：内部大量按名字动态装配（execution provider / 各类 registry），
+# 静态分析基本抓不到，全量收子模块 + 带 JSON/配置数据文件。onnxruntime 与 tokenizers 是
+# chromadb 的依赖，同样懒导入。chromadb 是 RAG 的必需依赖（不是可选），但没装时仍不阻断
+# 打包——产物只是没有知识库功能，与其它可选块保持一致的失败姿势。
+try:
+    _chroma_hiddenimports = (collect_submodules('chromadb')
+                             + collect_submodules('chromadb_rust_bindings'))
+    _chroma_datas = (collect_data_files('chromadb')
+                     + collect_data_files('onnxruntime')
+                     + collect_data_files('tokenizers'))
+except Exception:
+    _chroma_hiddenimports = []
+    _chroma_datas = []
+
+# 知识库 PDF 摄取（可选）：没装 pypdf 时产物只支持 .md
+try:
+    _pdf_hiddenimports = collect_submodules('pypdf')
+except Exception:
+    _pdf_hiddenimports = []
+
 # jedi 代码导航（可选）：PyInstaller 静态分析可能漏掉 jedi 的子模块
 try:
     _jedi_hiddenimports = collect_submodules('jedi')
@@ -58,7 +78,7 @@ a = Analysis(
         ('icons', 'icons'),                 # SVG 按钮图标（顶栏/设置/搜索等，走 BASE_DIR/_MEIPASS 读）
         ('roles', 'roles'),                 # 默认角色卡目录
         ('config.example.json', '.'),       # 配置模板，首次启动时复制成 config.json
-    ] + _ruff_datas + _mcp_datas + _jedi_datas + _ts_datas,
+    ] + _ruff_datas + _mcp_datas + _jedi_datas + _ts_datas + _chroma_datas,
     hiddenimports=[
         # LangChain 各 provider 包，PyInstaller 静态分析有时识别不到
         'langchain_anthropic',
@@ -80,7 +100,13 @@ a = Analysis(
         'jsonschema_specifications',
         'referencing',
         'rpds',
-    ] + _mcp_hiddenimports + _jedi_hiddenimports + _ts_hiddenimports,
+        # Chroma 向量库（RAG）及其懒导入依赖
+        'chromadb',
+        'onnxruntime',
+        'tokenizers',
+        'pypdf',
+    ] + (_mcp_hiddenimports + _jedi_hiddenimports + _ts_hiddenimports
+         + _chroma_hiddenimports + _pdf_hiddenimports),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

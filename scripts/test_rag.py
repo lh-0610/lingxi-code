@@ -1,4 +1,4 @@
-"""RAG 引擎单元测试（不打网络）：markdown 切块 + numpy 向量库检索/持久化/缓存。
+"""RAG 引擎单元测试（不打网络）：markdown/PDF 切块 + Chroma 向量库检索/持久化/分域。
 
 embedding 是真实网络调用，不进单测；这里覆盖确定性的切块逻辑和向量库行为。
 """
@@ -385,28 +385,40 @@ class TestIndexHardening:
             retrieve("q", embed_model="m", embed_base_url="u", embed_api_key="k",
                      kb_dir=kb, chunk_size=500, chunk_overlap=100)
 
-    def test_reindex_reembeds_when_cache_corrupt(self, isolated_memory, tmp_path, monkeypatch):
-        """P1 端到端：坏缓存（nan）被丢 → 重新 embedding → 索引有效可加载（不再"报成功却 0 块"）。"""
-        import json
+    def test_reindex_reembeds_when_cached_vec_corrupt(self, isolated_memory, tmp_path, monkeypatch):
+        """P1 端到端：可复用向量取回来是坏的（nan）→ 判为不可复用、重新 embedding →
+        索引有效可加载（不再"报成功却 0 块"，也绝不把 nan 写进索引）。"""
         import numpy as np
         from src.rag.index import reindex
         from src.rag.store import VectorStore
+        import src.rag.store as st_mod
         import src.rag.index as idx_mod
         monkeypatch.setattr(idx_mod, "embed_texts", _stub_embed)
         kb = self._kb(tmp_path)
         kw = dict(embed_model="m", embed_base_url="u", embed_api_key="k",
                   chunk_size=800, chunk_overlap=100)
         reindex(kb, **kw)
-        st = VectorStore().load()
-        gen, dim = st.manifest["generation"], st.manifest["dim"]
-        with open(st._cache_path(gen), "w", encoding="utf-8") as f:      # 污染缓存为 nan
-            for m in st.metas:
-                f.write(json.dumps({"h": m["hash"], "v": [float("nan")] * dim}) + "\n")
+        dim = VectorStore().load().manifest["dim"]
+
+        # 污染「已有向量」的读取结果为 nan，再走真实的 _ensure_cache——被测的正是它里面
+        # 的 _valid_vec 过滤：坏向量必须判为"没缓存"，从而触发重新 embedding。
+        real_ensure = st_mod.VectorStore._ensure_cache
+
+        def _corrupt_ensure(self):
+            if self._col is not None and self._cache is None:
+                ids = self._col.get()["ids"]
+                self._col = _ColProxy(self._col, get=lambda **kw: {
+                    "ids": ids, "embeddings": [[float("nan")] * dim for _ in ids]})
+            return real_ensure(self)
+        monkeypatch.setattr(st_mod.VectorStore, "_ensure_cache", _corrupt_ensure)
+
         stats = reindex(kb, **kw)                                        # 同参数再重建
         assert stats["chunks"] >= 1 and stats["embedded"] == stats["chunks"]   # 全部重新 embed
+        monkeypatch.undo()
         s2 = VectorStore()
         assert s2.count() == stats["chunks"]                            # 索引真可加载（非 0）
-        assert np.isfinite(s2.vecs).all()                               # 落盘向量全有限
+        vecs = s2._col.get(include=["embeddings"])["embeddings"]
+        assert np.isfinite(np.asarray(vecs, dtype=np.float32)).all()    # 入库向量全有限
 
     def test_reindex_rejects_too_small_chunk_size(self, isolated_memory, tmp_path):
         """P2：chunk_size 低于下限 → ValueError（防海量切片/天量请求）。"""
@@ -457,6 +469,21 @@ class TestIndexHardening:
         assert seen["n"] == 3          # 允许 2 块；看到第 3 块立即停，未继续枚举剩余 97 块
 
 
+class _ColProxy:
+    """包一层真实 collection，只替换指定方法——用来注入「取向量失败 / 取回坏向量」，
+    同时让 count/query 走真实数据，验证主索引不受连累。"""
+
+    def __init__(self, real, **overrides):
+        self._real = real
+        self._ov = overrides
+
+    def __getattr__(self, k):
+        ov = self.__dict__["_ov"]
+        if k in ov:
+            return ov[k]
+        return getattr(self.__dict__["_real"], k)
+
+
 class TestStoreHardening:
     def _mk(self, name, texts=("a", "b")):
         from src.rag.store import VectorStore, text_hash
@@ -467,71 +494,52 @@ class TestStoreHardening:
         s.rebuild(metas, vecs)
         return s
 
-    def test_corrupt_length_mismatch_treated_as_empty(self, isolated_memory):
-        """向量行数 ≠ meta 条数（当前代文件被外力破坏）→ 按损坏清空，不再 IndexError。"""
-        from src.rag.store import VectorStore
-        s = self._mk("c1")
-        gen = s.manifest["generation"]
-        with open(s._meta_path(gen), encoding="utf-8") as f:
-            lines = f.readlines()
-        with open(s._meta_path(gen), "w", encoding="utf-8") as f:
-            f.write(lines[0])                               # meta 少一行
-        s2 = VectorStore("c1")
-        assert s2.count() == 0                              # 按损坏清空
-        assert s2.search([1.0, 0.0], top_k=2) == []         # 不崩
+    def test_corrupt_manifest_fails_closed(self, isolated_memory, tmp_path):
+        """manifest（存在 collection metadata 里）损坏 → 不当作可用索引静默检索，
+        而是走锚校验判「需重建」。Chroma 后端下向量与文本是同一条记录，原 numpy 时代
+        「向量数 ≠ meta 数 / 一维 .npy」那类错位在结构上已不可能发生。"""
+        from src.rag.store import VectorStore, _client
+        from src.rag.retriever import index_status
+        s = self._mk("cmf")
+        client = _client(s.dir)
+        # 只改 lingxi_manifest：Chroma 不允许 modify 时重设 hnsw:space（距离函数建后不可变）
+        client.get_collection(s._cname).modify(metadata={"lingxi_manifest": "{ not valid json"})
+        s2 = VectorStore("cmf")
+        assert s2.count() == 2                              # 数据本身还在，不误删
+        assert s2.load().manifest == {}                     # 但锚读不出来
+        st = index_status(kb_dir=str(tmp_path), embed_model="m", embed_base_url="u", name="cmf")
+        assert st["ok"] is False and "重建" in st["reason"]   # fail-closed
 
-    def test_1d_vec_file_treated_as_corrupt(self, isolated_memory):
-        """P2#2：一维 .npy（长度恰等于 meta 数）会蒙混过数量校验，须由 ndim 校验拦下，
-        否则 search 里 vecs@q 退化成标量、len(sims) 抛 TypeError。"""
-        import numpy as np
-        from src.rag.store import VectorStore
-        s = self._mk("c1d")                                 # 2 条 meta / 2 维向量 / manifest dim=2
-        gen = s.manifest["generation"]
-        np.save(s._vec_path(gen), np.array([1.0, 2.0], dtype=np.float32))   # 覆盖成一维长度 2
-        s2 = VectorStore("c1d")
-        assert s2.count() == 0                              # ndim!=2 → 按损坏处理
-        assert s2.search([1.0, 0.0], top_k=2) == []         # 不抛 TypeError
-
-    def test_corrupt_cache_vec_dropped_on_load(self, isolated_memory):
-        """P1：缓存里的坏向量（nan / 维度不符）加载时丢弃，不会被复用污染新索引。"""
-        import json
+    def test_corrupt_cached_vec_dropped(self, isolated_memory, monkeypatch):
+        """P1：取回的坏向量（nan / 维度不符）被丢弃，不会被复用污染新索引。"""
         from src.rag.store import VectorStore, text_hash
-        s = self._mk("cc")                                  # dim=2；写了 vec_cache
-        gen = s.manifest["generation"]
-        with open(s._cache_path(gen), "w", encoding="utf-8") as f:
-            f.write(json.dumps({"h": text_hash("a"), "v": [float("nan"), 0.0]}) + "\n")
-            f.write(json.dumps({"h": text_hash("b"), "v": [1.0]}) + "\n")   # 维度不符
+        s = VectorStore("cc")
+        s.load()
+        self._mk("cc")                                      # dim=2 的有效索引
         s2 = VectorStore("cc")
         s2.load()
+        monkeypatch.setattr(s2, "_col", _ColProxy(s2._col, get=lambda **kw: {
+            "ids": [text_hash("a"), text_hash("b")],
+            "embeddings": [[float("nan"), 0.0], [1.0]],      # nan / 维度不符
+        }))
         assert s2.cached_vec(text_hash("a")) is None        # nan → 丢
         assert s2.cached_vec(text_hash("b")) is None        # 维度不符 → 丢
-        assert s2.count() == 2                              # 主索引（.npy）未受影响，仍可用
+        assert s2.count() == 2                              # 主索引未受影响，仍可用
 
-    def test_malformed_cache_json_does_not_invalidate_main_index(self, isolated_memory):
-        """vec_cache 是可丢优化层：JSON 截断只能清缓存，不能拖累完整 vec/meta 主索引。"""
-        from src.rag.store import VectorStore
-        s = self._mk("bad-cache-json")
-        gen = s.manifest["generation"]
-        with open(s._cache_path(gen), "w", encoding="utf-8") as f:
-            f.write('{"h": "truncated"\n')
-        s2 = VectorStore("bad-cache-json").load()
-        assert s2.count() == 2
-        assert s2._cache == {}
-        assert s2.search([1.0, 0.0], top_k=1)[0][1]["source"] == "a.md"
+    def test_cache_read_failure_does_not_invalidate_main_index(self, isolated_memory, monkeypatch):
+        """向量复用只是省 embedding 的优化层：取不回来就全部重 embed，
+        绝不能拖累完整的主索引（count/search 必须照常）。"""
+        from src.rag.store import VectorStore, text_hash
 
-    def test_corrupt_cache_json_does_not_wipe_index(self, isolated_memory):
-        """P2：缓存文件语法损坏 / 行缺 h / 非 dict → 只丢缓存，完整主索引（vec+meta）照常可用。"""
-        from src.rag.store import VectorStore
-        s = self._mk("cj")                                  # 2 块有效主索引
-        gen = s.manifest["generation"]
-        with open(s._cache_path(gen), "w", encoding="utf-8") as f:
-            f.write("{ this is not valid json\n")           # 语法错误
-            f.write('{"v": [1.0, 0.0]}\n')                   # 缺 h
-            f.write("42\n")                                  # 非 dict
+        def _boom(**kw):
+            raise RuntimeError("collection get failed")
+        self._mk("cj")
         s2 = VectorStore("cj")
+        s2.load()
+        monkeypatch.setattr(s2, "_col", _ColProxy(s2._col, get=_boom))
+        assert s2.cached_vec(text_hash("a")) is None        # 复用层降级
         assert s2.count() == 2                              # 主索引未被连累清空
-        assert s2.search([1.0, 0.0], top_k=2)               # 仍可检索
-        assert s2._cache == {}                              # 坏缓存整体丢弃
+        assert s2.search([1.0, 0.0], top_k=1)[0][1]["source"] == "a.md"   # 仍可检索
 
     def test_rebuild_refuses_nan_matrix_keeps_old_index(self, isolated_memory):
         """P1：提交前校验拦下含 nan 的向量矩阵 → 抛错、不落盘、不清旧代（旧索引保留）。"""
@@ -546,30 +554,41 @@ class TestStoreHardening:
         assert s2.count() == 2                              # 旧代仍在（未被 0 块顶替）
         assert s2.manifest["generation"] == old_gen         # manifest 未提交新代
 
-    def test_partial_new_generation_not_visible(self, isolated_memory):
-        """事务性：新一代数据文件写了、manifest 没提交（中途崩溃）→ 读到的仍是完整旧代。"""
-        import numpy as np
-        from src.rag.store import VectorStore
+    def test_partial_staging_not_visible(self, isolated_memory, monkeypatch):
+        """事务性：staging 写到一半崩溃（提交点未到）→ 读到的仍是完整旧索引，
+        且半成品 staging 被清理掉，不会在下次重建时被误用。"""
+        from src.rag.store import VectorStore, text_hash, _client
         s = self._mk("c3")
         gen = s.manifest["generation"]
-        # 模拟崩溃现场：下一代的向量 + meta 写了一半（块数与旧代相同，长度校验发现不了）
-        np.save(s._vec_path(gen + 1), np.asarray([[9.0, 9.0], [8.0, 8.0]], dtype=np.float32))
-        with open(s._meta_path(gen + 1), "w", encoding="utf-8") as f:
-            f.write('{"text":"EVIL","heading":"","source":"evil.md","chunk_id":0,"hash":"x"}\n'
-                    '{"text":"EVIL2","heading":"","source":"evil2.md","chunk_id":0,"hash":"y"}\n')
-        s2 = VectorStore("c3").load()
-        assert s2.manifest["generation"] == gen             # manifest 仍指向旧代
-        hits = s2.search([1.0, 0.0], top_k=1)
-        assert hits[0][1]["source"] == "a.md"               # 读到的是旧代内容，不是 EVIL
 
-    def test_legacy_flat_files_require_rebuild(self, isolated_memory):
-        """旧版散文件格式（无 generation manifest）→ 按未建索引处理，不误读。"""
+        real_create = _client(s.dir).create_collection
+
+        def _create_then_fail(name, **kw):
+            col = real_create(name, **kw)
+            if name.endswith("__staging"):
+                col.add = lambda **k: (_ for _ in ()).throw(RuntimeError("disk full"))
+            return col
+        monkeypatch.setattr(_client(s.dir), "create_collection", _create_then_fail)
+        with pytest.raises(RuntimeError, match="disk full"):
+            s.rebuild([{"text": "EVIL", "heading": "", "source": "evil.md", "chunk_id": 0,
+                        "hash": text_hash("EVIL")}], [[9.0, 9.0]])
+        monkeypatch.undo()
+
+        s2 = VectorStore("c3").load()
+        assert s2.manifest["generation"] == gen             # 未提交新代
+        assert s2.count() == 2
+        assert s2.search([1.0, 0.0], top_k=1)[0][1]["source"] == "a.md"   # 旧内容，不是 EVIL
+        names = {c.name for c in _client(s.dir).list_collections()}
+        assert s._staging_cname not in names                # 半成品已清理
+
+    def test_legacy_numpy_index_requires_rebuild(self, isolated_memory):
+        """旧版 numpy 散文件索引（rag_index/<name>/）→ 按未建索引处理，不误读。"""
         import os
         from src.rag.store import VectorStore
         s = VectorStore("legacy")
-        os.makedirs(s.dir, exist_ok=True)
-        with open(os.path.join(s.dir, "meta.jsonl"), "w", encoding="utf-8") as f:
-            f.write('{"text":"old","heading":"","source":"o.md","chunk_id":0,"hash":"h"}\n')
+        os.makedirs(s._legacy_dir(), exist_ok=True)
+        with open(os.path.join(s._legacy_dir(), "manifest.json"), "w", encoding="utf-8") as f:
+            f.write('{"generation": 3, "chunks": 1, "dim": 2}')
         assert VectorStore("legacy").count() == 0
 
     def test_manifest_roundtrip(self, isolated_memory):
@@ -584,37 +603,61 @@ class TestStoreHardening:
         assert isinstance(s2.manifest["generation"], int)
 
     def test_transient_read_error_aborts_rebuild(self, isolated_memory, monkeypatch):
-        """manifest 读取遇瞬时 I/O 错（PermissionError）→ rebuild 中止，活动代不被覆盖。"""
+        """读不到活动索引（数据目录占用/损坏）→ rebuild 中止，绝不拿新数据顶掉一个
+        其实完好的索引。"""
+        from src.rag import store as st_mod
         from src.rag.store import VectorStore, text_hash
         s = self._mk("c4")
         old_gen = s.manifest["generation"]
 
-        import builtins
-        _real_open = builtins.open
-
-        def _open(path, *a, **k):
-            if str(path).endswith("manifest.json"):
-                raise PermissionError("locked by AV")
-            return _real_open(path, *a, **k)
-        monkeypatch.setattr(builtins, "open", _open)
+        def _boom(path):
+            raise PermissionError("locked by AV")
+        monkeypatch.setattr(st_mod, "_client", _boom)
         s2 = VectorStore("c4")   # 未加载的新实例（模拟另一次进程/调用）
         with pytest.raises(OSError):
             s2.rebuild([{"text": "z", "heading": "", "source": "z.md", "chunk_id": 0,
                          "hash": text_hash("z")}], [[0.5, 0.5]])
-        monkeypatch.setattr(builtins, "open", _real_open)
+        monkeypatch.undo()
         s3 = VectorStore("c4").load()
-        assert s3.manifest["generation"] == old_gen      # 活动代原样
+        assert s3.manifest["generation"] == old_gen      # 活动索引原样
         assert s3.search([1.0, 0.0], top_k=1)[0][1]["source"] == "a.md"
 
-    def test_generation_never_collides_with_stray_files(self, isolated_memory):
-        """磁盘残留了更高代号的文件（上次崩溃遗留）→ 新代号必须跳过它，绝不覆盖写。"""
-        import numpy as np
-        from src.rag.store import text_hash
-        s = self._mk("c5")                                # gen 1
-        np.save(s._vec_path(5), np.asarray([[9.0, 9.0]], dtype=np.float32))  # 残留 gen5
-        s.rebuild([{"text": "n", "heading": "", "source": "n.md", "chunk_id": 0,
-                    "hash": text_hash("n")}], [[1.0, 0.0]])
-        assert s.manifest["generation"] == 6              # max(1, 5) + 1，不与残留冲突
+    def test_recovers_from_leftover_staging(self, isolated_memory):
+        """崩在提交点之前（main 完好 + 残留 staging）→ 清掉 staging，main 照常可用。"""
+        from src.rag.store import VectorStore, _client
+        s = self._mk("c5")
+        client = _client(s.dir)
+        client.create_collection(s._staging_cname)         # 伪造崩溃残留
+        s2 = VectorStore("c5")
+        assert s2.count() == 2                             # main 未受影响
+        names = {c.name for c in client.list_collections()}
+        assert s._staging_cname not in names               # 残留被清理
+
+    def test_rolls_back_when_crashed_between_renames(self, isolated_memory):
+        """崩在两次改名之间（main 已改名成 old、staging 还没顶上）→ 回滚到 old，
+        索引不会凭空消失。"""
+        from src.rag.store import VectorStore, _client
+        s = self._mk("c6")
+        client = _client(s.dir)
+        client.get_collection(s._cname).modify(name=s._old_cname)   # 伪造崩溃现场
+        client.create_collection(s._staging_cname)                  # 未提交的半成品
+        s2 = VectorStore("c6")
+        assert s2.count() == 2                                      # 从 old 回滚出来
+        assert s2.search([1.0, 0.0], top_k=1)[0][1]["source"] == "a.md"
+        names = {c.name for c in client.list_collections()}
+        assert s._cname in names and s._old_cname not in names
+        assert s._staging_cname not in names                        # 半成品被弃
+
+    def test_cleans_up_old_when_crashed_after_commit(self, isolated_memory):
+        """崩在提交点之后（main 已是新数据、old 没删掉）→ 前滚：留 main、清 old。"""
+        from src.rag.store import VectorStore, _client
+        s = self._mk("c7")
+        client = _client(s.dir)
+        client.create_collection(s._old_cname)             # 伪造未清理的旧索引
+        s2 = VectorStore("c7")
+        assert s2.count() == 2
+        names = {c.name for c in client.list_collections()}
+        assert s._old_cname not in names
 
 
 class TestRetrieverAnchor:
@@ -796,3 +839,191 @@ class TestEmbedValidation:
         monkeypatch.setattr("requests.post", lambda *a, **k: _Resp())
         with pytest.raises(RuntimeError, match="index 序列异常"):
             embed_texts(["a", "b"], model="m", base_url="http://x", api_key="k", retries=1)
+
+
+def _mini_pdf(pages):
+    """手搓一个最小可用 PDF（每页一行 Helvetica 文本），让测试跑真实的 pypdf 抽取，
+    而不是只测桩——PDF 支持的价值全在「真能读出字」上。"""
+    import io
+    objs, n = {}, len(pages)
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(n))
+    objs[1] = "<< /Type /Catalog /Pages 2 0 R >>"
+    objs[2] = f"<< /Type /Pages /Kids [{kids}] /Count {n} >>"
+    objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    for i, txt in enumerate(pages):
+        esc = txt.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+        objs[4 + 2 * i] = ("<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 3 0 R >> >> "
+                           f"/MediaBox [0 0 612 792] /Contents {5 + 2 * i} 0 R >>")
+        objs[5 + 2 * i] = ("STREAM", f"BT /F1 12 Tf 72 720 Td ({esc}) Tj ET")
+    out, offsets = io.BytesIO(), {}
+    out.write(b"%PDF-1.4\n")
+    for k in sorted(objs):
+        offsets[k] = out.tell()
+        v = objs[k]
+        if isinstance(v, tuple):
+            body = v[1].encode()
+            out.write(f"{k} 0 obj\n<< /Length {len(body)} >>\nstream\n".encode()
+                      + body + b"\nendstream\nendobj\n")
+        else:
+            out.write(f"{k} 0 obj\n{v}\nendobj\n".encode())
+    xref, mx = out.tell(), max(objs) + 1
+    out.write(f"xref\n0 {mx}\n0000000000 65535 f \n".encode())
+    for k in range(1, mx):
+        out.write(f"{offsets[k]:010d} 00000 n \n".encode())
+    out.write(f"trailer\n<< /Size {mx} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return out.getvalue()
+
+
+class TestPdfIngest:
+    def _kb(self, tmp_path):
+        kb = tmp_path / "kb"
+        kb.mkdir(exist_ok=True)
+        return kb
+
+    def _reindex(self, kb, monkeypatch, **over):
+        import src.rag.index as idx_mod
+        monkeypatch.setattr(idx_mod, "embed_texts", _stub_embed)
+        kw = dict(embed_model="m", embed_base_url="u", embed_api_key="k",
+                  chunk_size=800, chunk_overlap=100)
+        kw.update(over)
+        return idx_mod.reindex(str(kb), **kw)
+
+    def test_pdf_ingested_with_page_headings(self, isolated_memory, tmp_path, monkeypatch):
+        """PDF 被真实抽取入库，heading 填「第 N 页」——引用时能定位到页码。"""
+        from src.rag.store import VectorStore
+        kb = self._kb(tmp_path)
+        (kb / "doc.pdf").write_bytes(_mini_pdf(["Alpha about MCP", "Beta about RAG"]))
+        stats = self._reindex(kb, monkeypatch)
+        assert stats["chunks"] == 2
+        got = VectorStore().load()._col.get(include=["documents", "metadatas"])
+        by_heading = {m["heading"]: d for m, d in zip(got["metadatas"], got["documents"])}
+        assert by_heading["第 1 页"] == "Alpha about MCP"
+        assert by_heading["第 2 页"] == "Beta about RAG"
+        assert all(m["source"] == "doc.pdf" for m in got["metadatas"])
+
+    def test_pdf_text_not_parsed_as_markdown(self, isolated_memory, tmp_path, monkeypatch):
+        """PDF 正文里的 # 和 ``` 只是普通字符：不得被当成标题/代码围栏，
+        否则会凭空造出错误的标题路径、还会让后续内容的切块全乱。"""
+        from src.rag.store import VectorStore
+        kb = self._kb(tmp_path)
+        (kb / "tricky.pdf").write_bytes(_mini_pdf(["# Chapter One and ``` fence", "plain tail"]))
+        self._reindex(kb, monkeypatch)
+        got = VectorStore().load()._col.get(include=["documents", "metadatas"])
+        headings = {m["heading"] for m in got["metadatas"]}
+        assert headings == {"第 1 页", "第 2 页"}                     # 没冒出 Chapter One
+        assert any("# Chapter One" in d for d in got["documents"])   # 原文保留
+
+    def test_missing_pypdf_aborts_and_keeps_index(self, isolated_memory, tmp_path, monkeypatch):
+        """没装 pypdf 却放了 PDF → 明确报错中止（旧索引保留），不静默跳过。
+        静默跳过会让「放进来了却没被索引」无声发生，比报错难查得多。"""
+        import sys
+        from src.rag.store import VectorStore
+        kb = self._kb(tmp_path)
+        (kb / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        assert self._reindex(kb, monkeypatch)["chunks"] == 1
+        old = VectorStore().count()
+
+        (kb / "doc.pdf").write_bytes(_mini_pdf(["x"]))
+        # sys.modules 里塞 None：CPython 对此的定义就是 import 时抛 ImportError。
+        # 比替换 builtins.__import__ 精确得多——后者会波及所有线程的所有 import
+        # （chromadb 有后台线程），是不确定性的来源。
+        monkeypatch.setitem(sys.modules, "pypdf", None)
+        with pytest.raises(RuntimeError, match="中止重建"):
+            self._reindex(kb, monkeypatch)
+        monkeypatch.undo()
+        assert VectorStore().count() == old              # 旧索引原样保留
+
+    def test_md_and_pdf_coexist(self, isolated_memory, tmp_path, monkeypatch):
+        kb = self._kb(tmp_path)
+        (kb / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        (kb / "b.pdf").write_bytes(_mini_pdf(["beta page"]))
+        stats = self._reindex(kb, monkeypatch)
+        assert stats["files"] == 2 and stats["chunks"] == 2
+
+
+class TestCategoryScope:
+    def _kb(self, tmp_path):
+        kb = tmp_path / "kb"
+        (kb / "project").mkdir(parents=True)
+        (kb / "learning").mkdir(parents=True)
+        (kb / "project" / "impl.md").write_text("# MCP\n\n本项目的 MCP 实现细节", encoding="utf-8")
+        (kb / "learning" / "guide.md").write_text("# MCP\n\n通用 MCP 教程写法", encoding="utf-8")
+        (kb / "loose.md").write_text("# Loose\n\n根目录散文件", encoding="utf-8")
+        return kb
+
+    def _reindex(self, kb, monkeypatch):
+        import src.rag.index as idx_mod
+        monkeypatch.setattr(idx_mod, "embed_texts", _stub_embed)
+        return idx_mod.reindex(str(kb), embed_model="m", embed_base_url="u",
+                               embed_api_key="k", chunk_size=800, chunk_overlap=100)
+
+    def test_category_from_top_level_subdir(self, isolated_memory, tmp_path, monkeypatch):
+        """顶层子目录名 = 分域名；根目录下的文件归 default。"""
+        from src.rag.store import VectorStore
+        stats = self._reindex(self._kb(tmp_path), monkeypatch)
+        assert stats["categories"] == {"project": 1, "learning": 1, "default": 1}
+        assert VectorStore().categories() == ["default", "learning", "project"]
+
+    def test_nested_subdir_keeps_top_level_category(self):
+        from src.rag.index import category_of
+        assert category_of("project/deep/nested/x.md") == "project"
+        assert category_of("x.md") == "default"
+
+    def test_duplicate_content_deduped(self, isolated_memory, tmp_path, monkeypatch):
+        """同内容的多个副本只入库一条：否则一份资料会占掉多个 top-k 名额。"""
+        kb = tmp_path / "kb"
+        kb.mkdir()
+        (kb / "a.md").write_text("# T\n\nsame body", encoding="utf-8")
+        (kb / "copy.md").write_text("# T\n\nsame body", encoding="utf-8")
+        stats = self._reindex(kb, monkeypatch)
+        assert stats["chunks"] == 1 and stats["duplicates"] == 1
+
+    def test_balanced_retrieval_gives_each_domain_a_slot(self, isolated_memory, tmp_path, monkeypatch):
+        """两批同题材资料共存时，top-k 不能被其中一批占满——每域至少拿到名额。"""
+        from src.rag import retriever as rmod
+        kb = tmp_path / "kb"
+        (kb / "project").mkdir(parents=True)
+        (kb / "learning").mkdir(parents=True)
+        for i in range(5):        # project 侧块数远多于 learning，制造挤占压力
+            (kb / "project" / f"p{i}.md").write_text(f"# MCP {i}\n\n项目实现 {i}", encoding="utf-8")
+        (kb / "learning" / "g.md").write_text("# MCP\n\n通用教程", encoding="utf-8")
+        self._reindex(kb, monkeypatch)
+        monkeypatch.setattr(rmod, "embed_query", lambda q, **kw: [1.0, 2.0, 3.0])
+        hits = rmod.retrieve("MCP", embed_model="m", embed_base_url="u", embed_api_key="k",
+                             top_k=3, chunk_size=800, chunk_overlap=100)
+        assert len(hits) == 3
+        assert {h["category"] for h in hits} == {"project", "learning"}   # 没被单域占满
+
+    def test_scope_restricts_to_one_domain(self, isolated_memory, tmp_path, monkeypatch):
+        from src.rag import retriever as rmod
+        self._reindex(self._kb(tmp_path), monkeypatch)
+        monkeypatch.setattr(rmod, "embed_query", lambda q, **kw: [1.0, 2.0, 3.0])
+        kw = dict(embed_model="m", embed_base_url="u", embed_api_key="k",
+                  top_k=5, chunk_size=800, chunk_overlap=100)
+        hits = rmod.retrieve("MCP", scope="learning", **kw)
+        assert hits and {h["category"] for h in hits} == {"learning"}
+        assert rmod.retrieve("MCP", scope="nonexistent", **kw) == []   # 不静默退回全库
+
+    def test_tool_reports_available_scopes_on_typo(self, isolated_memory, tmp_path, monkeypatch):
+        """分域名写错 → 告诉模型有哪些可用分域，别让它把空结果误读成「库里没有」。"""
+        from src import config
+        import src.tools_rag as tr
+        kb = self._kb(tmp_path)
+        self._reindex(kb, monkeypatch)
+        monkeypatch.setattr(config, "RAG_KB_DIR", str(kb))
+        monkeypatch.setattr(config, "RAG_EMBED_API_KEY", "k")
+        out = tr.search_knowledge.invoke({"query": "MCP", "scope": "projekt"})
+        assert "不存在" in out and "project" in out and "learning" in out
+
+    def test_single_category_keeps_plain_search(self, isolated_memory, tmp_path, monkeypatch):
+        """单域库（根目录平铺）不走配额分支，行为与分域前一致。"""
+        from src.rag import retriever as rmod
+        kb = tmp_path / "kb"
+        kb.mkdir()
+        for i in range(3):
+            (kb / f"a{i}.md").write_text(f"# A{i}\n\nbody {i}", encoding="utf-8")
+        self._reindex(kb, monkeypatch)
+        monkeypatch.setattr(rmod, "embed_query", lambda q, **kw: [1.0, 2.0, 3.0])
+        hits = rmod.retrieve("q", embed_model="m", embed_base_url="u", embed_api_key="k",
+                             top_k=2, chunk_size=800, chunk_overlap=100)
+        assert len(hits) == 2 and {h["category"] for h in hits} == {"default"}

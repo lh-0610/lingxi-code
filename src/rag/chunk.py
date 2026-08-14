@@ -61,6 +61,23 @@ def iter_markdown_chunks(text: str, source: str, chunk_size: int = 800, overlap:
             cid += 1
 
 
+def iter_plain_chunks(text: str, source: str, heading: str = "",
+                      chunk_size: int = 800, overlap: int = 120, start_id: int = 0):
+    """把一段**无 Markdown 结构**的纯文本切块，全部挂在同一个 heading 下。
+
+    给 PDF 抽出的页面文字用：PDF 正文里恰好以 ``#`` 开头的行、或出现的 ``` 序列，都只是
+    普通字符，不该被 ``iter_markdown_chunks`` 当成标题/代码围栏——那会凭空造出错误的标题
+    路径，甚至因围栏状态翻转让后面整篇的标题识别全错。这里直接按大小切，语义可控。
+    """
+    cid = start_id
+    body = text.strip()
+    if not body:
+        return
+    for piece in _iter_split_by_size(body, chunk_size, overlap):
+        yield {"text": piece, "heading": heading, "source": source, "chunk_id": cid}
+        cid += 1
+
+
 def _split_by_size(body: str, size: int, overlap: int) -> list[str]:
     """把一段正文切成 <=size 的块，且**任意相邻块都保留 overlap 字符的上下文**。
 

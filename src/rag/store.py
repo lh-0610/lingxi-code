@@ -1,23 +1,24 @@
-"""numpy 持久化向量库：暴力 cosine 检索 + 按 text-hash 缓存复用未变块的向量。
+"""Chroma 持久化向量库：cosine 检索 + metadata 过滤 + 按 chunk-hash 复用未变块的向量。
 
-为什么不上 chromadb/faiss：本机 Python 3.14 太新，重型向量库（及其 onnxruntime 等
-二进制依赖）多半没有 3.14 wheel、硬装就崩；而单用户 md 知识库规模（几百~几千块）下，
-numpy 暴力 cosine 亚毫秒级，零重依赖、保证能跑。store 抽象后端可换。
+为什么从 numpy 换成 Chroma：78 块规模下 numpy 暴力点积本就够快，换库不为性能，而为
+**metadata 过滤**（同一库里按 category 分域检索，见 index.py 的子目录分类）和主流选型的
+可迁移性。原 numpy 实现的三项保证在这里都做了等价物，一项没丢：
 
-事务性（generation 方案）：每次重建写一代【带版本号】的数据文件，最后**原子替换
-manifest** 作为提交点——load 只认 manifest 指向的那一代，所以进程中途退出最多留下
-一堆没被引用的新代文件（下次重建清理），绝不会出现"新向量 + 旧元数据"的混搭
-（分文件逐个替换的方案在块数恰好相同时无法靠长度校验发现错位）。
+  ① 块级增量复用 —— **chunk hash 直接当 Chroma 的 document ID**。「哪些块已 embed 过」
+     退化成「哪些 ID 已存在」，不再需要单独的 vec_cache 文件。附赠内容去重：同 hash 只
+     可能有一条记录，同一份资料的多个副本不会各占一个 top-k 名额。
+  ② 事务性提交 —— Chroma 没有事务，用**三段式改名**补：新数据先写进 staging collection，
+     提交时 main→old、staging→main、删 old。任一步崩溃后 load() 都能从残留状态推断出该
+     回滚还是该前滚（见 _recover），绝不会出现「新向量 + 旧元数据」的混搭或索引凭空消失。
+  ③ 索引锚 —— manifest 整体 json.dumps 后存进 collection metadata 的 lingxi_manifest 键
+     （存字符串而非摊平成多个键：绕开 Chroma 的 metadata 取值类型限制与保留键前缀，
+     且能原样往返）。
 
-落盘（rag_index/<name>/）：
-  manifest.json          —— {generation, kb_dir, embed_model, embed_base_url, chunks, dim}
-                            索引锚 + 提交点：原子写、最后写；load 先读它
-  embeddings.<gen>.npy   —— float32 [N, dim]，已 L2 归一化（检索时点积即 cosine）
-  meta.<gen>.jsonl       —— N 行，每行 {text, heading, source, chunk_id, hash}
-  vec_cache.<gen>.jsonl  —— {h: text_hash, v: 归一化向量}，重建时复用未变块、免重复 embed
+落盘：rag_index/chroma/（整个 Chroma PersistentClient 的数据目录，多个 store 共用一个
+client，按 collection 名区分）。旧版 numpy 散文件索引（rag_index/<name>/*.npy）不兼容，
+视为未建索引、要求重建。
 
-旧版（无 generation 的散文件）索引不兼容：视为未建索引、要求重建（一次性成本，
-换来确定的一致性）。读写/重建全程持模块级 RLock（后台重建线程 vs agent 检索线程）。
+读写全程持模块级 RLock（后台重建线程 vs agent 检索线程）。
 """
 import hashlib
 import json
@@ -33,7 +34,20 @@ from ..paths import rag_index_dir, logger
 # RLock：count/search 内部会再入 load。
 _LOCK = threading.RLock()
 
-_GEN_FILE_RE = re.compile(r"^(embeddings|meta|vec_cache)\.(\d+)\.(npy|jsonl)$")
+# Chroma collection 名约束：3-512 个 [a-zA-Z0-9._-]，且首尾必须是字母或数字。
+# 固定的 kb_ 前缀 + _v1 后缀让任何 store 名（含 "t1" 这种 2 字符的）都自动合规。
+_NAME_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9._-]")
+
+# 每次 add 的批大小：远低于 Chroma 的单批上限，避免大库一次性打爆内存/请求体。
+_ADD_BATCH = 1000
+
+# path -> PersistentClient。同一数据目录必须复用同一个 client（重复构造在 Chroma 里
+# 会因 settings 冲突报错），且测试用 set_data_dir 换目录时能各自拿到自己的 client。
+_CLIENTS: dict[str, object] = {}
+
+# 已提示过「旧版索引需重建」的目录：UI 每次刷新状态行都会新建 VectorStore，不去重的话
+# 同一句告警会在一次会话里刷几十遍。重建之前状态不会变，说一次就够。
+_LEGACY_WARNED: set[str] = set()
 
 
 def text_hash(s: str) -> str:
@@ -41,8 +55,10 @@ def text_hash(s: str) -> str:
 
 
 def _valid_vec(v, dim=None) -> bool:
-    """判定一个（缓存/待提交）向量是否可用：非空一维数字序列、值全有限（无 nan/inf）、
-    维度与期望 dim 一致（dim 给定时）。挡住污染索引的坏缓存/坏 embedding。"""
+    """判定一个（复用/待提交）向量是否可用：非空一维数字序列、值全有限（无 nan/inf）、
+    维度与期望 dim 一致（dim 给定时）。挡住污染索引的坏向量。"""
+    if isinstance(v, np.ndarray):
+        v = v.tolist()
     if not isinstance(v, (list, tuple)) or not v:
         return False
     if isinstance(dim, int) and len(v) != dim:
@@ -54,166 +70,183 @@ def _valid_vec(v, dim=None) -> bool:
     return arr.ndim == 1 and bool(np.isfinite(arr).all())
 
 
+def _client(path: str):
+    """按数据目录缓存的 Chroma PersistentClient。"""
+    with _LOCK:
+        c = _CLIENTS.get(path)
+        if c is None:
+            import chromadb
+            from chromadb.config import Settings
+            os.makedirs(path, exist_ok=True)
+            c = chromadb.PersistentClient(
+                path=path,
+                settings=Settings(anonymized_telemetry=False, allow_reset=False),
+            )
+            _CLIENTS[path] = c
+        return c
+
+
 class VectorStore:
     def __init__(self, name: str = "default"):
         self.name = name
-        self.dir = os.path.join(rag_index_dir(), name)
-        self.vecs = None            # np.ndarray [N, dim] float32（已归一化）
-        self.metas: list[dict] = []
-        self.manifest: dict = {}    # 索引锚（generation / kb_dir / embed_model / ...）
-        self._cache: dict[str, list[float]] = {}   # text_hash -> 归一化向量
+        self.dir = os.path.join(rag_index_dir(), "chroma")   # Chroma client 数据目录
+        self.metas: list[dict] = []      # 兼容字段：Chroma 下不再全量驻留，保持空
+        self.manifest: dict = {}         # 索引锚（generation / kb_dir / embed_model / ...）
+        self._col = None                 # 当前 collection 句柄（None = 未建索引）
+        self._cache: dict[str, list[float]] | None = None   # 懒加载：hash -> 向量
         self._loaded = False
 
-    # ── 路径 ──
+    # ── collection 命名 ──
 
-    def _manifest_path(self):
-        return os.path.join(self.dir, "manifest.json")
+    @property
+    def _cname(self) -> str:
+        return f"kb_{_NAME_UNSAFE_RE.sub('_', self.name)}_v1"
 
-    def _vec_path(self, gen: int):
-        return os.path.join(self.dir, f"embeddings.{gen}.npy")
+    @property
+    def _staging_cname(self) -> str:
+        return self._cname + "__staging"
 
-    def _meta_path(self, gen: int):
-        return os.path.join(self.dir, f"meta.{gen}.jsonl")
+    @property
+    def _old_cname(self) -> str:
+        return self._cname + "__old"
 
-    def _cache_path(self, gen: int):
-        return os.path.join(self.dir, f"vec_cache.{gen}.jsonl")
+    def _legacy_dir(self) -> str:
+        """旧版 numpy 索引目录（仅用于提示用户重建）。"""
+        return os.path.join(rag_index_dir(), self.name)
 
     # ── 加载 ──
 
     def load(self, for_write: bool = False) -> "VectorStore":
-        """加载 manifest 指向的那一代。
+        """加载当前 collection 与它的 manifest。
 
         错误分流（同 projects._load 的原则）：
-          瞬时 I/O 错（PermissionError/占用等 OSError）→ for_write=True 时**抛出**——
-            绝不能把 generation 当 0 继续，否则 rebuild 会提交新 manifest 覆盖活动代；
-            纯读路径按空返回但**不缓存**（_loaded 不置 True），下次访问重试。
-          损坏（JSON 错/结构错）→ 按空处理（重建可修复），缓存结果。
+          collection 不存在 → 正常的「未建索引」，按空返回并缓存结果。
+          其它任何异常（数据目录损坏 / 占用 / Chroma 内部错）→ for_write=True 时**抛出**，
+            绝不能把「读不出活动索引」当成空索引继续，否则 rebuild 会拿新数据顶掉一个其实
+            完好的索引；纯读路径按空返回但**不缓存**（_loaded 不置 True），下次访问重试。
         """
         with _LOCK:
             if self._loaded:
                 return self
             try:
-                if not os.path.exists(self._manifest_path()):
-                    # 无 manifest：全新目录，或旧版散文件格式（不兼容，按未建索引处理）
-                    if os.path.exists(os.path.join(self.dir, "meta.jsonl")):
-                        logger.warning("[RAG] 检测到旧版索引格式（无 generation），请重建索引")
-                    self._loaded = True
-                    return self
-                with open(self._manifest_path(), encoding="utf-8") as f:
-                    manifest = json.load(f) or {}
-                gen = manifest.get("generation")
-                if not isinstance(gen, int):
-                    logger.warning("[RAG] manifest 缺 generation（旧版索引），请重建索引")
+                client = _client(self.dir)
+                names = {c.name for c in client.list_collections()}
+                names = self._recover(client, names)
+
+                if self._cname not in names:
+                    legacy = self._legacy_dir()
+                    if (os.path.exists(os.path.join(legacy, "manifest.json"))
+                            and legacy not in _LEGACY_WARNED):
+                        _LEGACY_WARNED.add(legacy)
+                        logger.warning(f"[RAG] 检测到旧版 numpy 索引格式（已换 Chroma 后端），"
+                                       f"请重建索引；重建后 {legacy} 可删除")
                     self._loaded = True
                     return self
 
-                metas: list[dict] = []
-                if os.path.exists(self._meta_path(gen)):
-                    with open(self._meta_path(gen), encoding="utf-8") as f:
-                        metas = [json.loads(ln) for ln in f if ln.strip()]
-                vecs = None
-                if os.path.exists(self._vec_path(gen)):
-                    vecs = np.load(self._vec_path(gen))
-                cache: dict[str, list[float]] = {}
-                _cache_dim = manifest.get("dim")
-                _dropped = 0
-                if os.path.exists(self._cache_path(gen)):
-                    # vec_cache 只是省 embedding 的优化层，不是可检索主数据。它无论是 I/O
-                    # 失败、JSON 截断还是结构损坏，都只丢缓存；绝不能把完整 vec/meta 一起判空。
+                col = client.get_collection(self._cname)
+                manifest = {}
+                raw = (col.metadata or {}).get("lingxi_manifest")
+                if isinstance(raw, str) and raw:
                     try:
-                        with open(self._cache_path(gen), encoding="utf-8") as f:
-                            for ln in f:
-                                if not ln.strip():
-                                    continue
-                                try:
-                                    o = json.loads(ln)
-                                    h = o.get("h") if isinstance(o, dict) else None
-                                    v = o.get("v") if isinstance(o, dict) else None
-                                    if isinstance(h, str) and h and _valid_vec(v, _cache_dim):
-                                        cache[h] = v
-                                    else:
-                                        _dropped += 1
-                                except (json.JSONDecodeError, TypeError, ValueError):
-                                    _dropped += 1
-                    except OSError as e:
-                        logger.warning(f"[RAG] 向量缓存读取失败，忽略缓存并重新 embedding: {e}")
-                if _dropped:
-                    logger.warning(f"[RAG] 丢弃 {_dropped} 条损坏的缓存向量（将重新 embedding）")
-
-                # 一致性校验（防御纵深；generation 方案下正常不会走到）。数量、形状、维度、
-                # 数值都要过——尤其防「一维 .npy 恰好长度==meta 数」蒙混过数量校验，
-                # 之后 search 里 self.vecs @ q 退化成标量、len(sims) 抛 TypeError。
-                n_vec = 0 if vecs is None else (vecs.shape[0] if vecs.size else 0)
-                bad = ""
-                if n_vec != len(metas) or len(metas) != manifest.get("chunks", len(metas)):
-                    bad = (f"数量不一致（向量 {n_vec} / meta {len(metas)} / "
-                           f"manifest {manifest.get('chunks')}）")
-                elif vecs is not None and vecs.size:
-                    dim = manifest.get("dim")
-                    if vecs.ndim != 2:
-                        bad = f"向量不是二维（ndim={vecs.ndim}）"
-                    elif isinstance(dim, int) and vecs.shape[1] != dim:
-                        bad = f"向量维度与 manifest 不符（{vecs.shape[1]} != {dim}）"
-                    elif not np.isfinite(vecs).all():
-                        bad = "向量含 nan/inf"
-                if bad:
-                    logger.warning(f"[RAG] 索引第 {gen} 代损坏（{bad}），按损坏处理，请重建索引")
-                    self._loaded = True
-                    return self
-                self.vecs, self.metas, self.manifest, self._cache = vecs, metas, manifest, cache
+                        manifest = json.loads(raw) or {}
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        # manifest 读不出 → 锚校验会 fail-closed 要求重建（不当作可用索引）
+                        logger.warning("[RAG] 索引 manifest 损坏，请重建索引")
+                        manifest = {}
+                self._col, self.manifest = col, manifest
                 self._loaded = True
-            except OSError as e:
-                logger.warning(f"[RAG] 索引读取失败（瞬时 I/O 错）: {e}")
-                if for_write:
-                    raise   # 写路径中止：不能在读不到活动代的情况下重建/覆盖
-                self.vecs, self.metas, self.manifest, self._cache = None, [], {}, {}
-                # _loaded 保持 False → 纯读下次重试
             except Exception as e:
-                logger.warning(f"[RAG] 索引损坏，按空处理: {e}")
-                self.vecs, self.metas, self.manifest, self._cache = None, [], {}, {}
-                self._loaded = True
+                logger.warning(f"[RAG] 索引读取失败: {e}")
+                if for_write:
+                    raise   # 写路径中止：读不到活动索引就不许重建覆盖
+                self._col, self.manifest, self._cache = None, {}, None
+                # _loaded 保持 False → 纯读下次重试
             return self
 
-    def _max_gen_on_disk(self) -> int:
-        """目录里现存数据文件的最大代号（含未被 manifest 引用的残留），无文件返回 0。"""
-        best = 0
+    def _recover(self, client, names: set) -> set:
+        """从上次 rebuild 中途崩溃的残留状态里恢复，返回恢复后的 collection 名集合。
+
+        提交三段式是 main→old、staging→main、删 old，于是崩溃后只可能是三种状态：
+          main 在  → 提交没开始（staging 是废数据）或已完成（old 是废数据）→ 清废数据。
+          main 不在、old 在 → 崩在两次改名之间 → **回滚**：old 改回 main，弃掉 staging。
+          main 不在、old 不在 → 干净的未建索引。
+        """
         try:
-            for fn in os.listdir(self.dir):
-                m = _GEN_FILE_RE.match(fn)
-                if m:
-                    best = max(best, int(m.group(2)))
-        except OSError:
-            pass
-        return best
+            if self._cname in names:
+                for garbage in (self._staging_cname, self._old_cname):
+                    if garbage in names:
+                        logger.info(f"[RAG] 清理上次重建的残留 collection: {garbage}")
+                        client.delete_collection(garbage)
+                        names = names - {garbage}
+                return names
+            if self._old_cname in names:
+                logger.warning("[RAG] 检测到重建中途崩溃，回滚到上一份完整索引")
+                if self._staging_cname in names:
+                    client.delete_collection(self._staging_cname)
+                    names = names - {self._staging_cname}
+                client.get_collection(self._old_cname).modify(name=self._cname)
+                names = (names - {self._old_cname}) | {self._cname}
+        except Exception as e:
+            # 恢复失败不该让检索整个挂掉：回落到「按当前实际状态处理」
+            logger.warning(f"[RAG] 索引状态恢复失败: {e}")
+        return names
+
+    # ── 增量复用 ──
+
+    def _ensure_cache(self) -> dict:
+        """懒加载 hash -> 向量（只在重建时用到，检索路径不会付这个代价）。"""
+        with _LOCK:
+            if self._cache is not None:
+                return self._cache
+            cache: dict[str, list[float]] = {}
+            self.load()
+            if self._col is not None:
+                try:
+                    got = self._col.get(include=["embeddings"])
+                    ids = got.get("ids") or []
+                    embs = got.get("embeddings")
+                    embs = [] if embs is None else list(embs)
+                    dim = self.manifest.get("dim")
+                    for i, cid in enumerate(ids):
+                        if i >= len(embs):
+                            break
+                        v = embs[i]
+                        if isinstance(v, np.ndarray):
+                            v = v.tolist()
+                        if _valid_vec(v, dim):
+                            cache[cid] = v
+                except Exception as e:
+                    # 复用只是省 embedding 的优化层，取不到就全部重新 embed，不影响正确性
+                    logger.warning(f"[RAG] 读取已有向量失败，将重新 embedding: {e}")
+            self._cache = cache
+            return cache
 
     def cached_vec(self, h: str):
-        """已缓存的（归一化）向量，用于重建时复用未变块；没有返回 None。"""
+        """已存在的（归一化）向量，用于重建时复用未变块；没有返回 None。"""
         with _LOCK:
-            return self._cache.get(h)
+            return self._ensure_cache().get(h)
 
-    # ── 重建（generation 提交）──
+    # ── 重建（staging + 改名提交）──
 
     def rebuild(self, metas: list[dict], vectors: list[list[float]], manifest: dict | None = None) -> None:
-        """用全套 (metas, vectors) 重建索引并落盘。vectors 会被 L2 归一化。
+        """用全套 (metas, vectors) 重建索引。vectors 会被 L2 归一化。
 
-        写盘顺序 = 事务：① 完整写出【新一代】的三个数据文件 → ② 原子替换 manifest
-        指向新代（提交点）→ ③ 清理旧代文件。任何一步中途崩溃，manifest 仍指向完整
-        的旧代，load 读到的永远是一致快照。
+        提交顺序 = 事务：① 全部数据写进 staging collection → ② main→old、staging→main
+        （提交点）→ ③ 删 old。任何一步崩溃，load() 的 _recover 都能推断出一致状态。
+
+        同 hash 的重复块只保留第一条（Chroma 的 ID 唯一性天然去重），避免同一份内容的
+        多个副本在检索时挤占多个 top-k 名额。
         """
         if len(metas) != len(vectors):
             raise ValueError(f"metas({len(metas)}) 与 vectors({len(vectors)}) 数量不一致")
         with _LOCK:
-            self.load(for_write=True)   # 瞬时 I/O 错 → 抛出中止，绝不覆盖活动代
-            os.makedirs(self.dir, exist_ok=True)
-            # 新代号取 max(manifest 代, 磁盘现存最大代)+1：即使 manifest 读出异常/有
-            # 上次崩溃残留的更高代文件，也保证唯一、绝不与任何现存代冲突
-            gen = max(int(self.manifest.get("generation", 0)), self._max_gen_on_disk()) + 1
+            self.load(for_write=True)   # 读不到活动索引 → 抛出中止，绝不覆盖
 
             arr = np.asarray(vectors, dtype=np.float32) if vectors else np.zeros((0, 0), dtype=np.float32)
             if arr.size:
                 # 提交前把关整块矩阵：形状必须二维、数值必须全有限。任何坏向量（embedding 返回
-                # nan/坏缓存漏网）在这里就中止——**绝不落盘、绝不清理旧代**，否则会用 0 块索引
-                # 顶替掉有效旧代（重建"报成功"、检索却查不到）。抛出后 caller 保留旧索引。
+                # nan / 坏缓存漏网）在这里就中止——**绝不落盘**，否则会用坏索引顶掉有效旧索引
+                # （重建"报成功"、检索却查不到）。抛出后 caller 保留旧索引。
                 if arr.ndim != 2:
                     raise ValueError(f"向量矩阵必须二维，实际 ndim={arr.ndim}，拒绝提交（保留旧索引）")
                 if not np.isfinite(arr).all():
@@ -221,66 +254,144 @@ class VectorStore:
                 norms = np.linalg.norm(arr, axis=1, keepdims=True)
                 norms[norms == 0] = 1.0
                 arr = arr / norms
-            cache = {m["hash"]: arr[i].tolist() for i, m in enumerate(metas)} if arr.size else {}
 
-            # ① 新一代数据文件（此刻 manifest 还指向旧代，写一半崩了也不影响读）
-            if arr.size:
-                np.save(self._vec_path(gen), arr)   # 路径以 .npy 结尾，np.save 不再追加后缀
-            with open(self._meta_path(gen), "w", encoding="utf-8") as f:
-                for m in metas:
-                    f.write(json.dumps(m, ensure_ascii=False) + "\n")
-            with open(self._cache_path(gen), "w", encoding="utf-8") as f:
-                for h, v in cache.items():
-                    f.write(json.dumps({"h": h, "v": v}) + "\n")
+            # 按 hash 去重（保留首次出现）：同一 ID 在一次 add 里重复会被 Chroma 拒绝，
+            # 且重复内容本就不该各占一个检索名额。
+            ids, docs, mds, embs = [], [], [], []
+            seen: set[str] = set()
+            for i, m in enumerate(metas):
+                h = m.get("hash")
+                if not h or h in seen:
+                    continue
+                seen.add(h)
+                ids.append(h)
+                docs.append(m.get("text", ""))
+                mds.append({
+                    "heading": m.get("heading", "") or "",
+                    "source": m.get("source", "") or "",
+                    "chunk_id": int(m.get("chunk_id", 0) or 0),
+                    "category": m.get("category", "") or "default",
+                    "hash": h,
+                })
+                embs.append(arr[i].tolist())
+            dropped = len(metas) - len(ids)
+            if dropped:
+                logger.info(f"[RAG] 去重丢弃 {dropped} 个重复块（内容完全相同）")
 
-            # ② 提交点：原子替换 manifest
             new_manifest = dict(manifest or {})
-            new_manifest["generation"] = gen
-            new_manifest["chunks"] = len(metas)
+            new_manifest["generation"] = int(self.manifest.get("generation", 0)) + 1
+            new_manifest["chunks"] = len(ids)
             if arr.size:
                 new_manifest["dim"] = int(arr.shape[1])
-            tmp = self._manifest_path() + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(new_manifest, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self._manifest_path())
 
-            self.vecs, self.metas, self.manifest, self._cache = arr, list(metas), new_manifest, cache
+            client = _client(self.dir)
+            names = {c.name for c in client.list_collections()}
+            _LEGACY_WARNED.discard(self._legacy_dir())   # 重建过了，旧格式提示重新生效
+
+            # ① staging：先清掉可能的残留，再整份写进去（此刻 main 还是完整的旧索引）
+            if self._staging_cname in names:
+                client.delete_collection(self._staging_cname)
+            staging = client.create_collection(
+                self._staging_cname,
+                metadata={"hnsw:space": "cosine", "lingxi_manifest": json.dumps(new_manifest, ensure_ascii=False)},
+            )
+            try:
+                for s in range(0, len(ids), _ADD_BATCH):
+                    e = s + _ADD_BATCH
+                    staging.add(ids=ids[s:e], embeddings=embs[s:e],
+                                documents=docs[s:e], metadatas=mds[s:e])
+            except Exception:
+                # 写 staging 失败 → 清掉半成品，main 原样保留
+                try:
+                    client.delete_collection(self._staging_cname)
+                except Exception:
+                    pass
+                raise
+
+            # ② 提交点：main→old、staging→main
+            if self._old_cname in names:
+                client.delete_collection(self._old_cname)
+            had_main = self._cname in names
+            if had_main:
+                client.get_collection(self._cname).modify(name=self._old_cname)
+            staging.modify(name=self._cname)
+
+            # ③ 清理旧索引，失败不影响正确性（下次 load 的 _recover 会收拾）
+            if had_main:
+                try:
+                    client.delete_collection(self._old_cname)
+                except Exception as e:
+                    logger.debug(f"[RAG] 清理旧 collection 失败（不影响使用）: {e}")
+
+            self._col = client.get_collection(self._cname)
+            self.manifest = new_manifest
+            self._cache = {i: v for i, v in zip(ids, embs)}
             self._loaded = True
-
-            # ③ 清理非当前代的数据文件（含旧版散文件），失败不影响正确性
-            self._cleanup_other_generations(gen)
-
-    def _cleanup_other_generations(self, keep_gen: int) -> None:
-        try:
-            for fn in os.listdir(self.dir):
-                m = _GEN_FILE_RE.match(fn)
-                if m and int(m.group(2)) != keep_gen:
-                    os.remove(os.path.join(self.dir, fn))
-                elif fn in ("embeddings.npy", "meta.jsonl", "vec_cache.jsonl"):
-                    os.remove(os.path.join(self.dir, fn))   # 旧版散文件
-        except OSError as e:
-            logger.debug(f"[RAG] 清理旧代索引文件失败（不影响使用）: {e}")
 
     # ── 检索 ──
 
-    def search(self, query_vec: list[float], top_k: int = 5) -> list[tuple[float, dict]]:
-        """返回 [(cosine 相似度, meta), ...]，按相似度降序，至多 top_k 条。"""
+    def search(self, query_vec: list[float], top_k: int = 5, where: dict | None = None) -> list[tuple[float, dict]]:
+        """返回 [(cosine 相似度, meta), ...]，按相似度降序，至多 top_k 条。
+
+        where: Chroma 的 metadata 过滤（如 {"category": "project"}），None = 不过滤。
+        """
         with _LOCK:
             self.load()
-            if self.vecs is None or not len(self.metas) or not self.vecs.size:
+            if self._col is None or top_k <= 0:
                 return []
-            q = np.asarray(query_vec, dtype=np.float32)
-            n = float(np.linalg.norm(q))
+            n = self.count()
             if n == 0:
                 return []
-            q = q / n
-            sims = self.vecs @ q                      # 两边都归一化 → 点积即 cosine
-            k = min(top_k, len(sims))
-            top = np.argpartition(-sims, k - 1)[:k]
-            top = top[np.argsort(-sims[top])]
-            return [(float(sims[i]), self.metas[i]) for i in top]
+            q = np.asarray(query_vec, dtype=np.float32)
+            norm = float(np.linalg.norm(q))
+            if norm == 0 or not np.isfinite(norm):
+                return []
+            q = q / norm
+            try:
+                res = self._col.query(
+                    query_embeddings=[q.tolist()],
+                    n_results=min(top_k, n),
+                    where=where or None,
+                    include=["documents", "metadatas", "distances"],
+                )
+            except Exception as e:
+                logger.warning(f"[RAG] 检索失败: {e}")
+                return []
+            ids = (res.get("ids") or [[]])[0]
+            docs = (res.get("documents") or [[]])[0]
+            mds = (res.get("metadatas") or [[]])[0]
+            dists = (res.get("distances") or [[]])[0]
+            out: list[tuple[float, dict]] = []
+            for i, cid in enumerate(ids):
+                md = dict(mds[i] or {}) if i < len(mds) else {}
+                md["text"] = docs[i] if i < len(docs) else ""
+                md.setdefault("hash", cid)
+                # cosine 空间下 Chroma 返回的 distance = 1 - cosine 相似度
+                d = float(dists[i]) if i < len(dists) else 1.0
+                out.append((max(-1.0, min(1.0, 1.0 - d)), md))
+            return out
 
     def count(self) -> int:
         with _LOCK:
             self.load()
-            return len(self.metas)
+            if self._col is None:
+                return 0
+            try:
+                return int(self._col.count())
+            except Exception as e:
+                logger.warning(f"[RAG] 读取索引块数失败: {e}")
+                return 0
+
+    def categories(self) -> list[str]:
+        """索引里出现过的所有分域名（供 UI / scope 参数校验）。"""
+        with _LOCK:
+            self.load()
+            if self._col is None:
+                return []
+            try:
+                got = self._col.get(include=["metadatas"])
+                return sorted({(m or {}).get("category") or "default"
+                               for m in (got.get("metadatas") or [])})
+            except Exception as e:
+                logger.warning(f"[RAG] 读取分域列表失败: {e}")
+                return []
