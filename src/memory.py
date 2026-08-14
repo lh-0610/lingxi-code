@@ -167,6 +167,9 @@ def save_session(*, session=None):
         session_kind = "code"
         sess.session_kind = "code"
     rag_kb_dir = getattr(sess, "rag_kb_dir", "") or ""
+    agent_mode = getattr(sess, "agent_mode", "act")
+    if agent_mode not in ("plan", "act"):
+        agent_mode = "act"
 
     if session_kind == "rag":
         sess.project = None            # 清理可能残留的 project；rag 不锚代码项目
@@ -195,6 +198,8 @@ def save_session(*, session=None):
         "project": current_project,
         "session_kind": session_kind,
         "rag_kb_dir": rag_kb_dir,
+        # Plan/Act 跟着会话走：重开时恢复原模式，别让"正在规划"的会话静默变回可动手
+        "agent_mode": agent_mode,
         # list() 先快照：worker 线程可能正在 append（切会话时主线程存后台会话），
         # 直接迭代会撞 "list changed size during iteration"。
         "messages": [_msg_to_dict(m) for m in list(chat_history)],
@@ -407,6 +412,13 @@ def load_session(session_id, *, session=None):
         logger.warning(f"会话 {session_id} 的 session_kind={_kind!r} 未知，按 code 处理")
         _kind = "code"
     _rag_dir = data.get("rag_kb_dir", "") or ""
+    # Plan/Act 模式随会话持久化：不存的话，重开一个"聊到一半正在 Plan"的会话会变成
+    # Act——用户以为还在只读规划，模型却已经能动手改代码了，是个有安全后果的静默降级。
+    # 旧会话没这个字段 → 默认 act（与持久化之前的行为一致）。
+    _mode = data.get("agent_mode", "act")
+    if _mode not in ("plan", "act"):
+        logger.warning(f"会话 {session_id} 的 agent_mode={_mode!r} 未知，按 act 处理")
+        _mode = "act"
     # rag 会话与项目彻底解耦：忽略磁盘上可能残留的 project（下次保存会清成 None）。
     _proj = None if _kind == "rag" else data.get("project")
 
@@ -434,14 +446,15 @@ def load_session(session_id, *, session=None):
         session.task_ledger = state.new_task_ledger()
         session.compaction = {"summary": "", "covered_upto": 0}
 
-    # 分类 / 项目 / rag 锚点 / rag_mode（对两条路径统一设置在目标 Session 上）
+    # 分类 / 项目 / rag 锚点 / rag_mode / Plan-Act（对两条路径统一设置在目标 Session 上）
     tgt.session_kind = _kind
     tgt.rag_kb_dir = _rag_dir
     tgt.project = _proj
     tgt.rag_mode = (_kind == "rag")
+    tgt.agent_mode = _mode
     tgt.worktree = None
 
-    logger.info(f"会话已加载: {session_id}（kind={_kind}）")
+    logger.info(f"会话已加载: {session_id}（kind={_kind}, mode={_mode}）")
     return True
 
 
