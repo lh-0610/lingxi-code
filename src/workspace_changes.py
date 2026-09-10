@@ -48,19 +48,38 @@ def _snapshot(root, previous=None):
         if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
             continue
         key = relative.replace("\\", "/")
+        # stamp 是"内容可能变了吗"的廉价判据，命中就跳过哈希（每次工具调用都哈希整棵树太贵）。
+        # 五个字段各挡一类漏判：mtime_ns 挡普通修改；size 挡同一纳秒内的等时长改写；
+        # ctime_ns 挡"改完再把 mtime 改回原值"（POSIX 下 ctime 不可由用户直接设置）；
+        # ino 挡"删掉重建一个同名同大小同时间的文件"；mode 挡只改权限位不改内容。
         stamp = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, info.st_mode)
         old = (previous or {}).get(key)
         if old and old[0] == stamp:
             digest = old[1]
         elif stat.S_ISLNK(info.st_mode):
+            # 链接按"指向哪"比对，不读目标内容：目标在项目外时，读内容会把外部变化
+            # 误记成项目改动，而且跟随链接读本身就绕出了项目边界。
             digest = os.readlink(path)
         else:
-            # 不跟随指向项目外的父目录链接。
-            if os.path.commonpath([root, os.path.realpath(path)]) != root:
-                raise OSError(f"文件路径跳出项目: {relative}")
+            # realpath 落到项目外 = 这个普通文件是透过 junction / 符号链接目录看到的，
+            # 读它等于读项目外的内容，不能算进本项目的改动追踪。
+            # 跨盘符时 commonpath 直接抛 ValueError（Windows 上把子目录 junction 到
+            # 另一个盘很常见），归进同一个"跳出项目"分支——否则用户只会看到
+            # "Paths don't have the same drive"，完全联想不到是某个目录链接
+            # 导致验证闸门再也过不去。
+            try:
+                escaped = os.path.commonpath([root, os.path.realpath(path)]) != root
+            except ValueError:
+                escaped = True
+            if escaped:
+                raise OSError(
+                    f"文件路径跳出项目（疑似目录链接指向项目外；跨盘链接同样如此）: {relative}")
             with open(path, "rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
         files[key] = (stamp, digest)
+        # 上限是为了"别让一次工具调用卡死在遍历上"——追踪在每次工具调用前后各跑一次，
+        # 10 万文件的全树 stat 已经到秒级。超限宁可整体抛错、降级成"未验证"，
+        # 也不要静默只追踪一部分：那会让闸门误以为"没改动"而放行。
         if len(files) > 100_000:
             raise OSError("项目文件超过 100000 个，无法完整追踪命令的修改")
     return files

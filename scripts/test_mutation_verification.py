@@ -153,3 +153,48 @@ def test_agent_cannot_silently_finish_after_command_write(project_dir, monkeypat
     assert count == 3
     assert "验证仍未完整完成" in ui.text()
     assert "app.py" in sess.verification["code_dirty_files"]
+
+
+def test_cross_drive_link_reports_actionable_reason(tmp_path, monkeypatch):
+    """Windows 上把子目录 junction 到别的盘时，commonpath 抛 ValueError。
+
+    以前它会一路冒到 tracking_errors，用户只看到 "Paths don't have the same drive"，
+    根本联想不到是某个目录链接导致验证闸门再也过不去。现在归进"跳出项目"，
+    错误信息里带上文件名和成因。
+    """
+    root = os.path.realpath(tmp_path)
+    (tmp_path / "linked.txt").write_text("x", encoding="utf-8")
+
+    real_commonpath = os.path.commonpath
+
+    def _cross_drive(paths):
+        if any(str(p).endswith("linked.txt") for p in paths):
+            raise ValueError("Paths don't have the same drive")
+        return real_commonpath(paths)
+
+    monkeypatch.setattr(os.path, "commonpath", _cross_drive)
+
+    try:
+        workspace_changes._snapshot(root)
+    except OSError as exc:
+        assert "跳出项目" in str(exc) and "linked.txt" in str(exc)
+        assert "same drive" not in str(exc)
+    else:
+        raise AssertionError("跨盘链接必须报错，不能当作无改动放行")
+
+
+def test_cross_drive_link_degrades_to_unverified_not_crash(tmp_path, monkeypatch):
+    """降级路径：追踪失败要变成一条可读的验证缺口，而不是抛穿到 agent 主循环。"""
+    root = os.path.realpath(tmp_path)
+    (tmp_path / "linked.txt").write_text("x", encoding="utf-8")
+    real_commonpath = os.path.commonpath
+    monkeypatch.setattr(os.path, "commonpath", lambda paths: (
+        real_commonpath(paths) if not any(str(p).endswith("linked.txt") for p in paths)
+        else (_ for _ in ()).throw(ValueError("Paths don't have the same drive"))))
+
+    v = verification.new_verification() if hasattr(verification, "new_verification") else {}
+    v.setdefault("dirty_files", set())
+    v.setdefault("code_dirty_files", set())
+    v["workspace_snapshots"] = {root: None}
+    workspace_changes.refresh_workspace_tracking(v)
+    assert any("跳出项目" in reason for reason in v["tracking_errors"].values())

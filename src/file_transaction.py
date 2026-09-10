@@ -10,6 +10,18 @@ class PatchApplyError(OSError):
         self.rollback_failed = rollback_failed
 
 
+def _umask() -> int:
+    """读当前 umask。os 只给了"设置并返回旧值"的接口，只能设一次再设回去。
+
+    这里有竞态（两次调用之间别的线程建的文件会用到临时 umask 0），但本函数只在
+    补丁准备阶段调用、且 apply_patch 本身是串行的；相比"新建文件恒为 0600"的
+    确定性错误，这个窗口可以接受。
+    """
+    current = os.umask(0)
+    os.umask(current)
+    return current
+
+
 def _read_bytes(path):
     if not os.path.lexists(path):
         return None
@@ -40,6 +52,8 @@ def apply_file_changes(changes):
             entry = {"path": path, "expected": expected, "staged": None,
                      "backup": None, "written": None}
             prepared.append(entry)
+            # 临时文件必须和目标同目录：os.replace 要求同一文件系统才是原子替换，
+            # 落到系统 temp 上跨卷时会退化成"复制+删除"，中途崩溃就留半个文件。
             for key, data in (("backup", expected), ("staged", content)):
                 if data is None:
                     continue
@@ -49,8 +63,14 @@ def apply_file_changes(changes):
                 kwargs = {} if isinstance(data, bytes) else {"encoding": "utf-8"}
                 with os.fdopen(fd, mode, **kwargs) as stream:
                     stream.write(data)
+                # mkstemp 建的文件是 0600。改已有文件要沿用它原来的权限位，否则
+                # 一次补丁就把可执行脚本改成不可执行、把共享文件改成 owner-only；
+                # 新建文件没有"原权限"可沿用，按 umask 走（与 write_file 一致），
+                # 不然 apply_patch 建出来的文件权限会莫名比别的路径更严。
                 if expected is not None:
                     os.chmod(temporary, stat.S_IMODE(os.stat(path).st_mode))
+                else:
+                    os.chmod(temporary, 0o666 & ~_umask())
             if entry["staged"]:
                 entry["written"] = _read_bytes(entry["staged"])
 

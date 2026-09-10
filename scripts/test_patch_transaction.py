@@ -126,3 +126,20 @@ def test_replacement_preserves_file_mode(project_dir):
     file_transaction.apply_file_changes([(str(target), b"before", "after")])
     assert stat.S_IMODE(target.stat().st_mode) == 0o750
     assert Path(target).read_text() == "after"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows 不按 umask/POSIX 权限位工作")
+def test_new_file_follows_umask_not_mkstemp_0600(project_dir):
+    """新建文件要按 umask 走，别继承 mkstemp 的 0600。
+
+    否则 apply_patch 建出来的文件权限莫名比 write_file 更严（owner-only），
+    在 Linux 上表现为"补丁生成的文件别的用户/进程读不了"。
+    """
+    target = project_dir / "created.txt"
+    old_umask = os.umask(0o022)
+    try:
+        file_transaction.apply_file_changes([(str(target), None, "hello")])
+    finally:
+        os.umask(old_umask)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert target.read_text() == "hello"
