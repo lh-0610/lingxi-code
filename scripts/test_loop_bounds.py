@@ -91,7 +91,7 @@ class TestRoundCap:
         _stub_endless_tool_calls(monkeypatch, _agent, calls)
 
         ui = _UI()
-        _agent.agent_loop(ui)
+        assert _agent.agent_loop(ui).status == "limit_reached"
 
         assert calls["n"] <= 6, f"跑了 {calls['n']} 轮，没被上限 6 拦住"
         assert any("轮次上限" in m for m in ui.messages), "触顶后没告诉用户"
@@ -128,7 +128,7 @@ class TestRoundCap:
                             lambda g, t, tcs: AIMessage(content="x"))
 
         ui = _UI()
-        _agent.agent_loop(ui)
+        assert _agent.agent_loop(ui).status == "cancelled"
         sess.stop_flag = False
 
         assert calls["n"] >= 80, f"设 0 却只跑了 {calls['n']} 轮，被上限拦住了"
@@ -148,7 +148,7 @@ class TestRoundCap:
         monkeypatch.setattr(_agent, "_build_ai_message",
                             lambda g, t, tcs: AIMessage(content=t))
         ui = _UI()
-        _agent.agent_loop(ui)
+        assert _agent.agent_loop(ui).status == "completed"
         assert not any("轮次上限" in m for m in ui.messages)
 
 
@@ -184,7 +184,7 @@ class TestOverflowRecovery:
         monkeypatch.setattr(_agent, "_stream_with_tools", _always_overflow)
 
         ui = _UI()
-        _agent.agent_loop(ui)      # 不抛异常即通过
+        assert _agent.agent_loop(ui).status == "failed"
         assert any("上下文窗口" in r for r in ui.retries)
         assert sess.overflow_squeeze <= _agent._MAX_OVERFLOW_RETRIES
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
+from src.agent_result import AgentResult
 
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _root not in sys.path:
@@ -131,6 +132,7 @@ class TestSubagentSpawn:
             name = "a.py" if "a.py" in task else "b.py"
             (cwd / name).write_text(f"created by {name}\n", encoding="utf-8")
             session.current_session().chat_history.append(AIMessage(content=f"done {name}"))
+            return AgentResult("completed")
 
         monkeypatch.setattr(subagent, "_run_agent_loop", fake_loop)
 
@@ -157,6 +159,7 @@ class TestSubagentSpawn:
             subprocess.run(["git", "commit", "-m", "subagent commit"], cwd=str(cwd),
                            check=True, capture_output=True, env=env)
             session.current_session().chat_history.append(AIMessage(content="done"))
+            return AgentResult("completed")
 
         monkeypatch.setattr(subagent, "_run_agent_loop", fake_loop)
         results = subagent.spawn(["build feat"], str(git_repo), None)
@@ -173,6 +176,7 @@ class TestSubagentSpawn:
 
         def fake_loop(ui):
             session.current_session().chat_history.append(AIMessage(content="done"))
+            return AgentResult("completed")
 
         monkeypatch.setattr(subagent, "_run_agent_loop", fake_loop)
         try:
@@ -211,6 +215,7 @@ class TestSubagentSpawn:
             session.current_session().chat_history.append(AIMessage(content="done"))
             with lock:
                 active -= 1
+            return AgentResult("completed")
 
         monkeypatch.setattr(subagent, "_run_agent_loop", fake_loop)
         results = subagent.spawn([f"task {i}" for i in range(7)], str(git_repo), None)
@@ -234,6 +239,7 @@ class TestSubagentSpawn:
             task = _task_text()
             (cwd / "same.txt").write_text(("one\n" if "one" in task else "two\n"), encoding="utf-8")
             session.current_session().chat_history.append(AIMessage(content=task))
+            return AgentResult("completed")
 
         monkeypatch.setattr(subagent, "_run_agent_loop", fake_loop)
         results = subagent.spawn(["write one", "write two"], str(git_repo), None)
@@ -250,6 +256,7 @@ class TestSubagentSpawn:
         def fake_loop(ui):
             while not session.current_session().stop_flag:
                 time.sleep(0.05)
+            return AgentResult("cancelled", "停止")
 
         monkeypatch.setattr(subagent, "_run_agent_loop", fake_loop)
         monkeypatch.setattr(subagent, "_TIMEOUT_SECONDS", 0.2)
@@ -281,6 +288,7 @@ class TestSubagentSpawn:
                 seen[task] = cwd
             Path(cwd, f"{task}.txt").write_text(task, encoding="utf-8")
             session.current_session().chat_history.append(AIMessage(content=task))
+            return AgentResult("completed")
 
         monkeypatch.setattr(subagent, "_run_agent_loop", fake_loop)
         subagent.spawn(["x", "y", "z"], str(git_repo), None)

@@ -683,6 +683,12 @@ def run_command(command: str, timeout: int | None = None, background: bool = Fal
     background=True 时命令在后台运行（适用于 dev server / watch / 长服务），
     立即返回 bg_id；用 read_background_output 看输出，stop_background_command 停止。
     """
+    from .workspace_changes import track_workspace_changes
+    with track_workspace_changes(_project_cwd()):
+        return _run_command(command, timeout, background)
+
+
+def _run_command(command: str, timeout: int | None, background: bool) -> str:
     import threading as _thr_local
 
     effective_timeout = timeout if timeout is not None else RUN_COMMAND_TIMEOUT_S
@@ -1969,7 +1975,9 @@ def _parse_patch(content: str):
 
 @tool
 def apply_patch(patch: str) -> str:
-    """批量文件补丁工具：在一个原子操作中创建、修改、删除多个文件。
+    """批量文件补丁工具：先完整校验，再写入多个文件；写入失败时回滚并报告。
+
+    不承诺进程崩溃时的跨文件原子性；回滚受阻时保留备份并明确提示人工恢复。
 
     Patch 格式（类似 git diff，但靠上下文定位、不用行号）：
 
@@ -2008,6 +2016,7 @@ def apply_patch(patch: str) -> str:
     # ── Phase 2: 校验 + 内存计算（不写盘）──
     root = _project_cwd()
     resolved_ops: list = []  # (action, path, resolved, old/None, new/None) 异质 tuple,给 list 注解防 mypy 窄推断
+    originals = {}
     errors = []
 
     for op in operations:
@@ -2024,6 +2033,23 @@ def apply_patch(patch: str) -> str:
                 continue
         except ValueError:
             errors.append(f"路径超出项目范围，不允许: {path}")
+            continue
+
+        if os.path.islink(resolved):
+            errors.append(f"补丁不直接操作符号链接，请指定真实文件: {path}")
+            continue
+        resolved = os.path.realpath(resolved)
+        if resolved in originals:
+            errors.append(f"同一文件在补丁中出现多次，请合并为一个文件块: {path}")
+            continue
+        try:
+            if os.path.exists(resolved):
+                with open(resolved, "rb") as f:
+                    originals[resolved] = f.read()
+            else:
+                originals[resolved] = None
+        except OSError as error:
+            errors.append(f"无法读取 {path}: {error}")
             continue
 
         if action == "update":
@@ -2134,42 +2160,39 @@ def apply_patch(patch: str) -> str:
     if not allowed:
         return reject
 
-    # ── Phase 5: 写盘 ──
-    added_files = 0
-    modified_files = 0
-    deleted_files = 0
-    check_warnings = []
-
+    # checkpoint 会短暂 stash 工作区，必须在创建事务临时文件之前完成。
     for action, path, resolved, _, new_content in resolved_ops:
         try:
             _checkpoint.make_checkpoint(root, f"apply_patch_{action}", resolved)
         except Exception as e:
             logger.warning(f"checkpoint 失败（不影响 patch 应用）: {e}")
 
-        if action == "add":
-            os.makedirs(os.path.dirname(os.path.abspath(resolved)), exist_ok=True)
-            with open(resolved, "w", encoding="utf-8") as f:
-                f.write(new_content)
-            added_files += 1
-        elif action == "update":
-            with open(resolved, "w", encoding="utf-8") as f:
-                f.write(new_content)
-            modified_files += 1
-        elif action == "delete":
-            os.remove(resolved)
-            deleted_files += 1
+    from .file_transaction import PatchApplyError, apply_file_changes
+    try:
+        apply_file_changes([
+            (resolved, originals[resolved], new_content)
+            for action, path, resolved, _, new_content in resolved_ops
+        ])
+    except PatchApplyError as error:
+        if error.rollback_failed:
+            for _, _, resolved, _, _ in resolved_ops:
+                _mark_current_dirty(resolved)
+        return str(error)
 
+    added_files = sum(action == "add" for action, *_ in resolved_ops)
+    modified_files = sum(action == "update" for action, *_ in resolved_ops)
+    deleted_files = sum(action == "delete" for action, *_ in resolved_ops)
+    check_warnings = []
+    for action, path, resolved, _, _ in resolved_ops:
+        _mark_current_dirty(resolved)
         if action in ("add", "update"):
-            _mark_current_dirty(resolved)
-            issues, checker = _run_code_check(resolved)
-            if checker:
-                _mark_current_check(resolved, not bool(issues), checker)
-            else:
-                _mark_current_check(resolved, None, "")
-            if checker and issues:
+            try:
+                issues, checker = _run_code_check(resolved)
+            except Exception as error:
+                issues, checker = f"检查器执行失败: {error}", None
+            _mark_current_check(resolved, not bool(issues) if checker else None, checker or "")
+            if issues:
                 check_warnings.append(f"{path}:\n{issues}")
-        elif action == "delete":
-            _mark_current_dirty(resolved)
 
     # ── 组装结果 ──
     parts = [f"Patch 已应用: {added_files} 个新增, {modified_files} 个修改, {deleted_files} 个删除"]

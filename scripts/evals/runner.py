@@ -163,6 +163,7 @@ def run_once(case, workdir, model_index):
     from src.roles import get_system_prompt
     from src.subagent import HeadlessUI
     from src import agent as _agent
+    from src.agent_result import AgentResult
 
     sess = _session.Session()
     sess.agent_mode = case.get("mode", "act")
@@ -186,7 +187,11 @@ def run_once(case, workdir, model_index):
         sess.chat_history = [SystemMessage(content=system_prompt),
                              HumanMessage(content=case["prompt"])]
         _session.register(sess)
-        _agent.agent_loop(ui)
+        result = _agent.agent_loop(ui)
+        if not isinstance(result, AgentResult):
+            err = f"Agent 未返回有效运行结果: {result!r}"
+        elif result.status != "completed":
+            err = f"{result.status}: {result.reason}"
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
     finally:

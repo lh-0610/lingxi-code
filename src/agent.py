@@ -8,7 +8,6 @@
 - 写入 state 必须用 `state.X = ...`（不要 `agent.X = ...`，那只会污染 agent 模块本身）
 """
 import re
-import contextlib
 import threading as _threading
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -54,11 +53,12 @@ from .streaming import _stream_with_tools, _execute_tool, _extract_thinking
 from .claude_code import claude_code_loop as _claude_code_loop
 from . import session as _session_mod
 from .llm_errors import ContextOverflowError as _ContextOverflowError
+from . import projects as _projects
+from .agent_result import AgentResult
 
 # 上下文溢出后"收紧预算再发"的最大次数。每次收紧折半，4 次已经砍到 1/16，
 # 还溢出说明不是历史长度的问题（例如单条消息本身就超窗），继续试只是烧钱。
 _MAX_OVERFLOW_RETRIES = 3
-from . import projects as _projects
 
 _BOUND_LLM_CACHE = {}
 
@@ -176,11 +176,14 @@ if isinstance(state.chat_history[0], SystemMessage):
 # Agent 循环（全流式）
 # ══════════════════════════════════════
 
-def agent_loop(ui):
+def agent_loop(ui) -> AgentResult:
+    result = AgentResult("failed", "Agent 未正常完成。")
+    clean_text = ""
     try:
+        if state.stop_flag:
+            return AgentResult("cancelled", "用户停止生成。")
         from .verification import reset_verification as _v_reset
-        with contextlib.suppress(Exception):
-            _v_reset(_session_mod.current_session().verification)
+        _v_reset(_session_mod.current_session().verification)
 
         mtype = MODEL_LIST[state.current_model_index][1]
         model_name = MODEL_LIST[state.current_model_index][0]
@@ -194,16 +197,20 @@ def agent_loop(ui):
                     "\n⚠️ 知识库模式不支持 Claude Code 模型（它走本地 CLI、无法使用知识库检索）。"
                     "请在顶栏换一个 API 模型，或切回「编码」模式再用 Claude Code。\n",
                     "ai_msg")
-                return
-            _claude_code_loop(ui)
-            return
+                return AgentResult("failed", "知识库模式不支持 Claude Code。")
+            result = _claude_code_loop(ui)
+            if state.stop_flag:
+                return AgentResult("cancelled", "用户停止生成。")
+            if not isinstance(result, AgentResult):
+                return AgentResult("failed", "Claude Code 未返回有效运行结果。")
+            return result
 
         # 本地模型需要检测 Ollama 服务
         if mtype == "ollama" and not check_ollama():
             ui.show_message("\n⚠️ 无法连接 Ollama 服务，请先运行 ollama serve\n", "ai_msg")
             from .config import OLLAMA_BASE_URL
             logger.error(f"Ollama 服务不可用: {OLLAMA_BASE_URL}")
-            return
+            return AgentResult("failed", "无法连接 Ollama 服务。")
 
         round_i = -1
         # 角色卡存在时用角色名替代模型名
@@ -216,6 +223,7 @@ def agent_loop(ui):
 
             if state.stop_flag:
                 logger.info("用户停止生成")
+                result = AgentResult("cancelled", "用户停止生成。")
                 break
 
             # 轮次上限：模型持续返回 tool_calls 时主循环没有自然终点，触顶就停下来说明情况。
@@ -232,6 +240,7 @@ def agent_loop(ui):
                 logger.warning(f"agent_loop 触顶 {_max_rounds} 轮，强制停止")
                 state.chat_history.append(AIMessage(content=_msg))
                 ui.show_message(f"\n{_msg}\n", "tool_result")
+                result = AgentResult("limit_reached", _msg)
                 break
 
             # 只在第一轮显示标签
@@ -261,6 +270,7 @@ def agent_loop(ui):
                             "对话超出模型上下文窗口，自动压缩后仍然放不下。"
                             "请新建对话，或换一个上下文窗口更大的模型。"
                         )
+                        result = AgentResult("failed", f"上下文压缩后仍然溢出: {of_err}")
                         overflow_fatal = True
                         break
                     state.overflow_squeeze = int(getattr(state, "overflow_squeeze", 0) or 0) + 1
@@ -304,6 +314,7 @@ def agent_loop(ui):
                 clean = re.sub(r"<think>.*?</think>|<thought>.*?</thought>", "", raw_text, flags=re.DOTALL).strip()
                 if clean or (gathered is not None and isinstance(gathered.content, list)):
                     state.chat_history.append(_build_ai_message(gathered, clean, []))
+                result = AgentResult("cancelled", "用户停止生成。")
                 break
 
             clean_text = re.sub(r"<think>.*?</think>|<thought>.*?</thought>", "", raw_text, flags=re.DOTALL).strip()
@@ -369,7 +380,7 @@ def agent_loop(ui):
                 continue
             else:
                 # 纯文本回复，先过完成闸门，再渲染 Markdown 并结束。
-                if not clean_text and not raw_text:
+                if not clean_text:
                     # 这一轮没收到正文。两种成因要分开报，否则全甩锅"连接被中断"会误导：
                     #  ① 输出额度耗尽(stop_reason=max_tokens / finish_reason=length)：reasoning
                     #     模型思考太长把 max_tokens 吃光，根本没轮到吐正文。raw_text 只装正文不装
@@ -401,12 +412,16 @@ def agent_loop(ui):
                             f"第 {round_i+1} 轮流结束但未收到任何内容（stop_reason={stop_reason or '空'}），"
                             f"疑似服务端 idle timeout 中断"
                         )
+                    result = AgentResult("failed", f"模型未返回正文（结束原因: {stop_reason or '空流'}）。")
                     break
+                result = AgentResult("completed")
                 try:
                     from .verification import get_verification_gaps as _v_gaps
                     _cur_sess = _session_mod.current_session()
-                    _verification = getattr(_cur_sess, "verification", None)
-                    _gaps = _v_gaps(_verification) if _verification is not None else []
+                    _verification = _cur_sess.verification
+                    _gaps = _v_gaps(_verification)
+                    if _gaps:
+                        result = AgentResult("unverified", "\n".join(_gaps))
                     if _gaps and not state.stop_flag and getattr(state, "agent_mode", "act") != "plan":
                         if not _verification.get("gate_prompted"):
                             _verification["gate_prompted"] = True
@@ -429,7 +444,9 @@ def agent_loop(ui):
                             + (clean_text or "")
                         )
                 except Exception as _ge:
-                    logger.debug(f"验证闸门检查异常（已忽略）: {_ge}")
+                    result = AgentResult("unverified", f"验证闸门检查失败: {_ge}")
+                    logger.warning(result.reason)
+                    clean_text = f"⚠️ {result.reason}\n\n{clean_text}"
 
                 state.chat_history.append(_build_ai_message(gathered, clean_text, []))
                 if clean_text:
@@ -454,7 +471,8 @@ def agent_loop(ui):
             # 走 notify_long（尊重 NOTIFY 开关 / 分级 / 节流，用户可在设置里关 done 通知）。
             try:
                 from .notify import notify_long as _notify_long
-                _notify_long("done", "灵犀回复", clean_text or "(无文本回复)", "agent_done")
+                if result.status == "completed" and not state.stop_flag:
+                    _notify_long("done", "灵犀回复", clean_text or "(无文本回复)", "agent_done")
             except Exception:
                 pass
 
@@ -493,3 +511,8 @@ def agent_loop(ui):
         else:
             display_err = err_msg[:100]
         ui.show_retry(display_err)
+        result = AgentResult("failed", err_msg)
+
+    if state.stop_flag:
+        return AgentResult("cancelled", "用户停止生成。")
+    return result

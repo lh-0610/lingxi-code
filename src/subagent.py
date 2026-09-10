@@ -1,6 +1,4 @@
 """Parallel writable sub-agents backed by per-agent git worktrees."""
-import os
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -10,6 +8,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from . import session as _session, worktree
 from .paths import logger
 from .roles import get_system_prompt
+from .agent_result import AgentResult
+from .verification import mark_dirty
 
 _MAX_CONCURRENT = 4
 _TIMEOUT_SECONDS = 300
@@ -88,30 +88,8 @@ class _ChildRun:
     finished: bool = False
     timed_out: bool = False
     error: str = ""
+    result: AgentResult | None = None
     files_changed: list[str] = field(default_factory=list)
-
-
-def _changed_files(path: str | None) -> list[str]:
-    if not path or not os.path.isdir(path):
-        return []
-    try:
-        result = subprocess.run(
-            # quotepath=false：中文文件名不转义；否则报给模型的改动列表是乱码
-            ["git", "-c", "core.quotepath=false", "status", "--porcelain"],
-            cwd=path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=10,
-        )
-    except Exception:
-        return []
-    files = []
-    for line in (result.stdout or "").splitlines():
-        if len(line) >= 4:
-            name = line[3:].strip()
-            # 重命名条目 "R  old -> new"：取新名，别把 "old -> new" 当成一个文件名
-            if " -> " in name:
-                name = name.split(" -> ", 1)[1].strip()
-            files.append(name)
-    return sorted(set(files))
 
 
 def _last_ai_text(sess: _session.Session, fallback: str = "") -> str:
@@ -197,9 +175,12 @@ def spawn(tasks: list[str], project_root: str, parent_ui=None) -> list[dict]:
                 _session.bind_thread(r.session)
                 try:
                     r.session.is_generating = True
-                    _run_agent_loop(r.ui)
+                    if parent_sess.stop_flag or r.session.stop_flag:
+                        r.result = AgentResult("cancelled", "父任务或子任务已停止。")
+                    else:
+                        r.result = _run_agent_loop(r.ui)
                 except Exception as e:
-                    r.error = str(e)
+                    r.result = AgentResult("failed", str(e))
                     logger.error(f"子 Agent {r.index} 失败: {e}", exc_info=True)
                 finally:
                     r.session.is_generating = False
@@ -228,47 +209,55 @@ def spawn(tasks: list[str], project_root: str, parent_ui=None) -> list[dict]:
             run.thread.join(min(0.2, remaining))
     stop_monitor.set()
 
-    for run in runs:
-        run.files_changed = _changed_files(run.worktree_path)
-
     results = []
     for run in runs:
         summary = _last_ai_text(run.session, run.ui.text())
-        if run.timed_out:
-            results.append({
-                "task": run.task,
-                "summary": summary or "子 Agent 超时，已请求停止。",
-                "files_changed": run.files_changed,
-                "merge": "timeout",
-                "detail": f"超过 {_TIMEOUT_SECONDS}s，保留 worktree: {run.worktree_path}",
-            })
-            continue
+        outcome = run.result
+        if not isinstance(outcome, AgentResult):
+            outcome = AgentResult("failed", f"子 Agent 未返回有效运行结果: {outcome!r}")
         if run.error:
-            results.append({
-                "task": run.task,
-                "summary": summary,
-                "files_changed": run.files_changed,
-                "merge": "error",
-                "detail": run.error,
-            })
-            continue
-        if not run.worktree_path:
-            results.append({
-                "task": run.task,
-                "summary": summary,
-                "files_changed": run.files_changed,
-                "merge": "skipped",
-                "detail": "未创建 worktree。",
-            })
-            continue
+            outcome = AgentResult("failed", run.error)
+        if run.timed_out:
+            outcome = AgentResult("limit_reached", f"超过 {_TIMEOUT_SECONDS}s，已请求停止。")
+        elif parent_sess.stop_flag or run.session.stop_flag:
+            outcome = AgentResult("cancelled", "父任务或子任务已停止。")
 
-        ok, detail = worktree.finish(run.session, apply_changes=True)
-        merge = "ok" if ok else "conflict"
+        merge = "timeout" if run.timed_out else "skipped"
+        detail = f"任务状态 {outcome.status}: {outcome.reason}"
+        if run.worktree_path and run.finished:
+            try:
+                run.files_changed = worktree.changed_files(run.worktree_path)
+            except Exception as e:
+                run.error = f"读取 worktree 改动失败: {e}"
+                detail += f"\n{run.error}"
+        if not run.timed_out and (parent_sess.stop_flag or run.session.stop_flag):
+            outcome = AgentResult("cancelled", "父任务或子任务已停止。")
+            detail = f"任务状态 {outcome.status}: {outcome.reason}" + (f"\n{run.error}" if run.error else "")
+        if (outcome.status == "completed" and not run.error
+                and run.finished and run.worktree_path
+                and not parent_sess.stop_flag and not run.session.stop_flag):
+            try:
+                ok, merge_detail = worktree.finish(run.session, apply_changes=True)
+            except Exception as e:
+                ok, merge_detail = False, f"git 合并失败: {e}"
+            merge = "ok" if ok else "conflict"
+            detail = merge_detail
+            # finish 可能已应用补丁，却在清理隔离区时失败；失败也不能沿用父任务的旧验证。
+            for path in run.files_changed:
+                mark_dirty(parent_sess.verification, path)
+            if run.files_changed:
+                parent_sess.verification["tests_run"] = False
+                parent_sess.verification["tests_passed"] = None
+                parent_sess.verification["tests_reason"] = ""
+        if merge != "ok" and run.worktree_path:
+            detail += f"\n保留 worktree: {run.worktree_path}"
         results.append({
             "task": run.task,
             "summary": summary,
+            "status": outcome.status,
+            "reason": outcome.reason,
             "files_changed": run.files_changed,
             "merge": merge,
-            "detail": detail if ok else f"{detail}\n保留 worktree: {run.worktree_path}",
+            "detail": detail,
         })
     return results

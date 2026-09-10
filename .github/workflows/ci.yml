@@ -27,6 +27,6 @@ jobs:
         run: >-
           pip install langchain langchain-core langchain-ollama langchain-openai
           langchain-anthropic langchain-google-genai PySide6 markdown requests
-          pillow numpy jedi pytest
+          pillow numpy chromadb pypdf jedi pytest
       - name: Pytest
         run: python -m pytest scripts/ -q

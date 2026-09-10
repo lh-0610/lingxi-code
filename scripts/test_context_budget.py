@@ -149,7 +149,7 @@ def test_claude_200k_budget(_use_real_models):
     orig_idx = streaming.state.current_model_index
     streaming.state.current_model_index = idx
     try:
-        expected = 200_000 - _max_tokens_for(m[0], m[2]) - HISTORY_SAFETY_MARGIN
+        expected = 200_000 - _max_tokens_for(m[1], m[2]) - HISTORY_SAFETY_MARGIN
         assert streaming._current_history_budget() == expected
     finally:
         streaming.state.current_model_index = orig_idx
