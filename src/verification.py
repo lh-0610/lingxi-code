@@ -1,4 +1,4 @@
-"""验证状态管理模块（纯函数 + 会话级状态操作）。
+"""验证状态管理（会话状态 + 完成前的项目文件复查）。
 
 目标：在编码任务中，确保 AI 在声称"已完成"前必须先验证（跑测试 / 静态检查通过），
 防止无验证的草率收尾。
@@ -49,6 +49,8 @@ def reset_verification(v: dict) -> None:
     v["tests_reason"] = ""
     v["diff_reviewed"] = False
     v["gate_prompted"] = False
+    v.pop("workspace_snapshots", None)
+    v.pop("tracking_errors", None)
     # failure_diagnosis 在 check_repair_allowed() 成功通过时自动归零；
     # 新用户消息开始时也重置，防止上一轮残留状态。
     v["failure_diagnosis"] = {
@@ -113,17 +115,20 @@ def mark_diff_reviewed(v: dict) -> None:
 
 
 def get_verification_gaps(v: dict) -> list[str]:
-    """纯函数：检测验证间隙，返回需要补充验证的提示列表。
+    """复查命令追踪的工作区并返回待补充的验证要求。
 
-    空列表 = 无间隙，可以放心完成任务。
+    空列表表示没有已知验证缺口，不是任务语义正确性的证明。
     非空列表 = 有未验证的改动，AI 应在回复完成前补充验证。
     """
-    gaps = []
+    from .workspace_changes import refresh_workspace_tracking
+    refresh_workspace_tracking(v)
+    gaps = [f"工作区变更尚未完整验证：{reason}"
+            for reason in v.get("tracking_errors", {}).values()]
     has_code_changes = bool(v["code_dirty_files"])
     has_any_changes = bool(v["dirty_files"])
 
     if not has_any_changes:
-        return []
+        return gaps
 
     # 1. 测试未通过或未运行（仅有代码改动时检查）
     if has_code_changes:
@@ -134,6 +139,9 @@ def get_verification_gaps(v: dict) -> list[str]:
             )
         elif v["tests_passed"] is False:
             gaps.append("测试未通过（有失败用例），请先修复测试再声称任务完成。")
+        elif v["tests_passed"] is not True:
+            reason = v.get("tests_reason") or "未取得明确结果"
+            gaps.append(f"测试尚未验证：{reason}。不能将结果未知视为通过。")
 
     # 2. 静态检查未通过
     failed_checks = [
@@ -175,7 +183,8 @@ def _is_failure_result(content: str, tool_name: str) -> bool:
         ))
     if tool_name == "check_code":
         # 有检查问题（不是"✅"开头，也不是"未知"降级）
-        return "⚠️" in content or "❌" in content
+        return (any(line.startswith("status=failed|checker=") for line in content.splitlines())
+                or "⚠️" in content or "❌" in content)
     return False
 
 

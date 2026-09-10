@@ -72,8 +72,6 @@ def _resolve_remote_confirm(cid: str, allow: bool, remember: bool = False) -> bo
             _req_sess = entry["result"].get("_session")
             if _req_sess is not None:
                 _req_sess.stop_flag = True
-            else:
-                _state.stop_flag = True
         # 让主线程隐藏可能还挂着的 PC 确认卡（仅 UI，不碰 result/done）。
         # 必须在 done.set() 之前 emit：dismiss 先入主线程队列，worker 唤醒后即便
         # 立刻弹下一张卡，FIFO 也保证 dismiss 先处理、不会误清掉新卡。
@@ -548,12 +546,6 @@ class ConfirmBarsMixin:
         # 把焦点交给 bar 本身，1/2/3/Esc 由 eventFilter 接管
         self.command_confirm_bar.setFocus()
 
-    def _cur_confirm_sess(self):
-        """当前确认对应的会话：worker 发起 confirm 时记下的发起会话；没有则退当前线程会话。
-        让主线程点"记住"时把白名单加到【发起确认的那个会话】（可能是后台会话，非 active）。"""
-        from .. import session as _session
-        return getattr(self, "_active_confirm_session", None) or _session.current_session()
-
     def _resolve_command_confirm(self, allow: bool, remember: bool = False):
         """按钮点击：写结果、（必要时）把 base 命令加进前缀白名单、唤醒 worker、隐藏卡片。
 
@@ -564,16 +556,17 @@ class ConfirmBarsMixin:
             return  # 已被处理过 / 状态被清
 
         feedback = self.command_confirm_feedback.text().strip()
+        origin = self._command_confirm_result_holder.get("_session")
 
         if not allow:
             # 只有纯拒绝（无反馈）才停掉本轮；有反馈则让 AI 据此调整
-            if not feedback:
-                _state.stop_flag = True
+            if not feedback and origin is not None:
+                origin.stop_flag = True
 
-        if allow and remember and not self._command_confirm_destructive:
+        if allow and remember and not self._command_confirm_destructive and origin is not None:
             base = self._extract_base_command(self.command_confirm_text.toPlainText())
             if base:
-                self._cur_confirm_sess().command_prefix_allowlist.add(base)
+                origin.command_prefix_allowlist.add(base)
                 logger_log = getattr(self, "_logger", None)  # 不强依赖；只是 best-effort
                 if logger_log:
                     try:
@@ -848,14 +841,15 @@ class ConfirmBarsMixin:
         if self._edit_confirm_done_event is None:
             return
         feedback = self.edit_confirm_feedback.text().strip()
+        origin = self._edit_confirm_result_holder.get("_session")
         if not allow:
             # 只有纯拒绝（无反馈）才停掉本轮；有反馈则让 AI 据此调整
-            if not feedback:
-                _state.stop_flag = True
-        if allow and remember:
+            if not feedback and origin is not None:
+                origin.stop_flag = True
+        if allow and remember and origin is not None:
             p = self._edit_confirm_path
             if p:
-                self._cur_confirm_sess().edit_path_allowlist.add(p)
+                origin.edit_path_allowlist.add(p)
         self._edit_confirm_result_holder["allow"] = allow
         self._edit_confirm_result_holder["feedback"] = feedback
         self._edit_confirm_done_event.set()
@@ -929,7 +923,6 @@ class ConfirmBarsMixin:
         """
         from .. import session as _session
         _sess = _session.current_session()      # 发起确认的会话（worker 线程绑的）
-        self._active_confirm_session = _sess    # 给主线程 _resolve_* 把"记住"加到这个会话
         # 危险命令必须每次确认，永不被白名单绕过
         is_destructive = (
             command.startswith("将执行 Git 写操作")
@@ -999,7 +992,6 @@ class ConfirmBarsMixin:
         """
         from .. import session as _session
         _sess = _session.current_session()      # 发起编辑确认的会话（worker 线程绑的）
-        self._active_confirm_session = _sess
         if path and path in _sess.edit_path_allowlist:
             return True, ""
 

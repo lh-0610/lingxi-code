@@ -18,6 +18,7 @@ from .paths import logger
 from .config import CLAUDE_CODE_MODEL, CLAUDE_CODE_SKIP_PERMISSIONS
 from .memory import save_session, maybe_generate_session_title
 from .roles import get_external_agent_context, get_current_role_name
+from .agent_result import AgentResult
 
 
 def _kill_proc_tree(proc):
@@ -71,8 +72,10 @@ def _build_claude_cmd(*, agent_mode, skip_permissions, model, system_prompt_file
     return cmd
 
 
-def claude_code_loop(ui):
-    """通过 Claude Code CLI 处理消息"""
+def claude_code_loop(ui) -> AgentResult:
+    """通过 Claude Code CLI 处理消息；外部工具验证不可观测，不自动认定完成。"""
+    if state.stop_flag:
+        return AgentResult("cancelled", "用户停止生成。")
 
     # 构造带历史的 prompt（claude -p 不支持多轮，要手动拼）
     def _msg_text(msg):
@@ -101,7 +104,7 @@ def claude_code_loop(ui):
             history_parts.append(f"[你之前的回复]: {msg.content}")
 
     if not last_user_msg:
-        return
+        return AgentResult("failed", "Claude Code 没有可处理的用户文本。")
 
     # 检查最新用户消息是否包含图片
     has_images = False
@@ -187,6 +190,7 @@ def claude_code_loop(ui):
         full_text = ""
         thinking_tokens = 0   # CLI 只上报思考 token 估算，不返回思维链原文
         diagnostic_lines = []
+        outcome = AgentResult("failed", "Claude Code 未返回最终 result 事件。")
         indicator_removed = False
         for line in proc.stdout:
             if state.stop_flag:
@@ -256,7 +260,14 @@ def claude_code_loop(ui):
                         preview = str(result)[:200]
                         ui.show_message(f"{preview}\n", "tool_result")
             elif etype == "result":
-                # 最终结果
+                subtype = event.get("subtype", "")
+                if subtype == "success" and event.get("is_error") is False:
+                    outcome = AgentResult("unverified", "Claude Code 已结束，但外部工具的验证结果无法核实。")
+                elif subtype in {"error_max_turns", "error_max_budget_usd"}:
+                    outcome = AgentResult("limit_reached", f"Claude Code 达到运行上限: {subtype}")
+                else:
+                    reason = event.get("errors") or event.get("result") or subtype or "未知结果"
+                    outcome = AgentResult("failed", f"Claude Code 失败: {reason}")
                 # 提取 Claude Code 返回的 token 用量
                 usage_data = event.get('usage', {})
                 input_t = usage_data.get('input_tokens', 0) or 0
@@ -285,6 +296,7 @@ def claude_code_loop(ui):
                 err = f"Claude Code exited with code {proc.returncode}"
             logger.error(f"Claude Code 错误: {err}")
             ui.show_message(f"\n⚠️ {err}\n", "ai_msg")
+            outcome = AgentResult("failed", err)
 
         clean_text = full_text.strip()
         if clean_text:
@@ -292,19 +304,26 @@ def claude_code_loop(ui):
             logger.info(f"Claude Code 回复完成: {clean_text[:100]}...")
 
         save_session()
-        maybe_generate_session_title()
+        from . import session
+        if not session.current_session().is_subagent:
+            maybe_generate_session_title()
+        if state.stop_flag:
+            return AgentResult("cancelled", "用户停止生成。")
+        return outcome
 
     except FileNotFoundError:
         heartbeat_stop.set()
         ui.remove_thinking_indicator()
         ui.show_message("\n⚠️ 未找到 claude 命令，请确认 Claude Code CLI 已安装\n", "ai_msg")
         logger.error("claude 命令未找到")
+        return AgentResult("failed", "未找到 claude 命令。")
     except Exception as e:
         if heartbeat_started:
             heartbeat_stop.set()
         ui.remove_thinking_indicator()
         logger.error(f"Claude Code 异常: {e}", exc_info=True)
         ui.show_retry(str(e)[:100])
+        return AgentResult("cancelled" if state.stop_flag else "failed", str(e))
     finally:
         _kill_proc_tree(proc)
         if sys_prompt_file:

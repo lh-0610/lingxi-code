@@ -6,6 +6,7 @@
 import json
 
 from .paths import CONFIG_PATH, logger
+from .limits import RAG_MIN_CHUNK_SIZE as _RAG_MIN_CHUNK_SIZE
 
 
 try:
@@ -250,7 +251,6 @@ RAG_RERANK_URL: str = _rag_cfg.get("rerank_url", "") or \
 if RAG_TOP_K <= 0:
     logger.warning(f"rag.top_k={RAG_TOP_K} 非法（须 >0），回退 5")
     RAG_TOP_K = 5
-from .limits import RAG_MIN_CHUNK_SIZE as _RAG_MIN_CHUNK_SIZE
 if RAG_CHUNK_SIZE < _RAG_MIN_CHUNK_SIZE:
     # 下限保护：chunk_size 太小（如 1）会把文档切成海量块 → 天量付费 embedding 请求
     logger.warning(f"rag.chunk_size={RAG_CHUNK_SIZE} 过小（须 >={_RAG_MIN_CHUNK_SIZE}），回退 800")

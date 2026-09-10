@@ -1401,9 +1401,17 @@ def _execute_tool(tc, ui, _preinvoked=None):
                 ))
                 return
 
+    from contextlib import nullcontext
+    from . import session as _session
+    from .tools_common import _project_cwd
+    from .workspace_changes import refresh_workspace_tracking, track_workspace_changes
+    verification = _session.get_verification()
+    refresh_workspace_tracking(verification)
     try:
-        # 并行预取过结果就直接用（agent_loop 对多个只读工具并行 invoke 后，按序走这里渲染+append）
-        result = _preinvoked if _preinvoked is not None else get_tool_map()[name].invoke(args)
+        tracking = track_workspace_changes(_project_cwd()) if name.startswith("mcp_") else nullcontext()
+        with tracking:
+            # 并行预取结果只渲染一次；MCP 的本地写入与命令一样使旧验证失效。
+            result = _preinvoked if _preinvoked is not None else get_tool_map()[name].invoke(args)
     except Exception as e:
         result = f"工具执行失败: {e}"
         logger.error(f"工具 {name} 执行失败: {e}")
@@ -1413,6 +1421,8 @@ def _execute_tool(tc, ui, _preinvoked=None):
             _notify("error", f"工具失败: {name}", str(e)[:300], "tool_error")
         except Exception:
             pass
+    finally:
+        refresh_workspace_tracking(verification)
 
     # 流式工具（run_command）执行过程中已经把每行 stdout 实时 push 到 UI 了；
     # 这里若再 push 一次 result，会把所有输出在末尾**重复显示一遍**。

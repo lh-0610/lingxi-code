@@ -161,3 +161,47 @@ class TestCases:
         r = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=fx,
                            capture_output=True, text=True, timeout=120)
         assert r.returncode != 0, "broken-calc fixture 居然是全绿的"
+
+
+class TestRunOutcomes:
+    @pytest.mark.parametrize("status", ["failed", "cancelled", "unverified", "limit_reached", "unknown"])
+    def test_incomplete_outcome_is_error(self, tmp_path, monkeypatch, status):
+        from src import agent
+        from src.agent_result import AgentResult
+        from runner import run_once, resolve_model
+        monkeypatch.setattr(agent, "agent_loop", lambda ui: AgentResult(status, "not complete"))
+        _, _, err = run_once({"name": "offline", "prompt": "task"}, str(tmp_path), resolve_model(""))
+        assert err == f"{status}: not complete"
+
+    def test_none_is_not_success(self, tmp_path, monkeypatch):
+        from src import agent
+        from runner import run_once, resolve_model
+        monkeypatch.setattr(agent, "agent_loop", lambda ui: None)
+        _, _, err = run_once({"name": "offline", "prompt": "task"}, str(tmp_path), resolve_model(""))
+        assert "未返回有效运行结果" in err
+
+    def test_caught_model_error_fails_otherwise_passing_case(self, tmp_path, monkeypatch):
+        from src import agent, config
+        import runner
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        (fixture / "kept.txt").write_text("unchanged")
+        monkeypatch.setattr(runner, "FIXTURES_DIR", str(tmp_path))
+        monkeypatch.setattr(config, "NOTIFY_ENABLED", False)
+
+        def failed_stream(ui):
+            raise RuntimeError("offline SDK failure")
+
+        monkeypatch.setattr(agent, "_stream_with_tools", failed_stream)
+        case = {"id": "offline", "name": "caught failure", "fixture": "fixture", "prompt": "task",
+                "assert": [{"type": "no_file_modified"}]}
+        result = runner.run_case(case, 1, runner.resolve_model(""))
+        assert result["passed"] == 0
+
+    def test_completed_outcome_has_no_error(self, tmp_path, monkeypatch):
+        from src import agent
+        from src.agent_result import AgentResult
+        from runner import run_once, resolve_model
+        monkeypatch.setattr(agent, "agent_loop", lambda ui: AgentResult("completed"))
+        _, _, err = run_once({"name": "offline", "prompt": "task"}, str(tmp_path), resolve_model(""))
+        assert err is None

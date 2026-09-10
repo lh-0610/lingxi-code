@@ -27,8 +27,8 @@ def git_repo(tmp_path):
     """创建一个临时 git 仓库，返回其 Path。"""
     repo = tmp_path / "project"
     repo.mkdir()
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    env = {**os.environ, "GIT_AUTHOR_NAME": "皓 梁", "GIT_AUTHOR_EMAIL": "ll1816606771@gmail.com",
+           "GIT_COMMITTER_NAME": "皓 梁", "GIT_COMMITTER_EMAIL": "ll1816606771@gmail.com"}
     subprocess.run(["git", "init"], cwd=str(repo), check=True,
                    capture_output=True, env=env)
     # 禁用 GPG 签名（CI 环境可能没有 key）
@@ -302,8 +302,8 @@ class TestCreate:
             f.write("created in worktree\n")
 
         # 在 worktree 里 commit
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        env = {**os.environ, "GIT_AUTHOR_NAME": "皓 梁", "GIT_AUTHOR_EMAIL": "ll1816606771@gmail.com",
+               "GIT_COMMITTER_NAME": "皓 梁", "GIT_COMMITTER_EMAIL": "ll1816606771@gmail.com"}
         subprocess.run(["git", "add", "."], cwd=wt_path, check=True,
                        capture_output=True)
         subprocess.run(["git", "commit", "-m", "wt commit"], cwd=wt_path,
@@ -434,8 +434,8 @@ class TestApplyChangesEdgeCases:
 
     @staticmethod
     def _commit(repo, *, msg="c"):
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        env = {**os.environ, "GIT_AUTHOR_NAME": "皓 梁", "GIT_AUTHOR_EMAIL": "ll1816606771@gmail.com",
+               "GIT_COMMITTER_NAME": "皓 梁", "GIT_COMMITTER_EMAIL": "ll1816606771@gmail.com"}
         subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", msg], cwd=str(repo), check=True,
                        capture_output=True, env=env)

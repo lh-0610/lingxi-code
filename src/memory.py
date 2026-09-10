@@ -126,6 +126,12 @@ def save_session(*, session=None):
     session=None → 从 state 代理读（兼容旧调用）；
     session=<Session> → 直接从该 Session 对象读（用于保存后台会话）。
     """
+    # 快照与落盘必须在同一临界区，否则先取的旧快照会覆盖 worker 的最终回复。
+    with _LOCK:
+        _save_session_locked(session=session)
+
+
+def _save_session_locked(*, session=None):
     _ensure_memory_dir()
 
     from . import session as _session_mod

@@ -142,7 +142,7 @@ python main.py
 - **Agent 主循环**（`src/agent.py:agent_loop`）：stream → 收 tool_calls → 执行 → 再 stream → 没工具就停
 - **Claude Code 模式**：`subprocess.Popen` 调本地 `claude -p --output-format stream-json`，解析 `assistant`/`user`/`result` 事件
 - **UI ⟷ Agent 解耦**：agent 线程通过 `ui.show_message(text, tag)` 调用，内部 `bridge.append_signal.emit()` queue 到主线程渲染。所有 `ChatUI` 的对 agent 暴露接口（`show_message / render_final_markdown / remove_thinking_indicator / show_token_usage / show_retry / confirm_command`）都是线程安全的 wrapper
-- **命令确认**（`src/ui/chat_window.py:confirm_command`）：worker 线程调它时，会通过 `confirm_request = Signal(str, object, object)` 投递到主线程，UI 显示内联确认卡，worker 线程 `event.wait(timeout=300)` 阻塞直到用户点完。会话级 allowlist（`_session_command_allowlist`）让用户选"允许并记住"后同样命令秒过；危险命令（`_is_destructive_command` 正则匹配 `rm -rf` / `format` / `sudo` 等）不给"记住"选项
+- **命令确认**（`src/ui/chat_window.py:confirm_command`）：worker 线程调它时，会通过 `confirm_request = Signal(str, object, object)` 投递到主线程，UI 显示内联确认卡，worker 线程 `event.wait()` 等待用户操作；授权记忆与拒绝停止必须取当前确认卡 `result_holder['_session']` 的归属，不能依赖窗口共享的“最后发起确认的会话”指针。会话级 allowlist（`_session_command_allowlist`）让用户选"允许并记住"后同样命令秒过；危险命令（`_is_destructive_command` 正则匹配 `rm -rf` / `format` / `sudo` 等）不给"记住"选项
 - **思考过程**：解析 `<think>...</think>` / `reasoning_content` / Anthropic `thinking` content block，统一显示成可折叠的紫色块
 - **Markdown 渲染**：流式过程显示纯文本，完成后用 `markdown` 库一次性转 HTML 替换（QTextBrowser 不支持 `<style>` 标签，所有样式必须 inline）。复制/重新生成按钮用 `<table cellpadding=0 height=18>` spacer 撑开（QTextBrowser 对 `<div margin>` 支持差）
 
@@ -183,12 +183,16 @@ python main.py
 - 子 Agent 递归深度天然封顶：`spawn_agents` 里 `is_subagent` 的会话不许再派生
 
 ### 验证闭环与自动修复（src/verification.py，编码核心）
-- **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过
-- **自动修复循环**：`run_tests` / `check_code` 失败时，`check_repair_allowed()` 注入 `[REPAIR_INFO]` 修复提示让模型继续修，并**封顶 N 轮**（`failure_diagnosis.attempt >= max_attempts` 后停，交完成闸门/模型收尾）——见 `agent.py` 工具执行后、插 ToolMessage 前的调用
+- **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。
+- **命令与 MCP 本地写入**：`workspace_changes.py` 在调用前后追踪项目文件，工具执行及完成检查时复查；变化使旧测试/diff 失效。Git 项目遵循 ignore，非 Git 项目跳过依赖/构建目录。无法完整枚举（权限、子模块、文件数上限等）保持未验证；它不是进程沙箱，不保证跟踪项目外或任务结束后的写入。
+- **自动修复循环**：`check_code` 的 `[REPAIR_INFO]` / `status=failed|checker=...` 是失败识别依据之一，不能只依赖展示 emoji。`run_tests` / `check_code` 失败后由 `agent_loop` 注入诊断提示，修复次数封顶。
+- **终态契约**：`agent_loop` 返回不可变的 `AgentResult(status, reason)`：`completed / failed / cancelled / unverified / limit_reached`。线程返回、工具结果和任务完成是不同事实。评测必须检查状态，不能仅凭文件断言通过。Claude CLI 的外部验收无法核实，即使收到 success 也返回 `unverified`。
 - 纯运行态，不持久化
 
 ### 子 Agent 并行 + worktree 隔离（src/subagent.py + worktree.py）
-- `spawn_agents(tasks)` 把多个**相互独立**的子任务并行派给子 Agent，**各自在独立 git worktree 改代码**，跑完合并回主项目
+- `spawn_agents(tasks)` 把多个**相互独立**的子任务并行派给子 Agent，**各自在独立 git worktree 改代码**。仅明确 `completed` 且父子均未停止时自动合并；失败、未知、未验证、取消、超时均保留隔离区和原因。合并后父会话的相关验证结果失效。
+- **固定合并身份**：创建时解析 `base_sha`，创建分支与最终净补丁使用同一 SHA；`project_path` 明确记录原始 checkout。元数据存入隔离区真实 Git admin 目录的 `lingxi-worktree.json`，不进入用户 diff。支持已有 linked worktree 作为项目，不从 common Git dir 猜目标。
+- **恢复与兼容**：缺失/损坏元数据或身份变化时保留隔离区，拒绝自动恢复/合并，仍允许用户显式丢弃。旧版隔离区不猜基点自动迁移。`worktree.changed_files()` 使用临时 index 获取已提交、未提交和未跟踪净变化；读取失败不能伪装成没有改动。
 - 子 Agent 是 `is_subagent=True` 的会话，`ui_ref=None`（不弹前台确认）；文件/命令严格限定在自己 worktree（`tools_common._subagent_path_rejection` / `_subagent_command_rejection` best-effort 沙箱）
 - `worktree.py` 管隔离区生命周期；`Session.worktree` 路由该会话所有文件/命令落点（`_project_cwd` 优先返回 worktree）
 
@@ -199,6 +203,7 @@ python main.py
 
 ### 持久化（memory.py 并发安全）
 - 所有读写 `chat_memory/` 的函数都被 `threading.RLock` 串行化（`save_session` / `_update_index` / `_write_session_title` / `load_session` / `list_sessions` / `delete_session` / `move_sessions_to_no_project` / `_ensure_memory_dir`）
+- `save_session` 必须在同一临界区内取得 ID/标题/历史快照并写 session/index、rekey；只锁写盘会让 UI 的旧快照覆盖 worker 的新回复。
 - 用 RLock 不用 Lock：`save_session` 自己持锁时还会调 `_update_index`（也持锁），普通 Lock 会自死锁
 - 修复了原来"快速发两条消息时，标题生成线程和 save_session 同时改 index.json 互相覆盖丢会话"的并发 bug
 
@@ -280,7 +285,7 @@ python main.py
 | `git_diff` / `git_log` / `git_status` | 只读 git（看改动/历史/状态；commonpath 越界防护；Plan 只读放行） |
 | `git_stage` / `git_unstage` / `git_commit` | git 写操作（暂存/取消暂存/本地提交，**无 push**）；**执行前强制弹确认卡**（按危险操作处理、不给"记住"选项）；路径白名单防注入，commit 不自动暂存、校验信息非空 |
 | `check_code` | 静态检查单文件（lint/语法）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`），其它语言用 config 的 `check_command`；只读不弹确认、Plan 放行 |
-| `apply_patch` | 多文件原子补丁（Codex 风格 `*** Begin Patch`）：一次建/改/删多文件；hunk 复用 `_locate_edit` 连续块匹配（拒绝模糊猜测）；全量校验通过才落盘，任一失败整体中止；写工具、Plan/遥控自动拦 |
+| `apply_patch` | 多文件补丁（Codex 风格 `*** Begin Patch`）：统一校验、确认后，暂存新内容和原文件备份再写入。写入失败回滚，回滚受阻保留备份并报告；审批期间目标变化拒绝覆盖。不承诺崩溃时跨文件原子性。写工具、Plan/遥控自动拦 |
 | `search_knowledge` | 知识库语义检索（`query` + `scope` 分域，默认 all 各域按配额取；只读、Plan 放行、不弹确认；`kb_dir` 未配置/索引未建/索引锚不一致都返回明确提示而非空结果） |
 | `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、HTML 去标签转文本、二进制拒绝、无需 key）；`web_search` 用 Tavily（config `web_search_api_key`，没配优雅降级）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
 
@@ -336,4 +341,4 @@ python main.py
 - **C2** `_project_cwd` 改公开别名：纯改名无价值。
 
 ### 待办 backlog（真问题，按优先级排期）
-来自 `docs/glm_code_review_2026-06-19.md`（该文件本地可见、未入库）：默认模型 fallback 落到 Claude Code（`agent.py`）；`read_file` 大文件全量 `readlines()`（`tools.py`）；token 估算 `×0.7` 对英文高估（`streaming.py`）；流式重试不分错误类型（`streaming.py`）；`apply_patch` 自称原子但写盘逐文件（`tools.py`）。
+来自 `docs/glm_code_review_2026-06-19.md`（该文件本地可见、未入库）的剩余项：默认模型 fallback 落到 Claude Code（`agent.py`）；`read_file` 大文件全量 `readlines()`（`tools.py`）；token 估算 `×0.7` 对英文高估（`streaming.py`）。流式错误分类和补丁写入失败回滚已实现，边界见上文。

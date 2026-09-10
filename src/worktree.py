@@ -5,6 +5,8 @@
 """
 
 import os
+import json
+from contextlib import contextmanager
 import re
 import shutil
 import subprocess
@@ -15,8 +17,13 @@ import functools
 
 logger = logging.getLogger(__name__)
 
-# 运行期活跃 worktree 注册表：session_id → {"path": str, "branch": str}
+# 运行期活跃 worktree 注册表：session_id → 路径、分支及持久化的基点/目标身份
 _WORKTREES: dict[str, dict] = {}
+_METADATA_FILE = "lingxi-worktree.json"
+
+
+class WorktreeMetadataError(RuntimeError):
+    """隔离区基点或目标身份无法验证；必须保留数据，不能自动合并。"""
 
 # 串行化所有 worktree 生命周期操作：_WORKTREES 是被 UI 线程（隔离开关）、worker 线程
 # （子 Agent spawn）、退出清理共享的可变 dict，且并发 `git worktree add` 会撞 git 索引锁。
@@ -54,29 +61,123 @@ def has_uncommitted_changes(project_path: str) -> bool:
         return False
 
 
-def _worktree_info_from_path(wt_path: str) -> dict | None:
-    """从 worktree 的 .git 文件恢复主仓库路径和 worktree 名称。"""
-    git_file = os.path.join(wt_path, ".git")
-    if not os.path.isfile(git_file):
-        return None
-    try:
-        with open(git_file, encoding="utf-8", errors="replace") as f:
-            content = f.read().strip()
-    except OSError:
-        return None
-    if not content.startswith("gitdir: "):
-        return None
+def _git_output(path: str, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=path, capture_output=True, text=True,
+        encoding="utf-8", errors="strict", check=True, timeout=30,
+    )
+    return result.stdout.strip()
 
-    git_dir = content[8:].strip()
-    git_dir_abs = os.path.realpath(os.path.join(wt_path, git_dir) if not os.path.isabs(git_dir) else git_dir)
-    worktrees_dir = os.path.dirname(git_dir_abs)
-    git_root = os.path.dirname(worktrees_dir)
-    project_path = os.path.dirname(git_root)
-    return {
-        "git_dir": git_dir_abs,
-        "name": os.path.basename(git_dir_abs),
-        "project_path": project_path,
-    }
+
+def _git_path(path: str, name: str) -> str:
+    value = _git_output(path, "rev-parse", "--git-path", name)
+    return os.path.realpath(os.path.join(path, value))
+
+
+def _admin_dir(path: str) -> str:
+    return os.path.realpath(_git_output(path, "rev-parse", "--absolute-git-dir"))
+
+
+def _common_dir(path: str) -> str:
+    value = _git_output(path, "rev-parse", "--git-common-dir")
+    return os.path.realpath(os.path.join(path, value))
+
+
+def _worktree_info_from_path(wt_path: str) -> dict:
+    """从独立 Git admin 目录读取并验证基点和目标，绝不从 .git 指针猜 checkout。"""
+    try:
+        wt_path = os.path.realpath(wt_path)
+        if not is_git_repo(wt_path):
+            raise ValueError("隔离区不是有效的 Git 工作树根目录")
+        admin = _admin_dir(wt_path)
+        with open(os.path.join(admin, _METADATA_FILE), encoding="utf-8") as f:
+            info = json.load(f)
+        if not isinstance(info, dict) or info.get("version") != 1:
+            raise ValueError("不支持的元数据格式")
+        for key in ("path", "project_path", "git_dir", "project_git_dir"):
+            value = info.get(key)
+            if not isinstance(value, str) or not os.path.isabs(value):
+                raise ValueError(f"缺少有效的 {key}")
+            if os.path.realpath(value) != value:
+                raise ValueError(f"{key} 的路径身份已改变")
+        if info["path"] != wt_path or info["git_dir"] != admin:
+            raise ValueError("隔离区路径或 Git admin 身份不符")
+        project = info["project_path"]
+        if project == wt_path or not is_git_repo(project):
+            raise ValueError("目标项目不存在或不是 Git 工作树根目录")
+        if _admin_dir(project) != info["project_git_dir"]:
+            raise ValueError("目标项目 Git admin 身份已改变")
+        if _common_dir(project) != _common_dir(wt_path):
+            raise ValueError("隔离区与目标不属于同一仓库")
+        base = info.get("base_sha")
+        if not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base):
+            raise ValueError("缺少有效的 base_sha")
+        if _git_output(wt_path, "rev-parse", "--verify", f"{base}^{{commit}}") != base:
+            raise ValueError("基点提交无效")
+        _git_output(wt_path, "merge-base", "--is-ancestor", base, "HEAD")
+        branch = info.get("branch")
+        if not isinstance(branch, str) or not branch.startswith("lingxi/"):
+            raise ValueError("隔离分支元数据无效")
+        if _git_output(wt_path, "symbolic-ref", "--short", "HEAD") != branch:
+            raise ValueError("隔离分支已改变")
+        for registered in _WORKTREES.values():
+            if registered.get("path") == wt_path and registered != info:
+                raise ValueError("磁盘元数据与注册表不一致")
+        return info
+    except Exception as exc:
+        raise WorktreeMetadataError(
+            f"隔离区元数据缺失或无效，拒绝自动合并，已保留隔离区；可显式丢弃：{exc}"
+        ) from exc
+
+
+@contextmanager
+def _temporary_index(path: str):
+    # 临时索引同时用于读取净变化和应用补丁，不能改变用户或子 Agent 的暂存状态。
+    with tempfile.TemporaryDirectory(prefix="lingxi-index-") as directory:
+        temp_index = os.path.join(directory, "index")
+        index_path = _git_path(path, "index")
+        if os.path.exists(index_path):
+            shutil.copy2(index_path, temp_index)
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = temp_index
+        if not os.path.exists(temp_index):
+            subprocess.run(
+                ["git", "read-tree", "HEAD"], cwd=path, env=env,
+                capture_output=True, check=True, timeout=30,
+            )
+        yield env
+
+
+def _worktree_changes(wt_path: str, base: str, *, include_patch: bool = False):
+    with _temporary_index(wt_path) as env:
+        subprocess.run(
+            ["git", "add", "-A"], cwd=wt_path, env=env,
+            capture_output=True, check=True, timeout=30,
+        )
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z", base, "--"],
+            cwd=wt_path, env=env, capture_output=True, check=True, timeout=30,
+        )
+        files = [os.fsdecode(p) for p in result.stdout.split(b"\0") if p]
+        patch = b""
+        if include_patch and files:
+            patch = subprocess.run(
+                ["git", "diff", "--cached", "--no-renames", "--binary", base, "--"],
+                cwd=wt_path, env=env, capture_output=True, check=True, timeout=30,
+            ).stdout
+        return files, patch
+
+
+@_synchronized
+def changed_files(wt_path: str) -> list[str]:
+    """返回相对持久化 base_sha 的净变化路径（相对隔离区根）。
+
+    包含已提交、未提交、未跟踪文件和删除，重命名返回旧/新两条路径；遵循 Git ignore。
+    不改变实际索引。元数据无效抛 WorktreeMetadataError，Git 读取失败也抛异常，绝不伪装成空列表。
+    """
+    info = _worktree_info_from_path(wt_path)
+    files, _ = _worktree_changes(wt_path, info["base_sha"])
+    return files
 
 
 def _branch_for_worktree(project_path: str, wt_path: str) -> str | None:
@@ -217,14 +318,21 @@ def create(session, project_path: str, session_id: str = None) -> str | None:
     if session_id is None:
         session_id = str(id(session))
 
-    # 幂等：已有且目录还在就复用
+    project_path = os.path.realpath(str(project_path))
+    # 幂等恢复也必须重新验证磁盘元数据，不能让内存缓存掩盖基点丢失。
     if session_id in _WORKTREES:
         info = _WORKTREES[session_id]
         if os.path.isdir(info["path"]):
             session.worktree = info["path"]
-            return info["path"]
+            try:
+                recovered = _worktree_info_from_path(info["path"])
+                if recovered["project_path"] != project_path:
+                    raise WorktreeMetadataError("目标项目与创建时不符，已保留隔离区。")
+                return info["path"]
+            except WorktreeMetadataError as exc:
+                logger.error(str(exc))
+                return None
 
-    project_path = str(project_path)
     if not is_git_repo(project_path):
         return None
 
@@ -233,55 +341,45 @@ def create(session, project_path: str, session_id: str = None) -> str | None:
     wt_path = os.path.join(wt_dir, session_id)
 
     try:
-        os.makedirs(wt_dir, exist_ok=True)
-        _ensure_worktree_excluded(project_path)  # 本地忽略隔离目录，别污染主项目 git status
-        if not _is_within(wt_path, wt_dir):
+        if not _is_within(wt_path, wt_dir) or os.path.realpath(wt_path) == os.path.realpath(wt_dir):
             raise ValueError("worktree 路径越界")
+        os.makedirs(wt_dir, exist_ok=True)
+        _ensure_worktree_excluded(project_path)
 
-        # 程序退出时会保留隔离区，重启后同一 session_id 应复用磁盘上的 worktree。
-        if os.path.isdir(wt_path):
+        # 未知或旧版隔离区不能删除重建；保留会话路径，允许用户显式丢弃。
+        if os.path.lexists(wt_path):
+            session.worktree = wt_path
             info = _worktree_info_from_path(wt_path)
-            if info and os.path.realpath(info["project_path"]) == os.path.realpath(project_path):
-                _WORKTREES[session_id] = {"path": wt_path, "branch": branch}
-                session.worktree = wt_path
-                logger.info(f"已恢复隔离 worktree: {wt_path} (branch={branch})")
-                return wt_path
-            _cleanup_worktree(wt_path)
+            if info["project_path"] != project_path:
+                raise WorktreeMetadataError("目标项目与创建时不符，已保留隔离区。")
+            _WORKTREES[session_id] = info
+            logger.info(f"已恢复隔离 worktree: {wt_path} (branch={info['branch']})")
+            return wt_path
 
-        # 若分支残留先删（从上次异常退出恢复）
+        base = _git_output(project_path, "rev-parse", "--verify", "HEAD^{commit}")
         subprocess.run(
-            ["git", "branch", "-D", branch],
-            cwd=project_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=30,
-        )
-
-        # 创建 worktree + 分支
-        subprocess.run(
-            ["git", "worktree", "add", "-b", branch, wt_path, "HEAD"],
+            ["git", "worktree", "add", "-b", branch, wt_path, base],
             cwd=project_path, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             check=True, timeout=30,
         )
-
-        _WORKTREES[session_id] = {"path": wt_path, "branch": branch}
         session.worktree = wt_path
-        logger.info(f"已创建隔离 worktree: {wt_path} (branch={branch})")
+        info = {
+            "version": 1, "path": os.path.realpath(wt_path), "branch": branch,
+            "base_sha": base, "project_path": project_path,
+            "git_dir": _admin_dir(wt_path), "project_git_dir": _admin_dir(project_path),
+        }
+        metadata_path = os.path.join(info["git_dir"], _METADATA_FILE)
+        with open(metadata_path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False)
+        os.replace(metadata_path + ".tmp", metadata_path)
+        _worktree_info_from_path(wt_path)
+        _WORKTREES[session_id] = info
+        logger.info(f"已创建隔离 worktree: {wt_path} (branch={branch}, base={base})")
         return wt_path
 
     except Exception as e:
-        logger.error(f"创建 worktree 失败: {e}")
-        _cleanup_worktree(wt_path)
-        # 收尾删分支是 best-effort：它自己失败（含 timeout=30 抛 TimeoutExpired）绝不能
-        # 穿透出去——本函数的契约是"失败返回 None"，抛异常会让调用方走上完全不同的路径，
-        # 而且会盖掉上面那个真正有诊断价值的原始错误 e。
-        try:
-            subprocess.run(
-                ["git", "branch", "-D", branch],
-                cwd=project_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=30,
-            )
-        except Exception as _ce:
-            logger.debug(f"清理残留分支 {branch} 失败（不影响返回）: {_ce}")
+        logger.error(f"创建或恢复 worktree 失败，现有隔离数据未清理: {e}")
         return None
 
 
@@ -289,41 +387,31 @@ def create(session, project_path: str, session_id: str = None) -> str | None:
 def finish(session, *, apply_changes: bool = False) -> tuple[bool, str]:
     """结束会话的 worktree。
 
-    ``apply_changes=True`` 时先把隔离区相对 HEAD 的改动应用回主项目，成功后再清理；
+    ``apply_changes=True`` 时先把隔离区相对创建基点的改动应用回原项目，成功后再清理；
     否则只丢弃隔离区并清理。返回 ``(success, message)``。
     """
     wt_path = session.worktree
     if not wt_path:
         return True, "没有活跃的 worktree。"
 
-    # 从注册表反查 session_id 和 branch
-    sid_found = None
-    for sid, info in list(_WORKTREES.items()):
-        if info["path"] == wt_path:
-            sid_found = sid
-            branch = info["branch"]
-            break
-
-    if sid_found is not None:
-        _WORKTREES.pop(sid_found, None)
-    else:
-        branch = None
-
-    info = _worktree_info_from_path(wt_path)
-    project_path = info["project_path"] if info else None
-    branch = branch or (_branch_for_worktree(project_path, wt_path) if project_path else None)
-
     if apply_changes:
-        ok, msg = _apply_changes_to_project(wt_path, project_path)
+        try:
+            info = _worktree_info_from_path(wt_path)
+        except WorktreeMetadataError as exc:
+            return False, str(exc)
+        ok, msg = _apply_changes_to_project(wt_path, info["project_path"])
         if not ok:
-            if sid_found is not None:
-                _WORKTREES[sid_found] = {"path": wt_path, "branch": branch}
             return False, msg
 
-    if project_path and branch:
+    # 显式丢弃只需定位隔离区所在仓库，无须猜测原项目 checkout 或基点。
+    branch = _branch_for_worktree(wt_path, wt_path)
+    try:
         _remove_worktree(wt_path, branch)
-    else:
-        _cleanup_worktree(wt_path)
+    except Exception as exc:
+        return False, f"清理隔离区失败，已保留会话路径：{exc}"
+    for sid, info in list(_WORKTREES.items()):
+        if info["path"] == wt_path:
+            _WORKTREES.pop(sid, None)
 
     session.worktree = None
     if apply_changes:
@@ -336,143 +424,80 @@ def cleanup_all() -> None:
     """清理所有注册的 worktree。调用时机：程序退出。"""
     for sid, info in list(_WORKTREES.items()):
         try:
+            _worktree_info_from_path(info["path"])
             _remove_worktree(info["path"], info["branch"])
         except Exception as e:
-            logger.warning(f"清理 worktree {sid} 失败: {e}")
-            _cleanup_worktree(info["path"])
-    _WORKTREES.clear()
+            logger.warning(f"清理 worktree {sid} 失败，已保留隔离区: {e}")
+        else:
+            _WORKTREES.pop(sid, None)
 
 
 # ── 内部 ──────────────────────────────────────────────────────────────────────
 
 
-def _remove_worktree(wt_path: str, branch: str) -> None:
-    """通过 ``git worktree remove`` 移除 worktree + 分支。"""
-    info = _worktree_info_from_path(wt_path)
-    project_path = info["project_path"] if info else None
-
-    if project_path and os.path.isdir(project_path):
-        try:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", wt_path],
-                cwd=project_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=30,
-            )
-        except Exception:
-            _cleanup_worktree(wt_path)
-
-        try:
-            subprocess.run(
-                ["git", "branch", "-D", branch],
-                cwd=project_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=10,
-            )
-        except Exception:
-            pass
-    else:
+def _remove_worktree(wt_path: str, branch: str | None) -> None:
+    """通过 Git common dir 移除隔离区，不把 common dir 当作目标 checkout。"""
+    if not os.path.exists(wt_path):
+        return
+    if not is_git_repo(wt_path):
         _cleanup_worktree(wt_path)
+        return
+    common = _common_dir(wt_path)
+    if _admin_dir(wt_path) == common:
+        raise ValueError("拒绝删除非 linked worktree 的项目目录")
+    subprocess.run(
+        ["git", "--git-dir", common, "worktree", "remove", "--force", wt_path],
+        capture_output=True, check=True, timeout=30,
+    )
+    if branch and branch.startswith("lingxi/"):
+        subprocess.run(
+            ["git", "--git-dir", common, "branch", "-D", branch],
+            capture_output=True, timeout=10,
+        )
 
 
 def _apply_changes_to_project(wt_path: str, project_path: str | None) -> tuple[bool, str]:
-    """把 worktree 相对 HEAD 的所有改动应用到主项目工作区。"""
-    temp_index = None
+    """把 worktree 相对持久化基点的净改动应用到创建时的项目工作区。"""
+    snapshots = None
     try:
-        if not project_path or not os.path.isdir(project_path):
-            return False, "无法定位主项目，已保留隔离区未清理。"
-        if not os.path.isdir(wt_path):
-            return False, "隔离区目录不存在，无法恢复改动。"
-
-        # base = 主项目当前 HEAD = worktree 的分叉基点（常态下主项目自 create 起未动）。
-        # 必须用它而非 worktree 的 HEAD：AI 若在隔离区里 git_commit 过，工作区是干净的，按
-        # worktree HEAD 取 diff 会判成"无改动"，提交过的工作就随 worktree 删除而静默丢失。
-        # 对 base 取 diff（git add -A 后比 index 与 base）则把"已提交 + 未提交"净改动一起算进来。
-        base_r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=10,
-        )
-        base = (base_r.stdout or "").strip() if base_r.returncode == 0 else "HEAD"
-
-        add = subprocess.run(
-            ["git", "add", "-A"],
-            cwd=wt_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=30,
-        )
-        if add.returncode != 0:
-            return False, f"暂存隔离区改动失败：{(add.stderr or '').strip() or '未知错误'}"
-
-        changed = subprocess.run(
-            # core.quotepath=false：非 ASCII（中文）文件名不被转义成 \xxx，否则快照/恢复对不上真路径
-            ["git", "-c", "core.quotepath=false", "diff", "--cached", "--name-only", base],
-            cwd=wt_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=10,
-        )
-        if changed.returncode != 0:
-            return False, f"读取隔离区改动失败：{(changed.stderr or '').strip() or '未知错误'}"
-        changed_files = [line.strip() for line in (changed.stdout or "").splitlines() if line.strip()]
-        if not changed_files:
+        info = _worktree_info_from_path(wt_path)
+        if not project_path or os.path.realpath(project_path) != info["project_path"]:
+            return False, "目标项目与隔离区元数据不符，已保留隔离区未清理。"
+        changed, patch = _worktree_changes(wt_path, info["base_sha"], include_patch=True)
+        if not patch:
             return True, "隔离区没有需要恢复的改动。"
-        snapshots = _snapshot_project_files(project_path, changed_files)
+        snapshots = _snapshot_project_files(project_path, changed)
 
-        diff = subprocess.run(
-            ["git", "diff", "--cached", "--binary", base],
-            cwd=wt_path, capture_output=True,
-            timeout=30,
-        )
-        if diff.returncode != 0:
-            stderr = diff.stderr.decode("utf-8", errors="replace") if diff.stderr else ""
-            return False, f"生成隔离区补丁失败：{stderr.strip() or '未知错误'}"
-        if not diff.stdout:
-            return True, "隔离区没有需要恢复的改动。"
-
-        index_path = os.path.join(project_path, ".git", "index")
-        tmp = tempfile.NamedTemporaryFile(prefix="lingxi-index-", delete=False)
-        tmp.close()
-        temp_index = tmp.name
-        if os.path.exists(index_path):
-            shutil.copy2(index_path, temp_index)
-
-        git_env = os.environ.copy()
-        git_env["GIT_INDEX_FILE"] = temp_index
-
-        check = subprocess.run(
-            ["git", "apply", "--check", "--3way", "--binary"],
-            cwd=project_path, input=diff.stdout, capture_output=True,
-            env=git_env,
-            timeout=30,
-        )
-        if check.returncode != 0:
-            _restore_project_files(project_path, snapshots)
-            stderr = check.stderr.decode("utf-8", errors="replace") if check.stderr else ""
-            return False, (
-                "恢复隔离区改动失败，已保留 worktree。"
-                f"\n{stderr.strip() or '请检查主项目是否有冲突或未提交改动。'}"
+        with _temporary_index(project_path) as git_env:
+            check = subprocess.run(
+                ["git", "apply", "--check", "--3way", "--binary"],
+                cwd=project_path, input=patch, capture_output=True,
+                env=git_env, timeout=30,
             )
+            if check.returncode != 0:
+                stderr = check.stderr.decode("utf-8", errors="replace") if check.stderr else ""
+                return False, (
+                    "恢复隔离区改动失败，已保留 worktree。"
+                    f"\n{stderr.strip() or '请检查主项目是否有冲突或未提交改动。'}"
+                )
 
-        apply = subprocess.run(
-            ["git", "apply", "--3way", "--binary"],
-            cwd=project_path, input=diff.stdout, capture_output=True,
-            env=git_env,
-            timeout=30,
-        )
-        if apply.returncode != 0:
-            _restore_project_files(project_path, snapshots)
-            stderr = apply.stderr.decode("utf-8", errors="replace") if apply.stderr else ""
-            return False, (
-                "恢复隔离区改动失败，已保留 worktree。"
-                f"\n{stderr.strip() or '请检查主项目是否有冲突或未提交改动。'}"
+            apply = subprocess.run(
+                ["git", "apply", "--3way", "--binary"],
+                cwd=project_path, input=patch, capture_output=True,
+                env=git_env, timeout=30,
             )
+            if apply.returncode != 0:
+                _restore_project_files(project_path, snapshots)
+                stderr = apply.stderr.decode("utf-8", errors="replace") if apply.stderr else ""
+                return False, (
+                    "恢复隔离区改动失败，已保留 worktree。"
+                    f"\n{stderr.strip() or '请检查主项目是否有冲突或未提交改动。'}"
+                )
         return True, "隔离区改动已应用到主项目工作区。"
-    except subprocess.TimeoutExpired:
-        return False, "恢复隔离区改动超时，已保留 worktree。"
     except Exception as e:
+        if snapshots is not None:
+            _restore_project_files(project_path, snapshots)
         return False, f"恢复隔离区改动异常，已保留 worktree：{e}"
-    finally:
-        if temp_index and os.path.exists(temp_index):
-            try:
-                os.remove(temp_index)
-            except OSError:
-                pass
 
 
 def _snapshot_project_files(project_path: str, rel_paths: list[str]) -> dict[str, bytes | None]:
