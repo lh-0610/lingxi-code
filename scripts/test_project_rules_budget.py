@@ -295,3 +295,169 @@ def test_tool_overview_lists_sources_usable_for_paging(project_dir):
 
     page = _call(path=".", source="CLAUDE.md", offset=0, limit=2000)
     assert "节0" in page and "原文" in page
+
+# ══════════════════════════════════════════════════════════════
+# 330e110 复审补漏（五处）
+# ══════════════════════════════════════════════════════════════
+
+def test_many_short_headings_stay_within_budget(tmp_path):
+    """目录的 [未展示] 标记是渲染完才加的，必须计入预算。
+
+    复现参数：1000 个短标题、每节 40 字符，预算 20000 —— 旧实现输出 25468 字符，
+    随后被发送层二次截断，把省略说明和补读入口本身切掉。
+    """
+    text = "".join(f"## H{i}\n\n" + "内容" * 20 + "\n\n" for i in range(1000))
+    (tmp_path / "CLAUDE.md").write_text(text, encoding="utf-8")
+
+    out = roles.render_rule_sources(roles.read_rule_sources(str(tmp_path)), 20000)
+
+    assert len(out) <= 20000, f"溢出 {len(out) - 20000} 字符"
+    assert len(out) < TOOL_RESULT_HARD_CAP_CHARS
+
+
+def test_long_toc_never_drops_later_sources(tmp_path):
+    """目录很长时后面的来源不能消失。
+
+    旧实现最后一步 out[:budget]，等于把"拼完砍尾巴"请了回来：三份规则只剩第一份，
+    AGENTS.md 和 .lingxirules 的来源记录、目录总数提示一起没了。
+    """
+    # 标题足够长，第一个来源的目录就能吃掉整个预算——旧实现在这里 [:budget]，
+    # 后两个来源连标题行都还没轮到就被砍掉了
+    long_titles = "".join(
+        f"## {'很长的标题段落用来撑满目录预算' * 8}{i}\n\n正文\n\n" for i in range(150))
+    for name in ("CLAUDE.md", "AGENTS.md", ".lingxirules"):
+        (tmp_path / name).write_text(f"# {name}\n\n" + long_titles, encoding="utf-8")
+
+    out = roles.render_rule_sources(roles.read_rule_sources(str(tmp_path)), 8000)
+
+    assert len(out) <= 8000
+    for name in ("CLAUDE.md", "AGENTS.md", ".lingxirules"):
+        assert f"## 来源：{name}" in out, f"{name} 的来源记录被砍掉了"
+    assert "未列出" in out or "目录仅展示部分" in out, "被省略的部分要有交代"
+
+
+def test_truncated_toc_is_retrievable_by_paging(tmp_path):
+    """目录被截断时必须真的能翻回来——只写一句"还有 N 项"而没有取回入口，那是空话。"""
+    text = "".join(f"## 小节{i}\n\n内容\n\n" for i in range(500))
+    (tmp_path / "CLAUDE.md").write_text(text, encoding="utf-8")
+
+    out = roles.render_rule_sources(roles.read_rule_sources(str(tmp_path)), 4000)
+    assert "目录仅展示部分" in out and "toc=True" in out
+
+    seen, offset, guard = [], 0, 0
+    while True:
+        page = roles.read_rule_toc_page(str(tmp_path), None, "CLAUDE.md",
+                                        offset=offset, limit=120)
+        seen.extend(h["title"] for h in page["headings"])
+        guard += 1
+        if page["next_offset"] is None or guard > 20:
+            break
+        offset = page["next_offset"]
+
+    assert seen == [f"小节{i}" for i in range(500)], "目录分页必须能取回全部标题"
+
+
+def test_raw_paging_preserves_leading_whitespace(tmp_path):
+    """分页返回的必须是**原文**，不能被 strip 掉首尾空白。
+
+    基准取写入文件的字符串本身，不取同一个读取函数的返回值——旧测试正是拿被 strip
+    过的结果当原文比对，才让 55 字符只翻出 47 字符这种错误一路通过。
+    首行缩进被吃掉还会改变 Markdown 语义（缩进代码块变成普通段落）。
+    """
+    written = "\n\n    # heading\n\nkeep leading and trailing blanks\n\n\n"
+    (tmp_path / "CLAUDE.md").write_text(written, encoding="utf-8")
+
+    buf, offset, guard = "", 0, 0
+    while True:
+        page = roles.read_rule_source_page(str(tmp_path), None, "CLAUDE.md",
+                                           offset=offset, limit=16)
+        buf += page["text"]
+        guard += 1
+        if page["next_offset"] is None or guard > 50:
+            break
+        offset = page["next_offset"]
+
+    assert buf == written, f"分页结果与写入内容不一致：{len(buf)} vs {len(written)}"
+    assert page["total"] == len(written)
+
+
+def test_system_prompt_uses_the_budget_renderer_for_lone_lingxirules(
+        isolated_memory, tmp_path, monkeypatch):
+    """只有 .lingxirules 时，system prompt 也必须走预算渲染，而不是旧的截断拼接。
+
+    这是最常见的项目布局。渲染器修好了而注入口没跟上，等于没修：尾部约定照样丢，
+    而且连"哪里被省略、怎么补读"都没有。
+    """
+    from src import state
+    body = "\n".join(f"## 第{i}节\n\n" + "内容。" * 400 for i in range(40))
+    tail = "\n## 尾部约定\n\n提交前必须跑全量测试。\n"
+    (tmp_path / ".lingxirules").write_text("# 规则\n\n" + body + tail, encoding="utf-8")
+    monkeypatch.setattr(state, "current_project", str(tmp_path))
+
+    prompt = roles.get_system_prompt()
+
+    assert "尚未完整读取" in prompt, "超预算时 system prompt 必须自报不完整"
+    assert "尾部约定" in prompt, "尾部章节至少要在目录里可见"
+    assert "get_project_instructions" in prompt and "offset=" in prompt, "必须给出具体补读入口"
+
+
+def test_system_prompt_surfaces_rule_read_errors(isolated_memory, tmp_path, monkeypatch):
+    """全部规则读取失败时，system prompt 要报错，不能说成"这个项目没有规则"。"""
+    from src import state
+    (tmp_path / "CLAUDE.md").write_text("内容", encoding="utf-8")
+    monkeypatch.setattr(state, "current_project", str(tmp_path))
+    real_open = open
+
+    def boom(path, *a, **kw):
+        if str(path).endswith("CLAUDE.md"):
+            raise PermissionError("mocked denial")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", boom)
+    prompt = roles.get_system_prompt()
+
+    assert "读取失败" in prompt and "mocked denial" in prompt
+
+
+def test_four_backtick_fence_is_not_closed_by_inner_triple(tmp_path):
+    """四反引号围栏不能被内部的三反引号提前关闭（CommonMark：闭栏不得短于开栏）。
+
+    提前关闭会让示例里的 `# xxx` 被当成真标题，围栏区间也随之错位。
+    """
+    text = ("# REAL\n\n````markdown\n```\n# EXAMPLE_NOT_HEADING\n```\n````\n\n"
+            "## REAL_TAIL\n\n正文\n")
+    headings, fences = roles._scan_markdown_structure(text)
+
+    assert [h["title"] for h in headings] == ["REAL", "REAL_TAIL"]
+    assert len(fences) == 1, "四反引号块应当是一个整体"
+
+
+def test_closing_fence_must_have_nothing_after_it(tmp_path):
+    """行尾还有内容的就不是闭栏（```python 不关闭前一个围栏）。"""
+    text = "# T\n\n```\n# inside\n```python\n# still inside\n```\n\n## AFTER\n"
+    headings, fences = roles._scan_markdown_structure(text)
+
+    assert [h["title"] for h in headings] == ["T", "AFTER"]
+    assert len(fences) == 1
+
+
+def test_tilde_fence_not_closed_by_backticks(tmp_path):
+    """波浪号围栏只能被波浪号关闭。"""
+    text = "# T\n\n~~~\n# inside\n```\n# also inside\n~~~\n\n## AFTER\n"
+    headings, _ = roles._scan_markdown_structure(text)
+    assert [h["title"] for h in headings] == ["T", "AFTER"]
+
+
+def test_tool_toc_paging_round_trip(project_dir):
+    """工具层目录分页：能翻、能续、越界报错。"""
+    text = "".join(f"## 节{i}\n\n内容\n\n" for i in range(300))
+    (project_dir / "CLAUDE.md").write_text(text, encoding="utf-8")
+
+    first = _call(path=".", source="CLAUDE.md", toc=True, limit=100)
+    assert "共 300 项" in first and "续读" in first and "节0" in first
+
+    bad = _call(path=".", source="CLAUDE.md", toc=True, offset=9999)
+    assert "越界" in bad and "个标题" in bad
+
+    no_src = _call(path=".", toc=True)
+    assert "需要指定 source" in no_src

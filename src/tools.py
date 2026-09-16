@@ -1071,7 +1071,8 @@ def forget(query: str) -> str:
 
 @tool
 def get_project_instructions(path: str = ".", source: str = "",
-                             offset: int = 0, limit: int = 0) -> str:
+                             offset: int = 0, limit: int = 0,
+                             toc: bool = False) -> str:
     """读取目标路径适用的 AI 编码规则（CLAUDE.md / AGENTS.md / .lingxirules）。
 
     不带 source 时返回**概览**：规则不长就是完整原文；过长则给出来源清单、目录、
@@ -1080,8 +1081,9 @@ def get_project_instructions(path: str = ".", source: str = "",
 
     path:   当前项目内的文件或目录，决定适用哪几层规则（不传只读项目根）。
     source: 概览里列出的来源相对路径，如 "CLAUDE.md"、"pkg/.lingxirules"。
-    offset: 原文起始字符（Unicode 字符数，0 基）。
-    limit:  本页字符数，默认 6000、上限 12000。
+    offset: 原文起始字符（Unicode 字符数，0 基）；toc=True 时是标题条数。
+    limit:  本页字符数，默认 6000、上限 12000；toc=True 时是标题条数，默认 120、上限 400。
+    toc:    只取该来源的标题目录（概览里目录被截断时用它翻完整目录）。
     """
     from . import roles as _roles
     root = _project_cwd()
@@ -1091,6 +1093,9 @@ def get_project_instructions(path: str = ".", source: str = "",
         return reject
 
     if not source:
+        if toc:
+            return ("查看完整目录需要指定 source（来源相对路径）。请先不带参数调用本工具看概览里的"
+                    "来源清单，再用 source + toc=True 翻该来源的目录。")
         if offset or limit:
             # 不指定来源就分页，只能对"拼接后的概览"分页——那是被预算裁过的文本，
             # 翻页拼出来是残缺内容而调用方无从察觉。明确拒绝，不猜。
@@ -1102,7 +1107,10 @@ def get_project_instructions(path: str = ".", source: str = "",
                     "或该路径不在当前项目根目录内。")
         return result
 
-    page = _roles.read_rule_source_page(root, target, source, offset=offset, limit=limit)
+    if toc:
+        page = _roles.read_rule_toc_page(root, target, source, offset=offset, limit=limit)
+    else:
+        page = _roles.read_rule_source_page(root, target, source, offset=offset, limit=limit)
     err = page.get("error")
     if err == "no_rules":
         return (f"路径 `{path or '.'}` 没有适用的项目规则，"
@@ -1113,7 +1121,19 @@ def get_project_instructions(path: str = ".", source: str = "",
     if err == "unreadable":
         return f"来源 `{page['rel']}` 读取失败：{page['detail']}"
     if err == "bad_offset":
-        return f"offset 越界：`{page['rel']}` 原文共 {page['total']} 字符。"
+        unit = "个标题" if toc else "字符"
+        return f"offset 越界：`{page['rel']}` 共 {page['total']} {unit}。"
+
+    if toc:
+        lines = [f"{'  ' * (h['level'] - 1)}- {h['title']}  (offset={h['pos']})"
+                 for h in page["headings"]]
+        out = (f"# {page['rel']} 目录 [第 {page['offset']}–{page['end']} 项 / 共 {page['total']} 项 · "
+               f"内容指纹 {page['sha']}]\n" + "\n".join(lines))
+        if page["next_offset"] is not None:
+            out += (f"\n\n... [还有 {page['total'] - page['end']} 项。续读："
+                    f"get_project_instructions(path={path or '.'!r}, source={page['rel']!r}, "
+                    f"toc=True, offset={page['next_offset']})]")
+        return out
 
     head = (f"# {page['rel']} 原文 [{page['offset']}–{page['end']} / 共 {page['total']} 字符 · "
             f"内容指纹 {page['sha']}]\n")
