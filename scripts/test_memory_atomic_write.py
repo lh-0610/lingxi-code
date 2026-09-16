@@ -349,6 +349,49 @@ def test_fdopen_late_failure_never_closes_unrelated_fd(tmp_path, monkeypatch):
                 pass
 
 
+def test_close_failure_does_not_close_the_same_fd_twice(tmp_path, monkeypatch):
+    """PEP 475：os.close 无论成败都会释放 fd，绝不能重试。
+
+    所以"关闭报错"**不等于**"fd 还开着"。若异常清理据此再关一次，而这个号在那一瞬已被
+    别的线程复用，关掉的就是一个无关文件——症状是别处莫名其妙读写失败，极难定位。
+    修法是在调用 close **之前**就把关闭责任交出去，而不是在它返回之后。
+    """
+    target = tmp_path / "x.json"
+    _write_legacy(target, {"old": True})
+    sentinel = tmp_path / "sentinel.bin"
+    sentinel.write_bytes(b"do-not-touch")
+    created = {}
+    _spy_mkstemp(monkeypatch, created)
+    closed = []
+    seen = {}
+    real_close = os.close
+
+    def close_then_fail(fd):
+        closed.append(fd)
+        if len(closed) == 1:
+            real_close(fd)                                  # fd 已真实释放
+            seen["sentinel_fd"] = os.open(str(sentinel), os.O_RDONLY)   # 号立刻被复用
+            raise OSError("close reported failure after releasing fd")
+        real_close(fd)                                      # 第二次 = 误关哨兵
+
+    monkeypatch.setattr(memory.os, "close", close_then_fail)
+    try:
+        with pytest.raises(OSError, match="close reported failure"):
+            memory._atomic_write_json(str(target), SAMPLE)
+
+        assert closed == [created["fd"]], f"同一 fd 号被关了不止一次：{closed}"
+        assert seen["sentinel_fd"] == created["fd"], "未复现 fd 号复用，测试前提不成立"
+        os.fstat(seen["sentinel_fd"])          # 哨兵仍有效 = 无关文件没被误关
+        assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
+        assert _temps(tmp_path) == []          # 关闭失败仍要尽力删掉临时文件
+    finally:
+        if "sentinel_fd" in seen:
+            try:
+                real_close(seen["sentinel_fd"])
+            except OSError:
+                pass
+
+
 def test_fdopen_failure_cleanup_errors_do_not_mask_original(tmp_path, monkeypatch):
     """fdopen 失败路径上，关 fd 和删临时文件再怎么失败，抛出去的仍是原始异常。
 
