@@ -8,12 +8,13 @@ class TestLingxiRules:
         assert roles._load_lingxirules(str(tmp_path)) == ""
 
     def test_truncates_oversized_file(self, tmp_path):
-        (tmp_path / ".lingxirules").write_text("x" * 20001, encoding="utf-8")
+        """兼容包装仍按单来源展示预算截断（B01 后该上限从 20000 提到 40000）。"""
+        (tmp_path / ".lingxirules").write_text("x" * (roles._SINGLE_RULE_MAX + 1), encoding="utf-8")
 
         result = roles._load_lingxirules(str(tmp_path))
 
-        assert result.startswith("x" * 20000)
-        assert "已截断至前 20000 字" in result
+        assert result.startswith("x" * roles._SINGLE_RULE_MAX)
+        assert f"已截断至前 {roles._SINGLE_RULE_MAX} 字" in result
 
 
 class TestRoleNames:
@@ -131,14 +132,14 @@ class TestLoadRulesFromDir:
         assert result[0][0] == "CLAUDE.md"
 
     def test_truncates_oversized_file(self, tmp_path):
-        """超长文件截断并附提示。"""
-        big = "y" * 20001
+        """超长文件截断并附提示（兼容包装；新代码走 render_rule_sources）。"""
+        big = "y" * (roles._SINGLE_RULE_MAX + 1)
         (tmp_path / ".lingxirules").write_text(big, encoding="utf-8")
         result = roles._load_rules_from_dir(str(tmp_path))
         assert len(result) == 1
         content = result[0][1]
-        assert content.startswith("y" * 20000)
-        assert "已截断至前 20000 字符" in content
+        assert content.startswith("y" * roles._SINGLE_RULE_MAX)
+        assert f"已截断至前 {roles._SINGLE_RULE_MAX} 字符" in content
 
     def test_handles_read_failure_gracefully(self, tmp_path, monkeypatch):
         """读取失败时跳过该文件，不影响其它文件。"""
@@ -207,16 +208,25 @@ class TestLoadProjectRules:
         assert "left-only" in result
         assert "right-only" not in result
 
-    def test_combined_rules_are_truncated(self, tmp_path):
-        (tmp_path / "CLAUDE.md").write_text("甲" * 20000, encoding="utf-8")
-        (tmp_path / "AGENTS.md").write_text("乙" * 20000, encoding="utf-8")
-        (tmp_path / ".lingxirules").write_text("丙" * 20000, encoding="utf-8")
+    def test_combined_rules_over_budget_stay_within_budget(self, tmp_path):
+        """超预算时不再盲截尾巴，而是给出标注了省略范围的节选，且守住预算。
+
+        旧行为是把拼接结果一刀切在 40000 字符——切点之后的来源既不在输出里，也不在
+        任何清单里，没人知道少了什么。现在每个来源都必须留下痕迹。
+        """
+        (tmp_path / "CLAUDE.md").write_text("甲" * 30000, encoding="utf-8")
+        (tmp_path / "AGENTS.md").write_text("乙" * 30000, encoding="utf-8")
+        (tmp_path / ".lingxirules").write_text("丙" * 30000, encoding="utf-8")
 
         result = roles.load_project_rules(str(tmp_path))
 
-        assert result.startswith("## 来源：CLAUDE.md")
-        assert "项目规则合并后过长" in result
-        assert len(result) > 40000
+        assert "尚未完整读取" in result                      # 明确标注不完整
+        assert len(result) <= roles._COMBINED_RULES_MAX
+        for rel in ("CLAUDE.md", "AGENTS.md", ".lingxirules"):
+            assert f"## 来源：{rel}" in result               # 没有来源被整个吞掉
+        assert "省略第" in result and "补读" in result        # 省略范围与补读入口都在
+        # 节选必须是原文，不是占位符
+        assert "甲" in result and "乙" in result and "丙" in result
 
 
 class TestLoadProjectRulesWithSources:

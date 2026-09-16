@@ -6,6 +6,7 @@
 """
 import re
 import os
+import hashlib
 import json
 
 from .paths import logger, memory_dir, role_config
@@ -26,7 +27,7 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 - find_tests: 根据源码文件/符号名查找相关测试文件（返回匹配原因 + run_tests 推荐命令）
 - related_files: 给定源码文件，列出它导入的文件、导入它的文件、相关测试（改代码前先看影响面）
 - list_directory: 列目录
-- get_project_instructions: 读取项目的规则文件（CLAUDE.md / AGENTS.md / .lingxirules），返回合并后的项目级指令。不传参数读当前项目，传 `path` 可读子目录的规则
+- get_project_instructions: 读取项目的规则文件（CLAUDE.md / AGENTS.md / .lingxirules）。不传参数读当前项目，传 `path` 可读子目录的规则。规则过长时返回的是**节选**，开头会写明"尚未完整读取"并列出每个来源的目录、省略的字符范围——**看到省略标记就按它给的 `source`/`offset`/`limit` 补读那一段**，别拿残篇当全部约定
 - **并行加速**：探索时要读多个文件 / 搜多个关键词 / 同时查定义和引用，就**在同一轮里一次性发出多个只读调用**（上面这些读查工具，以及 fetch_url/web_search 都行），它们会并行执行、明显更快。改文件、跑命令这类有副作用的操作**不要**并行，按顺序一个个来。
 
 **改文件**
@@ -390,48 +391,139 @@ def get_external_agent_context() -> str:
     return "\n\n".join(parts)
 
 
-# 项目规则文件读取上限（单文件 / 合并后总量）
+# ══════════════════════════════════════════════════════════════════
+# 项目规则：读取原文 与 按预算渲染 是两件事
+#
+# 原来合成一步做（读的时候就按 _SINGLE_RULE_MAX 截断），后果是**谁也不知道少了什么**：
+# 截断点之后的章节既不在 prompt 里，也不在任何清单里，模型不会去补读自己不知道存在的
+# 内容。本仓库的 CLAUDE.md 就因此丢了末尾整整 5 节（含"避免 code review 反复重提"）。
+#
+# 现在分层：read_* 只负责拿原文和元数据、绝不截断；render_* 负责在给定预算内挑内容，
+# 并且**把没展示的部分明确标出来**（来源清单 + 目录 + 省略范围 + 补读示例）。
+# ══════════════════════════════════════════════════════════════════
+
 _RULE_FILENAMES = ("CLAUDE.md", "AGENTS.md", ".lingxirules")
-_SINGLE_RULE_MAX = 20000
+
+# system prompt 里项目规则的合并预算
 _COMBINED_RULES_MAX = 40000
+# 单个来源在一次渲染里最多占的字符——防一个大文件把其它来源挤得连"存在过"都看不出来
+_SINGLE_RULE_MAX = 40000
 # 向后兼容：旧代码/测试可能引用 _LINGXIRULES_MAX
 _LINGXIRULES_MAX = _SINGLE_RULE_MAX
 
+# get_project_instructions 默认概览的总预算。必须明显低于 limits.TOOL_RESULT_HARD_CAP_CHARS
+# （24_000）：概览是**工具返回值**，超了会被发送层二次截断，而那次截断不认识我们的结构，
+# 会把省略说明和补读入口本身切掉——于是"标明了缺什么"这个唯一的补救也没了。
+_TOOL_OVERVIEW_MAX = 20000
+# 原文分页
+_RULE_PAGE_DEFAULT = 6000
+_RULE_PAGE_MAX = 12000
+
+_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*$")
+
+
+def _scan_markdown_structure(text: str):
+    """一次扫描同时得到：标题表 + 处于代码围栏内的行区间。
+
+    标题识别必须跳过围栏内的示例标题——CLAUDE.md 这类文档里 ``` 块中大量出现
+    `# 注释`，当成标题会凭空造出目录项；更糟的是按它去切正文会切进代码块中间。
+    """
+    headings = []
+    fence_spans = []          # [(start_offset, end_offset), ...]
+    fence_marker = None
+    fence_start = 0
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if fence_marker is not None:
+            if stripped.startswith(fence_marker):
+                fence_spans.append((fence_start, pos + len(line)))
+                fence_marker = None
+        elif stripped.startswith("```") or stripped.startswith("~~~"):
+            fence_marker = stripped[:3]
+            fence_start = pos
+        else:
+            m = _HEADING_RE.match(line.rstrip("\n"))
+            if m:
+                headings.append({"level": len(m.group(1)),
+                                 "title": m.group(2).strip(),
+                                 "pos": pos})
+        pos += len(line)
+    if fence_marker is not None:        # 未闭合的围栏：视为一直到文末
+        fence_spans.append((fence_start, len(text)))
+    return headings, fence_spans
+
+
+def _read_rule_file(directory: str, name: str) -> dict | None:
+    """读取单个规则文件的**完整**原文 + 元数据。不截断。
+
+    读取失败返回带 error 的条目而非 None——"读不出来"和"不存在"是两件事，
+    前者必须让用户看见，不能伪装成"这个项目没有规则"。
+    """
+    path = os.path.join(directory, name)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception as e:
+        logger.warning(f"读取规则文件失败 {path}: {e}")
+        return {"name": name, "path": path, "text": "", "length": 0,
+                "sha": "", "headings": [], "fences": [], "error": str(e)}
+    stripped = text.strip()
+    headings, fences = _scan_markdown_structure(stripped)
+    return {
+        "name": name,
+        "path": path,
+        "text": stripped,
+        "length": len(stripped),
+        # 原文指纹：分页翻到一半文件被改时能发现，避免把两个版本拼成一份规则
+        "sha": hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:12],
+        "headings": headings,
+        "fences": fences,
+        "error": "",
+    }
+
+
+def _load_rule_files_from_dir(directory: str) -> list[dict]:
+    """一个目录下的规则文件（原文 + 元数据），按 _RULE_FILENAMES 顺序。"""
+    out = []
+    for name in _RULE_FILENAMES:
+        entry = _read_rule_file(directory, name)
+        if entry is None:
+            continue
+        if entry["error"] or entry["text"]:
+            out.append(entry)          # 空文件跳过，读失败要留下
+    return out
+
 
 def _load_rules_from_dir(directory: str) -> list[tuple[str, str]]:
-    """读取一个目录下的规则文件，返回 [(relative_name, content), ...]。
+    """兼容包装：返回 [(relative_name, content), ...]，单文件超限时截断并附提示。
 
-    按 _RULE_FILENAMES 顺序，只读取存在的文件。
-    单文件超过 _SINGLE_RULE_MAX 字符时截断并附提示。
-    读取失败的文件跳过并写 warning 日志。
+    新代码请用 _load_rule_files_from_dir + render_*，能拿到目录与省略信息。
     """
     results = []
-    for name in _RULE_FILENAMES:
-        path = os.path.join(directory, name)
-        if not os.path.isfile(path):
+    for entry in _load_rule_files_from_dir(directory):
+        if entry["error"]:
             continue
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception as e:
-            logger.warning(f"读取规则文件失败 {path}: {e}")
-            continue
+        content = entry["text"]
         if len(content) > _SINGLE_RULE_MAX:
             content = content[:_SINGLE_RULE_MAX] + (
-                f"\n\n... [{name} 过长，已截断至前 {_SINGLE_RULE_MAX} 字符]"
+                f"\n\n... [{entry['name']} 过长，已截断至前 {_SINGLE_RULE_MAX} 字符]"
             )
-        stripped = content.strip()
-        if stripped:
-            results.append((name, stripped))
+        results.append((entry["name"], content))
     return results
 
 
-def _project_rule_sources(
-    project_root: str, target_path: str | None = None,
-) -> list[tuple[str, str]]:
-    """返回项目根到目标目录沿途的规则，拒绝越界和符号链接逃逸。"""
+def _rule_dirs_for_target(project_root: str, target_path: str | None = None):
+    """项目根 → 目标目录沿途要扫的目录列表，拒绝越界和符号链接逃逸。
+
+    路径安全判定只此一份：概览、分页、system prompt 注入共用，避免三处漂移出
+    宽窄不一的边界（那种不一致正是越权读取最容易钻的缝）。
+    返回 (root_real, dirs) 或 None（项目根无效 / 目标越界）。
+    """
     if not project_root or not os.path.isdir(project_root):
-        return []
+        return None
 
     root_real = os.path.realpath(project_root)
     if target_path is None:
@@ -445,9 +537,9 @@ def _project_rule_sources(
         try:
             common = os.path.commonpath([target_real, root_real])
         except ValueError:
-            return []
+            return None
         if os.path.normcase(common) != os.path.normcase(root_real):
-            return []
+            return None
         if os.path.isfile(target_real):
             target_dir = os.path.dirname(target_real)
         elif os.path.isdir(target_real):
@@ -464,6 +556,17 @@ def _project_rule_sources(
             current = os.path.join(current, part)
             dirs_to_scan.append(current)
 
+    return root_real, dirs_to_scan
+
+
+def _project_rule_sources(
+    project_root: str, target_path: str | None = None,
+) -> list[tuple[str, str]]:
+    """兼容接口：沿途规则的 (来源相对路径, 内容) 列表（单文件超限时截断）。"""
+    scan = _rule_dirs_for_target(project_root, target_path)
+    if scan is None:
+        return []
+    root_real, dirs_to_scan = scan
     all_rules = []
     for d in dirs_to_scan:
         for name, content in _load_rules_from_dir(d):
@@ -472,26 +575,252 @@ def _project_rule_sources(
     return all_rules
 
 
-def load_project_rules(project_root: str, target_path: str | None = None) -> str:
-    """加载并格式化适用于 target_path 的分层项目规则。"""
-    all_rules = _project_rule_sources(project_root, target_path)
+def read_rule_sources(project_root: str, target_path: str | None = None) -> list[dict]:
+    """适用于 target_path 的全部规则来源（**完整原文** + 元数据），根 → 目标目录。
 
-    if not all_rules:
+    路径越界/符号链接逃逸的判定与 _project_rule_sources 共用同一套，不因这层重构放宽。
+    """
+    scan = _rule_dirs_for_target(project_root, target_path)
+    if scan is None:
+        return []
+    root_real, dirs_to_scan = scan
+    sources = []
+    for d in dirs_to_scan:
+        for entry in _load_rule_files_from_dir(d):
+            entry = dict(entry)
+            entry["rel"] = os.path.relpath(entry["path"], root_real).replace(os.sep, "/")
+            sources.append(entry)
+    return sources
+
+
+# ── 按预算渲染 ────────────────────────────────────────────────────
+
+def _safe_cut_positions(text: str, fences: list) -> list[int]:
+    """可以安全切断正文的位置：段落边界，且不在代码围栏内部。
+
+    切在围栏中间再拼上另一节，会让模型读到一段语法不完整、来源不明的代码——
+    比少给一段更糟，因为它看起来像是完整的。
+    """
+    inside = lambda p: any(s < p < e for s, e in fences)   # noqa: E731
+    cuts = [0]
+    pos = 0
+    prev_blank = False
+    for line in text.splitlines(keepends=True):
+        if prev_blank and not inside(pos):
+            cuts.append(pos)
+        prev_blank = not line.strip()
+        pos += len(line)
+    cuts.append(len(text))
+    return sorted(set(cuts))
+
+
+def _select_body(text: str, fences: list, allowance: int):
+    """在 allowance 内选取正文：取头 + 取尾，中间省略。
+
+    只取头会让"结尾的内容一律次要"变成事实上的假设——而约定、已知取舍这类最该被遵守
+    的条目恰恰常写在文末（本仓库 CLAUDE.md 即如此）。重要性不能靠位置判断，所以两头都留。
+    返回 (head, tail, omit_start, omit_end)；不需要省略时 tail=None。
+    """
+    if len(text) <= allowance:
+        return text, None, 0, 0
+    cuts = _safe_cut_positions(text, fences)
+    head_budget = max(1, allowance * 3 // 5)
+    tail_budget = max(1, allowance - head_budget)
+
+    def _escape_fence(pos, forward):
+        """位置落在代码围栏内部时挪到围栏外，别把代码劈成两半。"""
+        for s, e in fences:
+            if s < pos < e:
+                return e if forward else s
+        return pos
+
+    head_end = max((c for c in cuts if c <= head_budget), default=0)
+    # 兜底：整段没有空行（压缩过的规则、单段长文）时段落边界只有 0 和结尾，
+    # 按边界切会渲染出**空正文**——比截断更糟，用户看到的是"有这个来源但一个字没有"。
+    # 此时退回按字符硬切，只避开围栏内部。
+    if head_end == 0:
+        head_end = _escape_fence(head_budget, forward=False)
+    tail_start = min((c for c in cuts if c >= len(text) - tail_budget), default=len(text))
+    if tail_start >= len(text):
+        tail_start = _escape_fence(len(text) - tail_budget, forward=True)
+
+    if tail_start <= head_end:            # 预算太小 → 只给头部
+        return text[:head_end], None, head_end, len(text)
+    return text[:head_end], text[tail_start:], head_end, tail_start
+
+
+def _render_toc(source: dict, omit_range: tuple | None = None, limit: int | None = None) -> str:
+    """来源的标题目录。省略区间内的标题标上 [未展示]，让"缺了什么"看得见。"""
+    headings = source["headings"]
+    if not headings:
+        return ""
+    lines = []
+    shown = headings if limit is None else headings[:limit]
+    for h in shown:
+        mark = ""
+        if omit_range and omit_range[0] <= h["pos"] < omit_range[1]:
+            mark = "  ← 未展示"
+        lines.append(f"{'  ' * (h['level'] - 1)}- {h['title']}{mark}")
+    if limit is not None and len(headings) > limit:
+        lines.append(f"- …（目录仅展示部分，共 {len(headings)} 项）")
+    return "### 目录\n" + "\n".join(lines)
+
+
+def _decoration_len(s: dict, toc: str, path_hint: str) -> int:
+    """一个来源除正文外的固定开销上界（标题行 + 目录 + 省略标记 + 补读示例）。"""
+    if s["error"]:
+        return len(f"\n\n## 来源：{s['rel']}  [读取失败]\n⚠️ {s['error']}")
+    n = s["length"]                      # 数字位数取顶格，保证是上界
+    return (
+        len(f"\n\n## 来源：{s['rel']}  [部分 · 原文 {n} 字符 · 本次展示 {n} 字符]\n")
+        + (len(toc) + 1 if toc else 0)
+        + len("### 正文节选\n")
+        + len(f"\n\n... [省略第 {n}–{n} 字符；补读："
+              f"get_project_instructions(path={path_hint!r}, source={s['rel']!r}, "
+              f"offset={n}, limit={_RULE_PAGE_DEFAULT})]\n\n")
+    )
+
+
+def _render_full(sources: list[dict]) -> str:
+    return "\n\n".join(f"## 来源：{s['rel']}\n{s['text']}" for s in sources)
+
+
+def _allocate(sources: list[dict], body_budget: int) -> dict:
+    """按来源公平分配正文预算：小文件用不完的份额让给大文件。
+
+    不这么做的话第一个大文件会吃掉整个预算，后面的来源连"存在过"都看不出来。
+    """
+    live = [s for s in sources if not s["error"]]
+    quota = {s["rel"]: 0 for s in sources}
+    if not live or body_budget <= 0:
+        return quota
+    remaining = body_budget
+    pending = sorted(live, key=lambda s: s["length"])
+    for i, s in enumerate(pending):
+        share = remaining // (len(pending) - i)
+        take = min(s["length"], share, _SINGLE_RULE_MAX)
+        quota[s["rel"]] = take
+        remaining -= take
+    return quota
+
+
+def render_rule_sources(sources: list[dict], budget: int, *, path_hint: str = ".") -> str:
+    """把规则来源渲染成给模型看的文本，总长不超过 budget。
+
+    能装下就原样给全文（与重构前的输出逐字一致）；装不下则给出
+    来源清单 + 目录 + 原文节选 + 省略范围 + 补读示例，且开头明确标注"尚未完整读取"。
+    """
+    if not sources:
         return ""
 
-    merged = "\n\n".join(
-        f"## 来源：{rel}\n{content}" for rel, content in all_rules
-    )
-    if len(merged) > _COMBINED_RULES_MAX:
-        merged = merged[:_COMBINED_RULES_MAX] + (
-            f"\n\n... [项目规则合并后过长，已截断至前 {_COMBINED_RULES_MAX} 字符]"
-        )
+    full = _render_full([s for s in sources if not s["error"]])
+    if not any(s["error"] for s in sources) and len(full) <= budget:
+        return full
 
-    return merged
+    header = (
+        "# 项目规则（部分内容，尚未完整读取）\n"
+        "下面是按预算挑选的**原文节选**，不是摘要；省略处已标出范围。\n"
+        f"补读完整原文：get_project_instructions(path={path_hint!r}, "
+        "source=\"<来源>\", offset=<起始字符>, limit=<字符数>)\n"
+    )
+    # 目录是"遗漏可见"的最后保障，必须先留出位置；正文只能用剩下的。
+    # 装饰长度按**上界**算（省略标记里的数字用 length 顶格），宁可少给正文也不能超预算——
+    # 概览一旦超过工具结果硬上限就会被发送层二次截断，而那次截断会把省略说明和补读入口
+    # 一起切掉，等于连"少了什么"都看不见了。
+    tocs = {s["rel"]: _render_toc(s) for s in sources}
+    overhead = len(header) + sum(
+        _decoration_len(s, tocs[s["rel"]], path_hint) for s in sources
+    )
+    if overhead > budget:
+        # 连目录都装不下 → 退化成"来源清单 + 截断目录 + 分页入口"
+        parts = [header, "\n（目录过长，正文请分页补读）"]
+        per = max(3, (budget - len(header)) // max(1, len(sources)) // 40)
+        for s in sources:
+            parts.append(f"\n\n## 来源：{s['rel']}  [原文 {s['length']} 字符]")
+            if s["error"]:
+                parts.append(f"\n⚠️ 读取失败：{s['error']}")
+            else:
+                parts.append("\n" + _render_toc(s, limit=per))
+        return "".join(parts)[:budget]
+
+    quota = _allocate(sources, budget - overhead)
+    parts = [header]
+    for s in sources:
+        if s["error"]:
+            parts.append(f"\n\n## 来源：{s['rel']}  [读取失败]\n⚠️ {s['error']}")
+            continue
+        head, tail, omit_s, omit_e = _select_body(s["text"], s["fences"], quota[s["rel"]])
+        omitted = omit_e > omit_s
+        status = "部分" if omitted else "完整"
+        parts.append(
+            f"\n\n## 来源：{s['rel']}  "
+            f"[{status} · 原文 {s['length']} 字符 · 本次展示 {len(head) + len(tail or '')} 字符]\n"
+        )
+        toc = _render_toc(s, omit_range=(omit_s, omit_e) if omitted else None)
+        if toc:
+            parts.append(toc + "\n")
+        parts.append("### 正文节选\n" + head)
+        if omitted:
+            parts.append(
+                f"\n\n... [省略第 {omit_s}–{omit_e} 字符；补读："
+                f"get_project_instructions(path={path_hint!r}, source={s['rel']!r}, "
+                f"offset={omit_s}, limit={_RULE_PAGE_DEFAULT})]\n\n"
+            )
+        if tail:
+            parts.append(tail)
+    return "".join(parts)
+
+
+def read_rule_source_page(project_root: str, target_path: str | None,
+                          source: str, offset: int = 0, limit: int = 0) -> dict:
+    """按来源分页读取规则**原文**。返回 dict，调用方负责格式化。
+
+    分页永远走原文，绝不复用被预算截短过的字符串——否则翻页拼出来的是残缺内容，
+    而调用方无从察觉。
+    """
+    sources = read_rule_sources(project_root, target_path)
+    if not sources:
+        return {"error": "no_rules"}
+    match = next((s for s in sources if s["rel"] == source.replace(os.sep, "/")), None)
+    if match is None:
+        return {"error": "unknown_source",
+                "available": [s["rel"] for s in sources]}
+    if match["error"]:
+        return {"error": "unreadable", "detail": match["error"], "rel": match["rel"]}
+
+    limit = _RULE_PAGE_DEFAULT if limit <= 0 else min(limit, _RULE_PAGE_MAX)
+    total = match["length"]
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
+    if offset < 0 or offset > total:
+        return {"error": "bad_offset", "total": total, "rel": match["rel"]}
+    chunk = match["text"][offset:offset + limit]
+    end = offset + len(chunk)
+    return {
+        "rel": match["rel"], "text": chunk, "total": total,
+        "offset": offset, "end": end,
+        "next_offset": end if end < total else None,
+        "sha": match["sha"],
+    }
+
+
+def load_project_rules(project_root: str, target_path: str | None = None) -> str:
+    """加载并格式化适用于 target_path 的分层项目规则（system prompt 用）。"""
+    return render_rule_sources(read_rule_sources(project_root, target_path),
+                               _COMBINED_RULES_MAX)
+
+
+def render_project_rules_overview(project_root: str, target_path: str | None = None,
+                                  *, path_hint: str = ".") -> str:
+    """get_project_instructions 的默认概览：预算比 system prompt 小，见 _TOOL_OVERVIEW_MAX。"""
+    return render_rule_sources(read_rule_sources(project_root, target_path),
+                               _TOOL_OVERVIEW_MAX, path_hint=path_hint)
 
 
 def load_project_rules_with_sources(project_root: str, target_path: str | None = None) -> list[tuple[str, str]]:
-    """加载项目规则并保留来源信息。"""
+    """加载项目规则并保留来源信息（兼容接口，返回 (来源, 内容) 二元组）。"""
     return _project_rule_sources(project_root, target_path)
 
 

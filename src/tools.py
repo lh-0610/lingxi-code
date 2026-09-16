@@ -1070,25 +1070,60 @@ def forget(query: str) -> str:
 
 
 @tool
-def get_project_instructions(path: str = ".") -> str:
+def get_project_instructions(path: str = ".", source: str = "",
+                             offset: int = 0, limit: int = 0) -> str:
     """读取目标路径适用的 AI 编码规则（CLAUDE.md / AGENTS.md / .lingxirules）。
 
-    path 可指向当前项目内的文件或目录；返回项目根到目标目录的完整规则链。
-    不传参数时只读取当前项目根规则。
+    不带 source 时返回**概览**：规则不长就是完整原文；过长则给出来源清单、目录、
+    原文节选，并标明省略了哪些范围、怎么补读（概览永远标注自己是否完整）。
+    带 source 时按**原文**分页返回该来源的指定区间。
+
+    path:   当前项目内的文件或目录，决定适用哪几层规则（不传只读项目根）。
+    source: 概览里列出的来源相对路径，如 "CLAUDE.md"、"pkg/.lingxirules"。
+    offset: 原文起始字符（Unicode 字符数，0 基）。
+    limit:  本页字符数，默认 6000、上限 12000。
     """
-    from .roles import load_project_rules
+    from . import roles as _roles
     root = _project_cwd()
     target = _resolve_path(path or ".")
     reject = _subagent_path_rejection(target, "目录")
     if reject:
         return reject
-    result = load_project_rules(root, target)
-    if not result:
-        return (
-            f"路径 `{path or '.'}` 没有适用的项目规则，"
-            "或该路径不在当前项目根目录内。"
-        )
-    return result
+
+    if not source:
+        if offset or limit:
+            # 不指定来源就分页，只能对"拼接后的概览"分页——那是被预算裁过的文本，
+            # 翻页拼出来是残缺内容而调用方无从察觉。明确拒绝，不猜。
+            return ("分页需要指定 source（来源相对路径）。请先不带参数调用本工具看概览里的"
+                    "来源清单，再按 source + offset + limit 补读原文。")
+        result = _roles.render_project_rules_overview(root, target, path_hint=path or ".")
+        if not result:
+            return (f"路径 `{path or '.'}` 没有适用的项目规则，"
+                    "或该路径不在当前项目根目录内。")
+        return result
+
+    page = _roles.read_rule_source_page(root, target, source, offset=offset, limit=limit)
+    err = page.get("error")
+    if err == "no_rules":
+        return (f"路径 `{path or '.'}` 没有适用的项目规则，"
+                "或该路径不在当前项目根目录内。")
+    if err == "unknown_source":
+        return (f"来源 `{source}` 不在该路径适用的规则链里。可用来源："
+                + "、".join(page["available"]))
+    if err == "unreadable":
+        return f"来源 `{page['rel']}` 读取失败：{page['detail']}"
+    if err == "bad_offset":
+        return f"offset 越界：`{page['rel']}` 原文共 {page['total']} 字符。"
+
+    head = (f"# {page['rel']} 原文 [{page['offset']}–{page['end']} / 共 {page['total']} 字符 · "
+            f"内容指纹 {page['sha']}]\n")
+    tail = ""
+    if page["next_offset"] is not None:
+        tail = (f"\n\n... [还有 {page['total'] - page['end']} 字符。续读："
+                f"get_project_instructions(path={path or '.'!r}, source={page['rel']!r}, "
+                f"offset={page['next_offset']}, limit={limit or 6000})"
+                "；若指纹与上页不同说明文件已改，请从头重读]")
+    return head + page["text"] + tail
 
 
 @tool

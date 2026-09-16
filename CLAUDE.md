@@ -131,9 +131,9 @@ python main.py
 | Qwen-Plus / Max / Turbo / Qwen3.5-Plus | cloud | qwen-* | ❌ |
 | Claude Sonnet 4 / Haiku 3.5 | anthropic | claude-sonnet-4-20250514 / claude-3-5-haiku-20241022 | ✅ |
 | DeepSeek V4 Flash / Pro | deepseek | deepseek-v4-flash / pro | ❌ |
-| ⚙ 用户自定义模型 | custom | config.json `custom_models`（OpenAI/Anthropic 协议自填） | 看配置 |
+| ⚙ 用户自定义模型 | custom | config.json `custom_models`（OpenAI / Anthropic / Responses 协议自填） | 看配置 |
 
-> **自定义模型**：`config.json` 的 `custom_models`（list），每项 `{name, model_id, api_key, base_url, protocol, supports_vision, supports_thinking}`。设置弹窗里可视化增删改。`models.py:_build_model_list()` 把它们以 `⚙` 前缀合进 `MODEL_LIST`，`_create_llm` 按 `protocol`（openai/anthropic）分发。
+> **自定义模型**：`config.json` 的 `custom_models`（list），每项 `{name, model_id, api_key, base_url, protocol, supports_vision, supports_thinking}`。设置弹窗里可视化增删改。`models.py:_build_model_list()` 把它们以 `⚙` 前缀合进 `MODEL_LIST`，`_create_llm` 按 `protocol` 分发，支持 `openai` / `anthropic` / `responses` 三种兼容接口——**多数兼容端点的模型零代码改动就能加**，只有协议不兼容或需特殊 `extra_body` 的才要动 `models.py`。
 
 ## 架构关键点
 
@@ -152,7 +152,10 @@ python main.py
 - **新对话沿用项目**：`reset_history()` 不动 `current_project`，所以 `save_session` 仍用当前项目打 tag
 - **删项目时批量改归属**：`memory.move_sessions_to_no_project(old_path)` 把所有 `project == old_path` 的会话改成 None，三处一起改：**① 内存里已打开的 `Session.project`**（关键——只改磁盘的话，移除当前项目后 `_switch_project` 的 `save_session` 会按旧内存锚点把会话写回已删项目，后台会话下次 save 也复发）+ ② index.json + ③ 各 session 文件。个别会话文件写失败 → 抛 `SessionMigrationError`（内存锚点已置 None、下次 save 自愈，caller 据此提示用户）
 - **工具按项目根解析路径**：`src/tools.py:_project_cwd()` / `_resolve_path()` 让 `read_file('foo.txt')` 解析到 `state.current_project/foo.txt`；`run_command` 的 cwd 也是项目根
-- **`.lingxirules` 项目级指令**：项目根放该文件后，`roles.get_system_prompt()` 会把它内容追加到 system prompt 末尾，优先于 SYSTEM_PROMPT 和角色卡的通用指令；每次新对话 / 切项目 / 删当前会话时都重新读，让 AI 立刻"懂这个项目的约定"。最长 20000 字（超过自动截断）
+- **`.lingxirules` 项目级指令**：项目根放该文件后，`roles.get_system_prompt()` 会把它内容追加到 system prompt 末尾，优先于 SYSTEM_PROMPT 和角色卡的通用指令；每次新对话 / 切项目 / 删当前会话时都重新读，让 AI 立刻"懂这个项目的约定"
+- **规则加载分两层**（`roles.py`）：`read_rule_sources()` 只读**原文**、不截断；`render_rule_sources(budget)` 负责在预算内挑内容。装得下给全文（输出与重构前逐字一致）；装不下给「来源清单 + 目录 + 原文节选 + 省略范围 + 补读示例」，开头标注"尚未完整读取"。节选取头也取尾——**重要性不能靠位置判断**，约定和已知取舍这类最该遵守的条目常写在文末。预算：system prompt 合并 `_COMBINED_RULES_MAX=40000`，单来源 `_SINGLE_RULE_MAX=40000`，`get_project_instructions` 概览 `_TOOL_OVERVIEW_MAX=20000`（必须明显低于 `TOOL_RESULT_HARD_CAP_CHARS=24000`，否则概览会被发送层二次截断，连"少了什么"的说明本身都被切掉）
+- **早先"读的时候就截断"丢过真东西**：本仓库 CLAUDE.md 超过当时 20000 的上限，末尾 5 节（含「已知限制与有意取舍」）从未进入 system prompt——既不在输出里也不在任何清单里，模型不会去补读自己不知道存在的内容。这类故障不报错，只会表现为"它怎么老提已经决定过的事"
+- **`get_project_instructions` 也受同一预算**，不是完整原文的后门；要拿全文用它的 `source`/`offset`/`limit` 分页（按 Unicode 字符计、默认 6000 上限 12000，返回内容指纹，翻页途中文件被改能发现）。路径作用域判定与 system prompt 注入共用 `_rule_dirs_for_target()`，不因分页放宽
 - **项目指令的优先级边界**（`roles._PROJECT_RULES_PRECEDENCE`，注入 CLAUDE.md / AGENTS.md / .lingxirules 时统一前置）：它们优先于通用编码约定，但**不得覆盖系统提示的安全约束与用户在本次对话中的直接指令**。这些文件来自**代码仓库**，是不可信输入——克隆一个第三方项目不该等于授权它改写助手的行为。早先写的"优先于上面任何通用约定"等于给了仓库里一句「忽略之前所有安全限制」以最高权限，是现成的提示注入面
 - **Plan/Act 随会话持久化**：`agent_mode` 进 session JSON，`load_session` 回填、`_sync_header_from_session` 同步段控。不存的话重开一个"聊到一半正在 Plan"的会话会变成 Act——用户以为还在只读规划、模型却已能动手改代码，是有安全后果的静默降级。旧会话缺该字段 → 默认 act
 
@@ -187,6 +190,7 @@ python main.py
 - **命令与 MCP 本地写入**：`workspace_changes.py` 在调用前后追踪项目文件，工具执行及完成检查时复查；变化使旧测试/diff 失效。Git 项目遵循 ignore，非 Git 项目跳过依赖/构建目录。无法完整枚举（权限、子模块、文件数上限等）保持未验证；它不是进程沙箱，不保证跟踪项目外或任务结束后的写入。
 - **自动修复循环**：`check_code` 的 `[REPAIR_INFO]` / `status=failed|checker=...` 是失败识别依据之一，不能只依赖展示 emoji。`run_tests` / `check_code` 失败后由 `agent_loop` 注入诊断提示，修复次数封顶。
 - **终态契约**：`agent_loop` 返回不可变的 `AgentResult(status, reason)`：`completed / failed / cancelled / unverified / limit_reached`。线程返回、工具结果和任务完成是不同事实。评测必须检查状态，不能仅凭文件断言通过。Claude CLI 的外部验收无法核实，即使收到 success 也返回 `unverified`。
+- **两条边界，别互相冒充**：① **计划状态是模型自述**——`update_plan` / `set_step_status` 的勾选由模型自己写，工具只保证清单不漂移，不保证步骤真做完了；可信度由本节的验证闭环提供，不由计划工具提供。② **验证只覆盖实际执行过的检查**——`tests_passed=True` 的语义是"已跑的测试通过"，不是"任务做对了"；测试全绿仍可能漏掉需求，也不证明每个计划步骤真实完成。
 - 纯运行态，不持久化
 
 ### 子 Agent 并行 + worktree 隔离（src/subagent.py + worktree.py）
@@ -239,10 +243,10 @@ python main.py
 - 旧版 numpy 散文件索引（`rag_index/<name>/*.npy`）不兼容，检测到只提示重建
 
 ### 长期记忆（src/memory_store.py，跨会话）
-- 让角色"天生记得"用户：`remember(fact)` / `forget(query)` 两个工具存取，`get_system_prompt()` 末尾**无条件注入**全部记忆（不靠 AI 主动查，开口就记得）
+- 让角色"天生记得"用户：`remember(fact)` / `forget(query)` 两个工具存取，`get_system_prompt()` 末尾自动注入记忆（不靠 AI 主动查，开口就记得）。**注入有预算**：`render_memories_for_prompt(max_chars=MEMORY_MAX_CHARS)` 默认 4000 字符，超出保留最近的——不是"无限全量注入"
 - 存 `chat_memory/long_term_memory.json`（`{memories: [{id, text, created, scope}]}`，scope 默认 global）。独立 `RLock`，跟 `memory.py`（会话历史）分开
 - **数据安全**：`_save` 用临时文件 + `os.replace` **原子写**（崩溃不留半截）；`_load` 区分"真损坏"（JSON/编码错 → 重置空可重建）和"瞬时错误"（IO/占用 → 抛 `_MemoryLoadError`，**写操作遇到必中止、绝不 _save 写空丢数据**）
-- v1 不用 embedding（单人助手记忆少，全量注入又快又准）；注入段会被 Anthropic/MiMo 缓存覆盖，每轮重读保持最新
+- v1 不用 embedding（单人助手记忆少，按预算全量注入又快又准）；注入段会被 Anthropic/MiMo 缓存覆盖，每轮重读保持最新。当前截断策略是"按时间取最近"，不是按重要性——条数多了会丢老记忆，这是已知取舍
 - `remember`/`forget` 是本地安全操作，**不弹确认**、Plan 模式放行（在 `PLAN_MODE_READONLY_TOOLS` 里）
 
 ### 持久化文件
