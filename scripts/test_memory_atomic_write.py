@@ -350,10 +350,10 @@ def test_fdopen_late_failure_never_closes_unrelated_fd(tmp_path, monkeypatch):
 
 
 def test_close_failure_does_not_close_the_same_fd_twice(tmp_path, monkeypatch):
-    """PEP 475：os.close 无论成败都会释放 fd，绝不能重试。
+    """PEP 475：os.close 报错时 fd 可能已被释放，因此不能盲目重复关闭同一编号。
 
-    所以"关闭报错"**不等于**"fd 还开着"。若异常清理据此再关一次，而这个号在那一瞬已被
-    别的线程复用，关掉的就是一个无关文件——症状是别处莫名其妙读写失败，极难定位。
+    也就是说"关闭报错"**推不出**"fd 还开着"。若异常清理据此再关一次，而这个号在那一瞬
+    已被别的线程复用，关掉的就是一个无关文件——症状是别处莫名其妙读写失败，极难定位。
     修法是在调用 close **之前**就把关闭责任交出去，而不是在它返回之后。
     """
     target = tmp_path / "x.json"

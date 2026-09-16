@@ -114,9 +114,10 @@ def _atomic_write_json(path, data, *, ensure_ascii=False, indent=2):
         # Windows 上 os.replace 覆盖自己仍打开着的文件会 PermissionError。
         #
         # 责任要在**调用之前**交出去，不能等 close 返回后再置标志：按 PEP 475，close()
-        # 无论成败都会释放 fd 且明确不可重试，所以"close 报错"**不能**推出"fd 还开着"。
-        # 若把置位留在后面，close 抛错时 fd_open 仍为 True，异常清理会对一个已释放的号
-        # 再关一次——那一瞬该号可能已被别的线程复用，关掉的是无关文件。
+        # 报错时 fd **可能已经被释放**（各平台行为不一致，这正是它被定为不可重试的原因），
+        # 所以"close 报错"推不出"fd 还开着"。若把置位留在后面，close 抛错时 fd_open 仍为
+        # True，异常清理就会对一个可能已释放的号再关一次——那一瞬它可能已被别的线程复用，
+        # 关掉的是无关文件。
         fd_open = False
         os.close(fd)
         # 不止"自己没关"：目标文件被别的进程打开时，能否替换取决于对方开文件时用的
