@@ -9,7 +9,9 @@
 import re
 import os
 import json
+import tempfile
 import threading
+import time
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
@@ -39,12 +41,105 @@ class SessionMigrationError(Exception):
         super().__init__(f"{len(self.failed_ids)} 个会话文件改写失败: {self.failed_ids}")
 
 
+# 替换阶段撞上"目标文件被别人打开"时的有界重试（见 _atomic_write_json 内注释）。
+# 总等待上限 ~80ms：足够躲过一次读句柄/扫描，又不会让保存明显卡顿。
+_REPLACE_RETRIES = 5
+_REPLACE_RETRY_DELAY = 0.02
+
+
+def _discard_temp(tmp, fd=None):
+    """失败路径上的尽力清理：关掉还归我们的 fd、删掉临时文件。
+
+    清理本身的异常一律吞掉——残留一个临时文件是小事，把"为什么没存上"的真实原因
+    （磁盘满 / 权限 / IO 错）换成"删不掉临时文件"才是排障灾难。
+    不吞 BaseException：KeyboardInterrupt 仍要传出去。
+
+    fd=None 表示所有权已转给文件对象，由它负责关闭，这里只清文件。
+    """
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    try:
+        os.unlink(tmp)
+    except Exception:
+        pass
+
+
+def _atomic_write_json(path, data, *, ensure_ascii=False, indent=2):
+    """本模块所有 chat_memory/*.json 写入的唯一出口：同目录临时文件 → os.replace。
+
+    原来每处都是 `open(path, "w")`：打开即把目标文件截断成 0 字节，序列化/写入中途出错
+    或进程在这期间退出，磁盘上留下的是半截 JSON——下次 `json.load` 直接抛，整段会话history
+    或整个 index.json 就此读不回来。改成"写别处、再原子改名"后，目标文件在任何时刻要么是
+    完整的旧内容、要么是完整的新内容。
+
+    **边界（不要过度承诺）**：
+    - 只保证**单个文件**的替换原子性，**不是**跨文件事务。会话正文与 index.json 仍是两次
+      独立替换，中间崩溃会留下"正文已更新、索引未更新"的不一致（可修复，属后续批次）。
+    - fsync 覆盖进程被杀 / 应用崩溃这类常见情形；不同硬件与文件系统对断电的保证不同，
+      **不声称绝对断电无损**。
+    """
+    # 先整体序列化成字符串再落盘：不可序列化的对象在这一步就抛，磁盘上连临时文件都不会
+    # 创建，旧文件原样保留。（若沿用 json.dump(obj, f) 边算边写，失败时还要清理半截临时文件。）
+    text = json.dumps(data, ensure_ascii=ensure_ascii, indent=indent)
+
+    # 临时文件必须与目标**同目录**：os.replace 要求源和目标在同一文件系统，跨文件系统会
+    # 直接抛 OSError（POSIX 是 EXDEV；Windows 的 MoveFileEx 未带 MOVEFILE_COPY_ALLOWED
+    # 同样失败）——**不会**自动退化成拷贝，所以"放同目录"是硬性前提而非优化。
+    # mkstemp 独占创建且名字唯一——固定的 "<name>.tmp" 会让并发写同一文件的两个线程互相
+    # 截断（本模块虽有 _LOCK，但辅助函数不该依赖调用方持锁这个隐含前提）。
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory,
+                               prefix=os.path.basename(path) + ".", suffix=".tmp")
+
+    # fd 所有权：mkstemp 交给我们一个裸 fd。os.fdopen 成功后所有权转给文件对象（由 with
+    # 关闭）；**没能接管**时 fd 仍归我们，必须自己关，否则每次失败泄漏一个句柄。
+    # 反向同样危险：若 fdopen 已接管并在内部关掉 fd，我们再关一次，关掉的可能是别的线程
+    # 刚拿到的同号描述符（fd 号会被复用），把无关文件关掉比泄漏更难查。所以只在 fdopen
+    # 明确抛出时才关，成功后立刻把所有权交出去、不再碰这个 fd。
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        _discard_temp(tmp, fd=fd)
+        raise
+
+    replaced = False
+    try:
+        # 不传 newline=""：保持与原来 open(path, "w", encoding="utf-8") 相同的换行翻译，
+        # 免得这次重构顺带把已落盘文件的 CRLF 悄悄改成 LF（格式选项要求原样保留）。
+        with handle as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        # 必须先关闭再替换：Windows 上 os.replace 覆盖自己仍打开着的文件会 PermissionError。
+        # 而且不止"自己没关"：目标文件被别的进程打开时，能否替换取决于对方开文件时用的
+        # **共享模式**——只有带 FILE_SHARE_DELETE 打开的句柄才允许替换。Python 自带的
+        # open() 不带这一位，所以另一个灵犀实例、编辑器或杀毒软件正在读 index.json 时，
+        # replace 就会失败。这类占用通常是毫秒级的，一次失败就放弃等于"用户这一轮白说了"。
+        # 故做有界重试；重试用尽仍失败就原样抛出，不吞错、不退化成非原子的直接覆盖。
+        for attempt in range(_REPLACE_RETRIES):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == _REPLACE_RETRIES - 1:
+                    raise
+                time.sleep(_REPLACE_RETRY_DELAY)
+        replaced = True
+    except BaseException:
+        if not replaced:
+            _discard_temp(tmp)      # fd 已由 with 关闭，这里只删文件
+        raise
+
+
 def _ensure_memory_dir():
     with _LOCK:
         os.makedirs(memory_dir(), exist_ok=True)
         if not os.path.exists(memory_index()):
-            with open(memory_index(), "w", encoding="utf-8") as f:
-                json.dump([], f)
+            # 保留原 json.dump([], f) 的默认格式选项（ensure_ascii=True、无缩进）
+            _atomic_write_json(memory_index(), [], ensure_ascii=True, indent=None)
 
 
 def _msg_to_dict(msg):
@@ -211,8 +306,7 @@ def _save_session_locked(*, session=None):
         "messages": [_msg_to_dict(m) for m in list(chat_history)],
     }
     with _LOCK:
-        with open(session_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(session_file, data)
         _update_index(current_session_id, title, current_project,
                        session_kind=session_kind, rag_kb_dir=rag_kb_dir)
     logger.info(f"会话已保存: {current_session_id} - {title}")
@@ -286,8 +380,7 @@ def _write_session_title(session_id, title):
             data = json.load(f)
         data["title"] = title
         data["updated"] = datetime.now().isoformat()
-        with open(session_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(session_file, data)
 
 
 def maybe_generate_session_title():
@@ -377,8 +470,7 @@ def _update_index(session_id, title, project=None, session_kind="code", rag_kb_d
         kept_ids = {item["id"] for item in index[:SESSION_HISTORY_LIMIT]}
         dropped_ids = [item["id"] for item in index[SESSION_HISTORY_LIMIT:]]
         index = index[:SESSION_HISTORY_LIMIT]
-        with open(memory_index(), "w", encoding="utf-8") as f:
-            json.dump(index, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(memory_index(), index)
         for old_id in dropped_ids:
             if old_id in kept_ids or old_id == state.current_session_id:
                 continue
@@ -547,8 +639,7 @@ def move_sessions_to_no_project(old_path):
                 moved += 1
 
         if moved:
-            with open(memory_index(), "w", encoding="utf-8") as f:
-                json.dump(index, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(memory_index(), index)
 
             for sid in affected_ids:
                 session_file = os.path.join(memory_dir(), f"{sid}.json")
@@ -558,8 +649,7 @@ def move_sessions_to_no_project(old_path):
                     with open(session_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     data["project"] = None
-                    with open(session_file, "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    _atomic_write_json(session_file, data)
                 except Exception as e:
                     logger.warning(f"改写会话 {sid} project 字段失败: {e}")
                     failed_ids.append(sid)
@@ -583,8 +673,7 @@ def delete_session(session_id):
             with open(memory_index(), "r", encoding="utf-8") as f:
                 index = json.load(f)
             index = [i for i in index if i["id"] != session_id]
-            with open(memory_index(), "w", encoding="utf-8") as f:
-                json.dump(index, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(memory_index(), index)
     # 同步清除会话注册表（不再持有该 Session 对象）
     drop_session(session_id)
     logger.info(f"会话已删除: {session_id}")

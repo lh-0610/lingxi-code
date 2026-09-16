@@ -357,16 +357,17 @@ class TestMoveSessionsToNoProject:
         state.current_project = "/old/project"
         save_session()
 
-        import builtins
-        _real_open = builtins.open
+        # 注入点是 os.replace：会话 JSON 改成原子写后，写入不再经 builtins.open(<id>.json,"w")
+        # ——内容先落到同目录临时文件，最后一步 replace 才命名成目标。失败注入要跟着落到那一步，
+        # 否则这个用例会静默失效（patch 打在没人走的路径上，永远注入不成功）。
+        _real_replace = os.replace
 
-        def _open(path, mode="r", *a, **k):
-            # 只让"非 index 的 .json 文件写"失败，模拟单个会话文件改写出错
-            p = str(path)
-            if p.endswith(".json") and "index" not in os.path.basename(p) and "w" in mode:
+        def _replace(src, dst):
+            # 只让"非 index 的 .json 目标"失败，模拟单个会话文件改写出错
+            if str(dst).endswith(".json") and "index" not in os.path.basename(str(dst)):
                 raise OSError("disk full")
-            return _real_open(path, mode, *a, **k)
-        monkeypatch.setattr(builtins, "open", _open)
+            return _real_replace(src, dst)
+        monkeypatch.setattr(os, "replace", _replace)
 
         with pytest.raises(SessionMigrationError):
             move_sessions_to_no_project("/old/project")
