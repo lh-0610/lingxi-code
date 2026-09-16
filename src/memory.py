@@ -94,27 +94,27 @@ def _atomic_write_json(path, data, *, ensure_ascii=False, indent=2):
     fd, tmp = tempfile.mkstemp(dir=directory,
                                prefix=os.path.basename(path) + ".", suffix=".tmp")
 
-    # fd 所有权：mkstemp 交给我们一个裸 fd。os.fdopen 成功后所有权转给文件对象（由 with
-    # 关闭）；**没能接管**时 fd 仍归我们，必须自己关，否则每次失败泄漏一个句柄。
-    # 反向同样危险：若 fdopen 已接管并在内部关掉 fd，我们再关一次，关掉的可能是别的线程
-    # 刚拿到的同号描述符（fd 号会被复用），把无关文件关掉比泄漏更难查。所以只在 fdopen
-    # 明确抛出时才关，成功后立刻把所有权交出去、不再碰这个 fd。
-    try:
-        handle = os.fdopen(fd, "w", encoding="utf-8")
-    except BaseException:
-        _discard_temp(tmp, fd=fd)
-        raise
-
-    replaced = False
+    # fd 所有权：**closefd=False** 让文件对象只负责缓冲与编码、永不关闭 fd，所有权自始至终
+    # 留在本函数手里，退出路径统一关一次。
+    #
+    # 不这么做的话所有权是含糊的：io.open 内部先构造 FileIO（此刻已接管 fd），再构造缓冲层、
+    # 文本层；后两步失败时它会把 FileIO 连同 fd 一起关掉，然后才抛。调用方看到的只是
+    # "fdopen 抛了异常"，**无从判断 fd 还在不在**——若按"没接管"再 close 一次，而这个 fd 号
+    # 此刻已被别的线程复用，关掉的就是一个无关文件（比句柄泄漏更难查，症状是别处莫名其妙
+    # 读写失败）。closefd=False 把这个歧义从根上消除：除了我们，没人会关它。
+    fd_open = True
     try:
         # 不传 newline=""：保持与原来 open(path, "w", encoding="utf-8") 相同的换行翻译，
         # 免得这次重构顺带把已落盘文件的 CRLF 悄悄改成 LF（格式选项要求原样保留）。
-        with handle as f:
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        # 必须先关闭再替换：Windows 上 os.replace 覆盖自己仍打开着的文件会 PermissionError。
-        # 而且不止"自己没关"：目标文件被别的进程打开时，能否替换取决于对方开文件时用的
+        # closefd=False 下 with 只关文件对象，fd 还开着——必须由我们关掉**再**替换：
+        # Windows 上 os.replace 覆盖自己仍打开着的文件会 PermissionError。
+        os.close(fd)
+        fd_open = False
+        # 不止"自己没关"：目标文件被别的进程打开时，能否替换取决于对方开文件时用的
         # **共享模式**——只有带 FILE_SHARE_DELETE 打开的句柄才允许替换。Python 自带的
         # open() 不带这一位，所以另一个灵犀实例、编辑器或杀毒软件正在读 index.json 时，
         # replace 就会失败。这类占用通常是毫秒级的，一次失败就放弃等于"用户这一轮白说了"。
@@ -127,10 +127,10 @@ def _atomic_write_json(path, data, *, ensure_ascii=False, indent=2):
                 if attempt == _REPLACE_RETRIES - 1:
                     raise
                 time.sleep(_REPLACE_RETRY_DELAY)
-        replaced = True
     except BaseException:
-        if not replaced:
-            _discard_temp(tmp)      # fd 已由 with 关闭，这里只删文件
+        # 走到这里 replace 必然没成功（成功后 try 里已无可抛之处），临时文件一律删。
+        # fd 只在还没关时才关——正常路径已经关过，重复关同样有误关复用号的风险。
+        _discard_temp(tmp, fd=fd if fd_open else None)
         raise
 
 

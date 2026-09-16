@@ -232,69 +232,160 @@ def test_replace_failure_keeps_old_file(tmp_path, monkeypatch):
     assert _temps(tmp_path) == []
 
 
-def test_fdopen_failure_closes_original_fd(tmp_path, monkeypatch):
-    """os.fdopen 没能接管 fd 时，mkstemp 给的裸 fd 仍归我们，必须自己关。
+def _spy_mkstemp(monkeypatch, sink):
+    """记录 mkstemp 发出的 fd 与临时路径，供测试在 finally 里做真实清理。"""
+    real = memory.tempfile.mkstemp
 
-    漏关的话每次失败泄漏一个句柄，攒够了整个应用连文件都打不开——而且这种泄漏不报错，
-    只会在很久以后以"莫名其妙打不开文件"的形式出现。
+    def spy(*args, **kwargs):
+        fd, tmp = real(*args, **kwargs)
+        sink["fd"], sink["tmp"] = fd, tmp
+        return fd, tmp
+
+    monkeypatch.setattr(memory.tempfile, "mkstemp", spy)
+
+
+def test_normal_path_closes_original_fd_exactly_once(tmp_path, monkeypatch):
+    """正常路径：mkstemp 给的 fd 必须由我们恰好关闭一次。
+
+    closefd=False 意味着文件对象不会替我们关——漏关就是每保存一次泄漏一个句柄；
+    关两次则可能命中别的线程刚拿到的同号描述符，把无关文件关掉。两边都不能错。
     """
     target = tmp_path / "x.json"
-    _write_legacy(target, {"old": True})
-    captured = {}
+    created = {}
+    _spy_mkstemp(monkeypatch, created)
+    closed = []
+    real_close = os.close
 
-    def boom_fdopen(fd, *_a, **_kw):
-        captured["fd"] = fd          # 抛出 = 没接管，fd 的所有权没转移
-        raise OSError("simulated fdopen failure")
+    def counting_close(fd):
+        closed.append(fd)
+        return real_close(fd)
 
-    monkeypatch.setattr(memory.os, "fdopen", boom_fdopen)
-    with pytest.raises(OSError, match="simulated fdopen failure"):
-        memory._atomic_write_json(str(target), SAMPLE)
+    monkeypatch.setattr(memory.os, "close", counting_close)
+    memory._atomic_write_json(str(target), SAMPLE)
 
-    # 用 fstat 而不是再 close 一次来验证：若 fd 已被关闭，fstat 抛 EBADF；若这里改用
-    # os.close，万一 fd 号已被别处复用就会把无关文件关掉，测试本身成了事故源。
-    with pytest.raises(OSError):
-        os.fstat(captured["fd"])
-    assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
+    assert closed == [created["fd"]], f"期望恰好关闭一次原始 fd，实际 {closed}"
+    assert json.loads(target.read_text(encoding="utf-8")) == SAMPLE
     assert _temps(tmp_path) == []
 
 
-def test_fdopen_failure_cleanup_errors_do_not_mask_original(tmp_path, monkeypatch):
-    """fdopen 失败路径上，关 fd 和删临时文件再怎么失败，抛出去的仍是原始异常。"""
-    target = tmp_path / "x.json"
-    _write_legacy(target, {"old": True})
+def test_fdopen_early_failure_closes_fd_exactly_once(tmp_path, monkeypatch):
+    """构造**早期**失败：io.open 还没接管 fd 就抛（如模式/编码非法）。
 
-    def boom_fdopen(_fd, *_a, **_kw):
-        raise RuntimeError("ORIGINAL FDOPEN FAILURE")
-
-    def boom_close(_fd):
-        raise OSError("close also failed")
-
-    def boom_unlink(_p):
-        raise OSError("unlink also failed")
-
-    monkeypatch.setattr(memory.os, "fdopen", boom_fdopen)
-    monkeypatch.setattr(memory.os, "close", boom_close)
-    monkeypatch.setattr(memory.os, "unlink", boom_unlink)
-    with pytest.raises(RuntimeError, match="ORIGINAL FDOPEN FAILURE"):
-        memory._atomic_write_json(str(target), SAMPLE)
-    assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
-    # 本例刻意让 unlink 也失败，所以临时文件会残留——这正是"清理失败不阻断原异常"的预期代价
-
-
-def test_successful_write_does_not_double_close_fd(tmp_path, monkeypatch):
-    """fdopen 成功后所有权归文件对象：正常路径不许再对那个 fd 调 os.close。
-
-    多关一次可能命中别的线程刚拿到的同号描述符，把无关文件关掉——比句柄泄漏更难查。
+    此时 fd 仍归我们，必须自己关一次。漏关的泄漏不报错，只会在很久以后以"莫名其妙
+    打不开文件"的形式出现。
     """
     target = tmp_path / "x.json"
+    _write_legacy(target, {"old": True})
+    created = {}
+    _spy_mkstemp(monkeypatch, created)
     closed = []
     real_close = os.close
     monkeypatch.setattr(memory.os, "close",
                         lambda fd: (closed.append(fd), real_close(fd))[1])
-    memory._atomic_write_json(str(target), SAMPLE)
-    assert closed == [], f"正常路径不该由我们显式关 fd，实际关了 {closed}"
-    assert json.loads(target.read_text(encoding="utf-8")) == SAMPLE
+    # 早期失败的忠实模型：不碰 fd，直接抛（closefd=False 下 io.open 也不会关它）
+    monkeypatch.setattr(memory.os, "fdopen",
+                        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("early construction failure")))
+
+    with pytest.raises(OSError, match="early construction failure"):
+        memory._atomic_write_json(str(target), SAMPLE)
+
+    assert closed == [created["fd"]], f"期望恰好关闭一次原始 fd，实际 {closed}"
+    assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
     assert _temps(tmp_path) == []
+
+
+def test_fdopen_late_failure_never_closes_unrelated_fd(tmp_path, monkeypatch):
+    """构造**后期**失败：io.open 已接管 fd，构造文本层时才失败。
+
+    这是 closefd=True 的陷阱：io.open 会把 FileIO 连同 fd 一起关掉再抛，调用方只看到
+    "fdopen 抛了异常"，无从判断 fd 还在不在；若按"没接管"再关一次，而这个 fd 号已被别的
+    线程复用，关掉的就是一个无关文件。
+
+    这里用 _pyio（纯 Python 实现，构造过程可注入）真实走一遍，并在异常缝隙里抢占 fd 号
+    模拟竞态。只要实现坚持传 closefd=False，io.open 就不会关我们的 fd，哨兵句柄安然无恙；
+    一旦有人改回 closefd=True，哨兵会被误关，这个用例立刻变红。
+    """
+    import _pyio
+
+    target = tmp_path / "x.json"
+    _write_legacy(target, {"old": True})
+    sentinel = tmp_path / "sentinel.bin"
+    sentinel.write_bytes(b"do-not-touch")
+    seen = {}
+
+    class _BoomTextWrapper:
+        def __init__(self, *_a, **_kw):
+            raise RuntimeError("late construction failure")
+
+    monkeypatch.setattr(_pyio, "TextIOWrapper", _BoomTextWrapper)
+
+    def fake_fdopen(fd, mode="r", buffering=-1, encoding=None, **kwargs):
+        closefd = kwargs.get("closefd", True)
+        seen["fd"] = fd
+        seen["closefd"] = closefd
+        try:
+            return _pyio.open(fd, mode, buffering, encoding, closefd=closefd)
+        except BaseException:
+            # io.open 若真把 fd 关了，这一瞬间别的线程就会拿到同一个号——这里用哨兵占位
+            seen["sentinel_fd"] = os.open(str(sentinel), os.O_RDONLY)
+            raise
+
+    monkeypatch.setattr(memory.os, "fdopen", fake_fdopen)
+    try:
+        with pytest.raises(RuntimeError, match="late construction failure"):
+            memory._atomic_write_json(str(target), SAMPLE)
+
+        assert seen["closefd"] is False, "必须以 closefd=False 打开，否则 fd 所有权含糊"
+        assert seen["sentinel_fd"] != seen["fd"], \
+            "fd 被 io.open 内部关闭并被哨兵复用——closefd 传错了"
+        os.fstat(seen["sentinel_fd"])          # 仍然有效 = 无关文件没被误关
+        assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
+        assert _temps(tmp_path) == []
+    finally:
+        if "sentinel_fd" in seen:
+            try:
+                os.close(seen["sentinel_fd"])
+            except OSError:
+                pass
+
+
+def test_fdopen_failure_cleanup_errors_do_not_mask_original(tmp_path, monkeypatch):
+    """fdopen 失败路径上，关 fd 和删临时文件再怎么失败，抛出去的仍是原始异常。
+
+    注意本例刻意让 os.close / os.unlink 都失败，于是**真实的** fd 和临时文件都会留下来。
+    monkeypatch 只恢复替身、不会替我们收尾，所以这里自己抓住 mkstemp 发出的 fd 与路径，
+    在 finally 里用**打补丁前抓到的真函数**清理——断言失败也能收尾，不把句柄泄漏留给
+    后续测试（泄漏的 fd 会被后面的 open 复用，制造难查的串扰）。
+    """
+    target = tmp_path / "x.json"
+    _write_legacy(target, {"old": True})
+    created = {}
+    _spy_mkstemp(monkeypatch, created)
+    real_close, real_unlink = os.close, os.unlink
+
+    def boom_fdopen(_fd, *_a, **_kw):
+        raise RuntimeError("ORIGINAL FDOPEN FAILURE")
+
+    monkeypatch.setattr(memory.os, "fdopen", boom_fdopen)
+    monkeypatch.setattr(memory.os, "close",
+                        lambda _fd: (_ for _ in ()).throw(OSError("close also failed")))
+    monkeypatch.setattr(memory.os, "unlink",
+                        lambda _p: (_ for _ in ()).throw(OSError("unlink also failed")))
+    try:
+        with pytest.raises(RuntimeError, match="ORIGINAL FDOPEN FAILURE"):
+            memory._atomic_write_json(str(target), SAMPLE)
+        assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
+    finally:
+        if "fd" in created:
+            try:
+                real_close(created["fd"])
+            except OSError:
+                pass
+        if created.get("tmp"):
+            try:
+                real_unlink(created["tmp"])
+            except OSError:
+                pass
 
 
 def test_cleanup_failure_does_not_mask_original_error(tmp_path, monkeypatch):
