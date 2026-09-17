@@ -1439,8 +1439,12 @@ def _execute_tool(tc, ui, _preinvoked=None):
 
     state.chat_history.append(ToolMessage(content=str(result), tool_call_id=call_id))
     # 自动任务台账（M1）：记"已改文件/已跑命令"，逐轮注入 system prompt、不受压缩影响
+    # 持快照锁改：save_session 会在同一把锁内一次性取走"计划 + 台账"，不加锁的话
+    # 存盘可能拍到台账改了一半的中间态。临界区只有这一个纯 dict 操作，极短。
     try:
-        state.record_tool_in_ledger(state.task_ledger, name, args, result)
+        from . import session as _session_mod
+        with _session_mod.current_session().snapshot_lock:
+            state.record_tool_in_ledger(state.task_ledger, name, args, result)
     except Exception:
         pass
     # 工具结果已固化到 chat_history → 清 render_log（切回靠 _redraw_chat 画 ToolMessage）

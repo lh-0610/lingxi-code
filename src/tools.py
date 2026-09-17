@@ -1251,7 +1251,11 @@ def update_plan(plan: str, explanation: str = "") -> str:
             )
     if items == current:
         return "计划未变化，无需重复更新。\n" + state.render_plan(current)
-    state.current_plan = items
+    # 持快照锁改：save_session 在同一把锁内一次取走"计划 + 台账"，不加锁的话存盘
+    # 可能拍到"计划已换、台账还停在上一轮"的半截状态。临界区只有一次赋值。
+    from . import session as _session_mod
+    with _session_mod.current_session().snapshot_lock:
+        state.current_plan = items
     _ui = getattr(state, "ui_ref", None)
     if _ui is not None and hasattr(_ui, "show_plan"):
         try:
@@ -1313,7 +1317,9 @@ def set_step_status(step: int, status: str, explanation: str = "") -> str:
         return f"第 {idx} 步已经是「{s}」，无需重复更新。"
     plan[idx - 1] = {"text": plan[idx - 1].get("text", ""), "status": s}
     _auto_advance_plan(plan)   # 标完 done 后，自动把下一个待办提为进行中（保证面板始终高亮当前步）
-    state.current_plan = plan
+    from . import session as _session_mod
+    with _session_mod.current_session().snapshot_lock:
+        state.current_plan = plan
     _ui = getattr(state, "ui_ref", None)
     if _ui is not None and hasattr(_ui, "show_plan"):
         try:

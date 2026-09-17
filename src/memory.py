@@ -29,6 +29,221 @@ from .content_blocks import is_text_block, is_think_block, block_text
 _LOCK = threading.RLock()
 
 
+# 会话 JSON 的格式版本。progress 是可选信封，旧文件没有它照常读。
+_SCHEMA_VERSION = 2
+_PROGRESS_VERSION = 1
+
+# 索引修复登记：正文写成功但索引写失败时记在这里，下次读盘时**只**修这些 id。
+# 不能改成"扫描目录里所有孤儿 JSON 就重建索引"——那会把用户主动删掉的会话复活，
+# 而删除恰恰是最不该被撤销的操作。
+_INDEX_REPAIR_NAME = "index_repair.json"
+
+
+def _index_repair_file():
+    return os.path.join(memory_dir(), _INDEX_REPAIR_NAME)
+
+
+class SessionFormatTooNewError(Exception):
+    """磁盘上的会话格式版本高于本程序能理解的版本。
+
+    这时**拒绝覆盖**：按当前字段重建整个字典会把不认识的部分悄悄丢掉，
+    而用户多半只是临时退回了旧版本，数据还要拿回去用。宁可存不上并明确报错。
+    """
+    def __init__(self, session_id, found, supported):
+        self.session_id = session_id
+        self.found = found
+        self.supported = supported
+        super().__init__(
+            f"会话 {session_id} 的格式版本 {found} 高于本程序支持的 {supported}，"
+            "已拒绝覆盖以免丢失新版本字段。请升级后再打开该会话。"
+        )
+
+
+_VALID_STEP_STATUS = ("pending", "in_progress", "done")
+
+
+def _normalize_progress(raw, session_id=""):
+    """把磁盘上的 progress 归一成可用结构，返回 (progress_dict, error_reason)。
+
+    容错原则：**进度坏掉不能拖垮聊天历史**。任何字段不合法就整块作废、返回空进度
+    并说明原因，由调用方决定怎么告诉用户；绝不把半信半疑的数据当成真进度用下去。
+    也绝不"尽量抢救"——抢救出来的计划看起来正常，用户无从分辨它是不是真的。
+    """
+    empty = {"current_plan": [], "task_ledger": state.new_task_ledger(), "revision": 0}
+    if raw is None:
+        return empty, ""
+    if not isinstance(raw, dict):
+        return empty, "progress 不是对象"
+
+    ver = raw.get("version")
+    if ver is not None and (not isinstance(ver, int) or ver > _PROGRESS_VERSION):
+        return empty, f"progress 版本 {ver!r} 无法识别"
+
+    plan_raw = raw.get("current_plan", [])
+    if not isinstance(plan_raw, list):
+        return empty, "current_plan 不是列表"
+    plan = []
+    for item in plan_raw:
+        if not isinstance(item, dict):
+            return empty, "计划步骤不是对象"
+        text = item.get("text")
+        status = item.get("status")
+        # 枚举必须严格比对：用 truthy 判断会把 "yes" / 1 / "完成了" 都当成 done，
+        # 于是恢复出来的进度比实际乐观——这正是最不能出错的方向。
+        if not isinstance(text, str) or status not in _VALID_STEP_STATUS:
+            return empty, "计划步骤字段非法"
+        plan.append({"text": text, "status": status})
+
+    ledger_raw = raw.get("task_ledger", None)
+    ledger = state.new_task_ledger()
+    if ledger_raw is not None:
+        if not isinstance(ledger_raw, dict):
+            return empty, "task_ledger 不是对象"
+        files = ledger_raw.get("files", {})
+        cmds = ledger_raw.get("commands", [])
+        if not isinstance(files, dict) or not isinstance(cmds, list):
+            return empty, "task_ledger 结构非法"
+        ledger["files"] = {str(k): str(v) for k, v in files.items()}
+        ledger["commands"] = [
+            {"cmd": str(c.get("cmd", "")), "brief": str(c.get("brief", ""))}
+            for c in cmds if isinstance(c, dict)
+        ]
+
+    rev = raw.get("revision", 0)
+    if not isinstance(rev, int) or rev < 0:
+        rev = 0
+    return {"current_plan": plan, "task_ledger": ledger, "revision": rev}, ""
+
+
+def _snapshot_progress(sess):
+    """在快照锁内取走计划 + 台账的**深拷贝**。
+
+    深拷贝是必须的：直接引用会让两个会话（或存盘副本与运行态）共享同一个 list/dict，
+    之后一边改另一边跟着变，表现为"另一个会话的计划莫名其妙动了"。
+    """
+    with sess.snapshot_lock:
+        plan = [dict(it) for it in (getattr(sess, "current_plan", None) or [])]
+        ledger_src = getattr(sess, "task_ledger", None) or state.new_task_ledger()
+        ledger = {
+            "files": dict(ledger_src.get("files") or {}),
+            "commands": [dict(c) for c in (ledger_src.get("commands") or [])],
+        }
+        rev = int(getattr(sess, "progress_revision", 0) or 0)
+    return plan, ledger, rev
+
+
+def _read_existing_session(path, session_id=""):
+    """读旧文件，用于保留未知字段并检查格式版本。读不出来就当没有（不阻断保存）。"""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            old = json.load(f)
+    except Exception as e:
+        logger.warning(f"读取旧会话文件失败（将按新内容写入）{path}: {e}")
+        return {}
+    if not isinstance(old, dict):
+        return {}
+    found = old.get("schema_version")
+    if isinstance(found, int) and found > _SCHEMA_VERSION:
+        raise SessionFormatTooNewError(session_id or old.get("id", "?"), found, _SCHEMA_VERSION)
+    return old
+
+
+def _record_index_repair(entry):
+    """登记一条"正文已存盘但索引没更新"的待修记录（尽力而为，失败只记日志）。"""
+    try:
+        pending = []
+        path = _index_repair_file()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("pending"), list):
+                pending = [p for p in data["pending"]
+                           if isinstance(p, dict) and p.get("id") != entry["id"]]
+        pending.append(entry)
+        _atomic_write_json(path, {"pending": pending})
+    except Exception as e:
+        logger.warning(f"登记索引待修记录失败 {entry.get('id')}: {e}")
+
+
+def _drop_index_repair(session_id):
+    """销掉某会话的索引待修登记（删除会话时调用）。"""
+    path = _index_repair_file()
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        pending = [p for p in (data.get("pending") or [])
+                   if isinstance(p, dict) and p.get("id") != session_id]
+        if pending:
+            _atomic_write_json(path, {"pending": pending})
+        else:
+            os.remove(path)
+    except Exception as e:
+        logger.warning(f"销掉索引待修记录失败 {session_id}: {e}")
+
+
+def _clear_progress(sess):
+    """新会话从零开始：计划、台账、修订号、进度错误一起清。
+
+    漏清 revision 会让新会话继承旧会话的修订号，后续批次拿它判断"结果是否已落盘"
+    就会对错门。
+    """
+    with sess.snapshot_lock:
+        sess.current_plan = []
+        sess.task_ledger = state.new_task_ledger()
+        sess.progress_revision = 0
+        sess.progress_error = ""
+
+
+def _repair_pending_index_entries():
+    """把登记过的待修索引项补回 index.json。只修登记过的 id。
+
+    调用方需已持 _LOCK。没有登记文件时是一次 os.path.exists，开销可忽略。
+    """
+    path = _index_repair_file()
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        pending = data.get("pending") if isinstance(data, dict) else None
+        if not isinstance(pending, list):
+            pending = []
+    except Exception as e:
+        logger.warning(f"读取索引待修记录失败: {e}")
+        return 0
+
+    still = []
+    fixed = 0
+    for item in pending:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        sid = item["id"]
+        # 会话文件已不在 → 用户后来删了它，**不要复活**，直接销案
+        if not os.path.exists(os.path.join(memory_dir(), f"{sid}.json")):
+            continue
+        try:
+            _update_index(sid, item.get("title") or "新对话", item.get("project"),
+                          session_kind=item.get("session_kind", "code"),
+                          rag_kb_dir=item.get("rag_kb_dir", "") or "")
+            fixed += 1
+            logger.info(f"已补回缺失的索引项: {sid}")
+        except Exception as e:
+            logger.warning(f"补索引项失败 {sid}: {e}")
+            still.append(item)
+    try:
+        if still:
+            _atomic_write_json(path, {"pending": still})
+        elif os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        logger.warning(f"更新索引待修记录失败: {e}")
+    return fixed
+
+
 class SessionMigrationError(Exception):
     """move_sessions_to_no_project 在【部分】会话文件改写失败时抛出。
 
@@ -298,6 +513,14 @@ def _save_session_locked(*, session=None):
             break
 
     session_file = os.path.join(memory_dir(), f"{current_session_id}.json")
+    # 格式版本高于本程序 → 抛 SessionFormatTooNewError，不覆盖（见该异常的说明）
+    existing = _read_existing_session(session_file, current_session_id)
+
+    # 计划 + 台账在快照锁内一次取走并深拷贝：这两者由工具线程持续改动，
+    # 分两次读可能拍到"计划已更新、台账还没更新"的半截状态。
+    plan_snapshot, ledger_snapshot, rev = _snapshot_progress(sess)
+    rev += 1
+
     data = {
         "id": current_session_id,
         "title": title,
@@ -307,14 +530,38 @@ def _save_session_locked(*, session=None):
         "rag_kb_dir": rag_kb_dir,
         # Plan/Act 跟着会话走：重开时恢复原模式，别让"正在规划"的会话静默变回可动手
         "agent_mode": agent_mode,
+        "schema_version": _SCHEMA_VERSION,
+        "progress": {
+            "version": _PROGRESS_VERSION,
+            "revision": rev,
+            "current_plan": plan_snapshot,
+            "task_ledger": ledger_snapshot,
+        },
         # list() 先快照：worker 线程可能正在 append（切会话时主线程存后台会话），
         # 直接迭代会撞 "list changed size during iteration"。
         "messages": [_msg_to_dict(m) for m in list(chat_history)],
     }
+    # 同版本里本程序不认识的顶层键原样带过去：读得懂的部分照常更新，读不懂的不丢。
+    for k, v in existing.items():
+        if k not in data:
+            data[k] = v
+
     with _LOCK:
+        # 正文先写、索引后写：正文是唯一真数据，索引丢了能补，正文丢了补不回来。
         _atomic_write_json(session_file, data)
-        _update_index(current_session_id, title, current_project,
-                       session_kind=session_kind, rag_kb_dir=rag_kb_dir)
+        try:
+            _update_index(current_session_id, title, current_project,
+                          session_kind=session_kind, rag_kb_dir=rag_kb_dir)
+        except Exception:
+            # 正文已落盘、索引没跟上：登记一条待修记录，下次读盘时**只**补这个 id。
+            # 仍然把异常抛出去——不能报"已保存"，调用方要知道这次没完全成功。
+            _record_index_repair({
+                "id": current_session_id, "title": title, "project": current_project,
+                "session_kind": session_kind, "rag_kb_dir": rag_kb_dir,
+                "recorded": datetime.now().isoformat(),
+            })
+            raise
+    sess.progress_revision = rev
     logger.info(f"会话已保存: {current_session_id} - {title}")
 
     # 新会话存盘拿到 id 后，把注册表里的临时 key（_new_N）迁移成 id；
@@ -505,6 +752,7 @@ def load_session(session_id, *, session=None):
     from . import session as _session_mod
     session_file = os.path.join(memory_dir(), f"{session_id}.json")
     with _LOCK:
+        _repair_pending_index_entries()
         if not os.path.exists(session_file):
             return False
         with open(session_file, "r", encoding="utf-8") as f:
@@ -526,6 +774,12 @@ def load_session(session_id, *, session=None):
     # rag 会话与项目彻底解耦：忽略磁盘上可能残留的 project（下次保存会清成 None）。
     _proj = None if _kind == "rag" else data.get("project")
 
+    # 进度：两条加载路径共用同一套校验/归一化，避免前台和后台会话行为分叉。
+    # 坏掉的 progress 只作废进度本身，聊天历史照常恢复。
+    progress, progress_error = _normalize_progress(data.get("progress"), session_id)
+    if progress_error:
+        logger.warning(f"会话 {session_id} 的进度无法恢复：{progress_error}")
+
     tgt = _session_mod.current_session() if session is None else session
     if session is None:
         state.session_token_usage = {"input": 0, "output": 0, "total": 0}
@@ -534,8 +788,6 @@ def load_session(session_id, *, session=None):
             state.chat_history.append(_dict_to_msg(d))
         state.current_session_id = session_id
         state.current_session_title = data.get("title")
-        state.current_plan = []
-        state.task_ledger = state.new_task_ledger()
         state.compaction["summary"] = ""
         state.compaction["covered_upto"] = 0
         tgt = _session_mod.current_session()
@@ -546,9 +798,17 @@ def load_session(session_id, *, session=None):
             session.chat_history.append(_dict_to_msg(d))
         session.current_session_id = session_id
         session.current_session_title = data.get("title")
-        session.current_plan = []
-        session.task_ledger = state.new_task_ledger()
         session.compaction = {"summary": "", "covered_upto": 0}
+
+    # 每个会话拿自己的深拷贝：共享容器会让两个会话的计划/台账互相串改。
+    with tgt.snapshot_lock:
+        tgt.current_plan = [dict(it) for it in progress["current_plan"]]
+        tgt.task_ledger = {
+            "files": dict(progress["task_ledger"].get("files") or {}),
+            "commands": [dict(c) for c in (progress["task_ledger"].get("commands") or [])],
+        }
+        tgt.progress_revision = progress["revision"]
+        tgt.progress_error = progress_error
 
     # 分类 / 项目 / rag 锚点 / rag_mode / Plan-Act（对两条路径统一设置在目标 Session 上）
     tgt.session_kind = _kind
@@ -573,6 +833,8 @@ def list_sessions(project_filter="__current__", *, kind=None):
     """
     _ensure_memory_dir()
     with _LOCK:
+        # 补回上次"正文写成功但索引没写上"的条目，否则那些会话在侧栏里看不见
+        _repair_pending_index_entries()
         if not os.path.exists(memory_index()):
             return []
         with open(memory_index(), "r", encoding="utf-8") as f:
@@ -680,6 +942,9 @@ def delete_session(session_id):
                 index = json.load(f)
             index = [i for i in index if i["id"] != session_id]
             _atomic_write_json(memory_index(), index)
+        # 主动删除优先于任何待修登记：不销案的话，下次读盘会把它当"索引丢了"补回来，
+        # 于是用户删掉的会话又出现在侧栏里。
+        _drop_index_repair(session_id)
     # 同步清除会话注册表（不再持有该 Session 对象）
     drop_session(session_id)
     logger.info(f"会话已删除: {session_id}")
@@ -703,10 +968,9 @@ def reset_history(*, session=None):
         state.current_session_id = None
         state.current_session_title = None
         state.shell_cwd = None
-        state.current_plan = []
-        state.task_ledger = state.new_task_ledger()
         state.compaction["summary"] = ""
         state.compaction["covered_upto"] = 0
+        _clear_progress(_sess)
         # 关键：这个 Session 对象已被"回收"成空白新对话，但注册表里还以旧 id 指向它。
         # 必须把旧 id 摘掉 + 清 key，否则点击侧栏旧会话会命中这个被清空的对象、显示空白
         # 且不重读盘（本会话"加载不出来"）。摘掉后旧会话内容仍在盘上，点击时重新读盘恢复。
@@ -721,6 +985,5 @@ def reset_history(*, session=None):
         session.current_session_id = None
         session.current_session_title = None
         session.shell_cwd = None
-        session.current_plan = []
-        session.task_ledger = state.new_task_ledger()
         session.compaction = {"summary": "", "covered_upto": 0}
+        _clear_progress(session)

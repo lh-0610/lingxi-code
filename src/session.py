@@ -69,6 +69,7 @@ class Session:
         "command_allowlist", "command_prefix_allowlist", "edit_path_allowlist",
         "pending_confirm", "render_log", "render_lock", "is_subagent",
         "role_snapshot", "session_kind", "rag_kb_dir",
+        "snapshot_lock", "progress_revision", "progress_error",
     )
 
     def __init__(self):
@@ -93,6 +94,16 @@ class Session:
         # append（worker 线程写）与切回时读快照（主线程）。
         self.render_log = []
         self.render_lock = threading.Lock()
+        # 进度快照锁：保护"计划 + 台账"这组会一起被读走存盘的状态。
+        # 保存时要在同一瞬间取走它们，否则可能拍到"计划已更新、台账还没更新"的半截状态。
+        # **锁序固定为 memory._LOCK → snapshot_lock**，反向获取会死锁。
+        # 临界区必须短：网络、工具实际执行、等待用户、发 Signal 一律不在里面。
+        self.snapshot_lock = threading.RLock()
+        # 进度修订号：每次成功存盘 +1，写进 JSON 的 progress.revision。
+        # 后续批次用它辨认"结果已落盘但标记没清"的中断窗口。
+        self.progress_revision = 0
+        # 本会话的进度为何没能恢复（空串 = 正常）。聊天历史照常加载，只有进度这部分作废。
+        self.progress_error = ""
         self.is_subagent = False
         # 本轮生成开始时冻结的角色卡快照（roles.capture_active_role() 的返回 dict）。
         # None = 用全局当前角色。worker 在 _run_agent 起手拍下、finally 清回 None：
