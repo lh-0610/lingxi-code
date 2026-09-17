@@ -419,6 +419,16 @@ _RULE_PAGE_MAX = 12000
 # 目录分页（以标题条数计）
 _TOC_PAGE_DEFAULT = 120
 _TOC_PAGE_MAX = 400
+# 目录页**正文**的字符预算（不含工具包装）。与条数上限同时生效：光限条数挡不住
+# 长标题——发送层会把超长页砍掉中段，而分页偏移还照原条数前进，中间的标题就没了。
+_TOC_PAGE_CHARS = 11000
+
+
+def _toc_page_line(h: dict) -> str:
+    """目录页里一条标题的呈现。**预算与渲染必须共用它**——两边各写一份格式化，
+    早晚会算得不一样，而不一致的那一刻恰好就是溢出发生的时候。"""
+    mark = "  [标题已节选]" if h.get("truncated") else ""
+    return f"{'  ' * (h['level'] - 1)}- {h['title']}{mark}  (offset={h['pos']})"
 
 _HEADING_RE = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*$")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -874,7 +884,8 @@ def render_rule_sources(sources: list[dict], budget: int, *, path_hint: str = ".
 
 
 def read_rule_toc_page(project_root: str, target_path: str | None,
-                       source: str, offset: int = 0, limit: int = 0) -> dict:
+                       source: str, offset: int = 0, limit: int = 0,
+                       char_budget: int = 0) -> dict:
     """按来源分页读取**目录**（标题表）。offset/limit 以标题条数计。
 
     概览里目录放不下时只提示"还有 N 项"是不够的——没有取回它们的入口，那句提示就是
@@ -890,13 +901,32 @@ def read_rule_toc_page(project_root: str, target_path: str | None,
         return {"error": "unreadable", "detail": match["error"], "rel": match["rel"]}
     total = len(match["headings"])
     limit = _TOC_PAGE_DEFAULT if limit <= 0 else min(limit, _TOC_PAGE_MAX)
+    char_budget = _TOC_PAGE_CHARS if char_budget <= 0 else char_budget
     try:
         offset = int(offset)
     except (TypeError, ValueError):
         offset = 0
     if offset < 0 or (total and offset >= total):
         return {"error": "bad_offset", "total": total, "rel": match["rel"]}
-    page = match["headings"][offset:offset + limit]
+
+    # 只限条数是不够的：150 个长标题按默认 120 条取，一页就是 39,713 字符，
+    # 发送层照 TOOL_RESULT_HARD_CAP_CHARS 砍成头+尾后只剩 54 条可见，而 next_offset
+    # 仍报 120——模型照提示续读，中间 66 条标题**静默消失**。补读通道自己漏了内容，
+    # 比一开始就说"目录太长"更糟。所以条数与字符数同时设限，且 next_offset 按
+    # **实际返回的条数**推进。
+    page, used = [], 0
+    for h in match["headings"][offset:offset + limit]:
+        line = len(_toc_page_line(h)) + 1
+        if page and used + line > char_budget:
+            break
+        if line > char_budget:
+            # 单条标题就超预算：节选并标注，同时保留 pos——否则这一页永远放不下
+            # 任何东西，next_offset 不前进，分页就此卡死。
+            keep = max(8, char_budget - len(_toc_page_line({**h, "title": ""})) - 16)
+            h = {**h, "title": h["title"][:keep], "truncated": True}
+            line = len(_toc_page_line(h)) + 1
+        page.append(h)
+        used += line
     end = offset + len(page)
     return {"rel": match["rel"], "headings": page, "total": total,
             "offset": offset, "end": end,

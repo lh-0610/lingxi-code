@@ -7,6 +7,8 @@
 注意本文件不断言"模型一定会去补读"。目录里写一句"请补读"不构成程序强制，
 这里验收的是：缺什么看得见、缺的部分拿得到。
 """
+import re
+
 from src import roles, tools
 from src.limits import TOOL_RESULT_HARD_CAP_CHARS
 
@@ -461,3 +463,102 @@ def test_tool_toc_paging_round_trip(project_dir):
 
     no_src = _call(path=".", toc=True)
     assert "需要指定 source" in no_src
+
+# ══════════════════════════════════════════════════════════════
+# bd3b1c0 复审：目录分页的字符预算
+# ══════════════════════════════════════════════════════════════
+
+def _through_send_layer(text):
+    """把工具结果真的过一遍发送层的硬上限截断，返回模型实际收到的内容。
+
+    不自己按 TOOL_RESULT_HARD_CAP_CHARS 复刻一份截断逻辑——复刻件和真货迟早会分叉，
+    而分叉的那一刻正好就是"测试说没问题、线上却丢内容"的时刻。
+    """
+    from langchain_core.messages import ToolMessage
+    from src import streaming
+
+    msgs, _ = streaming._cap_oversized_tool_results(
+        [ToolMessage(content=text, tool_call_id="t1")], budget=0)
+    return msgs[0].content
+
+
+def test_toc_page_survives_send_layer_with_long_headings(project_dir):
+    """长标题目录逐页读取不能有遗漏。
+
+    复现参数：150 个长标题、默认调用。旧实现只限条数不限字符，一页 39,713 字符，
+    发送层砍掉中段后只剩 54 条可见，而 next_offset 仍报 120——模型照提示续读，
+    中间 66 条静默消失。补读通道自己漏内容，比一开始就说"目录太长"更糟。
+    """
+    titles = [f"第{i:03d}节_" + "很长的标题用来撑爆单页字符预算" * 12 for i in range(150)]
+    (project_dir / "CLAUDE.md").write_text(
+        "".join(f"## {t}\n\n正文\n\n" for t in titles), encoding="utf-8")
+
+    seen, offset, guard = [], 0, 0
+    while True:
+        raw = _call(path=".", source="CLAUDE.md", toc=True, offset=offset)
+        assert len(raw) < TOOL_RESULT_HARD_CAP_CHARS, f"单页 {len(raw)} 字符，会被发送层截断"
+        delivered = _through_send_layer(raw)
+        assert delivered == raw, "整页必须原样送达，不能被发送层砍中段"
+
+        for t in titles:
+            if f"- {t}  (offset=" in delivered:
+                seen.append(t)
+
+        guard += 1
+        assert guard < 60, "分页没有收敛"
+        m = re.search(r"offset=(\d+)\)\]", delivered)
+        if "续读" not in delivered:
+            break
+        assert m, "续读提示里必须给出下一页偏移"
+        nxt = int(m.group(1))
+        assert nxt > offset, "next_offset 必须前进，否则分页卡死"
+        offset = nxt
+
+    assert seen == titles, f"逐页读取有遗漏：拿到 {len(seen)} / {len(titles)} 条"
+
+
+def test_toc_next_offset_tracks_actually_returned_count(tmp_path):
+    """next_offset 按**实际返回条数**推进，不按请求的 limit。"""
+    titles = ["很长的标题" * 60 + str(i) for i in range(80)]
+    (tmp_path / "CLAUDE.md").write_text(
+        "".join(f"## {t}\n\n正文\n\n" for t in titles), encoding="utf-8")
+
+    page = roles.read_rule_toc_page(str(tmp_path), None, "CLAUDE.md", offset=0, limit=80)
+
+    assert len(page["headings"]) < 80, "字符预算应当先于条数上限生效"
+    assert page["next_offset"] == len(page["headings"])
+    assert page["total"] == 80
+
+
+def test_toc_page_respects_char_budget(tmp_path):
+    titles = ["标题" * 80 + str(i) for i in range(200)]
+    (tmp_path / "CLAUDE.md").write_text(
+        "".join(f"## {t}\n\n正文\n\n" for t in titles), encoding="utf-8")
+
+    page = roles.read_rule_toc_page(str(tmp_path), None, "CLAUDE.md",
+                                    offset=0, limit=200, char_budget=2000)
+
+    rendered = "\n".join(roles._toc_page_line(h) for h in page["headings"])
+    assert len(rendered) <= 2000
+    assert page["headings"], "预算再小也要至少返回一条，否则分页无法推进"
+
+
+def test_single_overlong_heading_is_excerpted_and_still_advances(tmp_path):
+    """单条标题就超预算时：节选 + 标注 + 保留原文偏移，分页仍要能往前走。
+
+    不处理的话这一页永远放不下任何东西，next_offset 不前进，补读通道彻底卡死。
+    """
+    monster = "巨" * 5000
+    (tmp_path / "CLAUDE.md").write_text(
+        f"## {monster}\n\n正文\n\n## 后面一节\n\n正文\n", encoding="utf-8")
+
+    page = roles.read_rule_toc_page(str(tmp_path), None, "CLAUDE.md",
+                                    offset=0, limit=10, char_budget=300)
+
+    assert len(page["headings"]) == 1
+    h = page["headings"][0]
+    assert h["truncated"] is True
+    assert len(h["title"]) < len(monster)
+    assert "标题已节选" in roles._toc_page_line(h)
+    assert "offset=" in roles._toc_page_line(h), "要给出原文偏移，便于按 offset 读全称"
+    assert page["next_offset"] == 1, "必须前进，否则分页卡死"

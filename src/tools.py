@@ -1108,7 +1108,11 @@ def get_project_instructions(path: str = ".", source: str = "",
         return result
 
     if toc:
-        page = _roles.read_rule_toc_page(root, target, source, offset=offset, limit=limit)
+        # 留出本函数包装（标题行 + 续读提示）的余量，保证整页仍远低于工具结果硬上限。
+        # 只限条数不限字符时，150 个长标题一页就是 39,713 字符，发送层砍掉中段后只剩
+        # 54 条可见，而续页偏移仍按 120 前进——中间 66 条标题静默消失。
+        page = _roles.read_rule_toc_page(root, target, source, offset=offset, limit=limit,
+                                        char_budget=_roles._TOC_PAGE_CHARS - 400)
     else:
         page = _roles.read_rule_source_page(root, target, source, offset=offset, limit=limit)
     err = page.get("error")
@@ -1125,8 +1129,8 @@ def get_project_instructions(path: str = ".", source: str = "",
         return f"offset 越界：`{page['rel']}` 共 {page['total']} {unit}。"
 
     if toc:
-        lines = [f"{'  ' * (h['level'] - 1)}- {h['title']}  (offset={h['pos']})"
-                 for h in page["headings"]]
+        # 与预算共用 _toc_page_line：两边各写一份格式化，早晚会算得不一样
+        lines = [_roles._toc_page_line(h) for h in page["headings"]]
         out = (f"# {page['rel']} 目录 [第 {page['offset']}–{page['end']} 项 / 共 {page['total']} 项 · "
                f"内容指纹 {page['sha']}]\n" + "\n".join(lines))
         if page["next_offset"] is not None:
