@@ -419,3 +419,260 @@ def test_title_update_keeps_progress_and_unknown_fields(isolated_memory):
     assert after["title"] == "新标题"
     assert after["progress"]["current_plan"] == PLAN
     assert after["experimental_notes"] == {"a": 1}
+
+# ══════════════════════════════════════════════════════════════
+# f3ece76 复审补漏（五处）
+# ══════════════════════════════════════════════════════════════
+
+def test_unreadable_existing_file_aborts_save(isolated_memory, monkeypatch):
+    """已有文件读不出来时中止保存。
+
+    读失败和"文件不存在"必须分开。当成新文件直接写，会把读不到的内容连同它的格式版本
+    一起抹掉——实测 schema_version=99 被改写成 2、未知字段丢失，而版本保护正是靠读这一步
+    生效的。磁盘故障、文件被占用、JSON 损坏都会走到这里，保守地不动它总比覆盖正确。
+    """
+    sid = "unreadable_001"
+    path = isolated_memory / f"{sid}.json"
+    payload = {"id": sid, "title": "未来格式", "schema_version": 99,
+               "future_only_field": {"keep": "me"},
+               "messages": [{"type": "SystemMessage", "content": "sys"}]}
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    before = path.read_bytes()
+
+    sess = _new_session(PLAN)
+    sess.current_session_id = sid
+    real_open = open
+
+    def boom(p_, *a, **kw):
+        if str(p_).endswith(f"{sid}.json") and (len(a) == 0 or "r" in str(a[0])):
+            raise OSError("simulated read failure")
+        return real_open(p_, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", boom)
+    try:
+        memory.save_session(session=sess)
+        raise AssertionError("读不出已有文件时必须中止保存")
+    except memory.SessionUnreadableError as e:
+        assert sid in str(e.path)
+    monkeypatch.undo()
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert path.read_bytes() == before, "中止保存时不能动原文件"
+    assert after["schema_version"] == 99
+    assert after["future_only_field"] == {"keep": "me"}
+
+
+def test_malformed_json_body_is_not_silently_replaced(isolated_memory):
+    """正文是坏 JSON 时同样中止——无法确认覆盖是否安全就不覆盖。"""
+    sid = "broken_001"
+    path = isolated_memory / f"{sid}.json"
+    path.write_text("{ not json at all", encoding="utf-8")
+
+    sess = _new_session(PLAN)
+    sess.current_session_id = sid
+    try:
+        memory.save_session(session=sess)
+        raise AssertionError("坏 JSON 也必须中止保存")
+    except memory.SessionUnreadableError:
+        pass
+    assert path.read_text(encoding="utf-8") == "{ not json at all"
+
+
+def test_unreadable_progress_is_quarantined_not_destroyed(isolated_memory):
+    """读不懂的进度在被覆盖前必须留底。
+
+    运行态可以作废它（不拿半信半疑的数据冒充真进度），但一次普通保存不该消灭唯一副本——
+    用户可能只是临时退回了旧版本，那份进度还要拿回去用。
+    """
+    sid = "future_prog_001"
+    path = isolated_memory / f"{sid}.json"
+    original = {"version": 99, "current_plan": [{"text": "未来的步骤", "status": "done"}],
+                "future_extra": "keep"}
+    path.write_text(json.dumps({
+        "id": sid, "title": "会话", "schema_version": 2, "progress": original,
+        "messages": [{"type": "SystemMessage", "content": "sys"},
+                     {"type": "HumanMessage", "content": "问题"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    tgt = session.Session()
+    assert memory.load_session(sid, session=tgt) is True
+    assert tgt.progress_error, "应当标记进度无法识别"
+    assert tgt.current_plan == []
+
+    tgt.chat_history.append(AIMessage(content="继续聊"))
+    memory.save_session(session=tgt)
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["progress"]["version"] == memory._PROGRESS_VERSION
+    q = after.get("quarantined_progress")
+    assert q, "原始进度必须被隔离保存，不能凭空消失"
+    assert q["data"] == original
+    assert q["reason"]
+
+
+def test_quarantine_happens_once_and_then_persists(isolated_memory):
+    """隔离一次即可；之后的保存把它当未知键原样带着，不重复隔离也不丢。"""
+    sid = "future_prog_002"
+    path = isolated_memory / f"{sid}.json"
+    original = {"version": 99, "current_plan": []}
+    path.write_text(json.dumps({
+        "id": sid, "title": "会话", "schema_version": 2, "progress": original,
+        "messages": [{"type": "SystemMessage", "content": "sys"},
+                     {"type": "HumanMessage", "content": "问题"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    tgt = session.Session()
+    memory.load_session(sid, session=tgt)
+    tgt.chat_history.append(AIMessage(content="一"))
+    memory.save_session(session=tgt)
+    first = json.loads(path.read_text(encoding="utf-8"))["quarantined_progress"]
+
+    tgt.chat_history.append(AIMessage(content="二"))
+    memory.save_session(session=tgt)
+    second = json.loads(path.read_text(encoding="utf-8"))["quarantined_progress"]
+
+    assert second == first, "不该被重复隔离或覆盖成新的空进度"
+    assert second["data"] == original
+
+
+def test_revision_advances_even_when_index_write_fails(isolated_memory, monkeypatch):
+    """正文一落盘，revision 就已经提交出去了，必须立刻推进。
+
+    等索引也成功才推进的话，索引失败后下次保存会复用同一个 revision——两份不同内容顶着
+    同一个号，B03 靠它区分保存版本的能力就废了。索引失败仍然要报错。
+    """
+    sess = _new_session([{"text": "第一版", "status": "pending"}])
+    real_update = memory._update_index
+    monkeypatch.setattr(memory, "_update_index",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("index down")))
+    try:
+        memory.save_session(session=sess)
+    except OSError:
+        pass
+    sid = sess.current_session_id
+    first_disk = _read(isolated_memory, sid)["progress"]["revision"]
+    assert sess.progress_revision == first_disk, "正文已落盘，内存修订号必须跟上"
+
+    with sess.snapshot_lock:
+        sess.current_plan = [{"text": "第二版", "status": "done"}]
+    try:
+        memory.save_session(session=sess)
+    except OSError:
+        pass
+    monkeypatch.setattr(memory, "_update_index", real_update)
+
+    second = _read(isolated_memory, sid)["progress"]
+    assert second["revision"] > first_disk, "两份不同内容不能共用同一个 revision"
+    assert second["current_plan"][0]["text"] == "第二版"
+
+
+def test_stale_repair_entry_never_rolls_back_newer_data(isolated_memory, monkeypatch):
+    """陈旧的索引登记不得回滚更新的数据。
+
+    实测过：登记后用户改了标题和项目并成功保存，刷新列表时旧登记把索引改回了旧标题、
+    旧项目。修复必须以当前正文为准，而不是登记时的快照。
+    """
+    sess = _new_session(PLAN)
+    sess.project = "old_project"
+    sess.current_session_title = "old_title"
+    real_update = memory._update_index
+    monkeypatch.setattr(memory, "_update_index",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("index down")))
+    try:
+        memory.save_session(session=sess)
+    except OSError:
+        pass
+    monkeypatch.setattr(memory, "_update_index", real_update)
+    sid = sess.current_session_id
+
+    # 用户随后改了标题和项目，并且这次保存成功
+    sess.current_session_title = "new_title"
+    sess.project = "new_project"
+    sess.chat_history.append(AIMessage(content="又一轮"))
+    memory.save_session(session=sess)
+
+    before = [s for s in memory.list_sessions("__all__") if s["id"] == sid][0]
+    assert before["title"] == "new_title" and before["project"] == "new_project"
+
+    after = [s for s in memory.list_sessions("__all__") if s["id"] == sid][0]
+    assert after["title"] == "new_title", "旧登记把标题回滚了"
+    assert after["project"] == "new_project", "旧登记把项目归属回滚了"
+
+
+def test_successful_save_clears_pending_repair_entry(isolated_memory, monkeypatch):
+    """正文与索引都成功后要销案，免得那条记录日后再来回滚一次。"""
+    sess = _new_session(PLAN)
+    real_update = memory._update_index
+    monkeypatch.setattr(memory, "_update_index",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("index down")))
+    try:
+        memory.save_session(session=sess)
+    except OSError:
+        pass
+    monkeypatch.setattr(memory, "_update_index", real_update)
+    assert (isolated_memory / memory._INDEX_REPAIR_NAME).exists()
+
+    sess.chat_history.append(AIMessage(content="再存一次"))
+    memory.save_session(session=sess)
+
+    assert not (isolated_memory / memory._INDEX_REPAIR_NAME).exists(), "成功保存后应销案"
+
+
+def test_repair_uses_current_body_not_logged_snapshot(isolated_memory, monkeypatch):
+    """登记只保存 id；修复时的标题/项目一律从当前正文读。"""
+    sess = _new_session(PLAN)
+    real_update = memory._update_index
+    monkeypatch.setattr(memory, "_update_index",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("index down")))
+    try:
+        memory.save_session(session=sess)
+    except OSError:
+        pass
+    monkeypatch.setattr(memory, "_update_index", real_update)
+    sid = sess.current_session_id
+
+    marker = json.loads((isolated_memory / memory._INDEX_REPAIR_NAME)
+                        .read_text(encoding="utf-8"))
+    entry = [p for p in marker["pending"] if p["id"] == sid][0]
+    assert set(entry) <= {"id", "recorded"}, f"登记里不该带会过期的快照：{entry}"
+
+    # 直接改正文里的标题，修复后索引应当跟着正文走
+    path = isolated_memory / f"{sid}.json"
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["title"] = "正文里的最新标题"
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+
+    listed = [s for s in memory.list_sessions("__all__") if s["id"] == sid]
+    assert listed and listed[0]["title"] == "正文里的最新标题"
+
+
+def test_malformed_ledger_is_rejected_not_coerced(isolated_memory):
+    """台账非法要整块作废并说明原因，不能用 str() 转换或静默过滤掩盖损坏。
+
+    实测过：嵌套对象被转成 "{'invalid': 'nested'}" 塞进台账、非法命令条目被悄悄丢掉，
+    而 progress_error 是空的——损坏被抹平成"看起来正常"。
+    """
+    cases = {
+        "文件值是嵌套对象": {"files": {"a.py": {"invalid": "nested"}}, "commands": []},
+        "文件键不是字符串": {"files": {1: "编辑"}, "commands": []},
+        "命令条目不是对象": {"files": {}, "commands": ["not-a-dict"]},
+        "命令字段类型非法": {"files": {}, "commands": [{"cmd": 42, "brief": "x"}]},
+    }
+    for name, ledger in cases.items():
+        prog, err = memory._normalize_progress(
+            {"version": 1, "current_plan": [{"text": "step", "status": "done"}],
+             "task_ledger": ledger})
+        assert err, f"{name}: 应当报错"
+        assert prog["current_plan"] == [], f"{name}: 整块作废时计划也不能留下"
+        assert prog["task_ledger"] == state.new_task_ledger(), f"{name}: 台账不能被改写"
+
+
+def test_valid_ledger_is_preserved_verbatim(isolated_memory):
+    """合法台账原样保留——严格校验不能顺手把正常数据也挡掉。"""
+    ledger = {"files": {"src/a.py": "编辑"},
+              "commands": [{"cmd": "pytest", "brief": "3 passed"}]}
+    prog, err = memory._normalize_progress(
+        {"version": 1, "current_plan": [], "task_ledger": ledger})
+    assert err == ""
+    assert prog["task_ledger"]["files"] == {"src/a.py": "编辑"}
+    assert prog["task_ledger"]["commands"] == [{"cmd": "pytest", "brief": "3 passed"}]

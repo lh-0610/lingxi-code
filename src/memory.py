@@ -43,6 +43,19 @@ def _index_repair_file():
     return os.path.join(memory_dir(), _INDEX_REPAIR_NAME)
 
 
+class SessionUnreadableError(Exception):
+    """已有的会话文件读不出来，因此**无法确认**覆盖它是否安全。
+
+    读失败和"文件不存在"必须分开：当成新文件直接写，会把读不到的那份连同它的格式版本
+    和未知字段一起抹掉——实测 schema_version=99 被改写成 2。磁盘暂时故障、文件被占用、
+    JSON 损坏都会走到这里，而这几种情况下"保守地不动它"都比"覆盖"正确。
+    """
+    def __init__(self, path, detail):
+        self.path = path
+        self.detail = detail
+        super().__init__(f"无法读取已有会话文件 {path}（{detail}），已中止保存以免覆盖未知内容。")
+
+
 class SessionFormatTooNewError(Exception):
     """磁盘上的会话格式版本高于本程序能理解的版本。
 
@@ -103,11 +116,21 @@ def _normalize_progress(raw, session_id=""):
         cmds = ledger_raw.get("commands", [])
         if not isinstance(files, dict) or not isinstance(cmds, list):
             return empty, "task_ledger 结构非法"
-        ledger["files"] = {str(k): str(v) for k, v in files.items()}
-        ledger["commands"] = [
-            {"cmd": str(c.get("cmd", "")), "brief": str(c.get("brief", ""))}
-            for c in cmds if isinstance(c, dict)
-        ]
+        # 逐项严格校验，**不做 str() 转换、不静默丢弃非法条目**。
+        # 早先那样写的后果是：嵌套对象被转成 "{'invalid': 'nested'}" 这种字符串塞进台账、
+        # 非法命令条目被悄悄过滤，而 progress_error 是空的——损坏被抹平成"看起来正常"，
+        # 恰恰违背本函数"结构非法就整块作废并说明原因"的约定。
+        for k, v in files.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                return empty, "task_ledger.files 含非字符串键或值"
+        for c in cmds:
+            if not isinstance(c, dict):
+                return empty, "task_ledger.commands 含非对象条目"
+            if not isinstance(c.get("cmd", ""), str) or not isinstance(c.get("brief", ""), str):
+                return empty, "task_ledger.commands 条目字段类型非法"
+        ledger["files"] = dict(files)
+        ledger["commands"] = [{"cmd": c.get("cmd", ""), "brief": c.get("brief", "")}
+                              for c in cmds]
 
     rev = raw.get("revision", 0)
     if not isinstance(rev, int) or rev < 0:
@@ -135,15 +158,16 @@ def _snapshot_progress(sess):
 def _read_existing_session(path, session_id=""):
     """读旧文件，用于保留未知字段并检查格式版本。读不出来就当没有（不阻断保存）。"""
     if not os.path.exists(path):
-        return {}
+        return {}          # 真的是新文件，放心写
     try:
         with open(path, "r", encoding="utf-8") as f:
             old = json.load(f)
     except Exception as e:
-        logger.warning(f"读取旧会话文件失败（将按新内容写入）{path}: {e}")
-        return {}
+        # 存在但读不出来 → 中止。不能退化成"当新文件写"，那会把读不到的内容连同
+        # 它的格式版本一起抹掉，而版本保护正是靠读这一步生效的。
+        raise SessionUnreadableError(path, str(e)) from e
     if not isinstance(old, dict):
-        return {}
+        raise SessionUnreadableError(path, "文件内容不是 JSON 对象")
     found = old.get("schema_version")
     if isinstance(found, int) and found > _SCHEMA_VERSION:
         raise SessionFormatTooNewError(session_id or old.get("id", "?"), found, _SCHEMA_VERSION)
@@ -222,18 +246,31 @@ def _repair_pending_index_entries():
         if not isinstance(item, dict) or not item.get("id"):
             continue
         sid = item["id"]
+        body_path = os.path.join(memory_dir(), f"{sid}.json")
         # 会话文件已不在 → 用户后来删了它，**不要复活**，直接销案
-        if not os.path.exists(os.path.join(memory_dir(), f"{sid}.json")):
+        if not os.path.exists(body_path):
+            continue
+        # **以当前正文为准**，不用登记时的快照。登记里的标题/项目可能已经过期——
+        # 实测过：登记后用户改了标题和项目并成功保存，刷新列表时旧登记把索引改了回去，
+        # 等于用一条陈旧记录回滚了更新的数据。正文才是唯一真相。
+        try:
+            with open(body_path, "r", encoding="utf-8") as f:
+                body = json.load(f)
+            if not isinstance(body, dict):
+                raise ValueError("正文不是 JSON 对象")
+        except Exception as e:
+            logger.warning(f"补索引项时读不了正文 {sid}: {e}")
+            still.append({"id": sid, "recorded": item.get("recorded", "")})
             continue
         try:
-            _update_index(sid, item.get("title") or "新对话", item.get("project"),
-                          session_kind=item.get("session_kind", "code"),
-                          rag_kb_dir=item.get("rag_kb_dir", "") or "")
+            _update_index(sid, body.get("title") or "新对话", body.get("project"),
+                          session_kind=body.get("session_kind", "code"),
+                          rag_kb_dir=body.get("rag_kb_dir", "") or "")
             fixed += 1
             logger.info(f"已补回缺失的索引项: {sid}")
         except Exception as e:
             logger.warning(f"补索引项失败 {sid}: {e}")
-            still.append(item)
+            still.append({"id": sid, "recorded": item.get("recorded", "")})
     try:
         if still:
             _atomic_write_json(path, {"pending": still})
@@ -541,6 +578,23 @@ def _save_session_locked(*, session=None):
         # 直接迭代会撞 "list changed size during iteration"。
         "messages": [_msg_to_dict(m) for m in list(chat_history)],
     }
+    # 读不懂的原始进度在被覆盖前先隔离保存下来。
+    # 运行态可以作废它（不拿半信半疑的数据冒充真进度），但**不能让一次自动保存消灭唯一副本**——
+    # 用户可能只是临时退回了旧版本，那份进度还要拿回去用。隔离一次即可：下次保存时磁盘上
+    # 的 progress 已是本程序写的合法结构，不会重复隔离，而 quarantined_progress 作为
+    # 未知键被下面的原样带过逻辑保留。
+    old_progress = existing.get("progress")
+    if old_progress is not None and "quarantined_progress" not in existing:
+        _, why = _normalize_progress(old_progress, current_session_id)
+        if why:
+            data["quarantined_progress"] = {
+                "reason": why,
+                "quarantined_at": datetime.now().isoformat(),
+                "data": old_progress,
+            }
+            logger.warning(f"会话 {current_session_id} 的原进度无法识别（{why}），"
+                           "已隔离保存到 quarantined_progress，不会被本次保存抹掉")
+
     # 同版本里本程序不认识的顶层键原样带过去：读得懂的部分照常更新，读不懂的不丢。
     for k, v in existing.items():
         if k not in data:
@@ -549,19 +603,23 @@ def _save_session_locked(*, session=None):
     with _LOCK:
         # 正文先写、索引后写：正文是唯一真数据，索引丢了能补，正文丢了补不回来。
         _atomic_write_json(session_file, data)
+        # 正文一落盘，这个 revision 就已经提交出去了——**立刻推进内存修订号**，
+        # 不能等索引也成功。否则索引失败后下次保存会复用同一个 revision，
+        # 两份不同内容顶着同一个号，B03 靠它区分保存版本的能力就废了。
+        sess.progress_revision = rev
         try:
             _update_index(current_session_id, title, current_project,
                           session_kind=session_kind, rag_kb_dir=rag_kb_dir)
         except Exception:
             # 正文已落盘、索引没跟上：登记一条待修记录，下次读盘时**只**补这个 id。
             # 仍然把异常抛出去——不能报"已保存"，调用方要知道这次没完全成功。
-            _record_index_repair({
-                "id": current_session_id, "title": title, "project": current_project,
-                "session_kind": session_kind, "rag_kb_dir": rag_kb_dir,
-                "recorded": datetime.now().isoformat(),
-            })
+            # 只登记 id：修复时回头读正文，不用这里的快照（见 _repair_pending_index_entries）
+            _record_index_repair({"id": current_session_id,
+                                  "recorded": datetime.now().isoformat()})
             raise
-    sess.progress_revision = rev
+        # 正文与索引都成功 → 销掉可能存在的旧登记。不销的话，那条陈旧记录会在下次
+        # 刷新列表时把索引改回登记当时的样子，回滚掉这次的更新。
+        _drop_index_repair(current_session_id)
     logger.info(f"会话已保存: {current_session_id} - {title}")
 
     # 新会话存盘拿到 id 后，把注册表里的临时 key（_new_N）迁移成 id；
