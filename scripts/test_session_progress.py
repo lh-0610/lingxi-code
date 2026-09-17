@@ -768,3 +768,46 @@ def test_legacy_single_object_quarantine_is_migrated(isolated_memory):
     data = [e["data"] for e in entries]
     assert old_entry["data"] in data, "旧的单对象隔离记录被丢掉了"
     assert prog_b in data
+
+def test_quarantine_distinguishes_bool_from_number(isolated_memory):
+    """去重要区分布尔与数字：Python 里 1 == True，直接用 == 比会漏掉一份。
+
+    两份进度除了 status 一个是数字 1、一个是布尔 true 之外完全相同，都是非法进度，
+    应当分别留底。用 == 判重时第二份被当成"已经留过底"，覆盖后无声消失。
+    """
+    sid = "quarantine_types"
+    path = isolated_memory / f"{sid}.json"
+    prog_num = {"version": 1, "current_plan": [{"text": "步骤", "status": 1}]}
+    prog_bool = {"version": 1, "current_plan": [{"text": "步骤", "status": True}]}
+
+    _write_session_with_progress(isolated_memory, sid, prog_num)
+    tgt = session.Session()
+    memory.load_session(sid, session=tgt)
+    assert tgt.progress_error, "status 为数字应当被判非法"
+    tgt.chat_history.append(AIMessage(content="一"))
+    memory.save_session(session=tgt)
+
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["progress"] = prog_bool
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+
+    tgt2 = session.Session()
+    memory.load_session(sid, session=tgt2)
+    assert tgt2.progress_error, "status 为布尔应当被判非法"
+    tgt2.chat_history.append(AIMessage(content="二"))
+    memory.save_session(session=tgt2)
+
+    entries = json.loads(path.read_text(encoding="utf-8"))["quarantined_progress"]
+    assert len(entries) == 2, f"数字与布尔被当成同一份，只留下 {len(entries)} 条"
+    dumped = [json.dumps(e["data"], sort_keys=True) for e in entries]
+    assert any('"status": 1' in d for d in dumped), "数字那份丢了"
+    assert any('"status": true' in d for d in dumped), "布尔那份丢了"
+
+
+def test_json_fingerprint_keeps_type_and_ignores_key_order():
+    """指纹要区分类型、但不该因键序不同就把同一份算成两份。"""
+    fp = memory._json_fingerprint
+    assert fp(1) != fp(True)
+    assert fp(0) != fp(False)
+    assert fp({"a": 1, "b": 2}) == fp({"b": 2, "a": 1})
+    assert fp({"a": 1}) != fp({"a": "1"})

@@ -155,6 +155,21 @@ def _snapshot_progress(sess):
     return plan, ledger, rev
 
 
+def _json_fingerprint(value):
+    """保留 JSON 类型差异的内容指纹，用于比对两份数据是否真的相同。
+
+    不能直接用 `==`：Python 里 `1 == True`、`0 == False`，于是 status 为数字 1 的进度
+    和 status 为布尔 true 的进度会被判成同一份——第二份隔离被跳过，数据无声丢失。
+    json.dumps 会把它们分别写成 `1` 和 `true`，类型差异得以保留；sort_keys 抹平键序，
+    免得内容相同只是顺序不同的两份被当成不同的。
+    """
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, default=repr)
+    except Exception:
+        # 理论上进不来（隔离的数据都来自 JSON），兜底也要保住类型区分：repr(1) != repr(True)
+        return repr(value)
+
+
 def _append_quarantine(existing_entries, progress, reason):
     """把一份读不懂的进度追加进隔离清单，按内容去重，返回新的清单。
 
@@ -167,8 +182,9 @@ def _append_quarantine(existing_entries, progress, reason):
         entries = [e for e in existing_entries if isinstance(e, dict)]
     elif isinstance(existing_entries, dict):
         entries = [existing_entries]      # 兼容更早的单对象形态
+    fingerprint = _json_fingerprint(progress)
     for e in entries:
-        if e.get("data") == progress:
+        if _json_fingerprint(e.get("data")) == fingerprint:
             return entries                # 这份已经留过底了
     entries.append({
         "reason": reason,
