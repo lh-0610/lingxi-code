@@ -155,8 +155,35 @@ def _snapshot_progress(sess):
     return plan, ledger, rev
 
 
+def _append_quarantine(existing_entries, progress, reason):
+    """把一份读不懂的进度追加进隔离清单，按内容去重，返回新的清单。
+
+    用 list 而不是单个对象：同一个会话可能先后出现多份读不懂的进度（升级 → 退回 →
+    再升级 → 再退回）。只留一份的话，第二份在保存时被直接覆盖成空进度，而且悄无声息。
+    去重按原始内容比对——反复保存同一份不该攒出一堆一模一样的副本。
+    """
+    entries = []
+    if isinstance(existing_entries, list):
+        entries = [e for e in existing_entries if isinstance(e, dict)]
+    elif isinstance(existing_entries, dict):
+        entries = [existing_entries]      # 兼容更早的单对象形态
+    for e in entries:
+        if e.get("data") == progress:
+            return entries                # 这份已经留过底了
+    entries.append({
+        "reason": reason,
+        "quarantined_at": datetime.now().isoformat(),
+        "data": progress,
+    })
+    return entries
+
+
 def _read_existing_session(path, session_id=""):
-    """读旧文件，用于保留未知字段并检查格式版本。读不出来就当没有（不阻断保存）。"""
+    """读旧文件，用于保留未知字段并检查格式版本。
+
+    **存在但读不出来时抛 SessionUnreadableError 中止保存**，不能当成新文件写——
+    版本保护正是靠这一步生效的，绕过它就会把读不到的内容连同格式版本一起抹掉。
+    """
     if not os.path.exists(path):
         return {}          # 真的是新文件，放心写
     try:
@@ -580,18 +607,17 @@ def _save_session_locked(*, session=None):
     }
     # 读不懂的原始进度在被覆盖前先隔离保存下来。
     # 运行态可以作废它（不拿半信半疑的数据冒充真进度），但**不能让一次自动保存消灭唯一副本**——
-    # 用户可能只是临时退回了旧版本，那份进度还要拿回去用。隔离一次即可：下次保存时磁盘上
-    # 的 progress 已是本程序写的合法结构，不会重复隔离，而 quarantined_progress 作为
-    # 未知键被下面的原样带过逻辑保留。
+    # 用户可能只是临时退回了旧版本，那份进度还要拿回去用。
+    #
+    # 判据是「**这份**进度有没有留过底」，不是「这个会话有没有隔离记录」。后者会丢数据：
+    # 进度 A 隔离后，会话再次出现另一份读不懂的进度 B（比如又升一次级再退回来），
+    # 因为"已有隔离记录"就跳过，B 直接被空进度覆盖掉。所以按内容分别留底、相同内容去重。
     old_progress = existing.get("progress")
-    if old_progress is not None and "quarantined_progress" not in existing:
+    if old_progress is not None:
         _, why = _normalize_progress(old_progress, current_session_id)
         if why:
-            data["quarantined_progress"] = {
-                "reason": why,
-                "quarantined_at": datetime.now().isoformat(),
-                "data": old_progress,
-            }
+            data["quarantined_progress"] = _append_quarantine(
+                existing.get("quarantined_progress"), old_progress, why)
             logger.warning(f"会话 {current_session_id} 的原进度无法识别（{why}），"
                            "已隔离保存到 quarantined_progress，不会被本次保存抹掉")
 

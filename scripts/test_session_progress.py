@@ -505,9 +505,9 @@ def test_unreadable_progress_is_quarantined_not_destroyed(isolated_memory):
     after = json.loads(path.read_text(encoding="utf-8"))
     assert after["progress"]["version"] == memory._PROGRESS_VERSION
     q = after.get("quarantined_progress")
-    assert q, "原始进度必须被隔离保存，不能凭空消失"
-    assert q["data"] == original
-    assert q["reason"]
+    assert isinstance(q, list) and q, "原始进度必须被隔离保存，不能凭空消失"
+    assert q[0]["data"] == original
+    assert q[0]["reason"]
 
 
 def test_quarantine_happens_once_and_then_persists(isolated_memory):
@@ -531,8 +531,8 @@ def test_quarantine_happens_once_and_then_persists(isolated_memory):
     memory.save_session(session=tgt)
     second = json.loads(path.read_text(encoding="utf-8"))["quarantined_progress"]
 
-    assert second == first, "不该被重复隔离或覆盖成新的空进度"
-    assert second["data"] == original
+    assert second == first, "同一份内容不该被重复隔离"
+    assert len(second) == 1 and second[0]["data"] == original
 
 
 def test_revision_advances_even_when_index_write_fails(isolated_memory, monkeypatch):
@@ -676,3 +676,95 @@ def test_valid_ledger_is_preserved_verbatim(isolated_memory):
     assert err == ""
     assert prog["task_ledger"]["files"] == {"src/a.py": "编辑"}
     assert prog["task_ledger"]["commands"] == [{"cmd": "pytest", "brief": "3 passed"}]
+
+def _write_session_with_progress(mem_dir, sid, progress, extra_msg="问题"):
+    (mem_dir / f"{sid}.json").write_text(json.dumps({
+        "id": sid, "title": "会话", "schema_version": 2, "progress": progress,
+        "messages": [{"type": "SystemMessage", "content": "sys"},
+                     {"type": "HumanMessage", "content": extra_msg}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_second_unreadable_progress_is_also_quarantined(isolated_memory):
+    """先后出现两份读不懂的进度，两份都要留底。
+
+    判据必须是"**这份**进度有没有留过底"，不是"这个会话有没有隔离记录"。按会话判的话：
+    A 隔离后，会话再次出现另一份读不懂的进度 B（又升一次级再退回来），保存时因为
+    "已有隔离记录"就跳过，B 被空进度直接覆盖——保存成功、A 还在、B 无声无息地没了。
+    """
+    sid = "quarantine_two"
+    prog_a = {"version": 99, "current_plan": [{"text": "来自版本 A", "status": "done"}]}
+    prog_b = {"version": 100, "current_plan": [{"text": "来自版本 B", "status": "pending"}]}
+    path = isolated_memory / f"{sid}.json"
+
+    # 第一份读不懂的进度 → 隔离
+    _write_session_with_progress(isolated_memory, sid, prog_a)
+    tgt = session.Session()
+    memory.load_session(sid, session=tgt)
+    tgt.chat_history.append(AIMessage(content="一"))
+    memory.save_session(session=tgt)
+    assert [e["data"] for e in json.loads(path.read_text(encoding="utf-8"))
+            ["quarantined_progress"]] == [prog_a]
+
+    # 磁盘上又出现另一份读不懂的进度（模拟再次升级后回退），隔离记录仍在
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["progress"] = prog_b
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+
+    tgt2 = session.Session()
+    memory.load_session(sid, session=tgt2)
+    assert tgt2.progress_error
+    tgt2.chat_history.append(AIMessage(content="二"))
+    memory.save_session(session=tgt2)
+
+    kept = [e["data"] for e in json.loads(path.read_text(encoding="utf-8"))
+            ["quarantined_progress"]]
+    assert prog_a in kept, "第一份隔离记录不能被顶掉"
+    assert prog_b in kept, "第二份读不懂的进度也必须留底，不能被空进度覆盖"
+
+
+def test_quarantine_dedupes_by_content_not_by_count(isolated_memory):
+    """反复保存同一份读不懂的进度，不该攒出一堆一模一样的副本。"""
+    sid = "quarantine_dedupe"
+    prog = {"version": 99, "current_plan": []}
+    path = isolated_memory / f"{sid}.json"
+    _write_session_with_progress(isolated_memory, sid, prog)
+
+    for i in range(3):
+        body = json.loads(path.read_text(encoding="utf-8"))
+        body["progress"] = prog            # 每轮都把磁盘进度改回那份读不懂的
+        path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+        tgt = session.Session()
+        memory.load_session(sid, session=tgt)
+        tgt.chat_history.append(AIMessage(content=f"第{i}轮"))
+        memory.save_session(session=tgt)
+
+    entries = json.loads(path.read_text(encoding="utf-8"))["quarantined_progress"]
+    assert len(entries) == 1, f"同一份内容被隔离了 {len(entries)} 次"
+
+
+def test_legacy_single_object_quarantine_is_migrated(isolated_memory):
+    """更早版本写下的单对象隔离记录要能接着用，不能被丢掉。"""
+    sid = "quarantine_legacy"
+    old_entry = {"reason": "progress 版本 99 无法识别",
+                 "quarantined_at": "2026-01-01T00:00:00",
+                 "data": {"version": 99, "current_plan": []}}
+    prog_b = {"version": 100, "current_plan": [{"text": "B", "status": "done"}]}
+    path = isolated_memory / f"{sid}.json"
+    path.write_text(json.dumps({
+        "id": sid, "title": "会话", "schema_version": 2, "progress": prog_b,
+        "quarantined_progress": old_entry,          # 旧的单对象形态
+        "messages": [{"type": "SystemMessage", "content": "sys"},
+                     {"type": "HumanMessage", "content": "问题"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    tgt = session.Session()
+    memory.load_session(sid, session=tgt)
+    tgt.chat_history.append(AIMessage(content="继续"))
+    memory.save_session(session=tgt)
+
+    entries = json.loads(path.read_text(encoding="utf-8"))["quarantined_progress"]
+    assert isinstance(entries, list)
+    data = [e["data"] for e in entries]
+    assert old_entry["data"] in data, "旧的单对象隔离记录被丢掉了"
+    assert prog_b in data
