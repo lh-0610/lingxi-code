@@ -106,7 +106,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.bridge.edit_confirm_request.connect(self._on_edit_confirm_request)
         self.bridge.remote_submit.connect(self._on_remote_submit)
         self.bridge.dismiss_confirm.connect(self._on_dismiss_confirm)
-        self.bridge.show_plan.connect(self._render_plan_panel)
+        self.bridge.show_plan.connect(self._on_plan_update)
         self.bridge.kb_status.connect(self._on_kb_status)
 
         # 让 tools.py 在 worker 线程里能找到主窗口（弹确认框用）
@@ -2173,7 +2173,19 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     def show_plan(self, items):
         """线程安全：从 agent 线程推送任务计划到 UI 主线程"""
-        self.bridge.show_plan.emit(list(items or []))
+        from .. import session as _session
+        sess = _session.current_session()
+        if sess is not _session.get_active():
+            sess.needs_redraw = True
+            return
+        self.bridge.show_plan.emit(sess, [dict(it) for it in (items or [])])
+
+    def _on_plan_update(self, sess, items):
+        """信号排队期间可能切会话或更新计划；只显示当前会话的最新快照。"""
+        from .. import session as _session
+        if sess is not _session.get_active() or items != sess.current_plan:
+            return
+        self._render_plan_panel(items)
 
     def _tick_plan_spinner(self):
         self._plan_spinner_angle = (self._plan_spinner_angle + 30) % 360

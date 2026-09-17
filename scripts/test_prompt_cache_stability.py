@@ -92,6 +92,13 @@ class TestVolatileContext:
         v = roles.get_volatile_context()
         assert v.startswith("<system-reminder>") and v.endswith("</system-reminder>")
 
+    def test_plan_reminder_uses_incremental_updates(self, sess):
+        sess.current_plan = [{"text": "实现功能", "status": "in_progress"}]
+        reminder = roles.get_volatile_context()
+        assert "set_step_status" in reminder
+        assert "explanation" in reminder
+        assert "每开始/完成一步就调 update_plan" not in reminder
+
 
 class TestAppendVolatile:
     def _msgs(self):

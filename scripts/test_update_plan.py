@@ -1,8 +1,10 @@
-from src import state
+import pytest
+
+from src import state, session
 from src.tools import update_plan, set_step_status
 
 
-# ── 保留不变的旧测试（整份替换后行为一致） ──
+# ── 创建 / 解析 ──
 
 def test_parse_and_render():
     state.current_plan = []
@@ -14,11 +16,19 @@ def test_parse_and_render():
     assert "1/3 完成" in out
 
 
-def test_empty_clears():
+def test_empty_without_reason_keeps_unfinished_plan():
     update_plan.func("[ ] 临时")
     out = update_plan.func("")
+    assert state.current_plan == [{"text": "临时", "status": "pending"}]
+    assert "未更新" in out
+
+
+def test_explicit_cancel_clears():
+    update_plan.func("[ ] 临时")
+    out = update_plan.func("", explanation="用户取消此任务")
     assert state.current_plan == []
     assert "清空" in out
+    assert "用户取消此任务" in out
 
 
 def test_tolerant_formats():
@@ -73,42 +83,40 @@ def test_update_plan_allows_status_only_update():
     ]
 
 
-# ── 改写的旧测试（旧断言的是"模糊合并/拒绝"，现在是整份替换） ──
+# ── 结构保护：不猜测相似度，不将改写误当进度更新 ──
 
-def test_full_overwrite_replaces():
-    """整份替换：新计划完全覆盖旧计划，允许删步骤。"""
+def test_explicit_new_task_replaces():
     update_plan.func("[ ] A\n[ ] B")
-    out = update_plan.func("[x] C")
+    out = update_plan.func("[x] C", explanation="用户改为新任务 C")
     assert "计划已更新" in out
     assert state.current_plan == [{"text": "C", "status": "done"}]
 
 
-def test_full_overwrite_allows_removal_of_unfinished():
-    """整份替换：允许删未完成步骤，不需要调整说明。"""
+def test_removal_of_unfinished_requires_reason():
     update_plan.func("[x] A\n[~] B\n[ ] C")
     out = update_plan.func("[x] A\n[~] B")
-    assert "计划已更新" in out
+    assert "计划未更新" in out
     assert state.current_plan == [
         {"text": "A", "status": "done"},
         {"text": "B", "status": "in_progress"},
+        {"text": "C", "status": "pending"},
     ]
 
 
-def test_reword_replaces_text():
-    """整份替换：改写措辞后 current_plan 用模型发的新文字（不再冻结旧文字）。"""
+def test_reword_does_not_replace_or_guess_status():
+    """措辞变化时整次拒绝；不能猜测新旧步骤相似就把任务标完成。"""
     update_plan.func("[~] 实现登录功能\n[ ] 写测试")
     out = update_plan.func("[x] 实现登录\n[~] 写测试")   # 第一步措辞被改短
-    assert "计划已更新" in out
+    assert "计划未更新" in out
     assert state.current_plan == [
-        {"text": "实现登录", "status": "done"},         # 用新文字，不再冻结旧文字
-        {"text": "写测试", "status": "in_progress"},
+        {"text": "实现登录功能", "status": "in_progress"},
+        {"text": "写测试", "status": "pending"},
     ]
 
 
-def test_append_new_step_replaces():
-    """整份替换：新增一步时完全按新列表覆盖。"""
+def test_new_dependency_can_be_added_with_reason():
     update_plan.func("[x] A\n[~] B")
-    out = update_plan.func("[x] A\n[x] B\n[ ] C")
+    out = update_plan.func("[x] A\n[x] B\n[ ] C", explanation="发现还需要迁移 C")
     assert "计划已更新" in out
     assert [it["text"] for it in state.current_plan] == ["A", "B", "C"]
     assert state.current_plan[0]["status"] == "done"
@@ -116,12 +124,60 @@ def test_append_new_step_replaces():
     assert state.current_plan[2] == {"text": "C", "status": "pending"}
 
 
-def test_structural_change_no_reason_needed():
-    """整份替换：直接替换结构，不需要"调整说明"。"""
+@pytest.mark.parametrize("explanation", ["", " \n\t"])
+def test_structural_change_requires_nonempty_reason(explanation):
     update_plan.func("[~] 调研实现\n[ ] 修改代码")
-    out = update_plan.func("[~] 修改代码\n[ ] 跑测试")
+    out = update_plan.func("[~] 修改代码\n[ ] 跑测试", explanation=explanation)
+    assert "计划未更新" in out
+    assert [it["text"] for it in state.current_plan] == ["调研实现", "修改代码"]
+
+
+def test_reorder_requires_reason():
+    update_plan.func("[~] A\n[ ] B")
+    out = update_plan.func("[ ] B\n[~] A")
+    assert "计划未更新" in out
+    assert [it["text"] for it in state.current_plan] == ["A", "B"]
+    out = update_plan.func("[ ] B\n[~] A", explanation="发现 B 是 A 的前置条件")
     assert "计划已更新" in out
-    assert [it["text"] for it in state.current_plan] == ["修改代码", "跑测试"]
+    assert [it["text"] for it in state.current_plan] == ["B", "A"]
+
+
+def test_stale_status_snapshot_cannot_reset_progress():
+    update_plan.func("[x] A\n[~] B\n[ ] C")
+    out = update_plan.func("[ ] A\n[ ] B\n[ ] C")
+    assert "计划未更新" in out
+    assert [it["status"] for it in state.current_plan] == ["done", "in_progress", "pending"]
+
+
+def test_explicit_rework_can_reset_progress():
+    update_plan.func("[x] A\n[~] B")
+    out = update_plan.func("[~] A\n[ ] B", explanation="集成测试发现 A 需要返工，B 暂停")
+    assert "计划已更新" in out
+    assert [it["status"] for it in state.current_plan] == ["in_progress", "pending"]
+
+
+def test_repeated_or_rejected_update_does_not_redraw(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(state, "ui_ref", SimpleNamespace(show_plan=calls.append))
+    update_plan.func("[~] A\n[ ] B")
+    update_plan.func("[~] A\n[ ] B")
+    update_plan.func("[~] A 换个说法\n[ ] B")
+    assert len(calls) == 1
+
+
+def test_session_plans_are_guarded_independently():
+    first = session.get_active()
+    update_plan.func("[~] A")
+    second = session.Session()
+    session.bind_thread(second)
+    try:
+        update_plan.func("[~] B")
+        set_step_status.func(1, "完成")
+    finally:
+        session.unbind_thread()
+    assert first.current_plan == [{"text": "A", "status": "in_progress"}]
+    assert second.current_plan == [{"text": "B", "status": "done"}]
 
 
 # ── 新增：TestSetStepStatus ──
@@ -222,3 +278,20 @@ class TestSetStepStatus:
         assert state.current_plan[0]["status"] == "done"
         assert state.current_plan[1]["status"] == "pending"      # B 不被自动提升
         assert state.current_plan[2]["status"] == "in_progress"  # C 保持
+
+    def test_rework_requires_reason(self):
+        self._setup_three_steps()
+        set_step_status.func(1, "完成")
+        out = set_step_status.func(1, "进行中")
+        assert "进度未更新" in out
+        assert state.current_plan[0]["status"] == "done"
+        out = set_step_status.func(1, "进行中", explanation="测试发现该步骤还有遗漏")
+        assert "遗漏" in out
+        assert state.current_plan[0]["status"] == "in_progress"
+
+    def test_update_keeps_previous_snapshot_immutable(self):
+        self._setup_three_steps()
+        previous = state.current_plan
+        set_step_status.func(1, "完成")
+        assert [it["status"] for it in previous] == ["pending", "pending", "pending"]
+        assert state.current_plan[1]["status"] == "in_progress"

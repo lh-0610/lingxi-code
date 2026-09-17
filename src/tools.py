@@ -1212,14 +1212,16 @@ def _auto_advance_plan(plan: list) -> None:
 
 
 @tool
-def update_plan(plan: str) -> str:
-    """创建 / 重列当前任务的执行计划（待办清单，**整份覆盖**）。
+def update_plan(plan: str, explanation: str = "") -> str:
+    """创建计划；已有计划默认只允许按原文、原顺序推进状态。
 
     任务需要 3 步以上、或要改多个文件时，动手前先调一次列出全部步骤。
     **之后推进进度用 `set_step_status(步号, 状态)` 改单步，不要反复重发整份计划。**
-    仅当要大改结构（增删步骤、重排）时才再调本工具重列。
+    改名、增删、重排、清空、开始新任务或回退进度时，必须填写 explanation 说明具体原因。
+    没有原因的结构变更会被拒绝，原计划保持不变；不要为润色措辞重列计划。
 
     plan: 多行文本，每行一个步骤，行首标记：[ ] 未开始  [~] 进行中  [x] 已完成
+    explanation: 调整原因（例如需求变化、发现新依赖、用户取消某项或开始新任务）；不是向用户申请确认。
     """
     from . import state
     # 历史压缩摘要曾被模型续接进 plan 参数；摘要不是计划的一部分，硬截断防污染。
@@ -1231,17 +1233,36 @@ def update_plan(plan: str) -> str:
     items = state.parse_plan(clean_plan)
     if plan and not items:
         return "计划未更新：没有检测到合法 checklist 行，请用 [ ] / [~] / [x] 标记。"
-    state.current_plan = items          # 整份替换——不再模糊合并(churn 根源)、不再拒绝
+    current = state.current_plan
+    explanation = explanation.strip()
+    if current and not explanation:
+        if [it["text"] for it in items] != [it["text"] for it in current]:
+            return (
+                "计划未更新：已有步骤的文字、顺序和数量已固定。推进进度请用 "
+                "set_step_status；确需增删、改名、重排、清空或开始新任务时，"
+                "用 update_plan(plan=完整计划, explanation=具体调整原因)。\n"
+                "当前计划保持不变：\n" + state.render_plan(current)
+            )
+        if any(_plan_status_regresses(old["status"], new["status"])
+               for old, new in zip(current, items)):
+            return (
+                "计划未更新：不能无理由回退已有进度。确需返工时填写 explanation。\n"
+                "当前计划保持不变：\n" + state.render_plan(current)
+            )
+    if items == current:
+        return "计划未变化，无需重复更新。\n" + state.render_plan(current)
+    state.current_plan = items
     _ui = getattr(state, "ui_ref", None)
     if _ui is not None and hasattr(_ui, "show_plan"):
         try:
-            _ui.show_plan(list(items))
+            _ui.show_plan([dict(it) for it in items])
         except Exception:
             pass
+    reason = f"调整原因：{explanation}\n" if explanation else ""
     if not items:
-        return "计划已清空。"
+        return reason + "计划已清空。"
     done = sum(1 for it in items if it["status"] == "done")
-    return f"计划已更新（{done}/{len(items)} 完成）：\n" + state.render_plan(items)
+    return reason + f"计划已更新（{done}/{len(items)} 完成）：\n" + state.render_plan(items)
 
 
 # 模型传的状态词 → 内部状态。容忍中英 / checkbox 字符各种写法。
@@ -1258,16 +1279,22 @@ def _normalize_step_status(status: str):
     return _STEP_STATUS_ALIASES.get(str(status).strip().lower())
 
 
+def _plan_status_regresses(old: str, new: str) -> bool:
+    rank = {"pending": 0, "in_progress": 1, "done": 2}
+    return rank[new] < rank[old]
+
+
 @tool
-def set_step_status(step: int, status: str) -> str:
+def set_step_status(step: int, status: str, explanation: str = "") -> str:
     """更新计划中【某一步】的状态（增量更新，**不用重发整份计划**）。
 
     step: 步号（1 基，就是计划面板上看到的第几行）。
     status: 完成 / 进行中 / 待办（也接受 done / in_progress / pending / x / ~）。
     用法：开头用 update_plan 列全计划，之后每开始或完成一步就调本工具改那一步。
+    explanation: 仅回退进度时必填，例如测试发现问题需要返工；正常推进不需要。
     """
     from . import state
-    plan = list(getattr(state, "current_plan", None) or [])
+    plan = [dict(it) for it in (getattr(state, "current_plan", None) or [])]
     if not plan:
         return "还没有计划。请先用 update_plan 列出完整步骤。"
     try:
@@ -1279,17 +1306,23 @@ def set_step_status(step: int, status: str) -> str:
     s = _normalize_step_status(status)
     if s is None:
         return f"状态无效：{status}。请用 完成 / 进行中 / 待办（或 done / in_progress / pending）。"
+    explanation = explanation.strip()
+    if _plan_status_regresses(plan[idx - 1]["status"], s) and not explanation:
+        return "进度未更新：回退进度需要 explanation 说明返工或调整原因。"
+    if plan[idx - 1]["status"] == s:
+        return f"第 {idx} 步已经是「{s}」，无需重复更新。"
     plan[idx - 1] = {"text": plan[idx - 1].get("text", ""), "status": s}
     _auto_advance_plan(plan)   # 标完 done 后，自动把下一个待办提为进行中（保证面板始终高亮当前步）
     state.current_plan = plan
     _ui = getattr(state, "ui_ref", None)
     if _ui is not None and hasattr(_ui, "show_plan"):
         try:
-            _ui.show_plan(list(plan))
+            _ui.show_plan([dict(it) for it in plan])
         except Exception:
             pass
     done = sum(1 for it in plan if it["status"] == "done")
-    return f"已把第 {idx} 步标为「{s}」（{done}/{len(plan)} 完成）：\n" + state.render_plan(plan)
+    reason = f"调整原因：{explanation}\n" if explanation else ""
+    return reason + f"已把第 {idx} 步标为「{s}」（{done}/{len(plan)} 完成）：\n" + state.render_plan(plan)
 
 
 # ══════════════════════════════════════

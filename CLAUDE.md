@@ -281,7 +281,7 @@ python main.py
 | `find_tests` / `related_files` | 找某源文件的相关测试 / 列出导入·被导入·相关测试（只读、Plan 放行） |
 | `remember` / `forget` | 长期记忆存取（本地安全操作，**不弹确认**，Plan 模式放行） |
 | `spawn_agents` | 并行派生子 Agent 处理独立子任务（各自隔离 worktree、跑完合并；写工具，Plan/遥控拦） |
-| `update_plan` / `set_step_status` | 任务计划：整份重列 / 增量改单步状态（只读，Plan 放行；驱动计划面板） |
+| `update_plan` / `set_step_status` | 任务计划：创建或显式调整 / 增量改单步状态（Plan 放行；驱动计划面板） |
 | `get_project_instructions` | 读目标路径适用的项目规则（CLAUDE.md / AGENTS.md / .lingxirules；只读、Plan 放行） |
 | `notify_user` | 主动给用户推 Telegram 通知（分级；本地安全、Plan 放行） |
 | `code_map` | 代码库符号地图（命名组正则提取函数/类，commonpath 防越界；Plan 只读放行） |
@@ -294,6 +294,12 @@ python main.py
 | `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、HTML 去标签转文本、二进制拒绝、无需 key）；`web_search` 用 Tavily（config `web_search_api_key`，没配优雅降级）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
 
 > 写盘类工具（edit/write/append）共用 `tools.py:_confirm_file_write()`：算 unified diff → `ui.confirm_edit` 弹蓝色卡片 → worker 阻塞等审批。CLI/测试无 UI 时直接放行。
+
+### 计划稳定性（tools.py / roles.py / UI）
+- 创建后默认固定步骤文字、顺序和数量；`set_step_status` 只更新状态。`update_plan` 兼容同一清单的进度更新，但不做模糊匹配或隐式合并。
+- 重列、改名、增删、清空、开始新任务或回退进度必须传 `explanation`；缺失原因时整次拒绝且保留原计划。原因由模型随工具调用说明，不增加用户确认。相同状态重复上报不刷新 UI。
+- `show_plan` 信号携带来源 Session 和独立快照；发送时过滤后台会话，主线程接收时再次核对当前会话及最新计划，避免切会话时排队的旧消息或后台子 Agent 覆盖前台面板。
+- 静态提示与尾部运行态统一要求用 `set_step_status` 推进，显式调整结构才调用带 `explanation` 的 `update_plan`。回归见 `test_update_plan.py` / `test_plan_panel.py` / `test_prompt_cache_stability.py`。
 
 ### 自我校验闭环（src/tools.py，编码核心）
 - 让助手"改完自己发现错、自己修"（对标 Cline/Codex）。`edit_file`/`write_file`/`append_file` **成功后**调 `_auto_check_suffix(full_path)`：跑静态检查、把问题**追加到工具返回串**，模型在同一条 ToolMessage 里就看到「成功编辑 X」+「⚠️ 自动校验发现问题…」→ 下一轮自然去修
