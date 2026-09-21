@@ -81,8 +81,15 @@ def _normalize_progress(raw, session_id=""):
     容错原则：**进度坏掉不能拖垮聊天历史**。任何字段不合法就整块作废、返回空进度
     并说明原因，由调用方决定怎么告诉用户；绝不把半信半疑的数据当成真进度用下去。
     也绝不"尽量抢救"——抢救出来的计划看起来正常，用户无从分辨它是不是真的。
+
+    唯一的例外是完成回执（`recent_operations`）：它是**附加证据**，坏掉一条只会让
+    对应操作退回"结果未知"（保守方向）；整块作废反而会让所有已提交操作一起退回未知。
     """
-    empty = {"current_plan": [], "task_ledger": state.new_task_ledger(), "revision": 0}
+    from . import run_records as _rr
+
+    empty = {"current_plan": [], "task_ledger": state.new_task_ledger(), "revision": 0,
+             "last_run": None, "pending_verification": _rr.empty_pending_verification(),
+             "last_committed_operation": None, "recent_operations": []}
     if raw is None:
         return empty, ""
     if not isinstance(raw, dict):
@@ -135,15 +142,34 @@ def _normalize_progress(raw, session_id=""):
     rev = raw.get("revision", 0)
     if not isinstance(rev, int) or rev < 0:
         rev = 0
-    return {"current_plan": plan, "task_ledger": ledger, "revision": rev}, ""
+
+    # ── B03 的运行记录与待验证义务 ──
+    last_run, why = _rr.normalize_last_run(raw.get("last_run"))
+    if why:
+        return empty, why
+    pending, why = _rr.normalize_pending_verification(raw.get("pending_verification"))
+    if why:
+        return empty, why
+    last_op, recent_ops = _rr.normalize_receipts(raw.get("last_committed_operation"),
+                                                 raw.get("recent_operations"))
+
+    return {"current_plan": plan, "task_ledger": ledger, "revision": rev,
+            "last_run": last_run, "pending_verification": pending,
+            "last_committed_operation": last_op, "recent_operations": recent_ops}, ""
 
 
 def _snapshot_progress(sess):
-    """在快照锁内取走计划 + 台账的**深拷贝**。
+    """在快照锁内一次取走整份进度的**深拷贝**。
 
     深拷贝是必须的：直接引用会让两个会话（或存盘副本与运行态）共享同一个 list/dict，
     之后一边改另一边跟着变，表现为"另一个会话的计划莫名其妙动了"。
+
+    计划、台账、运行记录、待验证义务、完成回执必须在**同一个临界区**里取：
+    分几次读会拍到"工具结果已记进台账、但对应回执还没写上"这种半截状态，
+    而恢复时正是靠回执与 inflight 配对来判断操作提交没提交的。
     """
+    from . import run_records as _rr
+
     with sess.snapshot_lock:
         plan = [dict(it) for it in (getattr(sess, "current_plan", None) or [])]
         ledger_src = getattr(sess, "task_ledger", None) or state.new_task_ledger()
@@ -152,7 +178,24 @@ def _snapshot_progress(sess):
             "commands": [dict(c) for c in (ledger_src.get("commands") or [])],
         }
         rev = int(getattr(sess, "progress_revision", 0) or 0)
-    return plan, ledger, rev
+        last_run = getattr(sess, "last_run", None)
+        last_run = json.loads(json.dumps(last_run)) if isinstance(last_run, dict) else None
+        pending = getattr(sess, "pending_verification", None)
+        if isinstance(pending, dict):
+            pending = {"files": list(pending.get("files") or []),
+                       "code_files": list(pending.get("code_files") or []),
+                       "tracking_incomplete": dict(pending.get("tracking_incomplete") or {}),
+                       "reason": pending.get("reason") or "",
+                       "run_id": pending.get("run_id") or ""}
+        else:
+            pending = _rr.empty_pending_verification()
+        last_op = getattr(sess, "last_committed_operation", None)
+        last_op = dict(last_op) if isinstance(last_op, dict) else None
+        recent = [dict(r) for r in (getattr(sess, "recent_operations", None) or [])
+                  if isinstance(r, dict)]
+    return {"plan": plan, "ledger": ledger, "revision": rev, "last_run": last_run,
+            "pending_verification": pending, "last_committed_operation": last_op,
+            "recent_operations": recent}
 
 
 def _json_fingerprint(value):
@@ -253,16 +296,27 @@ def _drop_index_repair(session_id):
 
 
 def _clear_progress(sess):
-    """新会话从零开始：计划、台账、修订号、进度错误一起清。
+    """新会话从零开始：计划、台账、修订号、运行记录、待验证义务、回执一起清。
 
     漏清 revision 会让新会话继承旧会话的修订号，后续批次拿它判断"结果是否已落盘"
-    就会对错门。
+    就会对错门。漏清 last_run / 回执同理——新会话会带着上一个会话的运行身份，
+    恢复时把别人的中断记在自己头上。
+
+    待验证义务在这里**清掉**是对的：`reset_history` 是"开一个新会话"，不是"继续同一任务"；
+    旧会话的义务留在它自己的文件里，跟着那个会话走。
     """
+    from . import run_records as _rr
+
     with sess.snapshot_lock:
         sess.current_plan = []
         sess.task_ledger = state.new_task_ledger()
         sess.progress_revision = 0
         sess.progress_error = ""
+        sess.last_run = None
+        sess.pending_verification = _rr.empty_pending_verification()
+        sess.last_committed_operation = None
+        sess.recent_operations = []
+        sess.active_run_id = None
 
 
 def _repair_pending_index_entries():
@@ -457,17 +511,23 @@ def _msg_to_dict(msg):
             d["reasoning_content"] = ak['reasoning_content']
     if isinstance(msg, ToolMessage):
         d["tool_call_id"] = msg.tool_call_id
+    # 程序注入的消息（自动修复提示 / 完成闸门提示 / 视觉桥接说明）要带着标记落盘。
+    # 不存的话，重开会话后 run_records.describe_source 会把程序自己写的那段文字
+    # 当成"用户的最新要求"——恰恰是在长任务里最需要这条线索的时候失真。
+    if (getattr(msg, "additional_kwargs", None) or {}).get("lingxi_internal") is True:
+        d["lingxi_internal"] = True
     return d
 
 
 def _dict_to_msg(d):
     t = d["type"]
+    internal = {"lingxi_internal": True} if d.get("lingxi_internal") is True else {}
     if t == "SystemMessage":
         return SystemMessage(content=d["content"])
     elif t == "HumanMessage":
-        return HumanMessage(content=d["content"])
+        return HumanMessage(content=d["content"], additional_kwargs=internal)
     elif t == "AIMessage":
-        ak = {}
+        ak = dict(internal)
         if "reasoning_content" in d:
             ak["reasoning_content"] = d["reasoning_content"]
         msg = AIMessage(
@@ -477,8 +537,9 @@ def _dict_to_msg(d):
         )
         return msg
     elif t == "ToolMessage":
-        return ToolMessage(content=d["content"], tool_call_id=d.get("tool_call_id", ""))
-    return HumanMessage(content=d["content"])
+        return ToolMessage(content=d["content"], tool_call_id=d.get("tool_call_id", ""),
+                           additional_kwargs=internal)
+    return HumanMessage(content=d["content"], additional_kwargs=internal)
 
 
 def _build_ai_message(gathered, clean_text, tool_calls):
@@ -517,17 +578,45 @@ def _build_ai_message(gathered, clean_text, tool_calls):
 
 
 def save_session(*, session=None):
-    """保存当前会话到本地文件（追加/更新）。
+    """保存当前会话到本地文件（追加/更新）。失败抛异常（行为与本批之前一致）。
 
     session=None → 从 state 代理读（兼容旧调用）；
     session=<Session> → 直接从该 Session 对象读（用于保存后台会话）。
     """
+    outcome = save_session_report(session=session)
+    if outcome.error is not None:
+        raise outcome.error
+
+
+def save_session_report(*, session=None):
+    """同 `save_session`，但把**分步结果**作为 `SaveOutcome` 返回而不是抛异常。
+
+    存在的理由：调用方需要区分"正文写没写成功"和"这次保存整体成不成功"。
+    正文写成功而索引写失败时，完成回执其实已经落盘、inflight 标记可以清；
+    只给一个成功布尔值的话，这两件事会被混成一件，于是要么误删唯一线索、
+    要么把已经存好的结果说成未保存。
+    """
+    from .run_records import SaveOutcome
+
+    started = time.perf_counter()
     # 快照与落盘必须在同一临界区，否则先取的旧快照会覆盖 worker 的最终回复。
     with _LOCK:
-        _save_session_locked(session=session)
+        try:
+            return _save_session_locked(session=session, started=started)
+        except Exception as error:
+            return SaveOutcome(error=error,
+                               elapsed_ms=round((time.perf_counter() - started) * 1000, 2))
 
 
-def _save_session_locked(*, session=None):
+def _save_session_locked(*, session=None, started=None):
+    from .run_records import SaveOutcome
+
+    if started is None:
+        started = time.perf_counter()
+
+    def _elapsed():
+        return round((time.perf_counter() - started) * 1000, 2)
+
     _ensure_memory_dir()
 
     from . import session as _session_mod
@@ -536,7 +625,7 @@ def _save_session_locked(*, session=None):
 
     # 子 Agent 是临时会话：不落盘、不进侧栏历史（其改动经 worktree 合并回主项目即可）
     if getattr(sess, "is_subagent", False):
-        return
+        return SaveOutcome(skipped="子 Agent 会话不落盘", elapsed_ms=_elapsed())
 
     if session is None:
         chat_history = state.chat_history
@@ -548,7 +637,7 @@ def _save_session_locked(*, session=None):
         current_session_title = session.current_session_title
 
     if len(chat_history) <= 1:
-        return
+        return SaveOutcome(skipped="历史过短，尚无可保存内容", elapsed_ms=_elapsed())
 
     is_first_save = not current_session_id
     if is_first_save:
@@ -596,10 +685,19 @@ def _save_session_locked(*, session=None):
     # 格式版本高于本程序 → 抛 SessionFormatTooNewError，不覆盖（见该异常的说明）
     existing = _read_existing_session(session_file, current_session_id)
 
-    # 计划 + 台账在快照锁内一次取走并深拷贝：这两者由工具线程持续改动，
-    # 分两次读可能拍到"计划已更新、台账还没更新"的半截状态。
-    plan_snapshot, ledger_snapshot, rev = _snapshot_progress(sess)
-    rev += 1
+    # 进度（计划 / 台账 / 运行记录 / 待验证义务 / 完成回执）在快照锁内一次取走并深拷贝：
+    # 它们由工具线程持续改动，分几次读可能拍到"计划已更新、台账还没更新"的半截状态。
+    snap = _snapshot_progress(sess)
+    rev = snap["revision"] + 1
+    # 完成回执要带上**本次**保存的 revision：回执的意义是"这条结果在哪一版落的盘"，
+    # 内存里写它的时候还不知道 revision（由这里 +1 得出），所以在序列化这一刻补齐。
+    last_op = dict(snap["last_committed_operation"]) if snap["last_committed_operation"] else None
+    recent_ops = [dict(r) for r in snap["recent_operations"]]
+    if last_op is not None and not last_op.get("revision"):
+        last_op["revision"] = rev
+        for entry in recent_ops:
+            if entry.get("operation_id") == last_op.get("operation_id"):
+                entry["revision"] = rev
 
     data = {
         "id": current_session_id,
@@ -614,8 +712,19 @@ def _save_session_locked(*, session=None):
         "progress": {
             "version": _PROGRESS_VERSION,
             "revision": rev,
-            "current_plan": plan_snapshot,
-            "task_ledger": ledger_snapshot,
+            "current_plan": snap["plan"],
+            "task_ledger": snap["ledger"],
+            # 本轮运行记录：phase 说的是"程序有没有收到本轮结果"，outcome 是实际返回的
+            # AgentResult。重开时看到 phase=running 就展示"上次运行被中断"，
+            # 绝不凭空补一个 completed/failed。
+            "last_run": snap["last_run"],
+            # 尚未解决的验证义务。下一轮初始化重置验证状态后会**填回**它，
+            # 历史测试成功不因此变成当前任务的通行状态。
+            "pending_verification": snap["pending_verification"],
+            # 完成回执：辨认"结果已落盘但 inflight 标记没清"。只看 revision 变大不够——
+            # 别的保存同样推进 revision。
+            "last_committed_operation": last_op,
+            "recent_operations": recent_ops,
         },
         # list() 先快照：worker 线程可能正在 append（切会话时主线程存后台会话），
         # 直接迭代会撞 "list changed size during iteration"。
@@ -647,18 +756,31 @@ def _save_session_locked(*, session=None):
         _atomic_write_json(session_file, data)
         # 正文一落盘，这个 revision 就已经提交出去了——**立刻推进内存修订号**，
         # 不能等索引也成功。否则索引失败后下次保存会复用同一个 revision，
-        # 两份不同内容顶着同一个号，B03 靠它区分保存版本的能力就废了。
+        # 两份不同内容顶着同一个号，靠它区分保存版本的能力就废了。
         sess.progress_revision = rev
+        # 回执的 revision 也就地补齐：下次保存不会再改写它（上面只在 revision 为 0 时填），
+        # 否则同一条回执会跟着每次保存漂移，恢复时对不上它当初落的那一版。
+        with sess.snapshot_lock:
+            mem_op = getattr(sess, "last_committed_operation", None)
+            if isinstance(mem_op, dict) and not mem_op.get("revision"):
+                mem_op["revision"] = rev
+        try:
+            written_bytes = os.path.getsize(session_file)
+        except OSError:
+            written_bytes = 0
         try:
             _update_index(current_session_id, title, current_project,
                           session_kind=session_kind, rag_kb_dir=rag_kb_dir)
-        except Exception:
+        except Exception as index_error:
             # 正文已落盘、索引没跟上：登记一条待修记录，下次读盘时**只**补这个 id。
-            # 仍然把异常抛出去——不能报"已保存"，调用方要知道这次没完全成功。
+            # 仍然把错误带出去——不能报"已保存"，调用方要知道这次没完全成功；
+            # 但 body_written=True 让它知道回执确实落盘了，inflight 标记可以清。
             # 只登记 id：修复时回头读正文，不用这里的快照（见 _repair_pending_index_entries）
             _record_index_repair({"id": current_session_id,
                                   "recorded": datetime.now().isoformat()})
-            raise
+            return SaveOutcome(body_written=True, index_written=False, revision=rev,
+                               error=index_error, elapsed_ms=_elapsed(),
+                               bytes_written=written_bytes)
         # 正文与索引都成功 → 销掉可能存在的旧登记。不销的话，那条陈旧记录会在下次
         # 刷新列表时把索引改回登记当时的样子，回滚掉这次的更新。
         _drop_index_repair(current_session_id)
@@ -670,6 +792,8 @@ def _save_session_locked(*, session=None):
     target = session if session is not None else _session.current_session()
     if target is not None and target.key != current_session_id:
         _session.rekey(target, current_session_id)
+    return SaveOutcome(body_written=True, index_written=True, revision=rev,
+                       elapsed_ms=_elapsed(), bytes_written=written_bytes)
 
 
 def _first_user_text():
@@ -909,6 +1033,24 @@ def load_session(session_id, *, session=None):
         }
         tgt.progress_revision = progress["revision"]
         tgt.progress_error = progress_error
+        # 运行记录原样恢复，**不改写磁盘上的 phase**：phase=running 意思是程序从未收到
+        # 那一轮的结果，展示成"上次运行被中断"即可（run_records.describe_last_run），
+        # 不在加载时把它改成 interrupted——那是用我们的推断覆盖当时的事实记录。
+        _lr = progress["last_run"]
+        tgt.last_run = json.loads(json.dumps(_lr)) if isinstance(_lr, dict) else None
+        _pv = progress["pending_verification"]
+        tgt.pending_verification = {
+            "files": list(_pv.get("files") or []),
+            "code_files": list(_pv.get("code_files") or []),
+            "tracking_incomplete": dict(_pv.get("tracking_incomplete") or {}),
+            "reason": _pv.get("reason") or "",
+            "run_id": _pv.get("run_id") or "",
+        }
+        _lo = progress["last_committed_operation"]
+        tgt.last_committed_operation = dict(_lo) if isinstance(_lo, dict) else None
+        tgt.recent_operations = [dict(r) for r in progress["recent_operations"]]
+        # 加载不等于在跑：活动 run 是纯运行态，恢复出来的会话没有正在跑的 run。
+        tgt.active_run_id = None
 
     # 分类 / 项目 / rag 锚点 / rag_mode / Plan-Act（对两条路径统一设置在目标 Session 上）
     tgt.session_kind = _kind
@@ -917,6 +1059,19 @@ def load_session(session_id, *, session=None):
     tgt.rag_mode = (_kind == "rag")
     tgt.agent_mode = _mode
     tgt.worktree = None
+
+    # 清掉 sidecar 里**已经有匹配回执**的残留记录：它们的结果确实已经落盘，只是上次
+    # 删标记时失败了，留着只会在恢复界面上报一个不存在的"结果未知"。
+    # 没有回执的那些**原样保留**——它们是真正的诊断材料，由恢复界面（B04）呈现给用户。
+    try:
+        from .run_records import sweep_committed
+        unknown, sweep_error = sweep_committed(tgt, session_id)
+        if sweep_error:
+            logger.warning(f"会话 {session_id} 的执行前记录无法读取：{sweep_error}")
+        elif unknown:
+            logger.info(f"会话 {session_id} 有 {len(unknown)} 个操作结果未知（不自动重放）")
+    except Exception as _sweep_err:
+        logger.warning(f"核对执行前记录失败 {session_id}: {_sweep_err}")
 
     logger.info(f"会话已加载: {session_id}（kind={_kind}, mode={_mode}）")
     return True
@@ -1045,6 +1200,10 @@ def delete_session(session_id):
         # 主动删除优先于任何待修登记：不销案的话，下次读盘会把它当"索引丢了"补回来，
         # 于是用户删掉的会话又出现在侧栏里。
         _drop_index_repair(session_id)
+        # sidecar 跟着会话一起删。它不进侧栏索引，也不能作为复活已删除会话的依据——
+        # 留着只会让下次启动为一个不存在的会话报"有操作结果未知"。
+        from .run_records import discard_inflight
+        discard_inflight(session_id)
     # 同步清除会话注册表（不再持有该 Session 对象）
     drop_session(session_id)
     logger.info(f"会话已删除: {session_id}")

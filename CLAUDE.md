@@ -32,6 +32,7 @@ src/                     # 主代码
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
   llm_errors.py          # 模型请求错误分类（限流/上下文溢出/鉴权/瞬时）+ Retry-After 解析 + 重试策略
+  run_records.py         # 运行身份（run_id/来源/终态）+ 统一 begin/finalize + inflight sidecar + 完成回执 + 待验证义务归一化
   tools_rag.py           # search_knowledge（知识库语义检索，只读、Plan 放行、带 scope 分域参数）
   rag/                   # RAG 知识库引擎（详见「RAG 知识库检索」节）
     chunk.py             # 切块：iter_markdown_chunks（按标题分层）/ iter_plain_chunks（PDF 页，不解析 Markdown）
@@ -76,6 +77,7 @@ src/                     # 主代码
     _base.py             # 共享 BASE_DIR / CONFIG_PATH / THEME_CONFIG_PATH 常量
 
 scripts/                 # pytest 测试套件 + conftest fixtures
+  measure_save_cost.py   #   非 pytest：量典型/长会话的保存耗时与字节数（要不要上增量日志得先有数)
   evals/                 # **agent 行为评测集**（真调 API、不进 pytest；详见 evals/README.md）
     runner.py            #   fixture 全新副本 + HeadlessUI 驱动 + 7 类判定 + 多次取通过率
     cases/*.json         #   任务 + 判定 + 预算；含防作弊（file_unchanged）与负面用例
@@ -185,13 +187,37 @@ python main.py
 - **溢出恢复**：provider 报超窗 → `_stream_chunks_with_retry` 抛 `ContextOverflowError` → 主循环把会话的 `overflow_squeeze` +1（`_current_history_budget` 按 1/2^n 收紧、8k 地板）→ 压缩后重发，封顶 `_MAX_OVERFLOW_RETRIES=3`。**不在成功后清零**：溢出说明对该模型窗口的估算偏乐观，这个教训该在本会话内保持，否则每轮都要重新撞一次墙
 - 子 Agent 递归深度天然封顶：`spawn_agents` 里 `is_subagent` 的会话不许再派生
 
+### 运行记录与中断恢复（src/run_records.py，B03）
+- **三个身份分开**：会话 Session（聊天历史 + 项目归属）／任务 Task（目标 + 计划 + 累计进度，B05 才建立，`task_id` 现在允许为 null）／运行 Run（一次发送·重试·继续启动的 agent 循环）。`run_id` 每次由程序生成，与 session_id / task_id 无关
+- **统一 begin/finalize 在 `agent_loop` 最外层**，主体是 `_agent_loop_body`。普通聊天、重试、视觉桥接、Claude Code CLI 分支、所有提前返回和异常（含 `BaseException`）走同一条收尾路径。写在主循环内部的话，每加一个 `return` 就多一个漏网路径——而漏网的恰恰是异常和取消这些最需要记录的情形
+- 收尾**在 worker 解绑前**完成，**持久化成功之后**才发结果通知 / 起标题线程（`_post_run_notify`）。`claude_code_loop` 里原来自己那套 save + 标题已删除，否则一次 CLI 运行会起两个标题线程、还先存一份"还在跑"的快照
+- **三条不变量**：① `finalize_run` 幂等（重复调用不再写第二条记录、不再存一次盘）；② 旧 run 的迟到收尾按 `stale` 忽略，不覆盖同一会话的新 run；③ **运行结果与保存结果分开**——保存失败照样如实返回 `AgentResult`，但 `saved=False` 并追加"最新进度未保存"的独立提示
+- **运行来源由程序填写**：`describe_source` 取最后一条**真实**用户消息。自动修复提示、完成闸门提示、视觉桥接说明都带 `additional_kwargs["lingxi_internal"]=True` 并**跟着落盘**（`_msg_to_dict`/`_dict_to_msg` 往返），在这里被跳过。不跳过的话，一轮自动修复就把"用户要求了什么"改写成程序自己生成的诊断文字
+- **`phase` 与 `outcome` 不能互推**：`phase` 是"程序有没有收到本轮结果"（running / ended），`outcome` 是实际返回的 AgentResult（中断时为 null）。重开看到 `phase=running` 就展示"上次运行被中断"，**加载不改写磁盘事实**，绝不凭空补一个 completed/failed
+
+### 工具边界的 inflight sidecar（src/run_records.py + streaming._execute_tool）
+- 有副作用的工具**进入调用前**把一条小记录原子写进 `chat_memory/<id>.inflight.json`；写不成功就抛 `InflightWriteError`、**中止该工具调用**并明确报错。假装建立了恢复点再动手，比根本没有这套记录更糟——用户会以为有记录可查
+- **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径（实测恒 480 字节，不随历史增长），不复制历史、长参数或完整输出
+- **sidecar 内是操作列表不是单个对象**：一条记录结构上不可能覆盖另一条未完成的。目前只读工具才并行、写工具串行，但这个前提不该被隐含依赖
+- **判定哪些工具要记录**：只列纯读工具（`SIDE_EFFECT_FREE_TOOLS`），**不在清单里的一律记录**——未知工具、所有 `mcp_*`、以及 `remember`/`forget`/`notify_user`/`update_plan`/`set_step_status`。后面这几个虽在 `PLAN_MODE_READONLY_TOOLS` 里，却真有副作用（写长期记忆 / 推 Telegram / 改计划），**不能拿 Plan 白名单当这份清单用**
+- **提交顺序不可颠倒**：工具结果 + 台账 + 进度 + 待验证事项先进内存 → 写一次主快照（含匹配的完成回执）→ **只有正文可靠落盘后**才清 sidecar。先删标记再保存的话，保存失败就等于把唯一线索丢了
+- **不能只看一个成功布尔值**：`save_session_report` 返回 `SaveOutcome(body_written / index_written / revision / bytes / elapsed)`。正文成功而索引失败时，回执**确实已落盘**、sidecar 可以清，但这次保存整体是失败的，要照实告诉用户。`save_session` 行为不变（仍抛异常）
+- **判断操作是否已提交要核对 session_id + run_id + operation_id + 完成回执**，不能只看 revision 变大——别的保存同样推进 revision。回执存一个有界环（`recent_operations`，50 条）：只留一条的话，A、B 相继提交而 A 的清理失败时，A 会被误判成"结果未知"
+- **四个中断窗口**：① 标记已写、工具未返回 → 结果未知；② 工具已跑、快照没写 → 结果未知，标记留着；③ 快照已写、标记没清 → 认成 `committed`，`load_session` 顺手清掉；④ 清理失败后又有别的提交 → 靠回执环仍认得出。**结果未知 = 既不算成功也不算未执行，不自动重放**
+- 承诺的是"有记录地恢复并重新核对"，**不是**"任何命令恰好执行一次"。回执落盘 = "这条结果已可靠记录"，**不等于**"工具没有副作用"——执行失败同样留回执，因为失败也可能改了一半文件。「已调度」也不等于「副作用已发生」：写文件工具还要等确认卡，这中间被杀掉文件其实没动，但程序分辨不出，仍报未知
+- 子 Agent（`is_subagent`）全程跳过：不写 sidecar、不写运行记录、不发通知、不起标题
+
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。
 - **命令与 MCP 本地写入**：`workspace_changes.py` 在调用前后追踪项目文件，工具执行及完成检查时复查；变化使旧测试/diff 失效。Git 项目遵循 ignore，非 Git 项目跳过依赖/构建目录。无法完整枚举（权限、子模块、文件数上限等）保持未验证；它不是进程沙箱，不保证跟踪项目外或任务结束后的写入。
 - **自动修复循环**：`check_code` 的 `[REPAIR_INFO]` / `status=failed|checker=...` 是失败识别依据之一，不能只依赖展示 emoji。`run_tests` / `check_code` 失败后由 `agent_loop` 注入诊断提示，修复次数封顶。
 - **终态契约**：`agent_loop` 返回不可变的 `AgentResult(status, reason)`：`completed / failed / cancelled / unverified / limit_reached`。线程返回、工具结果和任务完成是不同事实。评测必须检查状态，不能仅凭文件断言通过。Claude CLI 的外部验收无法核实，即使收到 success 也返回 `unverified`。
 - **两条边界，别互相冒充**：① **计划状态是模型自述**——`update_plan` / `set_step_status` 的勾选由模型自己写，工具只保证清单不漂移，不保证步骤真做完了；可信度由本节的验证闭环提供，不由计划工具提供。② **验证只覆盖实际执行过的检查**——`tests_passed=True` 的语义是"已跑的测试通过"，不是"任务做对了"；测试全绿仍可能漏掉需求，也不证明每个计划步骤真实完成。
-- 纯运行态，不持久化
+- **待验证义务跨轮保留**（B03）：`verification` 本身仍是纯运行态，但"上一轮改了没验证的东西"会经 `summarize_obligations` 存进会话 JSON 的 `progress.pending_verification`，下一轮由 `begin_run` 在 `reset_verification` **之后**用 `restore_obligations` 填回。顺序反了就等于每轮开头静默清零——`reset_verification` 会清空 dirty 文件，先填充再被清掉是最容易写出的 bug
+- 恢复走 `mark_dirty` 而不是直接塞字段：它顺带把 `tests_run`/`tests_passed` 打回未验证。**历史测试成功只是历史证据，不能恢复成当前任务的通行状态**
+- `get_verification_gaps`（先复查工作区再算）与 `gaps_from_state`（只看状态、不扫盘）分开：工具边界每次提交都要算一次义务摘要，在那里重扫整棵项目树会让每个写操作都付一次全量哈希的代价
+- `workspace_changes` 的 `tracking_errors` 现在**枚举成功就消掉**。不消的话它是永久的（原函数只写不删），一次瞬时失败就让闸门再也过不去；跨轮恢复义务后更明显——义务一旦记下就没有出口。恢复时同时种一个 `workspace_snapshots[root] = None` 空基线，逼本轮重新枚举
+- 一轮完全验证通过（无 gaps）→ 义务清空；`reset_history` 开新会话也清（义务跟着它自己的会话走）
 
 ### 子 Agent 并行 + worktree 隔离（src/subagent.py + worktree.py）
 - `spawn_agents(tasks)` 把多个**相互独立**的子任务并行派给子 Agent，**各自在独立 git worktree 改代码**。仅明确 `completed` 且父子均未停止时自动合并；失败、未知、未验证、取消、超时均保留隔离区和原因。合并后父会话的相关验证结果失效。
@@ -255,7 +281,8 @@ python main.py
 | `chat_memory/index.json` | 会话列表（id + title + 时间 + project tag） |
 | `chat_memory/long_term_memory.json` | 跨会话长期记忆（remember/forget 存取，自动注入 system prompt） |
 | `chat_memory/rag_index/chroma/` | RAG 向量库（Chroma PersistentClient 数据目录；collection 名 `kb_<store>_v1`） |
-| `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化）+ project / session_kind / rag_kb_dir / agent_mode |
+| `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run` / `pending_verification` / `last_committed_operation` / `recent_operations`） |
+| `chat_memory/<session_id>.inflight.json` | 有副作用工具的**执行前**记录（sidecar）：session_id / run_id / operation_id / 工具名 / tool_call_id / 起始 revision / 路径。提交后删除；**不进侧栏索引**，也不能作为复活已删除会话的依据（`delete_session` 会一并删掉） |
 | `chat_memory/projects.json` | 注册的项目列表 + 当前激活项目（`{current, projects: [{path, name}]}`） |
 | `chat_memory/role_config.json` | 当前激活的角色卡名 |
 | `chat_memory/ui_prefs.json` | UI 偏好（如关闭按钮记住的选择） |

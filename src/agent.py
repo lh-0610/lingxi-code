@@ -39,7 +39,7 @@ from .roles import (
     load_saved_role_card,
 )
 from .memory import (
-    save_session,
+    save_session,                   # noqa: F401  facade 出口 → chat_window 发送前立即存盘
     load_session,                   # noqa: F401  facade 出口 → sidebar
     list_sessions,                  # noqa: F401  facade 出口 → sidebar
     delete_session,                 # noqa: F401  facade 出口 → sidebar
@@ -177,13 +177,87 @@ if isinstance(state.chat_history[0], SystemMessage):
 # ══════════════════════════════════════
 
 def agent_loop(ui) -> AgentResult:
+    """一轮运行的统一入口：begin / finalize 都在这里，主体在 `_agent_loop_body`。
+
+    普通聊天、重试、视觉桥接（它自己做完识别后调本函数）、Claude Code CLI 分支，
+    以及主体里所有提前返回和异常，全都经过这一层——begin/finalize 写在主体内部的话，
+    每加一条 `return` 就多一个漏网路径，而漏网的恰恰是异常和取消这些最需要记录的情形。
+
+    收尾在 worker 解绑之前完成（`_run_agent` 的 finally 才解绑），
+    并且**持久化成功之后**才发结果通知。
+    """
+    from . import run_records
+    sess = _session_mod.current_session()
+    run = run_records.begin_run(sess)
+    result = AgentResult("failed", "Agent 未正常完成。")
+    clean_text = ""
+    try:
+        result, clean_text = _agent_loop_body(ui)
+        return result
+    finally:
+        # finally 而不是 except：KeyboardInterrupt / SystemExit 同样要留下结束记录。
+        # finalize_run 自己幂等、自己拒绝旧 run，这里不必再判。
+        try:
+            run_records.finalize_run(sess, run, result, ui=ui)
+        except Exception as _fin_err:
+            logger.error(f"写结束记录失败: {_fin_err}", exc_info=True)
+        try:
+            _post_run_notify(ui, result, clean_text)
+        except Exception as _post_err:
+            logger.debug(f"收尾通知失败（已忽略）: {_post_err}")
+
+
+def _post_run_notify(ui, result, clean_text):
+    """持久化之后的收尾：手机通知 + 后台生成标题。
+
+    子 Agent 是临时会话：不推通知、不起标题生成，也不落历史（见 save_session 守卫）。
+    统一 finalize 不能顺手改变这条边界。
+    """
+    from . import session as _session
+    _title_sess = _session.current_session()
+    if getattr(_title_sess, "is_subagent", False):
+        return
+
+    # Telegram 通知：任务完成——不分端都把【完整】回复发回手机（长则分段不截断）。
+    # 走 notify_long（尊重 NOTIFY 开关 / 分级 / 节流，用户可在设置里关 done 通知）。
+    try:
+        from .notify import notify_long as _notify_long
+        if result.status == "completed" and not state.stop_flag:
+            _notify_long("done", "灵犀回复", clean_text or "(无文本回复)", "agent_done")
+    except Exception:
+        pass
+
+    # 标题生成是一次 LLM 调用（可能几十秒），**绝不能**同步跑——否则它会拖在 finished
+    # 信号之前，让 is_generating 一直为 True、UI 卡在"生成中"点不动。
+    # 新线程必须 bind 到这个会话，否则 maybe_generate_session_title 读
+    # state.current_session_id/title/model 会落到当时的 active（用户可能已切走），
+    # 把标题/项目 tag 写错会话。
+    def _gen_title_bg():
+        _session.bind_thread(_title_sess)
+        try:
+            maybe_generate_session_title()
+            bridge = getattr(ui, "bridge", None)
+            if bridge is not None:
+                bridge.sessions_refresh.emit()  # 标题出来后刷新侧栏（线程安全）
+        except Exception as e:
+            logger.error(f"自动生成标题失败: {e}", exc_info=True)
+        finally:
+            _session.unbind_thread()
+
+    _threading.Thread(target=_gen_title_bg, daemon=True).start()
+
+
+def _agent_loop_body(ui):
+    """主循环本体。返回 (AgentResult, 最终正文)——收尾由 `agent_loop` 统一负责。
+
+    注意：验证状态的重置已挪到 `run_records.begin_run`，因为恢复未了的验证义务
+    必须紧跟在重置之后；留在这里的话，两者中间任何一次提前返回都会让义务蒸发。
+    """
     result = AgentResult("failed", "Agent 未正常完成。")
     clean_text = ""
     try:
         if state.stop_flag:
-            return AgentResult("cancelled", "用户停止生成。")
-        from .verification import reset_verification as _v_reset
-        _v_reset(_session_mod.current_session().verification)
+            return AgentResult("cancelled", "用户停止生成。"), clean_text
 
         mtype = MODEL_LIST[state.current_model_index][1]
         model_name = MODEL_LIST[state.current_model_index][0]
@@ -197,20 +271,20 @@ def agent_loop(ui) -> AgentResult:
                     "\n⚠️ 知识库模式不支持 Claude Code 模型（它走本地 CLI、无法使用知识库检索）。"
                     "请在顶栏换一个 API 模型，或切回「编码」模式再用 Claude Code。\n",
                     "ai_msg")
-                return AgentResult("failed", "知识库模式不支持 Claude Code。")
+                return AgentResult("failed", "知识库模式不支持 Claude Code。"), clean_text
             result = _claude_code_loop(ui)
             if state.stop_flag:
-                return AgentResult("cancelled", "用户停止生成。")
+                return AgentResult("cancelled", "用户停止生成。"), clean_text
             if not isinstance(result, AgentResult):
-                return AgentResult("failed", "Claude Code 未返回有效运行结果。")
-            return result
+                return AgentResult("failed", "Claude Code 未返回有效运行结果。"), clean_text
+            return result, clean_text
 
         # 本地模型需要检测 Ollama 服务
         if mtype == "ollama" and not check_ollama():
             ui.show_message("\n⚠️ 无法连接 Ollama 服务，请先运行 ollama serve\n", "ai_msg")
             from .config import OLLAMA_BASE_URL
             logger.error(f"Ollama 服务不可用: {OLLAMA_BASE_URL}")
-            return AgentResult("failed", "无法连接 Ollama 服务。")
+            return AgentResult("failed", "无法连接 Ollama 服务。"), clean_text
 
         round_i = -1
         # 角色卡存在时用角色名替代模型名
@@ -365,7 +439,11 @@ def agent_loop(ui) -> AgentResult:
                             )
                             if allowed:
                                 prompt = inject_repair_prompt(_verification)
-                                state.chat_history.append(HumanMessage(content=prompt))
+                                # 程序注入，不是用户的新要求：打上标记，
+                                # 免得运行来源被改写成这段自动生成的诊断文字。
+                                state.chat_history.append(HumanMessage(
+                                    content=prompt,
+                                    additional_kwargs={"lingxi_internal": True}))
                                 try:
                                     ui.show_message(
                                         "\n⚠️ 验证失败，正在自动诊断并尝试修复…\n",
@@ -435,7 +513,9 @@ def agent_loop(ui) -> AgentResult:
                             ui.show_message("\n⚠️ 检测到改动尚未完成验证，正在继续检查…\n", "tool_result")
                             # Anthropic 只允许 SystemMessage 连续出现在历史开头。
                             # 这是对当前任务的内部续作指令，按 HumanMessage 注入最稳妥。
-                            state.chat_history.append(HumanMessage(content=_gap_msg))
+                            state.chat_history.append(HumanMessage(
+                                content=_gap_msg,
+                                additional_kwargs={"lingxi_internal": True}))
                             continue
                         clean_text = (
                             "⚠️ 验证仍未完整完成：\n"
@@ -454,44 +534,9 @@ def agent_loop(ui) -> AgentResult:
                 logger.info(f"回复完成: {clean_text[:100]}...")
                 break
 
-        # save_session 是本地写、很快，留在主流程；标题生成是一次 LLM 调用（可能几十秒），
-        # **绝不能**在这里同步跑——否则它会拖在 finished 信号之前，让 is_generating 一直
-        # 为 True、UI 卡在"生成中"点不动。挪到后台线程，完事再发信号刷新侧栏标题。
-        try:
-            save_session()
-        except Exception as save_err:
-            logger.error(f"保存会话失败: {save_err}", exc_info=True)
-
-        from . import session as _session
-        _title_sess = _session.current_session()
-
-        # 子 Agent 是临时会话：不推手机通知、不起标题生成（也不落历史，见 save_session 守卫）
-        if not getattr(_title_sess, "is_subagent", False):
-            # Telegram 通知：任务完成——不分端都把【完整】回复发回手机（长则分段不截断）。
-            # 走 notify_long（尊重 NOTIFY 开关 / 分级 / 节流，用户可在设置里关 done 通知）。
-            try:
-                from .notify import notify_long as _notify_long
-                if result.status == "completed" and not state.stop_flag:
-                    _notify_long("done", "灵犀回复", clean_text or "(无文本回复)", "agent_done")
-            except Exception:
-                pass
-
-            # 标题生成在新线程跑，必须 bind 到这个会话，否则 maybe_generate_session_title
-            # 读 state.current_session_id/title/model 会落到当时的 active（用户可能已切走），
-            # 把标题/项目 tag 写错会话。
-            def _gen_title_bg():
-                _session.bind_thread(_title_sess)
-                try:
-                    maybe_generate_session_title()
-                    bridge = getattr(ui, "bridge", None)
-                    if bridge is not None:
-                        bridge.sessions_refresh.emit()  # 标题出来后刷新侧栏（线程安全）
-                except Exception as e:
-                    logger.error(f"自动生成标题失败: {e}", exc_info=True)
-                finally:
-                    _session.unbind_thread()
-
-            _threading.Thread(target=_gen_title_bg, daemon=True).start()
+        # 保存不再在这里做：`agent_loop` 的 finalize 会连同结束记录一次存盘，
+        # 正常/取消/异常/提前返回四条路径共用同一次保存。留在这里的话，
+        # 只有成功路径会存，而异常路径恰恰是最需要留下记录的。
 
     except Exception as e:
         ui.remove_thinking_indicator()
@@ -514,5 +559,5 @@ def agent_loop(ui) -> AgentResult:
         result = AgentResult("failed", err_msg)
 
     if state.stop_flag:
-        return AgentResult("cancelled", "用户停止生成。")
-    return result
+        return AgentResult("cancelled", "用户停止生成。"), clean_text
+    return result, clean_text

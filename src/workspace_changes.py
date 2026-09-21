@@ -94,6 +94,11 @@ def refresh_workspace_tracking(v):
         except (OSError, ValueError) as error:
             v.setdefault("tracking_errors", {})[root] = str(error)
             continue
+        # 枚举成功 → 消掉这个根目录的旧追踪错误。不消的话错误是**永久**的：本函数只写不删，
+        # 于是一次瞬时失败（超时、文件被占用）就让完成闸门再也过不去，而且跨轮恢复未了义务
+        # 之后更明显——义务一旦记下就没有出口。注意这只说明"现在能完整枚举了"，
+        # 并不追认失败期间发生过什么；那段时间的改动仍由下面的 diff 照常标脏。
+        v.get("tracking_errors", {}).pop(root, None)
         if previous is not None:
             for path in sorted(previous.keys() | current.keys()):
                 before, after = previous.get(path), current.get(path)
@@ -109,9 +114,12 @@ def track_workspace_changes(root):
     v = session.get_verification()
     root = os.path.realpath(root)
     snapshots = v.setdefault("workspace_snapshots", {})
-    if root not in snapshots:
+    if snapshots.get(root) is None:
+        # `snapshots[root] is None` 有两个来源：上次建基线失败，或恢复未了义务时种下的
+        # 空基线。两种都该在这里重试建基线——`root not in snapshots` 判不出后者。
         try:
             snapshots[root] = _snapshot(root)
+            v.get("tracking_errors", {}).pop(root, None)
         except (OSError, ValueError) as error:
             snapshots[root] = None
             v.setdefault("tracking_errors", {})[root] = str(error)

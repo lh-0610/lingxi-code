@@ -122,6 +122,16 @@ def get_verification_gaps(v: dict) -> list[str]:
     """
     from .workspace_changes import refresh_workspace_tracking
     refresh_workspace_tracking(v)
+    return gaps_from_state(v)
+
+
+def gaps_from_state(v: dict) -> list[str]:
+    """只看验证状态算缺口，**不重扫磁盘**。
+
+    与 `get_verification_gaps` 分开是因为两类调用方需求不同：完成闸门必须先复查工作区
+    （命令可能在背后改了文件）；而工具边界保存每次调用都要算一次义务摘要，
+    在那里重扫整棵项目树会让每个写操作都付一次全量哈希的代价。
+    """
     gaps = [f"工作区变更尚未完整验证：{reason}"
             for reason in v.get("tracking_errors", {}).values()]
     has_code_changes = bool(v["code_dirty_files"])
@@ -164,6 +174,64 @@ def get_verification_gaps(v: dict) -> list[str]:
 def needs_verification(v: dict) -> bool:
     """快速判断是否有任何需要验证的内容。"""
     return bool(v["dirty_files"])
+
+
+# ── 跨轮次的待验证义务（B03）──
+
+def summarize_obligations(v) -> dict:
+    """把当前验证状态里**尚未解决**的部分整理成可持久化的义务摘要。
+
+    只读内存状态，不扫磁盘。没有缺口时返回空义务——这时"已跑的检查都过了"，
+    但它仍然只是"已执行的检查通过"，不等于任务做对了（见 CLAUDE.md 的两条边界）。
+    """
+    from .run_records import empty_pending_verification
+
+    pending = empty_pending_verification()
+    if not isinstance(v, dict):
+        return pending
+    gaps = gaps_from_state(v)
+    if not gaps:
+        return pending
+    pending["files"] = list(v.get("dirty_files") or [])
+    pending["code_files"] = list(v.get("code_dirty_files") or [])
+    tracking = v.get("tracking_errors") or {}
+    if isinstance(tracking, dict):
+        pending["tracking_incomplete"] = {str(k): str(val) for k, val in tracking.items()}
+    pending["reason"] = "；".join(gaps)[:2000]
+    return pending
+
+
+def restore_obligations(v: dict, pending) -> None:
+    """把上一轮没解决的验证义务填回**刚重置过**的验证状态。
+
+    必须排在 `reset_verification` 之后：先填充再被清掉，等于每轮开头静默清零。
+
+    走 `mark_dirty` 而不是直接塞字段，是为了让它顺带把 `tests_run` / `tests_passed`
+    打回未验证——**历史测试成功只是历史证据，不能恢复成当前任务的通行状态**。
+    """
+    if not isinstance(v, dict) or not isinstance(pending, dict):
+        return
+    for path in pending.get("files") or []:
+        if isinstance(path, str) and path:
+            mark_dirty(v, path)
+    # 扩展名判断不出是代码的（比如无后缀的脚本），按上次的判断补回，不靠这次重算。
+    for path in pending.get("code_files") or []:
+        if isinstance(path, str) and path and path not in v["code_dirty_files"]:
+            v["code_dirty_files"].append(path)
+            if path not in v["dirty_files"]:
+                v["dirty_files"].append(path)
+    tracking = pending.get("tracking_incomplete") or {}
+    if isinstance(tracking, dict) and tracking:
+        errors = v.setdefault("tracking_errors", {})
+        snapshots = v.setdefault("workspace_snapshots", {})
+        for root, reason in tracking.items():
+            if not isinstance(root, str) or not isinstance(reason, str):
+                continue
+            errors[root] = reason
+            # 种一个空基线：让本轮的复查会去重新枚举这个根目录。枚举成功就把原因消掉
+            # （见 workspace_changes.refresh_workspace_tracking），否则义务一旦记下
+            # 就再也没有出口，闸门会永远过不去。previous=None 不会凭空造出 dirty 文件。
+            snapshots.setdefault(root, None)
 
 
 # ── 自动修复循环 ──

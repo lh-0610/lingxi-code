@@ -1783,7 +1783,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if text:
                 content.append({"type": "text", "text": text})
             agent.chat_history.append(HumanMessage(content=content))
-            agent.chat_history.append(HumanMessage(content=bridge_text))
+            # 视觉桥接说明是程序生成的转述，不是用户的新要求——打上内部标记，
+            # 否则运行记录会把"图片识别结果…"当成本轮用户的最新要求。
+            agent.chat_history.append(HumanMessage(
+                content=bridge_text, additional_kwargs={"lingxi_internal": True}))
             # 立即存盘 + 刷侧栏（worker 线程→主线程信号），让该会话马上进侧栏可切回
             try:
                 agent.save_session()

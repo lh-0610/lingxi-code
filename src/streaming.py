@@ -1402,11 +1402,35 @@ def _execute_tool(tc, ui, _preinvoked=None):
                 return
 
     from contextlib import nullcontext
+    from . import run_records as _rr
     from . import session as _session
     from .tools_common import _project_cwd
     from .workspace_changes import refresh_workspace_tracking, track_workspace_changes
     verification = _session.get_verification()
     refresh_workspace_tracking(verification)
+
+    # ── 执行前记录（有副作用的工具）──
+    # 位置很关键：所有拒绝闸门（Plan / RAG / 遥控 / 空参 / MCP·Git 确认）都在上面，
+    # 走到这里才是真要调用。**写文件工具自己的确认卡在工具内部**，所以这条记录的语义
+    # 是"已调度"而不是"已执行"——等确认期间被杀掉的话文件其实没动，但程序分辨不出，
+    # 仍按结果未知处理。
+    _sess = _session.current_session()
+    operation = None
+    if _preinvoked is None and _rr.needs_record(name):
+        try:
+            operation = _rr.begin_operation(_sess, tool=name, tool_call_id=call_id, args=args)
+        except _rr.InflightWriteError as _if_err:
+            # 恢复点没建立起来就**不执行**。假装建立了再动手，比根本没有这套记录更糟：
+            # 崩溃后既不知道改了什么，用户还以为有记录可查。
+            ui.show_message(f"\n⛔ {_if_err}\n", "tool_tag")
+            state.chat_history.append(ToolMessage(
+                content=(f"未执行 `{name}`：{_if_err} "
+                         "这不是工具本身失败，该操作**没有被调用**，请检查磁盘/权限后重试。"),
+                tool_call_id=call_id,
+            ))
+            logger.error(f"执行前记录写入失败，已中止工具 {name}: {_if_err}")
+            return
+
     try:
         tracking = track_workspace_changes(_project_cwd()) if name.startswith("mcp_") else nullcontext()
         with tracking:
@@ -1448,5 +1472,14 @@ def _execute_tool(tc, ui, _preinvoked=None):
     except Exception:
         pass
     # 工具结果已固化到 chat_history → 清 render_log（切回靠 _redraw_chat 画 ToolMessage）
-    from . import session as _session
     _session.seal_render_log()
+
+    # ── 提交：工具结果 + 台账 + 进度 + 待验证事项在同一份主快照里落盘，然后才清 inflight ──
+    # 顺序不可颠倒。先删标记再保存的话，保存失败就等于把唯一的恢复线索也丢了。
+    if operation is not None:
+        try:
+            _rr.commit_operation(_sess, operation, ui=ui)
+        except Exception as _commit_err:
+            # 提交失败不改变已经发生的事：工具跑过了、结果已经在 chat_history 里。
+            # 标记留着，下次启动按"结果未知"如实报告。
+            logger.error(f"提交工具边界快照失败 {name}: {_commit_err}", exc_info=True)

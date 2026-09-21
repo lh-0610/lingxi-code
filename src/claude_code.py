@@ -16,7 +16,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from . import state
 from .paths import logger
 from .config import CLAUDE_CODE_MODEL, CLAUDE_CODE_SKIP_PERMISSIONS
-from .memory import save_session, maybe_generate_session_title
+# 两个名字现在由 agent_loop 的统一收尾调用；这里保留导入是因为既有测试按模块属性
+# patch 它们（monkeypatch.setattr(claude_code, "save_session", ...)）。
+from .memory import save_session, maybe_generate_session_title  # noqa: F401
 from .roles import get_external_agent_context, get_current_role_name
 from .agent_result import AgentResult
 
@@ -303,10 +305,9 @@ def claude_code_loop(ui) -> AgentResult:
             state.chat_history.append(AIMessage(content=clean_text))
             logger.info(f"Claude Code 回复完成: {clean_text[:100]}...")
 
-        save_session()
-        from . import session
-        if not session.current_session().is_subagent:
-            maybe_generate_session_title()
+        # 保存与标题生成由 agent_loop 的统一收尾负责（本函数只从那里被调用）。
+        # 各自再做一遍的话，一次 Claude Code 运行会起两个标题生成线程、白花一次模型调用；
+        # 而且那次保存发生在结束记录写入之前，等于先存一份"还在跑"的快照。
         if state.stop_flag:
             return AgentResult("cancelled", "用户停止生成。")
         return outcome

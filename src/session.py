@@ -51,6 +51,19 @@ _SESSION_FIELDS = {
     "verification": lambda: __import__("src.verification", fromlist=["new_verification"]).new_verification(),
     # git worktree 隔离区路径（运行期临时状态；会话文件不持久化）
     "worktree": lambda: None,
+    # ── B03 运行记录（随会话 JSON 的 progress 持久化）──
+    # 上一轮运行的记录：run_id / phase / outcome / 来源 / 证据。None = 本会话还没跑过。
+    # phase 是"程序有没有收到本轮结果"，outcome 是"实际返回的 AgentResult"，两者不能互推。
+    "last_run": lambda: None,
+    # 尚未解决的验证义务：上一轮改了但没验证的文件、追踪不完整的原因。
+    # 每轮开头 reset_verification 之后**重新填回**，否则未了义务会在每轮静默蒸发。
+    "pending_verification": lambda: __import__(
+        "src.run_records", fromlist=["empty_pending_verification"]
+    ).empty_pending_verification(),
+    # 最近一次工具边界提交的完成回执，以及一个有界的历史回执环。
+    # 用来辨认"结果已落盘但 inflight 标记没清"——只看 revision 变大是不够的。
+    "last_committed_operation": lambda: None,
+    "recent_operations": list,
 }
 
 # 哨兵：Session.project 的"尚未锚定"初值，区别于合法的 None（无项目/全局）。
@@ -70,6 +83,7 @@ class Session:
         "pending_confirm", "render_log", "render_lock", "is_subagent",
         "role_snapshot", "session_kind", "rag_kb_dir",
         "snapshot_lock", "progress_revision", "progress_error",
+        "active_run_id", "inflight_lock",
     )
 
     def __init__(self):
@@ -104,6 +118,14 @@ class Session:
         self.progress_revision = 0
         # 本会话的进度为何没能恢复（空串 = 正常）。聊天历史照常加载，只有进度这部分作废。
         self.progress_error = ""
+        # 当前正在跑的 run_id（纯运行态，不持久化）。收尾时比对它来拒绝旧 run 的迟到事件：
+        # 后台会话刚结束的那一轮若还在收尾，而用户已经点了"继续"开了新一轮，
+        # 旧 run 的结束记录绝不能盖掉新 run 的 running 状态。
+        self.active_run_id = None
+        # 保护 <id>.inflight.json 的读-改-写。与 snapshot_lock 分开：sidecar 的写发生在
+        # 工具执行【前】，那时可能正等着用户点确认，不能占着进度快照锁。
+        # 锁序：memory._LOCK → snapshot_lock，inflight_lock 不与它们嵌套持有。
+        self.inflight_lock = threading.RLock()
         self.is_subagent = False
         # 本轮生成开始时冻结的角色卡快照（roles.capture_active_role() 的返回 dict）。
         # None = 用全局当前角色。worker 在 _run_agent 起手拍下、finally 清回 None：
