@@ -49,7 +49,27 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
             return f"git diff 执行出错: {stderr or '未知错误'}"
 
         output = result.stdout or ""
-        if not output.strip():
+        empty = not output.strip()
+
+        # 标记 diff 已审查（验证状态）。**必须在"空 diff"提前返回之前**：
+        # 早先空结果直接 return，于是"跑完命令、结果确实是干净的"反而结不了验证义务。
+        # 触发它的是没有 dirty 文件、却仍要求审阅 diff 的场景（如 verification 的盲区），
+        # 那时 diff 本来就该是空的——义务永远解除不了，闸门死在这里。
+        #
+        # 但**不是所有成功的空 diff 都算审阅过**，判据是"这次调用有没有覆盖到该看的范围"：
+        #   - 全工作区且非 staged：空 = "工作区干净"，这是一次完整的审阅 → 算。
+        #   - 带 path 限定：只看了一个文件，它没改动说明不了别处 → 不算。
+        #   - staged=True：暂存区空不代表工作区干净（改了没 add 照样看不见）→ 不算。
+        #   - 非空输出：沿用原有行为，照常算（含 path 限定的情形）。
+        # 执行失败（git 缺失 / 非仓库 / 非零退出 / 超时 / 异常）一律走不到这里，不放行。
+        if not empty or (not path and not staged):
+            try:
+                from . import session as _session
+                _v_mark_diff_reviewed(_session.get_verification())
+            except Exception:
+                pass
+
+        if empty:
             return "暂存区没有改动。" if staged else "工作区干净，没有未提交改动。"
 
         if len(output) > max_chars:
@@ -58,12 +78,6 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
                 + f"\n\n... [输出已截断（共 {len(output)} 字符），"
                 f"可用 path 参数缩小到具体文件/目录查看]"
             )
-        # 标记 diff 已审查（验证状态）
-        try:
-            from . import session as _session
-            _v_mark_diff_reviewed(_session.get_verification())
-        except Exception:
-            pass
         return output
 
     except FileNotFoundError:

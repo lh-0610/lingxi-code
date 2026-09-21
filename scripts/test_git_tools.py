@@ -125,6 +125,71 @@ def git_repo(tmp_path):
     _sess.project = old_sess_proj
 
 
+# ── git_diff 与验证义务的接线（真实跑 git，不打桩）───────────────
+
+class TestGitDiffMarksReviewed:
+    """`git_diff` 什么时候算"审阅过"。
+
+    这条线以前只有"直接调 mark_diff_reviewed"的测试，把真实工具分支整个绕过去了：
+    空 diff 会提前 return，压根走不到标记那一步。于是"跑完 git_diff、结果确实是干净的"
+    反而结不了验证义务——在没有 dirty 文件却仍要求审阅 diff 的场景（verification 的盲区）
+    里，闸门就死在这儿。下面一律走真实的 `git_diff.func`。
+    """
+
+    def _fresh(self):
+        from src import session as _session
+        from src.verification import new_verification
+        sess = _session.get_active()
+        sess.verification = new_verification()
+        return sess.verification
+
+    def test_clean_worktree_counts_as_reviewed(self, git_repo):
+        v = self._fresh()
+        out = git_diff.func("")
+        assert "工作区干净" in out
+        assert v["diff_reviewed"] is True, "命令跑成功、结果就是干净的，这就是一次完整审阅"
+
+    def test_non_empty_diff_counts_as_reviewed(self, git_repo):
+        v = self._fresh()
+        (git_repo / "README.md").write_text("changed", encoding="utf-8")
+        out = git_diff.func("")
+        assert "README.md" in out
+        assert v["diff_reviewed"] is True
+
+    def test_empty_scoped_diff_does_not_count(self, git_repo):
+        """只看了一个文件、它没改动——说明不了别处，不能拿来结清整个工作区的义务。"""
+        v = self._fresh()
+        (git_repo / "other.py").write_text("value = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "other.py"], cwd=str(git_repo), check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add other"], cwd=str(git_repo), check=True,
+                       capture_output=True)
+        (git_repo / "README.md").write_text("changed but not looked at", encoding="utf-8")
+
+        out = git_diff.func("other.py")
+        assert "工作区干净" in out
+        assert v["diff_reviewed"] is False
+
+    def test_empty_staged_diff_does_not_count(self, git_repo):
+        """暂存区空不代表工作区干净：改了没 add，这条命令根本看不见。"""
+        v = self._fresh()
+        (git_repo / "README.md").write_text("changed", encoding="utf-8")
+        out = git_diff.func("", staged=True)
+        assert "暂存区没有改动" in out
+        assert v["diff_reviewed"] is False
+
+    def test_failure_never_counts_as_reviewed(self, project_dir):
+        """非 git 仓库 = 执行失败，不能放行。"""
+        v = self._fresh()
+        assert "不是 git 仓库" in git_diff.func("")
+        assert v["diff_reviewed"] is False
+
+    def test_path_escape_never_counts_as_reviewed(self, git_repo):
+        v = self._fresh()
+        assert "不允许" in git_diff.func("../")
+        assert v["diff_reviewed"] is False
+
+
 # ── git_status 测试 ──────────────────────────────────
 
 class TestGitStatus:

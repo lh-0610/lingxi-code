@@ -374,7 +374,7 @@ def begin_run(sess, *, task_id=None, ui=None):
     而那之前的窗口恰恰是最容易崩的。
 
     保存失败**不中止本轮**：用户的消息已经进了历史，为了一条记录把整轮拒掉不成比例。
-    但要明确告诉用户，并在记录上留 `start_persisted=False`，不假装恢复点已经建立。
+    但要明确告诉用户并记 error 日志，不假装恢复点已经建立。
     """
     from .verification import reset_verification, restore_obligations
 

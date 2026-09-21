@@ -14,6 +14,7 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -1579,6 +1580,81 @@ class TestSaveCost:
         side = os.path.getsize(isolated_memory / f"{sid}.inflight.json")
         assert body > 200_000
         assert side < 1_000, f"sidecar 不该随历史增长（{side} 字节）"
+
+
+class TestBlindPeriodDischargeThroughRealTools:
+    """盲区的出口要用**真实工具链**验证，不能直接调 mark_* 绕过去。
+
+    直接调 `mark_diff_reviewed` 的测试会漏掉真实分支：`git_diff` 对空结果提前 return，
+    根本走不到标记那一步。而盲区场景里没有 dirty 文件，diff 本来就该是空的——
+    于是"跑完测试、看完 diff、结果确实干净"仍然返回 unverified，义务永远解不开。
+    """
+
+    @pytest.fixture()
+    def git_project(self, tmp_path):
+        if not shutil.which("git"):
+            pytest.skip("git 未安装")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        for args in (["git", "init"],
+                     ["git", "config", "user.email", "t@example.com"],
+                     ["git", "config", "user.name", "T"]):
+            subprocess.run(args, cwd=str(repo), check=True, capture_output=True)
+        (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+        # 跑 pytest 会在仓库里留下 .pytest_cache / __pycache__。不 ignore 的话，
+        # 闸门复查会把它们当成"测试之后又新增的文件"，于是 diff 审阅被作废、
+        # 义务反而解不开。真实项目都会 ignore 它们，这里照做。
+        (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True,
+                       capture_output=True)
+        return repo
+
+    def test_real_run_tests_and_clean_git_diff_discharge_the_obligation(self, isolated_memory,
+                                                                       git_project):
+        from src import tools, tools_git
+        sess = _new_session()
+        _saved(sess)
+        sess.project = str(git_project)        # 首次保存之后再锚定，见 _session_for_tools
+        session.bind_thread(sess)
+        session.set_active(sess)
+        root = str(git_project)
+
+        run = run_records.begin_run(sess)
+        verification.mark_blind_period(sess.verification, root, "枚举项目文件超时")
+        run_records.finalize_run(sess, run, AgentResult("unverified"))
+        assert sess.pending_verification["tracking_incomplete"] == {root: "枚举项目文件超时"}
+
+        # 下一轮：目录恢复正常，模型照要求跑测试 + 看 diff
+        run_records.begin_run(sess)
+        assert verification.get_verification_gaps(sess.verification), "一开始义务还在"
+
+        out = tools.run_tests.func("")
+        assert sess.verification["tests_passed"] is True, out
+        diff_out = tools_git.git_diff.func("")
+        assert "工作区干净" in diff_out, diff_out
+
+        assert verification.get_verification_gaps(sess.verification) == [], (
+            "跑完测试、看完 diff（结果确实是干净的）就该结清，"
+            "不能因为 diff 是空的就永远卡住")
+        assert sess.verification["diff_reviewed"] is True
+
+    def test_failed_git_diff_does_not_discharge(self, isolated_memory, tmp_path):
+        """执行失败仍然不能放行——非 git 仓库不是"看过了"。"""
+        from src import tools_git
+        sess = _new_session()
+        _saved(sess)
+        sess.project = str(tmp_path)
+        session.bind_thread(sess)
+        session.set_active(sess)
+
+        run_records.begin_run(sess)
+        verification.mark_blind_period(sess.verification, str(tmp_path), "枚举超时")
+        verification.mark_tests(sess.verification, True, "1 passed")
+
+        assert "不是 git 仓库" in tools_git.git_diff.func("")
+        assert sess.verification["diff_reviewed"] is False
+        assert verification.get_verification_gaps(sess.verification)
 
 
 class TestCrashBeforeFirstTool:
