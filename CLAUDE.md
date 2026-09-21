@@ -202,7 +202,7 @@ python main.py
 - **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径（实测恒 480 字节，不随历史增长），不复制历史、长参数或完整输出
 - **sidecar 内是操作列表不是单个对象**：一条记录结构上不可能覆盖另一条未完成的。目前只读工具才并行、写工具串行，但这个前提不该被隐含依赖
 - **判定哪些工具要记录**：只列纯读工具（`SIDE_EFFECT_FREE_TOOLS`），**不在清单里的一律记录**——未知工具、所有 `mcp_*`、以及 `remember`/`forget`/`notify_user`/`update_plan`/`set_step_status`。后面这几个虽在 `PLAN_MODE_READONLY_TOOLS` 里，却真有副作用（写长期记忆 / 推 Telegram / 改计划），**不能拿 Plan 白名单当这份清单用**
-- **`run_tests` / `check_code` 同样要记录**，尽管名字听起来只是检查：`run_tests` 起 pytest，测试代码是项目自己的代码，写文件建目录都合法；`check_code` 在非 Python 项目里执行 config 的 `check_command`，那是用户配的任意命令。把它们当纯读的后果实测过——测试真的写出了文件、进程在结果返回前死掉，sidecar 前后都是空的，恢复分类返回空列表，连"结果未知"的线索都没有。判据是**「会不会执行项目代码或用户配置的命令」**，不是名字像不像检查
+- **`run_tests` / `check_code` 同样要记录**，尽管名字听起来只是检查：`run_tests` 起 pytest，测试代码是项目自己的代码，写文件建目录都合法；`check_code` 一旦配了 config 的 `check_command` 就执行它，那是用户配的任意命令（`_run_code_check` 先判 `check_command`、再判扩展名，所以 Python 文件同样走它，不限于非 Python 项目）。把它们当纯读的后果实测过——测试真的写出了文件、进程在结果返回前死掉，sidecar 前后都是空的，恢复分类返回空列表，连"结果未知"的线索都没有。判据是**「会不会执行项目代码或用户配置的命令」**，不是名字像不像检查
 - **需要记录的工具一律不并行预取**：`_can_parallel` 直接以 `run_records.needs_record` 为准，不另抄一份名单。预取是在 `_execute_tool` **之前**就把工具跑掉，那时记录还没写，执行前记录就成了摆设。两份清单分开维护必然漂移（`check_code` 就漂过）
 - **提交顺序不可颠倒**：工具结果 + 台账 + 进度 + 待验证事项先进内存 → 写一次主快照（含匹配的完成回执）→ **只有正文可靠落盘后**才清 sidecar。先删标记再保存的话，保存失败就等于把唯一线索丢了
 - **不能只看一个成功布尔值**：`save_session_report` 返回 `SaveOutcome(body_written / index_written / revision / bytes / elapsed)`。正文成功而索引失败时，回执**确实已落盘**、sidecar 可以清，但这次保存整体是失败的，要照实告诉用户。`save_session` 行为不变（仍抛异常）
@@ -349,7 +349,7 @@ python main.py
 - 其它语言读 config `check_command`（`{file}` 占位，shell 执行）；可用 `auto_check_after_edit` 关掉自动触发
 - 开关：config `auto_check_after_edit`（默认 true）；只检**刚改的那个文件**（快），防失控靠现有 agent loop 上限 + 模型没错就停
 - `check_code` 工具是手动复查入口（同一套 `_run_code_check`）；编辑后自动触发不需要模型记得调它
-- **Plan 模式禁用 `check_code`**（不在 `PLAN_MODE_READONLY_TOOLS` 里）：非 Python 项目下它执行 config 的 `check_command`，那是用户配的任意命令，无法保证只读。名字像"检查"不代表只读——判据与 B03 的执行前记录同一条：**会不会执行项目代码或用户配置的命令**。拦截点在 `streaming._execute_tool` 的 Plan 闸，在 `invoke` 和执行前记录**之前**，拦住的是子进程有没有起来；光靠提示词劝模型别调不算拦截
+- **Plan 模式禁用 `check_code`**（不在 `PLAN_MODE_READONLY_TOOLS` 里）：配了 config 的 `check_command` 之后它就执行那条命令，那是用户配的任意命令，无法保证只读。**不限于非 Python 项目**——`_run_code_check` 先判 `check_command`、再判扩展名，配了之后 Python 文件同样走它。名字像"检查"不代表只读——判据与 B03 的执行前记录同一条：**会不会执行项目代码或用户配置的命令**。拦截点在 `streaming._execute_tool` 的 Plan 闸，在 `invoke` 和执行前记录**之前**，拦住的是子进程有没有起来；光靠提示词劝模型别调不算拦截
 - 拒绝时回一条 `tool_call_id` 对得上的 ToolMessage，用 `_PLAN_REJECT_NOTES` 给**针对性**说明（"Plan 模式只进行调研；执行代码检查请切换到 Act 模式"）。通用文案只说"只能用只读工具"，模型看到 `check_code` 被拦会以为是误判，转头用 `run_command` 跑等价的 ruff——所以要点明原因并明说不要换工具绕。程序不自动切模式、不代跑替代命令
 - Act 模式不受影响；编辑后的 `_auto_check_suffix` 也不受影响（它挂在写工具后面，而写工具在 Plan 下本来就被拦）
 

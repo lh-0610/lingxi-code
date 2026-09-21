@@ -137,7 +137,8 @@ def new_id(prefix: str) -> str:
 #
 # **`run_tests` / `check_code` 也不在这份清单里**，尽管它们"看起来只是检查"：
 # `run_tests` 起 pytest，测试代码是**项目自己的代码**，写文件、建目录、连数据库都合法；
-# `check_code` 在非 Python 项目里执行 config 的 `check_command`，那是用户配的任意命令。
+# `check_code` 一旦配了 config 的 `check_command` 就执行它，那是用户配的任意命令——
+# 而且 `_run_code_check` 先判 `check_command`、再判扩展名，所以 Python 文件同样走它。
 # 早先把这两个当纯读，后果实测过：测试真的写出了文件、进程在结果返回前死掉，
 # 而 sidecar 前后都没有记录，恢复分类返回空列表——连"结果未知"的线索都没有。
 # 判据是「这个工具会不会执行项目代码或用户配置的命令」，不是「它的名字听起来像不像检查」。

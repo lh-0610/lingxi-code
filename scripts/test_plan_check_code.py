@@ -1,7 +1,8 @@
 """Plan 模式不允许执行 check_code。
 
-`check_code` 名字听起来像只读分析，但在非 Python 项目下它执行 config 的 `check_command`，
-那是**用户配的任意命令**。Plan 模式承诺"只调研、不动手"，所以这条必须在程序的实际分发
+`check_code` 名字听起来像只读分析，但只要配了 config 的 `check_command` 它就执行那条命令，
+那是**用户配的任意命令**（`_run_code_check` 先判 check_command、再判扩展名，
+所以 Python 文件同样走它）。Plan 模式承诺"只调研、不动手"，所以这条必须在程序的实际分发
 入口挡住——只在提示词里劝模型别调不算拦截，模型不听话的时候恰恰是最需要它生效的时候。
 
 因此本文件一律走真实的 `streaming._execute_tool`，并用一条**会创建标记文件**的
