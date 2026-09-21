@@ -327,7 +327,7 @@ python main.py
 | `run_tests` | 跑 pytest（`_resolve_python()` 选解释器：项目 venv → 开发期 sys.executable → PATH；精炼失败定位 + 总耗时；`encoding=utf-8` 防 GBK 崩） |
 | `git_diff` / `git_log` / `git_status` | 只读 git（看改动/历史/状态；commonpath 越界防护；Plan 只读放行） |
 | `git_stage` / `git_unstage` / `git_commit` | git 写操作（暂存/取消暂存/本地提交，**无 push**）；**执行前强制弹确认卡**（按危险操作处理、不给"记住"选项）；路径白名单防注入，commit 不自动暂存、校验信息非空 |
-| `check_code` | 静态检查单文件（lint/语法）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`），其它语言用 config 的 `check_command`；只读不弹确认、Plan 放行 |
+| `check_code` | 静态检查单文件（lint/语法）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`），其它语言用 config 的 `check_command`；不弹确认；**Plan 模式拦截**（见下） |
 | `apply_patch` | 多文件补丁（Codex 风格 `*** Begin Patch`）：统一校验、确认后，暂存新内容和原文件备份再写入。写入失败回滚，回滚受阻保留备份并报告；审批期间目标变化拒绝覆盖。不承诺崩溃时跨文件原子性。写工具、Plan/遥控自动拦 |
 | `search_knowledge` | 知识库语义检索（`query` + `scope` 分域，默认 all 各域按配额取；只读、Plan 放行、不弹确认；`kb_dir` 未配置/索引未建/索引锚不一致都返回明确提示而非空结果） |
 | `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、HTML 去标签转文本、二进制拒绝、无需 key）；`web_search` 用 Tavily（config `web_search_api_key`，没配优雅降级）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
@@ -349,6 +349,9 @@ python main.py
 - 其它语言读 config `check_command`（`{file}` 占位，shell 执行）；可用 `auto_check_after_edit` 关掉自动触发
 - 开关：config `auto_check_after_edit`（默认 true）；只检**刚改的那个文件**（快），防失控靠现有 agent loop 上限 + 模型没错就停
 - `check_code` 工具是手动复查入口（同一套 `_run_code_check`）；编辑后自动触发不需要模型记得调它
+- **Plan 模式禁用 `check_code`**（不在 `PLAN_MODE_READONLY_TOOLS` 里）：非 Python 项目下它执行 config 的 `check_command`，那是用户配的任意命令，无法保证只读。名字像"检查"不代表只读——判据与 B03 的执行前记录同一条：**会不会执行项目代码或用户配置的命令**。拦截点在 `streaming._execute_tool` 的 Plan 闸，在 `invoke` 和执行前记录**之前**，拦住的是子进程有没有起来；光靠提示词劝模型别调不算拦截
+- 拒绝时回一条 `tool_call_id` 对得上的 ToolMessage，用 `_PLAN_REJECT_NOTES` 给**针对性**说明（"Plan 模式只进行调研；执行代码检查请切换到 Act 模式"）。通用文案只说"只能用只读工具"，模型看到 `check_code` 被拦会以为是误判，转头用 `run_command` 跑等价的 ruff——所以要点明原因并明说不要换工具绕。程序不自动切模式、不代跑替代命令
+- Act 模式不受影响；编辑后的 `_auto_check_suffix` 也不受影响（它挂在写工具后面，而写工具在 Plan 下本来就被拦）
 
 ## 开发注意事项
 

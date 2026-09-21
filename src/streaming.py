@@ -78,13 +78,29 @@ PLAN_MODE_READONLY_TOOLS = {
     "read_background_output", "list_background_commands",  # 读后台输出也算只读
     "code_map",  # 代码地图只读扫描
     "git_diff", "git_log", "git_status",  # 只读 git：只看 diff/log/status，绝不碰 commit/add/push
-    "check_code",  # 静态检查只读分析（lint/语法），不改文件
+    # 注意 `check_code` **不在**这份白名单里：非 Python 项目下它执行 config 的
+    # `check_command`，那是用户配的任意命令，无法保证只读。名字听起来像"检查"不代表
+    # 它只读——同理 `run_tests` 起的是项目自己的测试代码，也不在这里。
     "fetch_url",  # 抓取网页只读
     "web_search",  # 网络搜索只读
     "search_knowledge",  # 知识库语义检索只读
     "find_definition", "find_references",  # jedi 代码导航，只读分析
     "find_tests", "related_files",  # 测试发现 / 关联文件，只读分析
     "get_project_instructions",  # 读取项目规则文件，只读
+}
+
+
+# 个别工具被 Plan 拦下时，给模型一句**针对性**的说明。
+# 通用文案只说"只能用只读工具"，模型看到 `check_code` 被拦会以为是误判（它确实像只读），
+# 于是换个花样再试一次（比如用 run_command 跑 ruff）。点明原因 + 指明出路才能止住。
+_PLAN_REJECT_NOTES = {
+    "check_code": (
+        "Plan 模式只进行调研；执行代码检查请切换到 Act 模式。"
+        "（它在非 Python 项目下会执行 config 里配置的 check_command，"
+        "属于执行命令、不保证只读。）"
+        "不要自行改模式，也不要改用别的工具跑等价的检查命令——"
+        "把需要做哪些检查写进方案里，由用户切到 Act 后再执行。"
+    ),
 }
 
 
@@ -1277,14 +1293,17 @@ def _execute_tool(tc, ui, _preinvoked=None):
         logger.info(f"知识库模式拒绝调用 {name}")
         return
 
-    # Plan 模式硬拦截：AI 不听话非要调写工具时，挡住并把拒绝信息回灌给 AI
+    # Plan 模式硬拦截：AI 不听话非要调写工具时，挡住并把拒绝信息回灌给 AI。
+    # 这道闸在 invoke 之前、也在执行前记录之前——真正拦住的是**子进程有没有起来**，
+    # 光靠提示词劝模型别调是不够的。
     if getattr(state, "agent_mode", "act") == "plan" and name not in PLAN_MODE_READONLY_TOOLS:
         ui.show_message(f"\n⛔ Plan 模式拒绝调用 {name}（只允许调研类工具）\n", "tool_tag")
+        _why = _PLAN_REJECT_NOTES.get(name, "")
         state.chat_history.append(ToolMessage(
             content=(
                 f"已拒绝执行 `{name}`：当前是 **Plan 模式**，只能用只读工具（"
                 f"{', '.join(sorted(PLAN_MODE_READONLY_TOOLS))}）。"
-                "请先给用户一个完整方案，让用户切回 Act 模式后再实际执行。"
+                + (_why or "请先给用户一个完整方案，让用户切回 Act 模式后再实际执行。")
             ),
             tool_call_id=call_id,
         ))
