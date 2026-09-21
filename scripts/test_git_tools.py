@@ -143,11 +143,64 @@ class TestGitDiffMarksReviewed:
         sess.verification = new_verification()
         return sess.verification
 
-    def test_clean_worktree_counts_as_reviewed(self, git_repo):
+    def test_truly_clean_worktree_counts_as_reviewed(self, git_repo):
+        """第一组：真正干净——没有未暂存改动、没有暂存、没有未跟踪。"""
         v = self._fresh()
         out = git_diff.func("")
         assert "工作区干净" in out
-        assert v["diff_reviewed"] is True, "命令跑成功、结果就是干净的，这就是一次完整审阅"
+        assert v["diff_reviewed"] is True, "命令跑成功、整个项目确实干净，这就是一次完整审阅"
+
+    def test_staged_only_does_not_count(self, git_repo):
+        """第二组：只有已暂存的修改。
+
+        默认 `git diff` 看不见它们——输出为空，但那份改动从头到尾没在任何 diff 里露过面。
+        """
+        v = self._fresh()
+        (git_repo / "README.md").write_text("changed and staged", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=str(git_repo), check=True,
+                       capture_output=True)
+
+        out = git_diff.func("")
+        assert v["diff_reviewed"] is False, "没看过的改动不能算审阅过"
+        assert "工作区干净，没有未提交改动" not in out, "不能谎报整个项目干净"
+        assert "已暂存的修改" in out and "README.md" in out
+        assert "git_diff(staged=True)" in out, "要告诉模型去哪儿补看"
+
+    def test_untracked_only_does_not_count(self, git_repo):
+        """第三组：只有未跟踪的新文件。默认 diff 同样看不见。"""
+        v = self._fresh()
+        (git_repo / "new_module.py").write_text("value = 1\n", encoding="utf-8")
+
+        out = git_diff.func("")
+        assert v["diff_reviewed"] is False
+        assert "工作区干净，没有未提交改动" not in out
+        assert "未跟踪的新文件" in out and "new_module.py" in out
+        assert "git_status" in out
+
+    def test_gitignored_files_do_not_block_discharge(self, git_repo):
+        """被 ignore 的构建产物/缓存不算"没审阅的改动"，否则义务又解不开了。"""
+        v = self._fresh()
+        (git_repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=str(git_repo), check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", "ignore build"], cwd=str(git_repo),
+                       check=True, capture_output=True)
+        (git_repo / "build").mkdir()
+        (git_repo / "build" / "out.o").write_text("junk", encoding="utf-8")
+
+        out = git_diff.func("")
+        assert "工作区干净" in out
+        assert v["diff_reviewed"] is True
+
+    def test_probe_failure_keeps_the_obligation(self, git_repo, monkeypatch):
+        """核对不了 = 不知道干不干净。不知道就不放行。"""
+        from src import tools_git
+        v = self._fresh()
+        monkeypatch.setattr(tools_git, "_uncovered_changes",
+                            lambda cwd: ([], [], "模拟核对失败"))
+        out = git_diff.func("")
+        assert v["diff_reviewed"] is False
+        assert "无法核对" in out and "模拟核对失败" in out
 
     def test_non_empty_diff_counts_as_reviewed(self, git_repo):
         v = self._fresh()

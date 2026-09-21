@@ -1600,6 +1600,7 @@ class TestBlindPeriodDischargeThroughRealTools:
                      ["git", "config", "user.email", "t@example.com"],
                      ["git", "config", "user.name", "T"]):
             subprocess.run(args, cwd=str(repo), check=True, capture_output=True)
+        (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
         (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
         # 跑 pytest 会在仓库里留下 .pytest_cache / __pycache__。不 ignore 的话，
         # 闸门复查会把它们当成"测试之后又新增的文件"，于是 diff 审阅被作废、
@@ -1638,6 +1639,39 @@ class TestBlindPeriodDischargeThroughRealTools:
             "跑完测试、看完 diff（结果确实是干净的）就该结清，"
             "不能因为 diff 是空的就永远卡住")
         assert sess.verification["diff_reviewed"] is True
+
+    @pytest.mark.parametrize("kind", ["staged", "untracked"])
+    def test_changes_invisible_to_default_diff_do_not_discharge(self, isolated_memory,
+                                                                git_project, kind):
+        """默认 diff 看不见的改动不能放行：已暂存的修改、未跟踪的新文件。
+
+        两者都会让 `git_diff()` 返回空。早先这被当成"整个项目干净"，义务清空、
+        任务按 completed 收尾——而那些文件从头到尾没在任何 diff 里露过面。
+        """
+        from src import tools, tools_git
+        sess = _new_session()
+        _saved(sess)
+        sess.project = str(git_project)
+        session.bind_thread(sess)
+        session.set_active(sess)
+
+        if kind == "staged":
+            (git_project / "app.py").write_text("value = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=str(git_project), check=True,
+                           capture_output=True)
+        else:
+            (git_project / "new_module.py").write_text("value = 1\n", encoding="utf-8")
+
+        run_records.begin_run(sess)
+        verification.mark_blind_period(sess.verification, str(git_project), "枚举超时")
+        assert tools.run_tests.func("") and sess.verification["tests_passed"] is True
+
+        out = tools_git.git_diff.func("")
+        assert "工作区干净，没有未提交改动" not in out, "不能谎报整个项目干净"
+        assert sess.verification["diff_reviewed"] is False
+        gaps = verification.get_verification_gaps(sess.verification)
+        assert gaps, "没被任何 diff 覆盖到的改动，不能结清审阅义务"
+        assert any("git_diff" in g for g in gaps)
 
     def test_failed_git_diff_does_not_discharge(self, isolated_memory, tmp_path):
         """执行失败仍然不能放行——非 git 仓库不是"看过了"。"""

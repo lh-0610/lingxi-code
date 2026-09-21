@@ -225,7 +225,9 @@ python main.py
 - 盲区像 `mark_dirty` 一样作废旧的测试 / diff 结论，且**每次枚举失败都作废**（不只第一次）——目录恢复后又坏掉是新的一段盲区，上一次的绿灯不能替它背书
 - `restore_obligations` 把持久化的 `tracking_incomplete` 填回 **`unknown_changes`**（不是 `tracking_errors`）：恢复那一刻并不知道目录现在读不读得了，而要保留的本来就是"曾经有一段没人看着"。若它现在仍然读不了，本轮第一次复查会把 `tracking_errors` 重新记上。同时种一个 `workspace_snapshots[root] = None` 空基线，逼本轮重新枚举建立新起点（`previous=None` 不会凭空造出 dirty 文件，也不追认盲区里发生过什么）
 - 一轮完全验证通过（无 gaps）→ 义务清空；`reset_history` 开新会话也清（义务跟着它自己的会话走）
-- **`git_diff` 的"算不算审阅过"判据是「这次调用有没有覆盖到该看的范围」，不是「有没有输出」**（`tools_git.py`）：全工作区且非 staged 的空 diff = "工作区干净"，那是一次完整审阅，**要算**；带 `path` 限定的空 diff 只说明那一个文件没动，说明不了别处，不算；`staged=True` 的空 diff 只说明没 add 过，工作区照样可能一堆改动，不算；非空输出照常算。执行失败（git 缺失 / 非仓库 / 非零退出 / 超时 / 路径逃逸）一律不算
+- **`git_diff` 的"算不算审阅过"判据是「这次调用有没有覆盖到该看的范围」，不是「有没有输出」**（`tools_git.py`）：带 `path` 限定的空 diff 只说明那一个文件没动，说明不了别处，不算；`staged=True` 的空 diff 只说明没 add 过，不算；非空输出照常算。执行失败（git 缺失 / 非仓库 / 非零退出 / 超时 / 路径逃逸）一律不算
+- **全工作区的空 diff 还要再核对一次才算**（`_uncovered_changes`）：默认 `git diff` **只看已跟踪文件的未暂存改动**——`git add` 过的修改和未跟踪的新文件它一个都看不见。所以"输出为空"不等于"整个项目干净"。实测过：app.py 改完 add 了、以及新增一个未跟踪的 new_module.py，两种情况下这条命令都回"工作区干净"，义务被清空、任务按 completed 收尾，而那些改动从头到尾没在任何 diff 里露过面。现在解除**全局**义务前会再跑 `git diff --cached --name-only` + `git ls-files --others --exclude-standard`，有没覆盖到的就不解除，并在返回里点名文件、告诉模型去哪儿补看（`git_diff(staged=True)` / `git_status`）。`--exclude-standard` 尊重 `.gitignore`，构建产物不会把义务卡死
+- 核对本身失败（非零 / 超时）→ **保留义务**并说明原因。核对不了就是不知道，不知道不放行（与追踪枚举失败同一取舍）
 - 早先空结果直接 `return`、跳过了 `mark_diff_reviewed`。有 dirty 文件时这个 bug 撞不上（有改动就有 diff），但盲区要求审阅 diff 时**本来就没有 dirty 文件**、diff 理应是空的——于是"跑完测试、看完 diff、结果确实干净"仍然返回 unverified，义务永远解不开。**测试不能直接调 `mark_diff_reviewed`**，那正好绕过这个真实分支；回归要真的跑 `git_diff.func`（见 `test_git_tools.py::TestGitDiffMarksReviewed`）
 - 写这类回归时给 fixture 仓库加 `.gitignore`（`__pycache__/`、`.pytest_cache/`）：不 ignore 的话，`run_tests` 自己留下的缓存会被闸门复查当成"测试之后又新增的文件"、把刚做完的 diff 审阅作废，义务反而解不开
 
