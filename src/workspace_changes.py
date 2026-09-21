@@ -86,18 +86,23 @@ def _snapshot(root, previous=None):
 
 
 def refresh_workspace_tracking(v):
-    from .verification import mark_dirty
+    from .verification import mark_blind_period, mark_dirty
 
     for root, previous in list(v.get("workspace_snapshots", {}).items()):
         try:
             current = _snapshot(root, previous)
         except (OSError, ValueError) as error:
             v.setdefault("tracking_errors", {})[root] = str(error)
+            mark_blind_period(v, root, str(error))
             continue
-        # 枚举成功 → 消掉这个根目录的旧追踪错误。不消的话错误是**永久**的：本函数只写不删，
-        # 于是一次瞬时失败（超时、文件被占用）就让完成闸门再也过不去，而且跨轮恢复未了义务
-        # 之后更明显——义务一旦记下就没有出口。注意这只说明"现在能完整枚举了"，
-        # 并不追认失败期间发生过什么；那段时间的改动仍由下面的 diff 照常标脏。
+        # 枚举成功 → 只消掉"**现在**读不了"这个事实。不消的话它是永久的（本函数只写不删），
+        # 一次瞬时失败就让完成闸门再也过不去。
+        #
+        # 但**不能**顺手把验证义务也消掉，而这正是 mark_blind_period 存在的理由：
+        # previous 为 None 时手上没有可比的旧基线，这次成功枚举只能建立一个**新**基线，
+        # 对盲区期间发生过什么一无所知。"现在能读取目录"不能证明"之前改的代码已验证"——
+        # 实测过：枚举失败期间真改了 app.py，下一轮枚举成功就把义务清空、没跑测试也返回
+        # completed。盲区标记不随"现在能读了"消失，只能靠显式的测试 + diff 了结。
         v.get("tracking_errors", {}).pop(root, None)
         if previous is not None:
             for path in sorted(previous.keys() | current.keys()):
@@ -110,6 +115,7 @@ def refresh_workspace_tracking(v):
 @contextmanager
 def track_workspace_changes(root):
     from . import session
+    from .verification import mark_blind_period
 
     v = session.get_verification()
     root = os.path.realpath(root)
@@ -123,6 +129,8 @@ def track_workspace_changes(root):
         except (OSError, ValueError) as error:
             snapshots[root] = None
             v.setdefault("tracking_errors", {})[root] = str(error)
+            # 建不出基线就等于这次工具调用全程无人看守：记盲区，靠显式验证才能了结。
+            mark_blind_period(v, root, str(error))
     else:
         refresh_workspace_tracking(v)
     try:

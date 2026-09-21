@@ -134,11 +134,17 @@ def new_id(prefix: str) -> str:
 # 注意 remember / forget / notify_user / update_plan / set_step_status 虽然在
 # Plan 模式白名单里，但它们**有副作用**（写长期记忆 / 推 Telegram / 改计划），
 # 不能拿 PLAN_MODE_READONLY_TOOLS 当这份清单用。
+#
+# **`run_tests` / `check_code` 也不在这份清单里**，尽管它们"看起来只是检查"：
+# `run_tests` 起 pytest，测试代码是**项目自己的代码**，写文件、建目录、连数据库都合法；
+# `check_code` 在非 Python 项目里执行 config 的 `check_command`，那是用户配的任意命令。
+# 早先把这两个当纯读，后果实测过：测试真的写出了文件、进程在结果返回前死掉，
+# 而 sidecar 前后都没有记录，恢复分类返回空列表——连"结果未知"的线索都没有。
+# 判据是「这个工具会不会执行项目代码或用户配置的命令」，不是「它的名字听起来像不像检查」。
 SIDE_EFFECT_FREE_TOOLS = frozenset({
     "read_file", "list_directory", "search_in_file", "search_files",
     "code_map", "find_definition", "find_references", "find_tests", "related_files",
     "git_diff", "git_log", "git_status",
-    "check_code", "run_tests",
     "read_background_output", "list_background_commands",
     "get_project_instructions", "search_knowledge",
     # 网络只读：GET 语义、不落盘。已知边界见 CLAUDE.md 的 fetch_url DNS 重绑定条目——
@@ -354,12 +360,21 @@ def describe_source(chat_history):
     return {"kind": "unknown", "message_index": -1, "text": "", "internal_skipped": skipped}
 
 
-def begin_run(sess, *, task_id=None):
-    """开一轮运行：生成 run_id、记录来源与开始时间、把验证状态重置并恢复未了义务。
+def begin_run(sess, *, task_id=None, ui=None):
+    """开一轮运行：生成 run_id、记录来源与开始时间、重置并恢复验证义务、**落盘**。
 
     返回运行记录 dict（子 Agent 返回 None）。**验证重置放在这里**是有意的：
     `reset_verification` 会清空 dirty 文件，恢复逻辑必须排在它之后，
     否则先填充再被清掉——未解决的验证义务就在每轮开头静默蒸发了。
+
+    **开始记录必须在进入运行主体之前落盘**，否则整套中断识别都是空的：实测过，
+    新一轮已经生成 run_id、进程在首次工具调用前退出，磁盘上却还是上一轮的
+    ended/completed——这次中断连一条记录都没有，而"重开发现 phase=running"正是
+    B04 恢复界面唯一的入口。只更新内存等于把这件事留给了第一次工具提交，
+    而那之前的窗口恰恰是最容易崩的。
+
+    保存失败**不中止本轮**：用户的消息已经进了历史，为了一条记录把整轮拒掉不成比例。
+    但要明确告诉用户，并在记录上留 `start_persisted=False`，不假装恢复点已经建立。
     """
     from .verification import reset_verification, restore_obligations
 
@@ -386,6 +401,24 @@ def begin_run(sess, *, task_id=None):
     with sess.snapshot_lock:
         sess.last_run = run
         sess.active_run_id = run["id"]
+    # 义务摘要改挂到这一轮，再连同 running 记录一起存——两者必须是同一份快照，
+    # 否则崩溃后会看到"这一轮的开始记录"配"上一轮的待验证事项"。
+    refresh_pending_verification(sess, run_id=run["id"])
+    outcome = save_snapshot(sess)
+    # 不把"存没存上"写进 run 字典：那是**本进程**的一次性事实，重开之后毫无意义
+    # （能读到这条记录就说明它存上了），塞进去只会多一个 normalize 不认识、
+    # 往返一次就丢的字段。明确处理 = 记日志 + 告诉用户，不是多一个持久化字段。
+    if not outcome.body_written and not outcome.skipped:
+        detail = outcome.error if outcome.error is not None else "未知原因"
+        logger.error(f"运行开始记录未能落盘 run_id={run['id']}: {detail}")
+        if ui is not None:
+            try:
+                ui.show_message(
+                    f"\n⚠️ 本轮的开始记录未能保存（{str(detail)[:200]}）。"
+                    "任务照常执行，但如果中途异常退出，重开时可能认不出这一轮被中断。\n",
+                    "tool_result")
+            except Exception:
+                pass
     logger.info(f"运行开始 run_id={run['id']} 来源={run['source'].get('kind')}")
     return run
 

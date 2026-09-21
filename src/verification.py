@@ -51,6 +51,9 @@ def reset_verification(v: dict) -> None:
     v["gate_prompted"] = False
     v.pop("workspace_snapshots", None)
     v.pop("tracking_errors", None)
+    # 盲区同样在这里清、随后由 restore_obligations 按已保存的义务填回——
+    # 与 dirty_files 完全同一套路径，否则"哪些义务能跨轮"会有两套互相不知道的规则。
+    v.pop("unknown_changes", None)
     # failure_diagnosis 在 check_repair_allowed() 成功通过时自动归零；
     # 新用户消息开始时也重置，防止上一轮残留状态。
     v["failure_diagnosis"] = {
@@ -85,6 +88,29 @@ def mark_dirty(v: dict, rel_path: str) -> None:
         v["tests_run"] = False
         v["tests_passed"] = None
         v["tests_reason"] = ""
+
+
+def mark_blind_period(v: dict, root: str, reason: str) -> None:
+    """记一段"看不见写入"的窗口：枚举失败期间发生的改动无人观察。
+
+    与 `tracking_errors` 的区别是**时态**，这一点是本函数存在的全部理由：
+    `tracking_errors` 说的是"**此刻**读不了这个目录"，枚举一旦成功它就该消失；
+    盲区说的是"**曾经**有一段时间没人看着"，它不因为"现在能读了"而消失。
+
+    把两者混成一个字段的后果实测过：枚举失败期间真改了 app.py，下一轮枚举成功、
+    没跑任何测试，闸门却放行并返回 completed——"能读取目录"被当成了"改动已验证"。
+
+    像 `mark_dirty` 一样作废旧的测试 / diff 结论：盲区里可能改了代码，
+    之前那次绿灯覆盖不到它。每次枚举失败都作废（而不只是第一次）——
+    目录恢复后又坏掉是新的一段盲区，上一次的记录不能替它背书。
+    """
+    if not root:
+        return
+    v.setdefault("unknown_changes", {})[root] = reason or "无法完整枚举项目文件"
+    v["tests_run"] = False
+    v["tests_passed"] = None
+    v["tests_reason"] = ""
+    v["diff_reviewed"] = False
 
 
 def mark_check(v: dict, rel_path: str, passed: bool | None, checker: str = "") -> None:
@@ -132,19 +158,37 @@ def gaps_from_state(v: dict) -> list[str]:
     （命令可能在背后改了文件）；而工具边界保存每次调用都要算一次义务摘要，
     在那里重扫整棵项目树会让每个写操作都付一次全量哈希的代价。
     """
-    gaps = [f"工作区变更尚未完整验证：{reason}"
+    gaps = [f"工作区当前无法完整枚举：{reason}"
             for reason in v.get("tracking_errors", {}).values()]
+
+    # 盲区：曾经有一段时间看不见写入。它**不随"现在能读了"消失**，只能靠显式的测试 + diff
+    # 了结——这既是它与 tracking_errors 的分工，也是它的出口。
+    #
+    # 注意它**没有**自己独立的一条 gap：那样写就成了无解的死结（测试跑通、diff 看过，
+    # 那条声明仍然挂着，闸门永远过不去）。盲区的作用是把下面的测试 / diff 要求**打开**，
+    # 满足了就一起消失。
+    blind = v.get("unknown_changes") or {}
+    _blind_note = ""
+    if blind:
+        _blind_note = (
+            "（曾有一段时间无法完整枚举项目文件："
+            + "；".join(f"{root} → {reason}" for root, reason in blind.items())
+            + "，期间的写入没有被观察到；目录现在能读取**不等于**那些改动已验证）"
+        )
+
     has_code_changes = bool(v["code_dirty_files"])
     has_any_changes = bool(v["dirty_files"])
 
-    if not has_any_changes:
+    if not has_any_changes and not blind:
         return gaps
 
-    # 1. 测试未通过或未运行（仅有代码改动时检查）
-    if has_code_changes:
+    # 1. 测试未通过或未运行（有代码改动、或存在盲区时检查）
+    if has_code_changes or blind:
         if not v["tests_run"]:
+            _what = (f"代码文件被修改（{', '.join(v['code_dirty_files'])}）"
+                     if has_code_changes else "存在未被观察到的工作区写入")
             gaps.append(
-                f"代码文件被修改（{', '.join(v['code_dirty_files'])}）但尚未运行测试。"
+                f"{_what}{_blind_note}但尚未运行测试。"
                 "请先调用 run_tests 验证改动不会引入回归。"
             )
         elif v["tests_passed"] is False:
@@ -164,9 +208,10 @@ def gaps_from_state(v: dict) -> list[str]:
             "请先修复检查问题再声称任务完成。"
         )
 
-    # 3. diff 未审查（有改动时检查）
-    if has_any_changes and not v["diff_reviewed"]:
-        gaps.append("本轮已有文件修改，但尚未调用 git_diff 查看最终改动。")
+    # 3. diff 未审查（有改动、或存在盲区时检查）
+    if (has_any_changes or blind) and not v["diff_reviewed"]:
+        _what = "本轮已有文件修改" if has_any_changes else "本轮可能有未被观察到的文件修改"
+        gaps.append(f"{_what}{_blind_note}，但尚未调用 git_diff 查看最终改动。")
 
     return gaps
 
@@ -194,9 +239,14 @@ def summarize_obligations(v) -> dict:
         return pending
     pending["files"] = list(v.get("dirty_files") or [])
     pending["code_files"] = list(v.get("code_dirty_files") or [])
-    tracking = v.get("tracking_errors") or {}
-    if isinstance(tracking, dict):
-        pending["tracking_incomplete"] = {str(k): str(val) for k, val in tracking.items()}
+    # 两个来源都要存：`unknown_changes` 是已经确认过的盲区，`tracking_errors` 是此刻还
+    # 读不了（它也意味着刚刚那段时间没人看着）。只存后者的话，"目录已经恢复、但盲区未了结"
+    # 这个最关键的状态在重启后就没了。
+    incomplete = {}
+    for source in (v.get("unknown_changes"), v.get("tracking_errors")):
+        if isinstance(source, dict):
+            incomplete.update({str(k): str(val) for k, val in source.items()})
+    pending["tracking_incomplete"] = incomplete
     pending["reason"] = "；".join(gaps)[:2000]
     return pending
 
@@ -222,15 +272,16 @@ def restore_obligations(v: dict, pending) -> None:
                 v["dirty_files"].append(path)
     tracking = pending.get("tracking_incomplete") or {}
     if isinstance(tracking, dict) and tracking:
-        errors = v.setdefault("tracking_errors", {})
         snapshots = v.setdefault("workspace_snapshots", {})
         for root, reason in tracking.items():
             if not isinstance(root, str) or not isinstance(reason, str):
                 continue
-            errors[root] = reason
-            # 种一个空基线：让本轮的复查会去重新枚举这个根目录。枚举成功就把原因消掉
-            # （见 workspace_changes.refresh_workspace_tracking），否则义务一旦记下
-            # 就再也没有出口，闸门会永远过不去。previous=None 不会凭空造出 dirty 文件。
+            # 填回**盲区**，不是 tracking_errors：恢复的这一刻并不知道目录现在读不读得了，
+            # 而且要保留的本来就是"曾经有一段没人看着"这件事。若它现在仍然读不了，
+            # 本轮第一次复查会把 tracking_errors 重新记上。
+            mark_blind_period(v, root, reason)
+            # 种一个空基线：让本轮的复查去重新枚举这个根目录，建立一个新的比较起点。
+            # previous=None 不会凭空造出 dirty 文件，也不会追认盲区里发生过什么。
             snapshots.setdefault(root, None)
 
 

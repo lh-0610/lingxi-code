@@ -190,6 +190,8 @@ python main.py
 ### 运行记录与中断恢复（src/run_records.py，B03）
 - **三个身份分开**：会话 Session（聊天历史 + 项目归属）／任务 Task（目标 + 计划 + 累计进度，B05 才建立，`task_id` 现在允许为 null）／运行 Run（一次发送·重试·继续启动的 agent 循环）。`run_id` 每次由程序生成，与 session_id / task_id 无关
 - **统一 begin/finalize 在 `agent_loop` 最外层**，主体是 `_agent_loop_body`。普通聊天、重试、视觉桥接、Claude Code CLI 分支、所有提前返回和异常（含 `BaseException`）走同一条收尾路径。写在主循环内部的话，每加一个 `return` 就多一个漏网路径——而漏网的恰恰是异常和取消这些最需要记录的情形
+- **`begin_run` 自己落盘，不能只更新内存**：进入运行主体前就要把 `phase=running` 存下去。只改内存的后果实测过——新一轮已经生成 run_id、进程在**首次工具调用之前**退出，磁盘上还是上一轮的 ended/completed，这次中断连一条记录都没有；而"重开发现 phase=running"正是 B04 恢复界面唯一的入口。把存盘留给第一次工具提交，等于把最容易崩的那个窗口漏掉了。开始记录与 `pending_verification` 必须是**同一份快照**，否则会出现"这一轮的开始配上一轮的待验证事项"
+- 写测试时注意：在 `begin_run` 之后补一次手动 `save_session`，正好会把这个缺口盖住。验证入口行为的用例**一次都不要手动存**
 - 收尾**在 worker 解绑前**完成，**持久化成功之后**才发结果通知 / 起标题线程（`_post_run_notify`）。`claude_code_loop` 里原来自己那套 save + 标题已删除，否则一次 CLI 运行会起两个标题线程、还先存一份"还在跑"的快照
 - **三条不变量**：① `finalize_run` 幂等（重复调用不再写第二条记录、不再存一次盘）；② 旧 run 的迟到收尾按 `stale` 忽略，不覆盖同一会话的新 run；③ **运行结果与保存结果分开**——保存失败照样如实返回 `AgentResult`，但 `saved=False` 并追加"最新进度未保存"的独立提示
 - **运行来源由程序填写**：`describe_source` 取最后一条**真实**用户消息。自动修复提示、完成闸门提示、视觉桥接说明都带 `additional_kwargs["lingxi_internal"]=True` 并**跟着落盘**（`_msg_to_dict`/`_dict_to_msg` 往返），在这里被跳过。不跳过的话，一轮自动修复就把"用户要求了什么"改写成程序自己生成的诊断文字
@@ -200,6 +202,8 @@ python main.py
 - **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径（实测恒 480 字节，不随历史增长），不复制历史、长参数或完整输出
 - **sidecar 内是操作列表不是单个对象**：一条记录结构上不可能覆盖另一条未完成的。目前只读工具才并行、写工具串行，但这个前提不该被隐含依赖
 - **判定哪些工具要记录**：只列纯读工具（`SIDE_EFFECT_FREE_TOOLS`），**不在清单里的一律记录**——未知工具、所有 `mcp_*`、以及 `remember`/`forget`/`notify_user`/`update_plan`/`set_step_status`。后面这几个虽在 `PLAN_MODE_READONLY_TOOLS` 里，却真有副作用（写长期记忆 / 推 Telegram / 改计划），**不能拿 Plan 白名单当这份清单用**
+- **`run_tests` / `check_code` 同样要记录**，尽管名字听起来只是检查：`run_tests` 起 pytest，测试代码是项目自己的代码，写文件建目录都合法；`check_code` 在非 Python 项目里执行 config 的 `check_command`，那是用户配的任意命令。把它们当纯读的后果实测过——测试真的写出了文件、进程在结果返回前死掉，sidecar 前后都是空的，恢复分类返回空列表，连"结果未知"的线索都没有。判据是**「会不会执行项目代码或用户配置的命令」**，不是名字像不像检查
+- **需要记录的工具一律不并行预取**：`_can_parallel` 直接以 `run_records.needs_record` 为准，不另抄一份名单。预取是在 `_execute_tool` **之前**就把工具跑掉，那时记录还没写，执行前记录就成了摆设。两份清单分开维护必然漂移（`check_code` 就漂过）
 - **提交顺序不可颠倒**：工具结果 + 台账 + 进度 + 待验证事项先进内存 → 写一次主快照（含匹配的完成回执）→ **只有正文可靠落盘后**才清 sidecar。先删标记再保存的话，保存失败就等于把唯一线索丢了
 - **不能只看一个成功布尔值**：`save_session_report` 返回 `SaveOutcome(body_written / index_written / revision / bytes / elapsed)`。正文成功而索引失败时，回执**确实已落盘**、sidecar 可以清，但这次保存整体是失败的，要照实告诉用户。`save_session` 行为不变（仍抛异常）
 - **判断操作是否已提交要核对 session_id + run_id + operation_id + 完成回执**，不能只看 revision 变大——别的保存同样推进 revision。回执存一个有界环（`recent_operations`，50 条）：只留一条的话，A、B 相继提交而 A 的清理失败时，A 会被误判成"结果未知"
@@ -216,7 +220,10 @@ python main.py
 - **待验证义务跨轮保留**（B03）：`verification` 本身仍是纯运行态，但"上一轮改了没验证的东西"会经 `summarize_obligations` 存进会话 JSON 的 `progress.pending_verification`，下一轮由 `begin_run` 在 `reset_verification` **之后**用 `restore_obligations` 填回。顺序反了就等于每轮开头静默清零——`reset_verification` 会清空 dirty 文件，先填充再被清掉是最容易写出的 bug
 - 恢复走 `mark_dirty` 而不是直接塞字段：它顺带把 `tests_run`/`tests_passed` 打回未验证。**历史测试成功只是历史证据，不能恢复成当前任务的通行状态**
 - `get_verification_gaps`（先复查工作区再算）与 `gaps_from_state`（只看状态、不扫盘）分开：工具边界每次提交都要算一次义务摘要，在那里重扫整棵项目树会让每个写操作都付一次全量哈希的代价
-- `workspace_changes` 的 `tracking_errors` 现在**枚举成功就消掉**。不消的话它是永久的（原函数只写不删），一次瞬时失败就让闸门再也过不去；跨轮恢复义务后更明显——义务一旦记下就没有出口。恢复时同时种一个 `workspace_snapshots[root] = None` 空基线，逼本轮重新枚举
+- **`tracking_errors` 与 `unknown_changes` 是两个时态，不能合成一个字段**：前者说"**此刻**读不了这个目录"，枚举一旦成功就该消失（不消的话一次瞬时失败就让闸门永远过不去）；后者（`mark_blind_period`）说"**曾经**有一段时间没人看着"，它**不随「现在能读了」消失**。合成一个的后果实测过——枚举失败期间真改了 app.py，下一轮枚举成功就把义务清空，没跑任何测试也返回 completed，"能读取目录"被当成了"改动已验证"
+- 盲区**没有自己独立的一条 gap**，它只是把测试 / diff 的要求**打开**（`_blind_note` 拼进那两条里）。给它单独一条声明就成了死结：测试跑通、diff 看过，声明仍然挂着，闸门永远过不去。出口 = 显式的 `run_tests` + `git_diff`
+- 盲区像 `mark_dirty` 一样作废旧的测试 / diff 结论，且**每次枚举失败都作废**（不只第一次）——目录恢复后又坏掉是新的一段盲区，上一次的绿灯不能替它背书
+- `restore_obligations` 把持久化的 `tracking_incomplete` 填回 **`unknown_changes`**（不是 `tracking_errors`）：恢复那一刻并不知道目录现在读不读得了，而要保留的本来就是"曾经有一段没人看着"。若它现在仍然读不了，本轮第一次复查会把 `tracking_errors` 重新记上。同时种一个 `workspace_snapshots[root] = None` 空基线，逼本轮重新枚举建立新起点（`previous=None` 不会凭空造出 dirty 文件，也不追认盲区里发生过什么）
 - 一轮完全验证通过（无 gaps）→ 义务清空；`reset_history` 开新会话也清（义务跟着它自己的会话走）
 
 ### 子 Agent 并行 + worktree 隔离（src/subagent.py + worktree.py）

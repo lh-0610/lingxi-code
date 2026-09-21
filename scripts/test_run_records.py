@@ -76,7 +76,14 @@ def _new_session(**fields):
 
 
 def _read(mem_dir, sid):
-    return json.loads((mem_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    """读会话 JSON。mem_dir 收 Path 或字符串，方便没有 isolated_memory 句柄的用例。"""
+    with open(os.path.join(str(mem_dir), f"{sid}.json"), encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def paths_mem_dir():
+    """当前线程数据根下的 chat_memory（loop_env 里没有 isolated_memory 的 Path 句柄）。"""
+    return paths.memory_dir()
 
 
 def _saved(sess):
@@ -155,6 +162,57 @@ class TestRunIdentity:
         sess.chat_history = [SystemMessage(content="sys"), AIMessage(content="hi")]
         sess.current_session_id = "manual"
         assert run_records.describe_source(sess.chat_history)["kind"] == "unknown"
+
+    def test_begin_run_persists_the_running_record_without_any_manual_save(self,
+                                                                            isolated_memory):
+        """开始记录必须由入口自己落盘。
+
+        早先只更新内存，靠第一次工具提交才顺带存上——而"新一轮开始、首次工具调用前退出"
+        恰恰是最容易崩的窗口，那时磁盘上还是上一轮的 ended/completed，这次中断连一条
+        记录都没有。测试里额外手动 save 会正好把这个缺口盖住，所以这里**一次都不手动存**。
+        """
+        sess = _new_session()
+        sid = _saved(sess)
+        run_records.finalize_run(sess, run_records.begin_run(sess), AgentResult("completed"))
+        assert _read(isolated_memory, sid)["progress"]["last_run"]["phase"] == "ended"
+
+        run = run_records.begin_run(sess)      # 注意：后面没有 save_session
+
+        stored = _read(isolated_memory, sid)["progress"]["last_run"]
+        assert stored["id"] == run["id"]
+        assert stored["phase"] == "running"
+        assert stored["outcome"] is None
+        assert stored["source"]["text"] == "修一下登录"
+
+    def test_begin_run_pins_the_obligations_to_this_run(self, isolated_memory):
+        """开始记录与待验证事项要在同一份快照里，不能是"这轮的开始配上轮的义务"。"""
+        sess = _new_session()
+        sid = _saved(sess)
+        first = run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "src/a.py")
+        run_records.finalize_run(sess, first, AgentResult("unverified"))
+
+        second = run_records.begin_run(sess)
+        progress = _read(isolated_memory, sid)["progress"]
+        assert progress["last_run"]["id"] == second["id"]
+        assert progress["pending_verification"]["run_id"] == second["id"]
+        assert progress["pending_verification"]["files"] == ["src/a.py"]
+
+    def test_begin_run_save_failure_is_reported_but_does_not_abort(self, isolated_memory,
+                                                                   monkeypatch):
+        """存不上就明说。但不因此拒掉整轮——用户的消息已经进历史了，不成比例。"""
+        sess = _new_session()
+        _saved(sess)
+        monkeypatch.setattr(memory, "_atomic_write_json",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("磁盘满了")))
+        ui = _UI()
+        run = run_records.begin_run(sess, ui=ui)
+
+        assert run is not None and run["phase"] == "running"
+        assert "磁盘满了" in ui.text()
+        assert "开始记录未能保存" in ui.text()
+        # 这是本进程的一次性事实，不该混进持久化结构
+        assert "start_persisted" not in run
 
     def test_subagent_runs_are_not_recorded(self, isolated_memory):
         sess = _new_session(is_subagent=True)
@@ -343,6 +401,22 @@ class TestAgentLoopBoundary:
         assert sess.last_run["phase"] == "ended"
         assert sess.last_run["outcome"] == "completed"
         assert sess.active_run_id is None
+
+    def test_disk_shows_running_before_the_body_starts(self, loop_env, monkeypatch):
+        """从运行主体内部回头看磁盘：这一轮的 running 记录必须已经在了。"""
+        _agent, sess = loop_env
+        seen = {}
+
+        def _peek(ui):
+            seen["disk"] = _read(paths_mem_dir(), sess.current_session_id)["progress"]["last_run"]
+            return ("好了", [], {"input": 0, "output": 0, "total": 0}, None)
+
+        monkeypatch.setattr(_agent, "_stream_with_tools", _peek)
+        _agent.agent_loop(_UI())
+
+        assert seen["disk"]["phase"] == "running"
+        assert seen["disk"]["id"] == sess.last_run["id"]
+        assert seen["disk"]["outcome"] is None
 
     def test_cancellation_is_recorded(self, loop_env, monkeypatch):
         _agent, sess = loop_env
@@ -894,24 +968,108 @@ class TestPendingVerification:
         assert sess.pending_verification["files"] == ["src/a.py"]
         assert verification.get_verification_gaps(sess.verification)
 
-    def test_tracking_incomplete_reason_is_kept_and_can_be_resolved(self, isolated_memory,
-                                                                    tmp_path):
-        """枚举不完整的原因要跨轮保留——但也要有出口，否则闸门永远过不去。"""
+    def test_blind_period_is_not_cleared_by_a_later_successful_enumeration(self,
+                                                                          isolated_memory,
+                                                                          tmp_path):
+        """枚举恢复只说明"现在能读了"，不能追认盲区里改过的代码已验证。
+
+        实测过的错法：枚举失败期间真改了 app.py → 保存重开 → 下一轮枚举成功 →
+        义务被清空，没跑任何测试也返回 completed。
+        """
         sess = _new_session()
         _saved(sess)
         root = str(tmp_path / "proj")
         os.makedirs(root, exist_ok=True)
         run = run_records.begin_run(sess)
-        sess.verification["tracking_errors"] = {root: "枚举项目文件超时"}
-        sess.verification["dirty_files"] = ["src/a.py"]
+        # 一段看不见写入的窗口
+        verification.mark_blind_period(sess.verification, root, "枚举项目文件超时")
         run_records.finalize_run(sess, run, AgentResult("unverified"))
         assert sess.pending_verification["tracking_incomplete"] == {root: "枚举项目文件超时"}
 
         run_records.begin_run(sess)
-        assert sess.verification["tracking_errors"] == {root: "枚举项目文件超时"}
-        # 下一轮能完整枚举了 → 原因消掉（但那一轮的改动仍然照常标脏）
-        verification.get_verification_gaps(sess.verification)
-        assert sess.verification["tracking_errors"] == {}
+        assert sess.verification["unknown_changes"] == {root: "枚举项目文件超时"}
+        # 这一轮目录能正常枚举了
+        gaps = verification.get_verification_gaps(sess.verification)
+        assert sess.verification.get("tracking_errors", {}) == {}, "此刻读得了，就不该再报读不了"
+        assert gaps, "但盲区期间的改动仍然没有被验证过"
+        assert any("不等于" in g for g in gaps), "要说清「能读」与「已验证」不是一回事"
+        assert any("run_tests" in g for g in gaps)
+
+    def test_blind_period_clears_only_after_explicit_verification(self, isolated_memory,
+                                                                  tmp_path):
+        """出口必须存在，否则闸门永远过不去——出口是显式的测试 + diff，不是"能读目录了"。"""
+        sess = _new_session()
+        _saved(sess)
+        root = str(tmp_path / "proj")
+        os.makedirs(root, exist_ok=True)
+        run_records.begin_run(sess)
+        verification.mark_blind_period(sess.verification, root, "枚举项目文件超时")
+
+        verification.mark_tests(sess.verification, True, "3 passed")
+        verification.mark_diff_reviewed(sess.verification)
+        assert verification.get_verification_gaps(sess.verification) == []
+
+        run = sess.last_run
+        run_records.finalize_run(sess, run, AgentResult("completed"))
+        assert sess.pending_verification["tracking_incomplete"] == {}
+        assert sess.pending_verification["files"] == []
+
+    def test_blind_period_invalidates_an_earlier_green_test(self, isolated_memory, tmp_path):
+        """盲区出现在测试之后 → 那次绿灯覆盖不到它，必须重跑。"""
+        sess = _new_session()
+        _saved(sess)
+        root = str(tmp_path / "proj")
+        os.makedirs(root, exist_ok=True)
+        run_records.begin_run(sess)
+        verification.mark_tests(sess.verification, True, "3 passed")
+        verification.mark_diff_reviewed(sess.verification)
+        verification.mark_blind_period(sess.verification, root, "枚举超时")
+
+        assert sess.verification["tests_passed"] is None
+        assert sess.verification["diff_reviewed"] is False
+        assert verification.get_verification_gaps(sess.verification)
+
+    def test_a_second_blind_period_after_recovery_invalidates_again(self, isolated_memory,
+                                                                   tmp_path):
+        """目录恢复、测试通过之后又坏一次：新的一段盲区，上次的绿灯不能替它背书。"""
+        sess = _new_session()
+        _saved(sess)
+        root = str(tmp_path / "proj")
+        os.makedirs(root, exist_ok=True)
+        run_records.begin_run(sess)
+        verification.mark_blind_period(sess.verification, root, "第一次超时")
+        verification.mark_tests(sess.verification, True, "3 passed")
+        verification.mark_diff_reviewed(sess.verification)
+        assert verification.get_verification_gaps(sess.verification) == []
+
+        verification.mark_blind_period(sess.verification, root, "第二次超时")
+        assert sess.verification["tests_passed"] is None
+        assert verification.get_verification_gaps(sess.verification)
+
+    def test_current_enumeration_failure_and_blind_period_are_different_fields(self,
+                                                                              isolated_memory,
+                                                                              project_dir,
+                                                                              monkeypatch):
+        """真实走一次追踪失败：两个字段都要记上，且时态不同。"""
+        from src import workspace_changes
+        sess = session.get_active()
+        root = str(project_dir)
+
+        def _fail(*args, **kwargs):
+            raise OSError("注入的枚举失败")
+
+        monkeypatch.setattr(workspace_changes, "_snapshot", _fail)
+        with workspace_changes.track_workspace_changes(root):
+            (project_dir / "app.py").write_text("value = 2\n", encoding="utf-8")
+        v = sess.verification
+        assert any("注入的枚举失败" in r for r in v["tracking_errors"].values())
+        assert any("注入的枚举失败" in r for r in v["unknown_changes"].values())
+
+        # 恢复枚举能力：tracking_errors 消失，盲区留下
+        monkeypatch.undo()
+        verification.get_verification_gaps(v)
+        assert v.get("tracking_errors", {}) == {}
+        assert v["unknown_changes"], "盲区不随「现在能读了」消失"
 
     def test_new_session_starts_without_inherited_obligations(self, isolated_memory):
         sess = _new_session()
@@ -1059,9 +1217,12 @@ class TestExecuteToolWiring:
 
     def _session_for_tools(self, tmp_path):
         sess = _new_session()
-        sess.project = str(tmp_path)
         sess.agent_mode = "act"
         _saved(sess)
+        # 项目锚点要在**首次保存之后**再设：`_save_session_locked` 会把第一次落盘的会话
+        # 锚定成当时的全局 current_project（这里是 None），先设就被它覆盖掉，
+        # 于是 `_project_cwd()` 退回仓库根，工具会往真实仓库里跑。
+        sess.project = str(tmp_path)
         session.bind_thread(sess)
         session.set_active(sess)
         run_records.begin_run(sess)
@@ -1108,6 +1269,96 @@ class TestExecuteToolWiring:
         assert run_records.needs_record("remember") is True, "写长期记忆是副作用"
         assert run_records.needs_record("notify_user") is True, "推送发出去就收不回来"
         assert run_records.needs_record("read_file") is False
+
+    def test_code_executing_tools_are_recorded(self):
+        """run_tests 起 pytest、check_code 可执行 config 的 check_command——
+        两者都在跑**项目自己的代码 / 用户配的命令**，名字像"检查"不代表没有副作用。"""
+        assert run_records.needs_record("run_tests") is True
+        assert run_records.needs_record("check_code") is True
+
+    def test_recorded_tools_are_never_parallel_preinvoked(self):
+        """并行预取在 `_execute_tool` **之前**就把工具跑掉，那时记录还没写。
+
+        两份清单分开维护必然漂移（check_code 就漂过），所以 `_can_parallel` 直接以
+        needs_record 为准。这条断言守的就是"别再抄一份名单"。
+        """
+        from src import streaming
+        for name in sorted(streaming.PARALLEL_SAFE_TOOLS):
+            calls = [{"name": name, "args": {"path": "a"}, "id": "1"},
+                     {"name": name, "args": {"path": "b"}, "id": "2"}]
+            if run_records.needs_record(name):
+                assert not streaming._can_parallel(calls), f"{name} 需要记录，不该被预取"
+            else:
+                assert streaming._can_parallel(calls), f"{name} 是纯读，预取不该被误拦"
+
+    def test_run_tests_leaves_a_record_when_the_process_dies_mid_run(self, isolated_memory,
+                                                                     tmp_path, monkeypatch):
+        """真实 _execute_tool → run_tests → pytest：测试自己写了文件，进程在结果返回前死掉。
+
+        修复前这里 sidecar 前后都是空的，恢复分类返回空列表——文件真的被改了，
+        却连一条"结果未知"的线索都没有。
+        """
+        from src import streaming
+        sess = self._session_for_tools(tmp_path)
+        sid = sess.current_session_id
+        test_file = tmp_path / "test_side_effect.py"
+        test_file.write_text(
+            "from pathlib import Path\n"
+            "def test_write():\n"
+            "    Path(__file__).with_name('changed.py').write_text('value = 2')\n",
+            encoding="utf-8")
+
+        marker = isolated_memory / f"{sid}.inflight.json"
+        seen = {}
+        real_run = subprocess.run
+
+        class _Crash(BaseException):
+            """用 BaseException 模拟进程消失：不会被工具的 except Exception 兜住。"""
+
+        def _run_then_crash(cmd, *a, **kw):
+            if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd:
+                seen["marker_before"] = marker.exists()
+                _done = real_run(cmd, *a, **kw)
+                seen["exit"] = _done.returncode
+                seen["cmd"] = cmd
+                seen["out"] = (_done.stdout or "")[-1500:] + (_done.stderr or "")[-500:]
+                raise _Crash("结果保存前进程消失")
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(subprocess, "run", _run_then_crash)
+        with pytest.raises(_Crash):
+            streaming._execute_tool({"name": "run_tests", "args": {"path": test_file.name},
+                                     "id": "c-run-tests"}, _UI())
+        monkeypatch.undo()
+
+        assert seen["exit"] == 0, (
+            "pytest 本身要跑通，否则这条用例证明不了副作用："
+            f"{seen.get('cmd')} / {seen.get('out')}")
+        assert (tmp_path / "changed.py").exists(), "测试确实写了文件"
+        assert seen["marker_before"] is True, "pytest 启动时记录必须已经在盘上"
+        assert marker.exists(), "进程消失后标记要留着"
+
+        entries, error = run_records.classify_inflight(sid)
+        assert not error
+        assert [(e["status"], e["operation"]["tool"]) for e in entries] == [
+            ("unknown", "run_tests")]
+
+    def test_check_code_leaves_a_record_before_running(self, isolated_memory, tmp_path,
+                                                       monkeypatch):
+        from src import streaming
+        sess = self._session_for_tools(tmp_path)
+        seen = {}
+
+        class _Tool:
+            def invoke(self, args):
+                seen["marker"] = (isolated_memory /
+                                  f"{sess.current_session_id}.inflight.json").exists()
+                return "✅ 没问题"
+
+        monkeypatch.setattr(streaming, "get_tool_map", lambda: {"check_code": _Tool()})
+        streaming._execute_tool({"name": "check_code", "args": {"path": "a.py"}, "id": "c1"},
+                                _UI())
+        assert seen["marker"] is True
 
     def test_inflight_write_failure_aborts_the_tool(self, isolated_memory, tmp_path, monkeypatch):
         """记录写不成功 → 工具**根本不被调用**，并且明确报错。"""
@@ -1204,6 +1455,50 @@ print(json.dumps({
 '''
 
 
+# 真实进程在「新一轮已开始、首次工具调用之前」死掉。用 os._exit 绕过 agent_loop 的
+# finally——这正是 finalize 帮不上忙、只能靠开始记录的那个窗口。
+_CRASH_CHILD = r'''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from src import paths
+paths.set_data_dir(sys.argv[2])
+from src import agent, memory, run_records, session
+from src.agent_result import AgentResult
+from langchain_core.messages import HumanMessage
+
+sid = sys.argv[3]
+out = sys.argv[4]
+sess = session.Session()
+assert memory.load_session(sid, session=sess) is True
+session.register(sess)
+session.bind_thread(sess)
+session.set_active(sess)
+agent._post_run_notify = lambda *a, **k: None
+
+# 先正常跑完一轮，让磁盘上留下 ended/completed
+old = run_records.begin_run(sess)
+run_records.finalize_run(sess, old, AgentResult("completed"))
+
+# 用户又发了一条；UI 在起 worker 前就把消息存了盘
+sess.chat_history.append(HumanMessage(content="task two"))
+memory.save_session(session=sess)
+
+def _die(ui):
+    open(out, "w", encoding="utf-8").write(json.dumps({
+        "old_run_id": old["id"], "new_run_id": sess.active_run_id}))
+    os._exit(23)
+
+agent._agent_loop_body = _die
+agent.agent_loop(type("U", (), {
+    "show_message": lambda self, *a, **k: None,
+    "render_final_markdown": lambda self, *a, **k: None,
+    "show_retry": lambda self, *a, **k: None,
+    "show_token_usage": lambda self, *a, **k: None,
+    "remove_thinking_indicator": lambda self, *a, **k: None,
+})())
+'''
+
+
 class TestFreshProcess:
     def test_a_brand_new_interpreter_reads_the_records_from_disk(self, isolated_memory, tmp_path):
         """同进程里新建一个 Session 再 load，证明不了跨进程恢复——必须真起一个解释器。
@@ -1284,3 +1579,39 @@ class TestSaveCost:
         side = os.path.getsize(isolated_memory / f"{sid}.inflight.json")
         assert body > 200_000
         assert side < 1_000, f"sidecar 不该随历史增长（{side} 字节）"
+
+
+class TestCrashBeforeFirstTool:
+    def test_a_real_process_death_before_the_first_tool_is_still_recorded(self, isolated_memory,
+                                                                         tmp_path):
+        """最强的那条证据：真进程在首次工具调用前 `os._exit`，绕过 agent_loop 的 finally。
+
+        修复前这里磁盘上是上一轮的 ended/completed——新一轮已经有 run_id、却一条记录都没有，
+        而"重开发现 phase=running"正是恢复界面唯一的入口。在测试里 begin_run 之后补一次
+        手动保存，恰好会把这个缺口盖住，所以这条用例一次都不手动存。
+        """
+        sess = _new_session()
+        sid = _saved(sess)
+
+        script = tmp_path / "crash_child.py"
+        script.write_text(_CRASH_CHILD, encoding="utf-8")
+        ids_file = tmp_path / "ids.json"
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        proc = subprocess.run(
+            [sys.executable, str(script),
+             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+             str(isolated_memory.parent), sid, str(ids_file)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=300, env=env,
+        )
+        assert proc.returncode == 23, f"子进程该以 os._exit(23) 死掉: {proc.stderr[-2000:]}"
+
+        ids = json.loads(ids_file.read_text(encoding="utf-8"))
+        stored = _read(isolated_memory, sid)["progress"]["last_run"]
+        assert ids["new_run_id"] and ids["new_run_id"] != ids["old_run_id"]
+        assert stored["id"] == ids["new_run_id"], "磁盘上必须是**这一轮**，不是上一轮"
+        assert stored["phase"] == "running"
+        assert stored["outcome"] is None
+        assert stored["source"]["text"] == "task two"
+        assert "中断" in run_records.describe_last_run(stored)

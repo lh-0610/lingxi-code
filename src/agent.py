@@ -188,7 +188,7 @@ def agent_loop(ui) -> AgentResult:
     """
     from . import run_records
     sess = _session_mod.current_session()
-    run = run_records.begin_run(sess)
+    run = run_records.begin_run(sess, ui=ui)
     result = AgentResult("failed", "Agent 未正常完成。")
     clean_text = ""
     try:

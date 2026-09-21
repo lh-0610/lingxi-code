@@ -1203,7 +1203,13 @@ def _can_parallel(tool_calls):
     每个工具还要么带参数、要么是 NO_ARG_OK_TOOLS（默认参数齐全、空参合法）——
     这层和 _execute_tool 的空参保护用同一判据：read_file/search_files 等必填参数工具
     用 {} 调是错误调用，不该进并行预取（否则预取必失败、白白产生失败日志，回放阶段还要
-    再被空参保护拦一次），让它走串行被拦下、拿到清晰的重试指引。"""
+    再被空参保护拦一次），让它走串行被拦下、拿到清晰的重试指引。
+
+    还有一条**硬约束**：需要执行前记录的工具（`run_records.needs_record`）一律不并行预取。
+    预取是在 `_execute_tool` 之前就把工具跑掉，那时记录还没写——执行前记录就成了摆设，
+    结果是"跑过了、也没有任何线索"。两份清单分开维护必然会漂移（`check_code` 就漂过），
+    所以这里直接以 needs_record 为准，而不是再抄一份名单。"""
+    from . import run_records as _rr
     return (
         len(tool_calls) > 1
         and getattr(state, "agent_mode", "act") != "plan"
@@ -1211,6 +1217,7 @@ def _can_parallel(tool_calls):
         and not getattr(state, "remote_session", False)
         and all(
             tc.get("name") in PARALLEL_SAFE_TOOLS
+            and not _rr.needs_record(tc.get("name", ""))
             and (bool(tc.get("args")) or tc.get("name") in NO_ARG_OK_TOOLS)
             for tc in tool_calls
         )
@@ -1416,7 +1423,12 @@ def _execute_tool(tc, ui, _preinvoked=None):
     # 仍按结果未知处理。
     _sess = _session.current_session()
     operation = None
-    if _preinvoked is None and _rr.needs_record(name):
+    if _rr.needs_record(name):
+        if _preinvoked is not None:
+            # 不变量被破坏了：`_can_parallel` 本该把需要记录的工具挡在并行预取之外。
+            # 预取意味着工具**已经跑完**，这条记录晚了，"执行前"的那一半保障没建立起来。
+            # 仍然写——有一条"结果未知"的线索，好过跑过了却什么都没留下。
+            logger.error(f"{name} 需要执行前记录却走了并行预取，记录已晚于实际执行")
         try:
             operation = _rr.begin_operation(_sess, tool=name, tool_call_id=call_id, args=args)
         except _rr.InflightWriteError as _if_err:
