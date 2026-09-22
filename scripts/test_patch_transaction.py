@@ -12,7 +12,7 @@ from src import file_transaction, session, tools
 def no_side_effects(monkeypatch):
     monkeypatch.setattr(tools._checkpoint, "make_checkpoint", lambda *args: None)
     monkeypatch.setattr(tools, "_confirm_file_write", lambda *args: (True, None))
-    monkeypatch.setattr(tools, "_run_code_check", lambda *args: ("", None))
+    monkeypatch.setattr(tools, "_run_code_check", lambda *args, **k: ("", None, []))
 
 
 def fail_destination(monkeypatch, destination):

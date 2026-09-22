@@ -17,7 +17,7 @@ from .verification import mark_tests as _v_mark_tests
 from .paths import logger
 from .tools_common import (  # 共享底座（拆包：路径/项目根/子 Agent 沙箱/验证标记/shell cwd/搜索常量）
     _project_cwd, _resolve_path, _subagent_path_rejection, _subagent_command_rejection,
-    _mark_current_dirty, _mark_current_check, _shell_cwd, _parse_cd,
+    _mark_current_dirty, _mark_current_check, _shell_cwd, _parse_cd, _norm_vpath,
     _SEARCH_IGNORE_DIRS, _SEARCH_MAX_FILE_SIZE,
 )
 from .limits import (
@@ -1760,6 +1760,38 @@ def _resolve_python():
     return shutil.which("python") or shutil.which("python3") or sys.executable
 
 
+def _evidence_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _first_lines(text: str, limit: int = 3) -> str:
+    """摘要只留前几行：完整输出已经在 chat_history 里，结果卡不该再存一份。"""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    return "\n".join(lines[:limit])
+
+
+def _record_run_evidence(**fields):
+    """把一条真实执行记录写进当前会话的验证状态（拿不到会话时静默跳过）。
+
+    `t0` 传 perf 起点，这里换算成毫秒——调用方不必各自算一遍。
+    `run_id` 从当前会话的运行记录取，不让调用方去猜自己属于哪一轮。
+    """
+    from .verification import record_evidence as _rec
+    t0 = fields.pop("t0", None)
+    if t0 is not None and "duration_ms" not in fields:
+        fields["duration_ms"] = int((time.time() - t0) * 1000)
+    try:
+        sess = _session.current_session()
+        run = getattr(sess, "last_run", None)
+        if isinstance(run, dict) and not fields.get("run_id"):
+            fields["run_id"] = run.get("id") or ""
+        return _rec(sess.verification, **fields)
+    except Exception as e:
+        logger.debug(f"记录验证证据失败（已忽略）: {e}")
+        return None
+
+
 @tool
 def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
     """跑 pytest 测试，返回精炼结果：通过/失败数 + 每个失败用例的位置和错误摘要。
@@ -1787,22 +1819,34 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
         cmd.extend(["-k", k])
 
     # ── 执行 ──
+    # 每条退出路径都要留一条**真实**证据：跑没跑起来、退了什么码、花了多久。
+    # 早先这里只有布尔 + 原因，结果卡据此说不出"pytest 根本没装"和"测试跑完挂了"的区别。
+    started = _evidence_now()
+    t0 = time.time()
     try:
-        t0 = time.time()
         result = subprocess.run(
             cmd, cwd=run_cwd,
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
         elapsed = time.time() - t0
     except FileNotFoundError:
+        _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,
+                             started_at=started, t0=t0, exit_code=None, status="not_run",
+                             summary="pytest 未安装或找不到", reason="未找到可执行文件")
         with contextlib.suppress(Exception):
             _v_mark_tests(_session.get_verification(), None, "pytest 未安装或找不到")
         return "pytest 未安装或找不到，请先运行 `pip install pytest` 安装。"
     except subprocess.TimeoutExpired:
+        _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,
+                             started_at=started, t0=t0, exit_code=None, status="timeout",
+                             summary=f"测试超时（>{timeout}s）", reason="超时被终止")
         with contextlib.suppress(Exception):
             _v_mark_tests(_session.get_verification(), None, f"测试超时（>{timeout}s）")
         return f"测试超时（>{timeout}s），可能有用例卡住，请检查或增大 timeout。"
     except Exception as e:
+        _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,
+                             started_at=started, t0=t0, exit_code=None, status="error",
+                             summary=f"运行 pytest 失败: {e}", reason=str(e))
         with contextlib.suppress(Exception):
             _v_mark_tests(_session.get_verification(), None, f"运行 pytest 失败: {e}")
         return f"运行 pytest 失败: {e}"
@@ -1813,6 +1857,11 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
 
     # pytest 没装时 stderr 里会有 "No module named pytest"
     if stderr and "No module named pytest" in stderr:
+        # 解释器起来了但模块不在 → 仍然是"没跑起来"，不是"测试失败"。
+        # 注意这里有真实退出码，照实记，不抹成 None。
+        _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,
+                             started_at=started, t0=t0, exit_code=result.returncode,
+                             status="not_run", summary="pytest 未安装", reason="No module named pytest")
         with contextlib.suppress(Exception):
             _v_mark_tests(_session.get_verification(), None, "pytest 未安装")
         return "pytest 未安装，请先运行 `pip install pytest` 安装。"
@@ -1832,8 +1881,22 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
         summary = summary[:6000] + "\n... [输出已截断，超过 6000 字]"
 
     # ── 标记验证状态：测试已执行 ──
+    # pytest 退出码 5 = "没收集到任何用例"。它既不是通过也不是失败：一个测试都没跑，
+    # 说 "已执行检查通过" 会让用户以为代码被测过了。
+    if result.returncode == 0:
+        _status, _reason = "passed", ""
+    elif result.returncode == 5:
+        _status, _reason = "not_run", "没有收集到任何测试用例"
+    else:
+        _status, _reason = "failed", ""
+    _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,
+                         started_at=started, t0=t0, exit_code=result.returncode,
+                         status=_status, summary=_first_lines(summary), reason=_reason)
     with contextlib.suppress(Exception):
-        _v_mark_tests(_session.get_verification(), result.returncode == 0)
+        if _status == "not_run":
+            _v_mark_tests(_session.get_verification(), None, _reason)
+        else:
+            _v_mark_tests(_session.get_verification(), result.returncode == 0)
 
     return summary
 
@@ -1865,31 +1928,46 @@ _TYPE_ERROR_CODES = ("call-arg", "call-overload", "name-defined",
                      "arg-type", "return-value", "valid-type")
 
 
-def _run_code_check(full_path: str):
-    """对单个文件跑静态检查。返回 (issues, checker)：
+def _run_code_check(full_path: str, *, record: bool = True):
+    """对单个文件跑静态检查。返回 (issues, checker, metas)：
     - checker=None → 没有可用检查器（不支持的语言且没配 check_command）
     - issues=""    → 检查通过、无问题
     - issues=非空  → 问题文本（file:line: 说明）
+    - metas        → **每个实际跑过的检查器各一条**执行事实（argv/cwd/退出码/耗时/状态）
+
     Python：ruff（F/E9 正确性+语法）+ mypy 类型检查（高信号错误码，抓臆造 API/参数错），
     两者结果合并。没装 ruff 退化到 py_compile；没装 mypy 则跳过类型检查。
-    其它语言走 config 的 check_command。"""
+    其它语言走 config 的 check_command。
+
+    metas 是**列表**而不是一条合并记录：Python 文件可能同时跑了 ruff 和 mypy，
+    合成一条就说不出"ruff 过了、mypy 超时"这种常见组合，而那恰恰是用户最需要看清的。
+    `record=True` 时顺手把它们写进当前会话的验证证据。"""
     from .config import CHECK_COMMAND
     ext = os.path.splitext(full_path)[1].lower()
     cwd = _shell_cwd()
 
+    def _finish(issues, checker, metas):
+        if record:
+            for meta in metas:
+                _record_run_evidence(kind="check", path=_norm_vpath(full_path), **meta)
+        return issues, checker, metas
+
     # 其它语言：用户自定义命令（shell 执行，{file} 占位）
     if CHECK_COMMAND:
-        return _run_check_subprocess(CHECK_COMMAND.replace("{file}", full_path), cwd, True, "check_command")
+        issues, checker, meta = _run_check_subprocess(
+            CHECK_COMMAND.replace("{file}", full_path), cwd, True, "check_command")
+        return _finish(issues, checker, [meta] if meta else [])
 
     if ext not in (".py", ".pyi"):
-        return None, None
+        return _finish(None, None, [])
 
-    ruff_issues, ruff_checker = _run_ruff_check(full_path, cwd)
-    type_issues, type_checker = _run_type_check(full_path, cwd)
+    ruff_issues, ruff_checker, ruff_meta = _run_ruff_check(full_path, cwd)
+    type_issues, type_checker, type_meta = _run_type_check(full_path, cwd)
 
     parts = [p for p in (ruff_issues, type_issues) if p]
     checkers = [c for c in (ruff_checker, type_checker) if c]
-    return "\n".join(parts), ("+".join(checkers) if checkers else None)
+    metas = [m for m in (ruff_meta, type_meta) if m]
+    return _finish("\n".join(parts), ("+".join(checkers) if checkers else None), metas)
 
 
 def _run_ruff_check(full_path: str, cwd):
@@ -1908,7 +1986,16 @@ def _run_ruff_check(full_path: str, cwd):
         ruff_cmd = [shutil.which("ruff"), "check", "--select", "F,E9", full_path]
     if ruff_cmd:
         return _run_check_subprocess(ruff_cmd, cwd, False, "ruff")
-    return _py_syntax_check(full_path), "py_compile"
+    # 进程内兜底：没有 argv、没有退出码，状态照实反映检查结论。
+    started = _evidence_now()
+    t0 = time.time()
+    issues = _py_syntax_check(full_path)
+    meta = {"checker": "py_compile", "argv": None, "command": "", "cwd": cwd,
+            "started_at": started, "duration_ms": int((time.time() - t0) * 1000),
+            "exit_code": None, "status": "failed" if issues else "passed",
+            "reason": "进程内 compile() 检查，无退出码",
+            "summary": _first_lines(issues)}
+    return issues, "py_compile", meta
 
 
 def _run_type_check(full_path: str, cwd):
@@ -1916,7 +2003,7 @@ def _run_type_check(full_path: str, cwd):
     返回 (issues, "mypy")；无命中 → ("", "mypy")；没装 mypy / 开关关 → (None, None) 静默跳过。"""
     from .config import TYPE_CHECK_AFTER_EDIT
     if not TYPE_CHECK_AFTER_EDIT:
-        return None, None
+        return None, None, None   # 开关关掉 = 用户没打算跑，不留证据
     import importlib.util
     frozen = getattr(sys, "frozen", False)
     base = None
@@ -1925,17 +2012,30 @@ def _run_type_check(full_path: str, cwd):
     elif shutil.which("mypy"):
         base = [shutil.which("mypy")]
     if not base:
-        return None, None     # 没装 mypy：跳过类型检查，不影响 ruff 结果
+        # 没装 mypy：跳过类型检查，不影响 ruff 结果。**不留证据**——
+        # 留一条 not_run 会让结果卡列出一个用户根本没打算用的检查器。
+        return None, None, None
     cmd = base + [
         "--check-untyped-defs", "--ignore-missing-imports", "--follow-imports=silent",
         "--no-error-summary", "--no-color-output", "--show-error-codes",
         "--hide-error-context", "--no-pretty", full_path,
     ]
+    started = _evidence_now()
+    t0 = time.time()
+
+    def _meta(status, exit_code, reason="", summary=""):
+        return {"checker": "mypy", "argv": list(cmd), "command": "", "cwd": cwd,
+                "started_at": started, "duration_ms": int((time.time() - t0) * 1000),
+                "exit_code": exit_code, "status": status, "reason": reason,
+                "summary": summary}
+
     try:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=90)
-    except Exception:
-        return None, None
+    except subprocess.TimeoutExpired:
+        return None, None, _meta("timeout", None, "类型检查超时（>90s）")
+    except Exception as e:
+        return None, None, _meta("not_run", None, str(e))
     out = (r.stdout or "") + (r.stderr or "")
     base_name = os.path.basename(full_path)
     kept = []
@@ -1946,25 +2046,46 @@ def _run_type_check(full_path: str, cwd):
             continue
         kept.append(line.replace(full_path, base_name).strip())
     if not kept:
-        return "", "mypy"
-    return "\n".join(kept[:15]), "mypy"
+        # 退出码可能非 0（有被我们过滤掉的低信号错误），但**按我们的判据**它是通过的。
+        # 退出码照实记、状态按判据给——不一致时用户能自己从退出码看出差别。
+        return "", "mypy", _meta("passed", r.returncode)
+    issues = "\n".join(kept[:15])
+    return issues, "mypy", _meta("failed", r.returncode, summary=_first_lines(issues))
 
 
 def _run_check_subprocess(cmd, cwd, use_shell, checker):
-    """跑一个检查命令，返回 (issues, checker)。退出码 0 = 通过("")；非 0 = 问题文本。"""
+    """跑一个检查命令，返回 (issues, checker, meta)。退出码 0 = 通过("")；非 0 = 问题文本。
+
+    `meta` 是这次执行的**事实**：argv / cwd / 退出码 / 耗时 / 状态，供结果卡使用。
+    起不来（找不到命令、超时）时 `issues` 和 `checker` 都是 None——调用方据此降级，
+    而 meta 里 `status` 明确是 not_run / timeout，**退出码留 None，绝不填 0**。
+    """
+    started = _evidence_now()
+    t0 = time.time()
+
+    def _meta(status, exit_code, reason="", summary=""):
+        return {"checker": checker, "argv": None if use_shell else list(cmd),
+                "command": cmd if use_shell else "", "cwd": cwd, "started_at": started,
+                "duration_ms": int((time.time() - t0) * 1000),
+                "exit_code": exit_code, "status": status, "reason": reason,
+                "summary": summary}
+
     try:
         r = subprocess.run(
             cmd, cwd=cwd, shell=use_shell, capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=60,
         )
-    except Exception:
-        return None, None
+    except subprocess.TimeoutExpired:
+        return None, None, _meta("timeout", None, "检查超时（>60s）")
+    except Exception as e:
+        return None, None, _meta("not_run", None, str(e))
     if r.returncode == 0:
-        return "", checker
+        return "", checker, _meta("passed", r.returncode)
     out = ((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip()
     if len(out) > 2000:
         out = out[:2000] + "\n... [检查输出已截断]"
-    return out or f"{checker} 返回非零退出码（无输出）", checker
+    issues = out or f"{checker} 返回非零退出码（无输出）"
+    return issues, checker, _meta("failed", r.returncode, summary=_first_lines(issues))
 
 
 def _py_syntax_check(full_path):
@@ -1991,7 +2112,7 @@ def _auto_check_suffix(full_path: str) -> str:
     if not AUTO_CHECK_AFTER_EDIT:
         return ""
     try:
-        issues, checker = _run_code_check(full_path)
+        issues, checker, _ = _run_code_check(full_path)
     except Exception:
         return ""
     if checker:
@@ -2285,7 +2406,7 @@ def apply_patch(patch: str) -> str:
         _mark_current_dirty(resolved)
         if action in ("add", "update"):
             try:
-                issues, checker = _run_code_check(resolved)
+                issues, checker, _ = _run_code_check(resolved)
             except Exception as error:
                 issues, checker = f"检查器执行失败: {error}", None
             _mark_current_check(resolved, not bool(issues) if checker else None, checker or "")
@@ -2316,7 +2437,7 @@ def check_code(path: str) -> str:
         return "失败：路径超出项目范围，不允许（不能用 .. 逃出项目根）"
     if not os.path.exists(resolved):
         return f"文件不存在: {resolved}"
-    issues, checker = _run_code_check(resolved)
+    issues, checker, _ = _run_code_check(resolved)
     if checker is None:
         ext = os.path.splitext(resolved)[1] or "（无扩展名）"
         _mark_current_check(resolved, None, "")

@@ -32,7 +32,8 @@ src/                     # 主代码
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
   llm_errors.py          # 模型请求错误分类（限流/上下文溢出/鉴权/瞬时）+ Retry-After 解析 + 重试策略
-  run_records.py         # 运行身份（run_id/来源/终态）+ 统一 begin/finalize + inflight sidecar + 完成回执 + 待验证义务归一化
+  run_records.py         # 运行身份（run_id/来源/终态）+ 统一 begin/finalize + inflight sidecar + 完成回执 + 待验证义务归一化 + 结果快照
+  result_view.py         # 运行结果快照 → 给人看的结论（纯函数、不依赖 Qt；标题/检查行/过期/保存提示的判定都在这里）
   tools_rag.py           # search_knowledge（知识库语义检索，只读、Plan 放行、带 scope 分域参数）
   rag/                   # RAG 知识库引擎（详见「RAG 知识库检索」节）
     chunk.py             # 切块：iter_markdown_chunks（按标题分层）/ iter_plain_chunks（PDF 页，不解析 Markdown）
@@ -63,6 +64,7 @@ src/                     # 主代码
     __init__.py          # 导出 ChatUI / SettingsDialog
     chat_window.py       # ChatUI 主窗口（__init__/build_ui/eventFilter/agent 集成/渲染原语 _append_html/show_message/_t）
     message_view.py      # 消息流的块级真控件渲染（圆角卡/阴影/可展开思考块）—— 逐步替代 QTextBrowser
+    result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 浮窗搜索
@@ -211,6 +213,22 @@ python main.py
 - 承诺的是"有记录地恢复并重新核对"，**不是**"任何命令恰好执行一次"。回执落盘 = "这条结果已可靠记录"，**不等于**"工具没有副作用"——执行失败同样留回执，因为失败也可能改了一半文件。「已调度」也不等于「副作用已发生」：写文件工具还要等确认卡，这中间被杀掉文件其实没动，但程序分辨不出，仍报未知
 - 子 Agent（`is_subagent`）全程跳过：不写 sidecar、不写运行记录、不发通知、不起标题
 
+### 运行结果卡（src/result_view.py + ui/result_card.py，B06）
+- **判断与绘制分开**：`result_view.describe(snapshot, live_run_id=...)` 算出标题/检查行/过期/待验证/保存提示，返回纯数据；`ui/result_card.py` 只负责画。卡片上"能不能说检查通过了"是要被逐条测试钉死的判断，混进布局代码就只能靠截图验
+- **卡片上每一句都要有程序证据**。模型正文说"已完成"不改变结论；没跑过检查就不写"测试通过"，纯问答连检查面板都不画（空面板会让人以为哪里出错）；`unverified` **不翻译成**"代码写完了只是没测"——它并不证明实现完整
+- **结构化证据在实际执行位置采集**（`verification.record_evidence` → `verification["evidence"]`，随 `last_run.evidence.validation_runs` 落盘）：`argv` / `command` / `cwd` / `started_at` / `duration_ms` / `exit_code` / `status`。`run_tests`、手动 `check_code`、编辑后的自动检查共用这一套
+- **状态枚举分得细是有原因的**：`passed / failed / not_run / timeout / cancelled / error / unknown`。"没装 pytest"和"测试跑完挂了"在卡片上是完全不同的两件事，合成一个布尔就说不出来。**拿不到退出码就是 `None`，绝不填 0**；pytest 退出码 5（一个用例都没收集到）算 `not_run`，不算通过
+- Python 检查跑了几个检查器就记几条（`_run_code_check` 返回 `metas` 列表）："ruff 过了、mypy 超时"是常见组合，合成一条就看不出来。没装 mypy / 开关关掉 → **不留记录**（列一条 not_run 会让用户以为自己少装了什么）
+- **过期判定不能用 `progress_revision`**：那个每保存一次就 +1，一次纯保存就会把刚跑完的绿灯标成过期。改用 `verification["change_revision"]`，只随 `mark_dirty` / `mark_blind_period` 递增。过期与否在 `collect_evidence` 里**定格**成每条记录的 `stale` 落盘——跨轮比较 revision 是错的，下一轮它从 0 重来，历史记录反而全变"没过期"
+- 检查后又改文件 → 记录**保留并标过期**，不删掉（删了就显示成"从未检查"）；再查一次则新记录是新鲜的
+- **结果快照与可变状态隔离**：`build_result_snapshot` 走 JSON 深拷贝，在 `finalize_run` 里生成（worker 还没解绑、run_id 是手上那一个），挂到 `sess.last_result` 并经 `run_result = Signal(object, str, object)` 投到主线程。**不能在迟到的回调里读 `sess.last_run` 猜自己属于哪一轮**
+- 归属判据是**会话最新那条运行记录的 id**：后台会话的结果不插进前台（只置 `needs_redraw`），旧 run 的迟到结果不覆盖新 run，同一 run 只画一张卡
+- **`finished` 信号带 worker 令牌**（`Session.worker_token`）：旧 worker 的迟到 finished 不能把新一轮正在用的按钮恢复成可发送；`_run_agent` 的 finally 也只在令牌仍是自己时才清运行态
+- 重绘来源：内存 `last_result` → 持久化 `last_run` 重建（`snapshot_from_loaded`）。**render_log 不能是唯一来源**，它只活在内存里，重开程序就没了
+- **显示卡片不往 chat_history 塞伪造的 AIMessage**；不新增总结模型调用；B04 没做完就**不放**"继续任务"按钮（放个点不动的比没有更糟）
+- 按钮带着**卡片自己的** `view`（含 session/project/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"明确标注是**当前状态**，不冒充那一轮保存过的历史 diff
+- **布局上的两个坑（都只有真渲染才暴露）**：① 把卡片包进一层 `QWidget` 再进布局，那层壳不向上传递 heightForWidth，整张卡被算矮、底部按钮被边框整条切掉——检查行和按钮行一律 `addLayout` 直接加，`MessageView.add_result_card` 也直接加卡；② 等宽字体的长行是撑宽卡片的元凶（消息流关掉了横向滚动条，撑宽就是被裁掉），路径中间省略、摘要压成一行省略、无断点长串按字符数强插换行
+
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。
 - **命令与 MCP 本地写入**：`workspace_changes.py` 在调用前后追踪项目文件，工具执行及完成检查时复查；变化使旧测试/diff 失效。Git 项目遵循 ignore，非 Git 项目跳过依赖/构建目录。无法完整枚举（权限、子模块、文件数上限等）保持未验证；它不是进程沙箱，不保证跟踪项目外或任务结束后的写入。
@@ -293,7 +311,7 @@ python main.py
 | `chat_memory/index.json` | 会话列表（id + title + 时间 + project tag） |
 | `chat_memory/long_term_memory.json` | 跨会话长期记忆（remember/forget 存取，自动注入 system prompt） |
 | `chat_memory/rag_index/chroma/` | RAG 向量库（Chroma PersistentClient 数据目录；collection 名 `kb_<store>_v1`） |
-| `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run` / `pending_verification` / `last_committed_operation` / `recent_operations`） |
+| `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run`（含 `evidence.validation_runs` 结构化检查记录）/ `pending_verification` / `last_committed_operation` / `recent_operations`） |
 | `chat_memory/<session_id>.inflight.json` | 有副作用工具的**执行前**记录（sidecar）：session_id / run_id / operation_id / 工具名 / tool_call_id / 起始 revision / 路径。提交后删除；**不进侧栏索引**，也不能作为复活已删除会话的依据（`delete_session` 会一并删掉） |
 | `chat_memory/projects.json` | 注册的项目列表 + 当前激活项目（`{current, projects: [{path, name}]}`） |
 | `chat_memory/role_config.json` | 当前激活的角色卡名 |

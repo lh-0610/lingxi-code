@@ -7,6 +7,8 @@
 本模块提供纯函数操作这些状态 + 间隙检测，不引入循环依赖。
 """
 import os
+import re
+import uuid
 
 
 # 代码文件扩展名——写入这些文件需要代码验证（测试 / 静态检查）
@@ -30,6 +32,14 @@ def new_verification() -> dict:
         "tests_reason": "",       # tests_passed=None 时的简短原因
         "diff_reviewed": False,   # 是否调过 git_diff（写入后）
         "gate_prompted": False,   # 完成闸门是否已提示过一次（两次尝试机制）
+        # ── B06 结构化证据 ──
+        # 每条记录来自**实际执行位置**（run_tests / 各 checker），带 argv / cwd / 退出码 /
+        # 耗时。布尔值 + 原因不足以支撑结果卡：那样只能说"通过了"，说不出跑的是什么命令、
+        # 退了什么码，也就无从分辨"真跑过并通过"和"根本没跑起来"。
+        "evidence": [],
+        # 文件变化版本。**只随实际变更 / 追踪不确定性递增，不随保存递增**——
+        # 用 progress_revision 当版本的话，一次纯保存就会把刚做完的检查标成过期。
+        "change_revision": 0,
         "failure_diagnosis": {    # 自动修复循环状态（独立于上面的验证闸门）
             "tool": "",           # 触发失败的工具名（"run_tests" / "check_code"）
             "attempt": 0,         # 已注入修复提示的次数
@@ -49,6 +59,10 @@ def reset_verification(v: dict) -> None:
     v["tests_reason"] = ""
     v["diff_reviewed"] = False
     v["gate_prompted"] = False
+    # 证据是**本轮**的执行记录：上一轮的已经随 last_run 落盘，留在内存里只会让结果卡
+    # 把上轮跑过的命令算进这一轮。change_revision 同归零，它只在一轮之内用于比新旧。
+    v["evidence"] = []
+    v["change_revision"] = 0
     v.pop("workspace_snapshots", None)
     v.pop("tracking_errors", None)
     # 盲区同样在这里清、随后由 restore_obligations 按已保存的义务填回——
@@ -67,6 +81,19 @@ def _is_code_file(path: str) -> bool:
     return ext in _CODE_EXTENSIONS
 
 
+def bump_change_revision(v: dict) -> int:
+    """文件确实变了（或追踪出现不确定）→ 推进文件变化版本。
+
+    结果卡据此判断"这条检查证据是不是在改动之前拿到的"。**绝不能**拿
+    `progress_revision` 代替：那个每保存一次就 +1，于是一次纯保存就把刚跑完的
+    绿灯测试标成过期，用户看到的是"刚测完就失效了"。
+    """
+    if not isinstance(v, dict):
+        return 0
+    v["change_revision"] = int(v.get("change_revision", 0) or 0) + 1
+    return v["change_revision"]
+
+
 def mark_dirty(v: dict, rel_path: str) -> None:
     """写文件工具成功后调用，标记文件为脏。
 
@@ -74,6 +101,7 @@ def mark_dirty(v: dict, rel_path: str) -> None:
     """
     if not rel_path:
         return
+    bump_change_revision(v)
     # 去重
     if rel_path not in v["dirty_files"]:
         v["dirty_files"].append(rel_path)
@@ -106,11 +134,90 @@ def mark_blind_period(v: dict, root: str, reason: str) -> None:
     """
     if not root:
         return
+    bump_change_revision(v)     # 盲区里可能改了东西 → 之前的检查证据同样该标过期
     v.setdefault("unknown_changes", {})[root] = reason or "无法完整枚举项目文件"
     v["tests_run"] = False
     v["tests_passed"] = None
     v["tests_reason"] = ""
     v["diff_reviewed"] = False
+
+
+# 证据的状态枚举。"没跑起来"(not_run) / "超时" / "取消" 必须和 "跑了且失败"(failed) 分开：
+# 合成一个 False 的话，结果卡就说不出"检查根本没执行"这件事。
+_EVIDENCE_STATUS = ("passed", "failed", "not_run", "timeout", "cancelled", "error", "unknown")
+
+
+# 证据条数上限：结果卡要能读，不是要把整份工具日志再存一遍（完整输出仍在 chat_history）。
+_MAX_EVIDENCE = 40
+_SUMMARY_MAX = 400
+_ARGV_ITEM_MAX = 300
+
+# 命令里像密钥的片段：形如 --token=xxx / api_key=xxx / sk-xxxxxxxx。
+# 这是**尽力而为**的脱敏，不是保证——所以除此之外一条更硬的规则是：
+# 只记 argv 和 cwd，**绝不记录环境变量**（密钥绝大多数从那里来）。
+_SECRET_RE = re.compile(
+    r"(?i)((?:api[-_]?key|token|secret|password|passwd|pwd|authorization)\s*[=:]\s*)(\S+)")
+_SK_RE = re.compile(r"(?i)\b((?:sk|ghp|gho|xox[abp])-)[A-Za-z0-9_\-]{8,}")
+
+
+def redact(text: str) -> str:
+    """把命令/摘要里像密钥的部分打码。短字符串原样返回。"""
+    if not isinstance(text, str) or not text:
+        return ""
+    out = _SECRET_RE.sub(lambda m: m.group(1) + "***", text)
+    return _SK_RE.sub(lambda m: m.group(1) + "***", out)
+
+
+def record_evidence(v: dict, **fields) -> dict | None:
+    """在**实际执行位置**记一条检查证据，返回该记录（无状态可记时返回 None）。
+
+    调用方必须给出真实发生的事实：`argv` / `cwd` / `exit_code` / `duration_ms` / `status`。
+    拿不到退出码就传 None，**不要填 0**——"没跑起来"和"跑了且成功"在结果卡上是完全
+    不同的两件事，用 0 冒充会让用户以为检查通过了。
+    """
+    if not isinstance(v, dict):
+        return None
+    argv = fields.get("argv")
+    if isinstance(argv, (list, tuple)):
+        argv = [redact(str(a))[:_ARGV_ITEM_MAX] for a in argv]
+    else:
+        argv = None
+    status = fields.get("status")
+    if status not in _EVIDENCE_STATUS:
+        status = "unknown"
+    exit_code = fields.get("exit_code")
+    if exit_code is not None and not isinstance(exit_code, int):
+        exit_code = None
+    record = {
+        "id": f"ev-{uuid.uuid4().hex[:12]}",
+        "kind": fields.get("kind") if fields.get("kind") in ("tests", "check") else "check",
+        "run_id": str(fields.get("run_id") or ""),
+        "tool_call_id": str(fields.get("tool_call_id") or ""),
+        "checker": str(fields.get("checker") or ""),
+        "path": str(fields.get("path") or ""),
+        "argv": argv,
+        "command": redact(str(fields.get("command") or ""))[:_SUMMARY_MAX],
+        "cwd": str(fields.get("cwd") or ""),
+        "started_at": str(fields.get("started_at") or ""),
+        "duration_ms": int(fields.get("duration_ms") or 0),
+        "exit_code": exit_code,
+        "status": status,
+        "summary": redact(str(fields.get("summary") or ""))[:_SUMMARY_MAX],
+        "reason": redact(str(fields.get("reason") or ""))[:_SUMMARY_MAX],
+        # 采集这一刻的文件变化版本。之后再有改动，版本一涨这条就算过期。
+        "change_revision": int(v.get("change_revision", 0) or 0),
+    }
+    records = v.setdefault("evidence", [])
+    records.append(record)
+    del records[:-_MAX_EVIDENCE]
+    return record
+
+
+def evidence_is_stale(record, current_revision) -> bool:
+    """这条证据是不是在之后的改动里失效了。"""
+    if not isinstance(record, dict):
+        return False
+    return int(record.get("change_revision", 0) or 0) < int(current_revision or 0)
 
 
 def mark_check(v: dict, rel_path: str, passed: bool | None, checker: str = "") -> None:

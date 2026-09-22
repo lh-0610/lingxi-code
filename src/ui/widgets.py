@@ -23,7 +23,12 @@ class SignalBridge(QObject):
     update_thinking = Signal(str)          # 更新等待指示器文
     render_md = Signal(str)                # 渲染 Markdown 替换最后的纯文
     show_retry = Signal(str)               # 显示重试按钮 + 错误信息
-    finished = Signal(object)              # (finished_session) 完成生成的会话对象
+    # (finished_session, worker_token) 完成生成的会话对象 + 该 worker 的身份令牌。
+    # 带令牌是必须的：旧 worker 的迟到 finished 不能把新一轮正在用的按钮恢复成可发送。
+    finished = Signal(object, object)
+    # (来源 Session, run_id, 结果快照 dict) —— B06 结果卡。快照与可变 Session 状态隔离，
+    # 排队期间下一轮改了状态也不会让这条信号读到新数据。
+    run_result = Signal(object, str, object)
     token_usage = Signal(dict, dict)   # (session_usage, round_usage)
     sessions_refresh = Signal()        # 异步标题生成完后刷新侧栏会话列表
     # 让 worker 线程能阻塞式请求 UI 弹确认框：发 (命令文本, 用于回传结果的 dict,

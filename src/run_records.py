@@ -100,6 +100,8 @@ class FinalizeReport:
     save: SaveOutcome | None = None
     stale: bool = False         # 旧 run 的迟到收尾，已忽略
     duplicate: bool = False     # 重复 finalize，未再生成结束记录
+    # 结果卡用的不可变快照。stale / duplicate 时为 None——那两种情况本来就不该再推一张卡。
+    snapshot: dict | None = None
 
 
 @dataclass
@@ -235,16 +237,53 @@ def normalize_last_run(raw):
     }, ""
 
 
+# 一条验证记录的字段与类型。校验按字段做，坏字段归一成安全值而不是整条丢——
+# 少一条记录会让结果卡把跑过的检查说成没跑过，那比字段缺失更误导。
+_RUN_STR_FIELDS = ("id", "kind", "run_id", "tool_call_id", "checker", "path",
+                   "command", "cwd", "started_at", "status", "summary", "reason")
+_VALID_EV_STATUS = ("passed", "failed", "not_run", "timeout", "cancelled", "error", "unknown")
+
+
+def _normalize_validation_run(raw):
+    if not isinstance(raw, dict):
+        return None
+    out = {key: (raw[key] if isinstance(raw.get(key), str) else "") for key in _RUN_STR_FIELDS}
+    if out["status"] not in _VALID_EV_STATUS:
+        # 认不出的状态退成 unknown，**不退成 passed**：读不懂绝不能变成"检查通过了"。
+        out["status"] = "unknown"
+    if out["kind"] not in ("tests", "check"):
+        out["kind"] = "check"
+    argv = raw.get("argv")
+    out["argv"] = ([str(a) for a in argv] if isinstance(argv, list) else None)
+    code = raw.get("exit_code")
+    # 严格判 int：字符串 "0" 不能变成退出码 0。没有就是 None（旧会话本就没采集过）。
+    out["exit_code"] = code if isinstance(code, int) and not isinstance(code, bool) else None
+    for key, default in (("duration_ms", 0), ("change_revision", 0)):
+        value = raw.get(key)
+        out[key] = value if isinstance(value, int) and value >= 0 else default
+    out["stale"] = raw.get("stale") is True
+    return out
+
+
 def _normalize_evidence(raw):
-    empty = {"changed_files": [], "validation_runs": [], "diff_reviewed": False}
+    empty = {"changed_files": [], "validation_runs": [], "diff_reviewed": False,
+             "change_revision": 0}
     if not isinstance(raw, dict):
         return empty
     files = raw.get("changed_files")
     runs = raw.get("validation_runs")
+    normalized = []
+    if isinstance(runs, list):
+        for item in runs:
+            entry = _normalize_validation_run(item)
+            if entry is not None:
+                normalized.append(entry)
+    revision = raw.get("change_revision")
     return {
         "changed_files": [f for f in files if isinstance(f, str)] if isinstance(files, list) else [],
-        "validation_runs": [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else [],
+        "validation_runs": normalized,
         "diff_reviewed": raw.get("diff_reviewed") is True,
+        "change_revision": revision if isinstance(revision, int) and revision >= 0 else 0,
     }
 
 
@@ -425,22 +464,32 @@ def begin_run(sess, *, task_id=None, ui=None):
 
 
 def collect_evidence(verification):
-    """把验证状态整理成本轮证据。纯读，不碰磁盘。"""
+    """把验证状态整理成本轮证据。纯读，不碰磁盘。
+
+    `validation_runs` 直接用**执行位置采集的结构化记录**（argv / cwd / 退出码 / 耗时），
+    不再由布尔值反推——反推出来的记录说不出跑的是什么命令，也分不清"没装"和"失败"。
+
+    过期与否在这里**定格**成每条记录上的 `stale`：跨轮比较 `change_revision` 是错的，
+    下一轮它会从 0 重新开始，历史记录反而全变成"没过期"。落盘的是这一刻的结论。
+    """
     if not isinstance(verification, dict):
-        return {"changed_files": [], "validation_runs": [], "diff_reviewed": False}
+        return {"changed_files": [], "validation_runs": [], "diff_reviewed": False,
+                "change_revision": 0}
+    from .verification import evidence_is_stale
+
+    current = int(verification.get("change_revision", 0) or 0)
     runs = []
-    if verification.get("tests_run"):
-        runs.append({"kind": "tests", "passed": verification.get("tests_passed"),
-                     "reason": verification.get("tests_reason") or ""})
-    for path, result in (verification.get("checks") or {}).items():
-        if isinstance(result, dict):
-            runs.append({"kind": "check", "path": path,
-                         "passed": result.get("passed"),
-                         "checker": result.get("checker") or ""})
+    for record in (verification.get("evidence") or []):
+        if not isinstance(record, dict):
+            continue
+        entry = dict(record)
+        entry["stale"] = evidence_is_stale(record, current)
+        runs.append(entry)
     return {
         "changed_files": list(verification.get("dirty_files") or []),
         "validation_runs": runs,
         "diff_reviewed": bool(verification.get("diff_reviewed")),
+        "change_revision": current,
     }
 
 
@@ -485,6 +534,14 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
         if getattr(sess, "active_run_id", None) == run["id"]:
             sess.active_run_id = None
 
+    # 快照在这里生成——**worker 还没解绑**，而且 run_id 是本函数手上的那一个，
+    # 不是过后回调里再去读 `sess.last_run` 猜出来的（那时它可能已经是下一轮的了）。
+    snapshot = build_result_snapshot(sess, run, save=outcome, source="live")
+    # 挂到会话上：它是会话状态，不取决于有没有 UI。无头路径（CLI/评测）同样留下，
+    # 切回会话时也从这里重绘，不必绕一趟 UI。
+    with sess.snapshot_lock:
+        sess.last_result = snapshot
+
     if not outcome.fully_saved and not outcome.skipped and ui is not None:
         detail = outcome.error if outcome.error is not None else "未知原因"
         try:
@@ -492,7 +549,68 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
                             "本轮的实际运行结果见上方。\n", "tool_result")
         except Exception:
             pass
-    return FinalizeReport(result=result, saved=outcome.fully_saved, save=outcome)
+    return FinalizeReport(result=result, saved=outcome.fully_saved, save=outcome,
+                          snapshot=snapshot)
+
+
+def build_result_snapshot(sess, run, *, save=None, source="live"):
+    """给结果卡用的**不可变快照**：把这一轮的事实从会话状态里彻底拷出来。
+
+    必须是拷贝而不是引用：信号排队期间下一轮可能已经开始改 `verification` /
+    `pending_verification`，排队中的那条信号一旦读到新数据，用户看到的就是
+    "上一轮的标题配下一轮的文件"。深拷贝走 JSON 往返，顺带保证它是可序列化的。
+
+    `save` 是本轮保存的 `SaveOutcome`：**运行结果与保存结果分开**，卡片要能同时说
+    "这一轮失败了"和"而且最新进度没存上"，两者互不冒充。
+    """
+    run = run if isinstance(run, dict) else (getattr(sess, "last_run", None) or {})
+    pending = getattr(sess, "pending_verification", None) or empty_pending_verification()
+    snapshot = {
+        "version": RUN_RECORD_VERSION,
+        "session_id": getattr(sess, "current_session_id", None) or "",
+        "session_key": getattr(sess, "key", None) or "",
+        "project": _project_of(sess),
+        "run_id": run.get("id") or "",
+        "task_id": run.get("task_id"),
+        "phase": run.get("phase") or "",
+        "outcome": run.get("outcome"),
+        "reason": run.get("reason") or "",
+        "started_at": run.get("started_at") or "",
+        "ended_at": run.get("ended_at") or "",
+        "source": dict(run.get("source") or {}),
+        "evidence": _normalize_evidence(run.get("evidence")),
+        "pending_verification": dict(pending),
+        # 展示来源：live=本轮刚跑完；restored=从磁盘重绘。后者不该显示成"刚刚发生"。
+        "display_source": source,
+        "saved": None if save is None else bool(getattr(save, "fully_saved", False)),
+        "save_body_written": None if save is None else bool(getattr(save, "body_written", False)),
+        "save_index_written": None if save is None else bool(getattr(save, "index_written", False)),
+        "save_skipped": "" if save is None else (getattr(save, "skipped", "") or ""),
+        "save_error": "" if save is None else (
+            str(getattr(save, "error", "") or "")[:300]),
+    }
+    try:
+        return json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
+    except Exception:       # pragma: no cover - 上面都是原生类型，理论上进不来
+        return snapshot
+
+
+def _project_of(sess):
+    from . import session as _session_mod
+    project = getattr(sess, "project", _session_mod._UNSET)
+    return project if isinstance(project, str) else None
+
+
+def snapshot_from_loaded(sess):
+    """从**已加载的持久化记录**重建结果快照（切回会话 / 重开程序时重绘用）。
+
+    只读 `last_run` + `pending_verification`，不碰 `render_log`——后者是内存里的
+    本轮渲染缓冲，重启后就没了，拿它当唯一来源等于"重开就看不到上一轮结果"。
+    """
+    run = getattr(sess, "last_run", None)
+    if not isinstance(run, dict) or not run.get("id"):
+        return None
+    return build_result_snapshot(sess, run, source="restored")
 
 
 def refresh_pending_verification(sess, *, run_id=""):

@@ -198,13 +198,33 @@ def agent_loop(ui) -> AgentResult:
         # finally 而不是 except：KeyboardInterrupt / SystemExit 同样要留下结束记录。
         # finalize_run 自己幂等、自己拒绝旧 run，这里不必再判。
         try:
-            run_records.finalize_run(sess, run, result, ui=ui)
+            _report = run_records.finalize_run(sess, run, result, ui=ui)
+            # 结果卡在**解绑之前**推出去，且带着本函数手上的 run_id——
+            # 迟到的回调里再去读 sess.last_run 猜"我是哪一轮"是不行的，那时它可能
+            # 已经是下一轮的记录了。stale / duplicate 不出卡（snapshot 为 None）。
+            if _report.snapshot is not None:
+                _deliver_result(ui, sess, _report.snapshot)
         except Exception as _fin_err:
             logger.error(f"写结束记录失败: {_fin_err}", exc_info=True)
         try:
             _post_run_notify(ui, result, clean_text)
         except Exception as _post_err:
             logger.debug(f"收尾通知失败（已忽略）: {_post_err}")
+
+
+def _deliver_result(ui, sess, snapshot):
+    """把结果快照交给 UI。没有这个接口的 UI（子 Agent 的 HeadlessUI / 测试桩）直接跳过。
+
+    快照本身已经由 `finalize_run` 挂在会话上（它是会话状态，不取决于有没有 UI），
+    这里只负责推送。
+    """
+    deliver = getattr(ui, "deliver_run_result", None)
+    if deliver is None:
+        return
+    try:
+        deliver(sess, snapshot.get("run_id") or "", snapshot)
+    except Exception as e:
+        logger.warning(f"推送运行结果卡失败: {e}")
 
 
 def _post_run_notify(ui, result, clean_text):

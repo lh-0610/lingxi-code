@@ -711,6 +711,25 @@ class MessageView(QScrollArea):
         wrap.addStretch(1)
         self._add_turn(holder, top_gap=8)
 
+    def add_result_card(self, card):
+        """把一张运行结果卡插到消息流末尾，并返回它。
+
+        结果卡是**应用状态**，不是模型说的话——所以它走独立控件插入，
+        绝不为了显示它往 chat_history 里塞一条伪造的 AIMessage。
+        """
+        if card is None:
+            return None
+        stick = self._at_bottom()
+        # **直接加卡，不套一层 QWidget**：包一层的话那个壳不向上传递 heightForWidth，
+        # 卡片被算矮、底部按钮被整条切掉（实测差 300px 以上）。
+        self._add_turn(card, top_gap=16)
+        # 结果卡后面必然要开新一轮，清掉当前 assistant turn 指针，
+        # 免得下一轮的内容被追加到卡片**之前**的那个 turn 里。
+        self._cur_assistant = None
+        if stick:
+            QTimer.singleShot(0, self._scroll_to_bottom)
+        return card
+
     def _at_bottom(self, slack=40):
         """用户当前是否贴在底部附近(slack px 容差)——决定要不要继续跟随滚动。
         必须在【追加内容之前】调用:插入控件后 maximum 要等下一轮布局才更新,

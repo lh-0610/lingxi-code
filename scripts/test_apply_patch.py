@@ -11,7 +11,7 @@ from src.tools import apply_patch, _parse_patch
 @pytest.fixture(autouse=True)
 def no_auto_check(monkeypatch):
     # apply_patch 落盘后对每个文件调 _run_code_check；测试里关掉它，免得真跑 ruff 干扰断言
-    monkeypatch.setattr("src.tools._run_code_check", lambda *a, **k: ("", None))
+    monkeypatch.setattr("src.tools._run_code_check", lambda *a, **k: ("", None, []))
 
 
 @pytest.fixture

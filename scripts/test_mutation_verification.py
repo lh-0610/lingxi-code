@@ -81,7 +81,8 @@ def test_missing_pytest_leaves_explicit_gap(project_dir, monkeypatch):
 
 def test_real_check_output_triggers_repair(project_dir, monkeypatch):
     (project_dir / "app.py").write_text("missing()\n", encoding="utf-8")
-    monkeypatch.setattr(tools, "_run_code_check", lambda path: ("app.py:1: F821 missing", "ruff"))
+    monkeypatch.setattr(tools, "_run_code_check",
+                        lambda path, **k: ("app.py:1: F821 missing", "ruff", []))
     v = session.get_verification()
     verification.mark_dirty(v, "app.py")
     result = tools.check_code.func("app.py")

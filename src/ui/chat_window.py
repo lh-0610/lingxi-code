@@ -107,6 +107,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.bridge.remote_submit.connect(self._on_remote_submit)
         self.bridge.dismiss_confirm.connect(self._on_dismiss_confirm)
         self.bridge.show_plan.connect(self._on_plan_update)
+        self.bridge.run_result.connect(self._on_run_result)
         self.bridge.kb_status.connect(self._on_kb_status)
 
         # 让 tools.py 在 worker 线程里能找到主窗口（弹确认框用）
@@ -123,6 +124,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.setAcceptDrops(True)
         self._search_widget = None         # Ctrl+F search floating window
         self._msg_buffers = {}             # msg_idx -> AI message plain text
+        # 当前消息流里已经画过结果卡的 run_id（同一轮只画一张，重复信号不重复追加）
+        self._rendered_result_run_id = ""
         # 命令 / 编辑白名单已迁移到 session.Session（会话级，见 confirm_bars）：用户"允许
         # 并记住"只影响发起确认的那个会话，不再作为 ChatUI 全局属性跨会话共享/泄漏。
 
@@ -305,6 +308,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._think_block_start = None
         self._think_block_chars = 0
         self._think_block_text = ""
+        self._rendered_result_run_id = ""   # 换会话 = 换消息流，结果卡要重新画
         if hasattr(self, "chat_area"):
             self.chat_area.clear()
         if hasattr(self, 'token_usage_label'):
@@ -395,6 +399,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                     self._append_html(f"🔧 调用了工具: {', '.join(_tool_names)}\n\n", "tool_result")
         if not rendered_any:
             self._show_empty_state()
+        self._redraw_result_card()
         # 计划面板的刷新已统一到 _reset_render_state（新建/切换/切项目三路共用漏斗），
         # 且 _load_session 调 _redraw_chat 前必先调 _reset_render_state，这里无需重复渲染。
 
@@ -1731,17 +1736,23 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         with sess.render_lock:
             sess.render_log.clear()    # 新一轮提问开始：清掉上一轮的渲染事件缓冲
         sess.thread = threading.current_thread()
+        # 本 worker 的身份令牌：finished 带着它回来，主线程据此分辨自己是不是"当前这一轮"。
+        token = object()
+        sess.worker_token = token
         _session.bind_thread(sess)
         from .. import roles as _roles
         sess.role_snapshot = _roles.capture_active_role()  # 冻结本轮人格（防生成途中被换卡）
         try:
             agent.agent_loop(self)
         finally:
-            sess.is_generating = False
-            sess.thread = None
-            sess.role_snapshot = None    # 解冻：空闲会话回退读全局当前角色
+            # 只有仍然是当前 worker 才清运行态：用户可能在这条 finally 之前就点了发送、
+            # 新 worker 已经起来了，这时把 is_generating 清掉会让两轮的按钮状态打架。
+            if sess.worker_token is token:
+                sess.is_generating = False
+                sess.thread = None
+                sess.role_snapshot = None    # 解冻：空闲会话回退读全局当前角色
             _session.unbind_thread()
-            self.bridge.finished.emit(sess)
+            self.bridge.finished.emit(sess, token)
 
     def _run_vision_bridge_agent(self, text, images, vision_model_name, original_model_name, sess=None):
         """非视觉模型收到图片时：视觉模型只负责识别，原模型负责最终回答。"""
@@ -1752,6 +1763,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         with sess.render_lock:
             sess.render_log.clear()    # 新一轮提问开始：清掉上一轮的渲染事件缓冲
         sess.thread = threading.current_thread()
+        token = object()
+        sess.worker_token = token
         _session.bind_thread(sess)
         from .. import roles as _roles
         sess.role_snapshot = _roles.capture_active_role()  # 冻结本轮人格（防生成途中被换卡）
@@ -1797,13 +1810,14 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         except Exception as e:
             self.show_retry(f"图片识别失败: {str(e)[:100]}")
         finally:
-            sess.is_generating = False
-            sess.thread = None
-            sess.role_snapshot = None    # 解冻：空闲会话回退读全局当前角色
+            if sess.worker_token is token:
+                sess.is_generating = False
+                sess.thread = None
+                sess.role_snapshot = None    # 解冻：空闲会话回退读全局当前角色
             _session.unbind_thread()
-            self.bridge.finished.emit(sess)
+            self.bridge.finished.emit(sess, token)
 
-    def _on_finished_sess(self, finished_sess):
+    def _on_finished_sess(self, finished_sess, token=None):
         """finished 信号槽：区分活跃会话 vs 后台会话。
 
         - finished_sess == active → 活跃会话结束，走完整收尾（刷 UI/按钮/撤销等）
@@ -1811,6 +1825,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """
         from .. import session as _session
         active_sess = _session.get_active()
+        if token is not None and getattr(finished_sess, "worker_token", None) is not token:
+            # **旧 worker 的迟到 finished**。新一轮已经在跑，按钮正处于"停止"状态——
+            # 在这里恢复成"可发送"会让用户以为上一条已经处理完了，点下去就是第二个 worker。
+            # 侧栏照刷（旧那轮的标题/状态确实变了），前台状态一概不碰。
+            self._refresh_session_list()
+            return
         if finished_sess is not active_sess:
             # 后台会话完成：只刷侧栏列表（显示新标题/状态），不碰前台 UI
             self._refresh_session_list()
@@ -2182,6 +2202,130 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             sess.needs_redraw = True
             return
         self.bridge.show_plan.emit(sess, [dict(it) for it in (items or [])])
+
+    # ── 运行结果卡（B06）──
+
+    def deliver_run_result(self, sess, run_id, snapshot):
+        """线程安全：worker 解绑前把结果快照投到 UI 主线程。
+
+        快照已经是不可变拷贝，信号排队期间下一轮再怎么改会话状态都影响不到它。
+        """
+        try:
+            self.bridge.run_result.emit(sess, str(run_id or ""), snapshot)
+        except Exception as e:
+            from ..paths import logger
+            logger.warning(f"投递结果卡失败: {e}")
+
+    def _on_run_result(self, sess, run_id, snapshot):
+        """主线程槽：只画属于当前前台会话、且确实是最新那一轮的卡。"""
+        from .. import session as _session
+        if sess is not _session.get_active():
+            # 后台会话跑完了：结果已经存在它自己的 last_result 上，切回去时重绘。
+            # 绝不插进当前前台会话——那是另一个任务的结果。
+            sess.needs_redraw = True
+            self._refresh_session_list()
+            return
+        # 归属判据是**会话最新的那条运行记录**，不是"最近渲染过什么"：
+        # 旧 run 的迟到信号必须认得出来，否则它会把新一轮的卡顶掉。
+        latest = (getattr(sess, "last_run", None) or {}).get("id")
+        if run_id and latest and latest != run_id:
+            return      # 迟到的旧 run：它仍然是历史事实，只是不再代表当前状态
+        if self._rendered_result_run_id == run_id and run_id:
+            return      # 重复信号：同一轮只画一张卡
+        self._render_result_card(snapshot)
+
+    def _render_result_card(self, snapshot):
+        from .. import result_view
+        from .. import session as _session
+        from .result_card import ResultCard
+        sess = _session.get_active()
+        # 正在跑的那一轮不能被显示成"上次运行被中断"——把当前活动 run_id 交给判定层。
+        live = getattr(sess, "active_run_id", None) if sess.is_generating else None
+        view = result_view.describe(snapshot, live_run_id=live)
+        if not view:
+            return
+        card = ResultCard(view)
+        card.view_diff_requested.connect(self._on_result_view_diff)
+        card.view_output_requested.connect(self._on_result_view_output)
+        self.chat_area.add_result_card(card)
+        self._rendered_result_run_id = view.get("run_id") or ""
+
+    def _redraw_result_card(self):
+        """切回会话 / 重开程序后，把最近一次运行结果重新画出来。
+
+        来源优先级：内存里的 `last_result`（本进程刚跑完的那一轮）→ 持久化的 `last_run`
+        重建。**不依赖 render_log**——它只活在内存里，重开程序就没了，
+        拿它当唯一来源等于"重启后看不到上一轮结果"。
+        """
+        from .. import run_records
+        from .. import session as _session
+        sess = _session.get_active()
+        snapshot = getattr(sess, "last_result", None)
+        if not snapshot:
+            snapshot = run_records.snapshot_from_loaded(sess)
+        if not snapshot:
+            return
+        self._rendered_result_run_id = ""
+        self._render_result_card(snapshot)
+
+    def _on_result_view_diff(self, view):
+        """只读查看**当前**差异。它不是那一轮保存过的历史 diff，文案必须说清楚。"""
+        project = view.get("project")
+        if not project:
+            self._show_toast("该运行没有关联项目，无法查看改动")
+            return
+        from .. import tools_git
+        from .. import session as _session
+        prev = _session.current_session()
+        holder = _session.Session()
+        holder.project = project          # 按**卡片自己的**项目取 diff，不借前台会话推断
+        _session.bind_thread(holder)
+        try:
+            text = tools_git.git_diff.func("")
+        except Exception as e:
+            text = f"查看改动失败: {e}"
+        finally:
+            _session.bind_thread(prev)
+        self._show_text_dialog(
+            "查看改动（当前状态）",
+            f"以下是 {project} 此刻的差异，**不是**该次运行保存下来的历史 diff。\n\n{text}")
+
+    def _on_result_view_output(self, view):
+        lines = []
+        for row in view.get("validations") or []:
+            head = f"{row['checker']}"
+            if row.get("path"):
+                head += f" · {row['path']}"
+            lines.append(f"── {head} · {row['label']}"
+                         + ("（已过期）" if row.get("stale") else ""))
+            if row.get("argv"):
+                lines.append("命令: " + " ".join(row["argv"]))
+            elif row.get("command"):
+                lines.append("命令: " + row["command"])
+            else:
+                lines.append("命令: （进程内执行，无 argv）")
+            lines.append(f"目录: {row.get('cwd') or '（未记录）'}   {row.get('detail') or ''}")
+            if row.get("summary"):
+                lines.append(row["summary"])
+            if row.get("reason"):
+                lines.append(f"原因: {row['reason']}")
+            lines.append("")
+        if not lines:
+            lines = ["本轮没有留下验证记录。"]
+        lines.append("完整工具输出在上面的对话记录里；这里只保留卡片采集到的摘要。")
+        self._show_text_dialog("验证输出", "\n".join(lines))
+
+    def _show_text_dialog(self, title, text):
+        from PySide6.QtWidgets import QDialog, QPlainTextEdit, QVBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(760, 520)
+        lay = QVBoxLayout(dlg)
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(text)
+        lay.addWidget(box)
+        dlg.exec()
 
     def _on_plan_update(self, sess, items):
         """信号排队期间可能切会话或更新计划；只显示当前会话的最新快照。"""

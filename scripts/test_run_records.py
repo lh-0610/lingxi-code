@@ -503,7 +503,11 @@ class TestAgentLoopBoundary:
         evidence = sess.last_run["evidence"]
         assert evidence["changed_files"] == ["src/a.py"]
         assert evidence["diff_reviewed"] is True
-        assert {"kind": "tests", "passed": True, "reason": "3 passed"} in evidence["validation_runs"]
+        # B06：validation_runs 改成**执行位置采集的结构化记录**，不再由布尔值反推。
+        # 这个桩没真跑检查，所以这里只有 mark_tests 留下的状态、没有执行记录——
+        # 正是它该有的样子：没执行过就没有记录，不凭 tests_passed=True 造一条出来。
+        assert evidence["validation_runs"] == []
+        assert sess.verification["tests_passed"] is True
 
 
 # ══════════════════════════════════════════════════════════════

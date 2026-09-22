@@ -64,6 +64,11 @@ _SESSION_FIELDS = {
     # 用来辨认"结果已落盘但 inflight 标记没清"——只看 revision 变大是不够的。
     "last_committed_operation": lambda: None,
     "recent_operations": list,
+    # ── B06 结果卡 ──
+    # 最近一次运行的结果快照（不可变 dict）。切走再切回、或者信号排队期间前台已换会话，
+    # 都从这里重绘；程序重开则由 run_records.snapshot_from_loaded 从持久化记录重建。
+    # 不拿 render_log 当唯一来源——它只活在内存里，重启就没了。
+    "last_result": lambda: None,
 }
 
 # 哨兵：Session.project 的"尚未锚定"初值，区别于合法的 None（无项目/全局）。
@@ -83,7 +88,7 @@ class Session:
         "pending_confirm", "render_log", "render_lock", "is_subagent",
         "role_snapshot", "session_kind", "rag_kb_dir",
         "snapshot_lock", "progress_revision", "progress_error",
-        "active_run_id", "inflight_lock",
+        "active_run_id", "inflight_lock", "worker_token",
     )
 
     def __init__(self):
@@ -126,6 +131,10 @@ class Session:
         # 工具执行【前】，那时可能正等着用户点确认，不能占着进度快照锁。
         # 锁序：memory._LOCK → snapshot_lock，inflight_lock 不与它们嵌套持有。
         self.inflight_lock = threading.RLock()
+        # 本会话当前 worker 的身份令牌（纯运行态）。`finished` 信号带上它，主线程据此
+        # 分辨"这条完成事件是不是当前这一轮的"——旧 worker 的迟到 finished 不能把
+        # 新一轮正在用的按钮恢复成可发送。
+        self.worker_token = None
         self.is_subagent = False
         # 本轮生成开始时冻结的角色卡快照（roles.capture_active_role() 的返回 dict）。
         # None = 用全局当前角色。worker 在 _run_agent 起手拍下、finally 清回 None：
