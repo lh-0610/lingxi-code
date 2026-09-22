@@ -21,6 +21,9 @@ _TITLES = {
 # 有效检查证据下的 completed 标题：明确限定在"已执行的检查"范围内，
 # 不宣称需求都做对了。
 _TITLE_COMPLETED_CHECKED = "本轮执行结束，已执行检查通过"
+# 跑了检查但没全过 / 结论已失效。必须和上面那条分开——只要有一条没解决，
+# 就不能把整轮概括成"检查通过"。
+_TITLE_COMPLETED_UNRESOLVED = "本轮执行结束，检查未全部通过"
 _TITLE_INTERRUPTED = "上次运行被中断"
 _TITLE_RUNNING = "本轮仍在运行"
 _TITLE_UNKNOWN = "本轮结果未知"
@@ -87,9 +90,30 @@ def validation_rows(snapshot):
     return rows
 
 
+def summarize_checks(snapshot):
+    """汇总本轮检查：`"none"` 没跑过 / `"clear"` 都过了 / `"unresolved"` 还有没解决的。
+
+    **不能用 `any(passed)`**：静态检查过了、pytest 挂了，那也是"有一条通过"，
+    标题就会写成"已执行检查通过"——而这一轮恰恰是没通过的。判据必须是
+    「**所有**未过期的记录都通过」，任何失败 / 未执行 / 超时 / 结果未知都让它不成立。
+
+    过期记录不参与判定：它的结论已经不代表当前代码了。但它也不能顶替一次有效通过，
+    所以"只剩过期记录"算 `unresolved`，不是 `clear`。
+    """
+    rows = validation_rows(snapshot)
+    if not rows:
+        return "none"
+    fresh = [r for r in rows if not r["stale"]]
+    if not fresh:
+        return "unresolved"          # 跑过，但结论全部失效
+    if all(r["status"] == "passed" for r in fresh):
+        return "clear"
+    return "unresolved"
+
+
 def has_fresh_pass(snapshot):
-    """有没有**未过期且通过**的检查证据。结果卡靠它决定要不要说"已执行检查通过"。"""
-    return any(r["status"] == "passed" and not r["stale"] for r in validation_rows(snapshot))
+    """本轮已执行的检查是不是**全部**通过（结果卡据此决定能不能说"检查通过"）。"""
+    return summarize_checks(snapshot) == "clear"
 
 
 def describe(snapshot, *, live_run_id=None):
@@ -111,8 +135,13 @@ def describe(snapshot, *, live_run_id=None):
             # 没收到终态。展示中断**不改写磁盘上的 phase/outcome**，只是这样呈现。
             title, tone = _TITLE_INTERRUPTED, "interrupted"
     elif outcome == "completed":
-        if has_fresh_pass(snapshot):
+        checks = summarize_checks(snapshot)
+        if checks == "clear":
             title, tone = _TITLE_COMPLETED_CHECKED, "ok"
+        elif checks == "unresolved":
+            # 跑过检查但没全过。既不能说"检查通过"，也不能只说"回复结束"
+            # （那会把一次有失败项的运行说得像纯问答）。
+            title, tone = _TITLE_COMPLETED_UNRESOLVED, "warn"
         else:
             # 纯问答 / 调研：没有检查证据就只说回复结束，绝不暗示"测过了"。
             title, tone = _TITLES["completed"], "ok"
@@ -144,6 +173,9 @@ def describe(snapshot, *, live_run_id=None):
         "run_id": snapshot.get("run_id") or "",
         "session_id": snapshot.get("session_id") or "",
         "project": snapshot.get("project"),
+        # 本轮实际的落点（worktree 优先）。"查看改动"必须用它：拿项目根去 diff 一个
+        # 在隔离区里跑的轮次，只会回一句"工作区干净"。
+        "work_dir": snapshot.get("work_dir") or snapshot.get("project"),
         "task_id": snapshot.get("task_id"),
         "files": files,
         # 没有净差异证据，所以只说"本轮涉及"——写"净修改 N 个文件"是它给不出的结论。
@@ -159,8 +191,8 @@ def describe(snapshot, *, live_run_id=None):
         "save_note": save_note,
         "diff_reviewed": bool((snapshot.get("evidence") or {}).get("diff_reviewed")),
         "display_source": snapshot.get("display_source") or "live",
-        # 有真实资料才给入口：没有项目路径就点不出差异，没有证据就没有输出可看。
-        "can_view_diff": bool(snapshot.get("project")),
+        # 有真实资料才给入口：没有目录就点不出差异，没有证据就没有输出可看。
+        "can_view_diff": bool(snapshot.get("work_dir") or snapshot.get("project")),
         "can_view_output": any(r["summary"] or r["reason"] or r["argv"] for r in rows),
     }
 

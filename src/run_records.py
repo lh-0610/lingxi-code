@@ -570,6 +570,9 @@ def build_result_snapshot(sess, run, *, save=None, source="live"):
         "session_id": getattr(sess, "current_session_id", None) or "",
         "session_key": getattr(sess, "key", None) or "",
         "project": _project_of(sess),
+        # 本轮**实际的**落点：worktree 里跑的那轮，改动在隔离区，不在主仓库。
+        # 结果卡的"查看改动"按这个取 diff，否则会对着主仓库说"工作区干净"。
+        "work_dir": _work_dir_of(sess),
         "run_id": run.get("id") or "",
         "task_id": run.get("task_id"),
         "phase": run.get("phase") or "",
@@ -599,6 +602,18 @@ def _project_of(sess):
     from . import session as _session_mod
     project = getattr(sess, "project", _session_mod._UNSET)
     return project if isinstance(project, str) else None
+
+
+def _work_dir_of(sess):
+    """本轮文件/命令实际落在哪：worktree 优先，否则项目根。
+
+    `worktree` 是纯运行态、不持久化，所以重开程序后这里只剩项目根——那是诚实的，
+    隔离区可能早就被合并或丢弃了，不该假装还能对着它取 diff。
+    """
+    worktree = getattr(sess, "worktree", None)
+    if isinstance(worktree, str) and worktree:
+        return worktree
+    return _project_of(sess)
 
 
 def snapshot_from_loaded(sess):
@@ -781,7 +796,14 @@ def commit_operation(sess, operation, *, ui=None) -> CommitReport:
         "committed_at": _now(),
     }
     refresh_pending_verification(sess)
+    # 检查证据也在**工具边界**进 last_run，不能只等 finalize。
+    # 只在收尾时拷的话，进程在"工具结果已提交"之后、收尾之前退出，磁盘上工具输出和
+    # 完成回执都在，检查记录却一条不剩——恰恰是最需要它的中断场景。
+    # 恢复出来的只用于**历史展示**：它不回填 verification，所以不会变成当前一轮的通行凭证。
     with sess.snapshot_lock:
+        run = getattr(sess, "last_run", None)
+        if isinstance(run, dict):
+            run["evidence"] = collect_evidence(getattr(sess, "verification", None))
         sess.last_committed_operation = receipt
         recent = list(getattr(sess, "recent_operations", None) or [])
         recent.append(receipt)

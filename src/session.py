@@ -183,6 +183,25 @@ def current_session() -> "Session":
     return s if s is not None else get_active()
 
 
+def get_bound() -> "Session | None":
+    """本线程**显式绑定**的会话；未绑定返回 None（不回退到 active）。
+
+    临时借用绑定的代码必须用它来存原状态：用 `current_session()` 的话，
+    未绑定的主线程会拿到 active，"还原"时反而把主线程**永久绑死**在那个会话上——
+    之后切到别的会话，`get_active()` 是新的、`current_session()` 还是旧的，
+    所有经会话代理的保存和状态操作都会写错会话。
+    """
+    return getattr(_thread_local, "session", None)
+
+
+def restore_bound(previous) -> None:
+    """还原 `get_bound()` 取到的绑定状态：原来没绑就解绑，别绑上去。"""
+    if previous is None:
+        unbind_thread()
+    else:
+        bind_thread(previous)
+
+
 def get_verification() -> dict:
     """当前会话的验证状态。给 tools.py 记录写入/测试/diff 使用。"""
     return current_session().verification

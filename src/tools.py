@@ -2046,8 +2046,16 @@ def _run_type_check(full_path: str, cwd):
             continue
         kept.append(line.replace(full_path, base_name).strip())
     if not kept:
-        # 退出码可能非 0（有被我们过滤掉的低信号错误），但**按我们的判据**它是通过的。
-        # 退出码照实记、状态按判据给——不一致时用户能自己从退出码看出差别。
+        # **"筛完没剩下东西" 不等于 "检查跑成功了"。**
+        # mypy 的退出码：0=干净，1=有错（可能全被我们的高信号筛选滤掉了），
+        # ≥2=致命错误（语法错、用法错、崩溃）——那时它根本没完成分析，
+        # 报成 passed 会让卡片说"检查通过"，而文件其实连语法都不对。
+        if r.returncode >= 2:
+            detail = _first_lines(out.strip()) or f"mypy 以退出码 {r.returncode} 中止"
+            return None, None, _meta("error", r.returncode,
+                                     reason="mypy 未能完成分析", summary=detail)
+        # 退出码 0 / 1 且筛选后无高信号问题：按我们的判据算通过。
+        # 退出码照实记，不一致时用户能自己看出是被筛掉的低信号错误。
         return "", "mypy", _meta("passed", r.returncode)
     issues = "\n".join(kept[:15])
     return issues, "mypy", _meta("failed", r.returncode, summary=_first_lines(issues))

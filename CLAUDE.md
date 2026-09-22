@@ -218,6 +218,7 @@ python main.py
 - **卡片上每一句都要有程序证据**。模型正文说"已完成"不改变结论；没跑过检查就不写"测试通过"，纯问答连检查面板都不画（空面板会让人以为哪里出错）；`unverified` **不翻译成**"代码写完了只是没测"——它并不证明实现完整
 - **结构化证据在实际执行位置采集**（`verification.record_evidence` → `verification["evidence"]`，随 `last_run.evidence.validation_runs` 落盘）：`argv` / `command` / `cwd` / `started_at` / `duration_ms` / `exit_code` / `status`。`run_tests`、手动 `check_code`、编辑后的自动检查共用这一套
 - **状态枚举分得细是有原因的**：`passed / failed / not_run / timeout / cancelled / error / unknown`。"没装 pytest"和"测试跑完挂了"在卡片上是完全不同的两件事，合成一个布尔就说不出来。**拿不到退出码就是 `None`，绝不填 0**；pytest 退出码 5（一个用例都没收集到）算 `not_run`，不算通过
+- **"筛完没剩下诊断"不等于"检查跑成功了"**：mypy 退出码 ≥2 是致命错误（语法错/用法错），它根本没完成分析 → 记 `error` 并保留摘要。退出码 0/1 且高信号筛选无命中才算 `passed`（那是有意的筛选，退出码照实记，用户能自己看出差别）
 - Python 检查跑了几个检查器就记几条（`_run_code_check` 返回 `metas` 列表）："ruff 过了、mypy 超时"是常见组合，合成一条就看不出来。没装 mypy / 开关关掉 → **不留记录**（列一条 not_run 会让用户以为自己少装了什么）
 - **过期判定不能用 `progress_revision`**：那个每保存一次就 +1，一次纯保存就会把刚跑完的绿灯标成过期。改用 `verification["change_revision"]`，只随 `mark_dirty` / `mark_blind_period` 递增。过期与否在 `collect_evidence` 里**定格**成每条记录的 `stale` 落盘——跨轮比较 revision 是错的，下一轮它从 0 重来，历史记录反而全变"没过期"
 - 检查后又改文件 → 记录**保留并标过期**，不删掉（删了就显示成"从未检查"）；再查一次则新记录是新鲜的
@@ -226,7 +227,12 @@ python main.py
 - **`finished` 信号带 worker 令牌**（`Session.worker_token`）：旧 worker 的迟到 finished 不能把新一轮正在用的按钮恢复成可发送；`_run_agent` 的 finally 也只在令牌仍是自己时才清运行态
 - 重绘来源：内存 `last_result` → 持久化 `last_run` 重建（`snapshot_from_loaded`）。**render_log 不能是唯一来源**，它只活在内存里，重开程序就没了
 - **显示卡片不往 chat_history 塞伪造的 AIMessage**；不新增总结模型调用；B04 没做完就**不放**"继续任务"按钮（放个点不动的比没有更糟）
-- 按钮带着**卡片自己的** `view`（含 session/project/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"明确标注是**当前状态**，不冒充那一轮保存过的历史 diff
+- 按钮带着**卡片自己的** `view`（含 session/work_dir/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"明确标注是**当前状态**，不冒充那一轮保存过的历史 diff
+- **"查看改动"用 `work_dir` 不用 `project`**：worktree 里跑的那轮改动在隔离区，拿项目根去 diff 只会回一句"工作区干净"。`work_dir` 在快照里记的是当时的实际落点（worktree 优先）；它不持久化，重开后只剩项目根——那是诚实的，隔离区可能早被合并或丢弃了
+- **临时借用线程绑定必须用 `session.get_bound()` / `restore_bound()`**，不能用 `current_session()` 存旧值：未绑定的主线程拿到的是 active，"还原"反而把主线程**永久绑死**在它身上，之后 `get_active()` 与 `current_session()` 指向不同会话，所有经代理的保存都写错人
+- **一条通过不代表整轮通过**：标题判据是 `summarize_checks`——**所有未过期记录都 passed** 才叫 `clear`，任何失败/未执行/超时/未知都让它变 `unresolved`（标题改成"检查未全部通过"）。用 `any(passed)` 的话，"静态检查过了、pytest 挂了"会被写成"已执行检查通过"。只剩过期记录也算 `unresolved`——它顶替不了一次有效通过
+- **证据在工具边界就进 `last_run`**，不是只在 finalize 拷一次：进程死在"工具结果已提交"与收尾之间时，磁盘上工具输出和完成回执都在、检查记录却一条不剩，而那正是最需要它的中断场景。恢复出来的只作**历史展示**，不回填 `verification`，所以不会变成当前一轮的通行凭证
+- **`last_result` 缓存要跟着失效**：`reset_history` 和 `load_session` 都清它（Session 对象会被复用来装别的会话），重绘前还要用 `_result_belongs_here` 核对 run_id + session_id。不清的话"新建对话"之后旧那轮的结果卡会重新画出来，而 `last_run` 明明已经空了
 - **布局上的两个坑（都只有真渲染才暴露）**：① 把卡片包进一层 `QWidget` 再进布局，那层壳不向上传递 heightForWidth，整张卡被算矮、底部按钮被边框整条切掉——检查行和按钮行一律 `addLayout` 直接加，`MessageView.add_result_card` 也直接加卡；② 等宽字体的长行是撑宽卡片的元凶（消息流关掉了横向滚动条，撑宽就是被裁掉），路径中间省略、摘要压成一行省略、无断点长串按字符数强插换行
 
 ### 验证闭环与自动修复（src/verification.py，编码核心）

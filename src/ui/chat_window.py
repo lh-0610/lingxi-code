@@ -2261,6 +2261,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from .. import session as _session
         sess = _session.get_active()
         snapshot = getattr(sess, "last_result", None)
+        # 缓存要**核对归属**再用：Session 对象会被复用来装别的会话，缓存也可能比
+        # 当前 last_run 旧。对不上就丢掉、从持久化记录重建，宁可少画一张卡，
+        # 也不要把另一轮（甚至另一个会话）的结果显示成这一轮的。
+        if snapshot and not self._result_belongs_here(sess, snapshot):
+            snapshot = None
         if not snapshot:
             snapshot = run_records.snapshot_from_loaded(sess)
         if not snapshot:
@@ -2268,27 +2273,47 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._rendered_result_run_id = ""
         self._render_result_card(snapshot)
 
+    @staticmethod
+    def _result_belongs_here(sess, snapshot):
+        """这份缓存的结果快照，是不是**这个会话当前这条**运行记录的。
+
+        两种对不上的情形都必须挡掉：① Session 对象被复用装了别的会话（侧栏切换）；
+        ② 会话被重置 / 加载成了另一段历史，`last_run` 已经换人或清空。
+        """
+        run = getattr(sess, "last_run", None)
+        if not isinstance(run, dict) or not run.get("id"):
+            return False        # 没有运行记录了（比如刚重置），缓存一律作废
+        if snapshot.get("run_id") != run.get("id"):
+            return False
+        sid = getattr(sess, "current_session_id", None) or ""
+        return (snapshot.get("session_id") or "") == sid
+
     def _on_result_view_diff(self, view):
         """只读查看**当前**差异。它不是那一轮保存过的历史 diff，文案必须说清楚。"""
-        project = view.get("project")
-        if not project:
-            self._show_toast("该运行没有关联项目，无法查看改动")
+        # 用本轮**实际的工作目录**：子 Agent / worktree 里跑的那轮，改动在隔离区里，
+        # 拿主仓库路径去 diff 会回一句"工作区干净"，而改动明明就在那儿。
+        work_dir = view.get("work_dir") or view.get("project")
+        if not work_dir:
+            self._show_toast("该运行没有关联目录，无法查看改动")
             return
         from .. import tools_git
         from .. import session as _session
-        prev = _session.current_session()
+        # **存原始绑定状态，不是 current_session()**：主线程本来没绑定，
+        # 用 current_session() 存下来的是 active，"还原"时会把主线程永久绑死在它身上，
+        # 之后切会话就出现 get_active() 与 current_session() 指向不同会话的错乱。
+        prev = _session.get_bound()
         holder = _session.Session()
-        holder.project = project          # 按**卡片自己的**项目取 diff，不借前台会话推断
+        holder.project = work_dir         # 按**卡片自己的**目录取 diff，不借前台会话推断
         _session.bind_thread(holder)
         try:
             text = tools_git.git_diff.func("")
         except Exception as e:
             text = f"查看改动失败: {e}"
         finally:
-            _session.bind_thread(prev)
+            _session.restore_bound(prev)
         self._show_text_dialog(
             "查看改动（当前状态）",
-            f"以下是 {project} 此刻的差异，**不是**该次运行保存下来的历史 diff。\n\n{text}")
+            f"以下是 {work_dir} 此刻的差异，**不是**该次运行保存下来的历史 diff。\n\n{text}")
 
     def _on_result_view_output(self, view):
         lines = []

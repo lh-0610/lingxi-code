@@ -317,6 +317,9 @@ def _clear_progress(sess):
         sess.last_committed_operation = None
         sess.recent_operations = []
         sess.active_run_id = None
+        # 结果卡的快照缓存也要清：重绘优先读它，不清的话"新建对话"之后
+        # 旧那一轮的结果卡会重新画出来，而 last_run 明明已经空了。
+        sess.last_result = None
 
 
 def _repair_pending_index_entries():
@@ -1051,6 +1054,10 @@ def load_session(session_id, *, session=None):
         tgt.recent_operations = [dict(r) for r in progress["recent_operations"]]
         # 加载不等于在跑：活动 run 是纯运行态，恢复出来的会话没有正在跑的 run。
         tgt.active_run_id = None
+        # 同一个 Session 对象可能被复用来装另一个会话（侧栏切换就是这么干的）。
+        # 结果快照缓存必须跟着作废，否则新装进来的会话会显示上一个会话的结果卡；
+        # 要展示的话由 run_records.snapshot_from_loaded 从刚读进来的 last_run 重建。
+        tgt.last_result = None
 
     # 分类 / 项目 / rag 锚点 / rag_mode / Plan-Act（对两条路径统一设置在目标 Session 上）
     tgt.session_kind = _kind
