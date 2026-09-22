@@ -37,10 +37,15 @@ class TestFindTests:
         assert "scripts/test_tools.py" in _norm(result)
 
     def test_finds_test_related_files_for_tools_py(self):
-        """find_tests(path='src/tools.py') 也应找到本测试文件。"""
+        """find_tests(path='src/tools.py') 也应找到本测试文件。
+
+        显式给足 max_results：本文件只靠"import 匹配 + 同目录"得分，和其它一堆测试
+        并列，默认只显示前 20 条时会被挤出去——那时失败的是名额，不是查找能力。
+        仓库里每多一个 import src.tools 的测试文件就可能踢掉它一次。
+        """
         from src.tools import find_tests
 
-        result = find_tests.func("src/tools.py")
+        result = find_tests.func("src/tools.py", max_results=50)
         assert "scripts/test_related_files.py" in _norm(result)
 
     def test_tools_py_scores_high_for_test_tools(self):

@@ -228,9 +228,12 @@ python main.py
 - 重绘来源：内存 `last_result` → 持久化 `last_run` 重建（`snapshot_from_loaded`）。**render_log 不能是唯一来源**，它只活在内存里，重开程序就没了
 - **显示卡片不往 chat_history 塞伪造的 AIMessage**；不新增总结模型调用；B04 没做完就**不放**"继续任务"按钮（放个点不动的比没有更糟）
 - 按钮带着**卡片自己的** `view`（含 session/work_dir/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"明确标注是**当前状态**，不冒充那一轮保存过的历史 diff
-- **"查看改动"用 `work_dir` 不用 `project`**：worktree 里跑的那轮改动在隔离区，拿项目根去 diff 只会回一句"工作区干净"。`work_dir` 在快照里记的是当时的实际落点（worktree 优先）；它不持久化，重开后只剩项目根——那是诚实的，隔离区可能早被合并或丢弃了
+- **"查看改动"用 `work_dir` 不用 `project`**：worktree 里跑的那轮改动在隔离区，拿项目根去 diff 只会回一句"工作区干净"。`work_dir` **持久化在 `last_run` 上**（`begin_run` 初始化、工具边界与收尾各刷一次）——只靠"重建时按当前会话现算"是不行的，重开后 `Session.worktree` 早没了，算出来永远是主仓库。记下来只为历史查看，**不会**被恢复成当前执行用的 `Session.worktree`
+- **记录的目录不存在时禁止回退**：`_project_cwd()` 在路径不存在时会回退到**进程 cwd**，于是 `git_diff` 悄悄查了灵犀自己的目录、回一句"工作区干净"，而弹窗标题还写着那个不存在的路径。`_on_result_view_diff` 先 `os.path.isdir` 校验，失效就明说不可用
 - **临时借用线程绑定必须用 `session.get_bound()` / `restore_bound()`**，不能用 `current_session()` 存旧值：未绑定的主线程拿到的是 active，"还原"反而把主线程**永久绑死**在它身上，之后 `get_active()` 与 `current_session()` 指向不同会话，所有经代理的保存都写错人
-- **一条通过不代表整轮通过**：标题判据是 `summarize_checks`——**所有未过期记录都 passed** 才叫 `clear`，任何失败/未执行/超时/未知都让它变 `unresolved`（标题改成"检查未全部通过"）。用 `any(passed)` 的话，"静态检查过了、pytest 挂了"会被写成"已执行检查通过"。只剩过期记录也算 `unresolved`——它顶替不了一次有效通过
+- **一条通过不代表整轮通过**：标题判据是 `summarize_checks`——**每项检查的最新有效结论**都 passed 才叫 `clear`，任何失败/未执行/超时/未知都让它变 `unresolved`（标题改成"检查未全部通过"）。用 `any(passed)` 的话，"静态检查过了、pytest 挂了"会被写成"已执行检查通过"。只剩过期记录也算 `unresolved`——它顶替不了一次有效通过
+- **同一项检查重试通过，旧失败要让位**（`effective_rows` / `check_identity`）：identity = 检查器 + 目录 + 目标 + 实际命令，同 identity 后来的取代先前的，旧记录保留展示并标 `superseded`。不这么做的话，文件没改所以旧失败**不会过期**，`all()` 一直把它算进去，卡片停在"检查未全部通过"，而完成闸门早就认了 `tests_passed=True`——两边对同一件事给出相反结论。identity 必须带目录和参数：对两个文件跑 ruff、在主仓库和隔离区各跑一次 pytest，都是两项检查，不该互相顶替
+- 取代不等于免疫：最新那次之后又改了文件，照样过期
 - **证据在工具边界就进 `last_run`**，不是只在 finalize 拷一次：进程死在"工具结果已提交"与收尾之间时，磁盘上工具输出和完成回执都在、检查记录却一条不剩，而那正是最需要它的中断场景。恢复出来的只作**历史展示**，不回填 `verification`，所以不会变成当前一轮的通行凭证
 - **`last_result` 缓存要跟着失效**：`reset_history` 和 `load_session` 都清它（Session 对象会被复用来装别的会话），重绘前还要用 `_result_belongs_here` 核对 run_id + session_id。不清的话"新建对话"之后旧那轮的结果卡会重新画出来，而 `last_run` 明明已经空了
 - **布局上的两个坑（都只有真渲染才暴露）**：① 把卡片包进一层 `QWidget` 再进布局，那层壳不向上传递 heightForWidth，整张卡被算矮、底部按钮被边框整条切掉——检查行和按钮行一律 `addLayout` 直接加，`MessageView.add_result_card` 也直接加卡；② 等宽字体的长行是撑宽卡片的元凶（消息流关掉了横向滚动条，撑宽就是被裁掉），路径中间省略、摘要压成一行省略、无断点长串按字符数强插换行

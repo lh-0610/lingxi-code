@@ -90,20 +90,50 @@ def validation_rows(snapshot):
     return rows
 
 
+def check_identity(row):
+    """两条记录是不是"同一项检查的两次执行"。
+
+    判据是**跑了什么、在哪跑、对谁跑**：检查器 + 目录 + 目标 + 实际命令。
+    只按检查器名归并是不够的——对两个不同文件跑 ruff 是两项检查，不该互相顶替。
+    """
+    command = " ".join(row.get("argv") or []) or (row.get("command") or "")
+    return (row.get("kind"), row.get("checker"), row.get("cwd"), row.get("path"), command)
+
+
+def effective_rows(snapshot):
+    """每项检查只留**最后一次**执行的结论，并标出被取代的旧记录。
+
+    同一条命令重试通过时，之前那次失败必须让位：文件没变，所以旧失败不会因为
+    "过期"而退场，`all()` 会一直把它算进去，卡片就永远停在"检查未全部通过"，
+    而完成闸门早就认了 `tests_passed=True`——两边对同一件事给出相反结论。
+
+    记录按时间顺序，同一 identity 后来的覆盖先前的。旧记录**保留展示**，
+    只是标成 `superseded`，不参与判定。
+    """
+    rows = validation_rows(snapshot)
+    latest = {}
+    for row in rows:
+        latest[check_identity(row)] = row
+    winners = set(id(r) for r in latest.values())
+    for row in rows:
+        row["superseded"] = id(row) not in winners
+    return rows, list(latest.values())
+
+
 def summarize_checks(snapshot):
     """汇总本轮检查：`"none"` 没跑过 / `"clear"` 都过了 / `"unresolved"` 还有没解决的。
 
     **不能用 `any(passed)`**：静态检查过了、pytest 挂了，那也是"有一条通过"，
-    标题就会写成"已执行检查通过"——而这一轮恰恰是没通过的。判据必须是
-    「**所有**未过期的记录都通过」，任何失败 / 未执行 / 超时 / 结果未知都让它不成立。
+    标题就会写成"已执行检查通过"——而这一轮恰恰是没通过的。判据是
+    「**每项检查的最新有效结论**都通过」。
 
     过期记录不参与判定：它的结论已经不代表当前代码了。但它也不能顶替一次有效通过，
     所以"只剩过期记录"算 `unresolved`，不是 `clear`。
     """
-    rows = validation_rows(snapshot)
+    rows, latest = effective_rows(snapshot)
     if not rows:
         return "none"
-    fresh = [r for r in rows if not r["stale"]]
+    fresh = [r for r in latest if not r["stale"]]
     if not fresh:
         return "unresolved"          # 跑过，但结论全部失效
     if all(r["status"] == "passed" for r in fresh):
@@ -123,7 +153,9 @@ def describe(snapshot, *, live_run_id=None):
 
     phase = snapshot.get("phase") or ""
     outcome = snapshot.get("outcome")
-    rows = validation_rows(snapshot)
+    # 走 effective_rows 而不是 validation_rows：它顺带给每条打上 superseded，
+    # 卡片才能把"后来重试通过了"的旧失败标出来，而不是并排摆两个矛盾的结论。
+    rows, _latest = effective_rows(snapshot)
     files = list((snapshot.get("evidence") or {}).get("changed_files") or [])
     pending = snapshot.get("pending_verification") or {}
 
@@ -184,6 +216,7 @@ def describe(snapshot, *, live_run_id=None):
         "validations": rows,
         "has_validations": bool(rows),
         "has_stale": any(r["stale"] for r in rows),
+        "has_superseded": any(r.get("superseded") for r in rows),
         "pending_files": pending_files,
         "pending_reason": pending_reason,
         "has_pending": bool(pending_files or pending_reason
@@ -208,7 +241,8 @@ def plain_text(view) -> str:
         lines.append(f"{view['files_caption']}：{'、'.join(view['files'])}")
     for row in view["validations"]:
         target = f" {row['path']}" if row["path"] else ""
-        stale = "（已过期）" if row["stale"] else ""
+        stale = ("（已过期）" if row["stale"]
+                 else "（已被后一次复查取代）" if row.get("superseded") else "")
         lines.append(f"{_KIND_LABELS.get(row['kind'], '检查')}{target} · "
                      f"{row['checker']}：{row['label']}{stale}（{row['detail']}）")
     if view["has_pending"]:

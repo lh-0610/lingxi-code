@@ -219,7 +219,7 @@ def normalize_last_run(raw):
     evidence = raw.get("evidence")
     if evidence is not None and not isinstance(evidence, dict):
         return None, "last_run.evidence 不是对象"
-    for key in ("started_at", "ended_at", "reason"):
+    for key in ("started_at", "ended_at", "reason", "work_dir"):
         value = raw.get(key)
         if value is not None and not isinstance(value, str):
             return None, f"last_run.{key} 类型非法"
@@ -232,6 +232,11 @@ def normalize_last_run(raw):
         "reason": raw.get("reason") or "",
         "started_at": raw.get("started_at") or "",
         "ended_at": raw.get("ended_at") or "",
+        # 这一轮实际的工作目录。**必须持久化**：重开之后 Session.worktree 早没了，
+        # 靠当时的会话状态重新推算只会得出主仓库，于是历史卡片的"查看改动"
+        # 去查了一个根本没跑过这轮的目录，回一句"工作区干净"。
+        # 记下来只为历史查看，不会被恢复成当前执行用的 worktree。
+        "work_dir": raw.get("work_dir") or "",
         "source": dict(source) if source else {},
         "evidence": _normalize_evidence(evidence),
     }, ""
@@ -435,6 +440,7 @@ def begin_run(sess, *, task_id=None, ui=None):
         "reason": "",
         "started_at": _now(),
         "ended_at": "",
+        "work_dir": _work_dir_of(sess) or "",
         "source": describe_source(getattr(sess, "chat_history", None) or []),
         "evidence": {"changed_files": [], "validation_runs": [], "diff_reviewed": False},
     }
@@ -526,6 +532,8 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
         run["reason"] = str(getattr(result, "reason", "") or "")
         run["ended_at"] = _now()
         run["evidence"] = collect_evidence(getattr(sess, "verification", None))
+        # worktree 可能是开跑之后才挂上的，收尾时按实际落点再刷一次。
+        run["work_dir"] = _work_dir_of(sess) or run.get("work_dir") or ""
         sess.last_run = run
 
     refresh_pending_verification(sess, run_id=run["id"])
@@ -571,8 +579,9 @@ def build_result_snapshot(sess, run, *, save=None, source="live"):
         "session_key": getattr(sess, "key", None) or "",
         "project": _project_of(sess),
         # 本轮**实际的**落点：worktree 里跑的那轮，改动在隔离区，不在主仓库。
-        # 结果卡的"查看改动"按这个取 diff，否则会对着主仓库说"工作区干净"。
-        "work_dir": _work_dir_of(sess),
+        # 优先用运行记录里存下来的——从磁盘重建历史卡片时，会话上的 worktree 早没了，
+        # 现算只会算出主仓库。只有记录里没有（旧会话）才回退到当前会话状态。
+        "work_dir": (run.get("work_dir") or _work_dir_of(sess)),
         "run_id": run.get("id") or "",
         "task_id": run.get("task_id"),
         "phase": run.get("phase") or "",
@@ -804,6 +813,7 @@ def commit_operation(sess, operation, *, ui=None) -> CommitReport:
         run = getattr(sess, "last_run", None)
         if isinstance(run, dict):
             run["evidence"] = collect_evidence(getattr(sess, "verification", None))
+            run["work_dir"] = _work_dir_of(sess) or run.get("work_dir") or ""
         sess.last_committed_operation = receipt
         recent = list(getattr(sess, "recent_operations", None) or [])
         recent.append(receipt)

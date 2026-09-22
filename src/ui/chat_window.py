@@ -2296,6 +2296,17 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if not work_dir:
             self._show_toast("该运行没有关联目录，无法查看改动")
             return
+        import os
+        if not os.path.isdir(work_dir):
+            # **目录没了就明说，绝不将就。** `_project_cwd()` 在路径不存在时会回退到
+            # 进程 cwd，于是 git_diff 悄悄查了灵犀自己的目录、回一句"工作区干净"，
+            # 而弹窗标题还写着那个已经不存在的路径——用户会以为那轮改动没了。
+            self._show_text_dialog(
+                "查看改动（目录已不可用）",
+                f"这一轮当时的工作目录是：\n{work_dir}\n\n"
+                "它现在不存在了（可能被移动、删除，或隔离区已合并/丢弃）。"
+                "为避免查到无关目录的差异，这里不做回退查询。")
+            return
         from .. import tools_git
         from .. import session as _session
         # **存原始绑定状态，不是 current_session()**：主线程本来没绑定，

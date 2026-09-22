@@ -172,9 +172,17 @@ class ResultCard(QFrame):
                 # 就是那条路径的完整宽度，把外面的 HBox 连同整张卡一起撑出可视区。
                 target += f" · {_elide_middle(row['path'])}"
             h.addWidget(_label(target, color=_P["text3"], size=12), 1)
-            state = row["label"] + ("（已过期）" if row.get("stale") else "")
-            color = _P["muted"] if row.get("stale") else _STATUS_COLOR.get(row["status"],
-                                                                          _P["muted"])
+            # 被后一次复查取代的旧结论要标出来，否则卡上会并排摆着
+            # "失败" 和 "通过" 两个矛盾的结果，用户无从判断哪个算数。
+            if row.get("stale"):
+                suffix = "（已过期）"
+            elif row.get("superseded"):
+                suffix = "（已被复查取代）"
+            else:
+                suffix = ""
+            state = row["label"] + suffix
+            color = (_P["muted"] if (row.get("stale") or row.get("superseded"))
+                     else _STATUS_COLOR.get(row["status"], _P["muted"]))
             h.addWidget(_label(state, color=color, size=12, bold=True, wrap=False,
                                shrink=False), 0)
             col.addLayout(h)
@@ -190,6 +198,9 @@ class ResultCard(QFrame):
         if self.view.get("has_stale"):
             col.addWidget(_label("标为已过期的检查在其之后又有文件改动，结论不再代表当前代码。",
                                  color=_P["orange"], size=11))
+        if self.view.get("has_superseded"):
+            col.addWidget(_label("标为已被复查取代的，是同一项检查更早的一次结果，以最新一次为准。",
+                                 color=_P["muted2"], size=11))
 
     def _add_pending(self, col):
         if not self.view.get("has_pending"):
