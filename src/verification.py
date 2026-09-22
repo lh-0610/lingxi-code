@@ -6,6 +6,8 @@
 验证状态存储在 `Session.verification`（会话级，多会话隔离）。
 本模块提供纯函数操作这些状态 + 间隙检测，不引入循环依赖。
 """
+import hashlib
+import json
 import os
 import re
 import uuid
@@ -168,6 +170,25 @@ def redact(text: str) -> str:
     return _SK_RE.sub(lambda m: m.group(1) + "***", out)
 
 
+def identity_fingerprint(*, kind, checker, cwd, path, argv, command) -> str:
+    """「这是哪一项检查」的指纹，从**完整未截断**的值算。
+
+    展示字段是要脱敏和截断的（argv 每项 300 字、命令 400 字），拿它们去比对身份
+    会把长参数的差异整个抹掉：实测两组 `pytest -k <702 字符>` 只有末尾不同，
+    截断后 identity 完全一样，于是第一组的失败被第二组"取代"，卡片写成
+    "已执行检查通过"——而第二组根本没跑那个失败用例。
+
+    所以身份用指纹、展示用截断值，两者分开。哈希是单向的，即便完整命令里带了密钥
+    也不会因为存了指纹而泄露。
+    """
+    payload = json.dumps(
+        {"kind": kind or "", "checker": checker or "", "cwd": cwd or "",
+         "path": path or "", "argv": list(argv) if argv else None,
+         "command": command or ""},
+        sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 def record_evidence(v: dict, **fields) -> dict | None:
     """在**实际执行位置**记一条检查证据，返回该记录（无状态可记时返回 None）。
 
@@ -177,6 +198,11 @@ def record_evidence(v: dict, **fields) -> dict | None:
     """
     if not isinstance(v, dict):
         return None
+    # **先算指纹，再截断**：顺序反了就等于拿展示数据当身份用。
+    identity = identity_fingerprint(
+        kind=fields.get("kind"), checker=fields.get("checker"),
+        cwd=fields.get("cwd"), path=fields.get("path"),
+        argv=fields.get("argv"), command=fields.get("command"))
     argv = fields.get("argv")
     if isinstance(argv, (list, tuple)):
         argv = [redact(str(a))[:_ARGV_ITEM_MAX] for a in argv]
@@ -190,6 +216,8 @@ def record_evidence(v: dict, **fields) -> dict | None:
         exit_code = None
     record = {
         "id": f"ev-{uuid.uuid4().hex[:12]}",
+        # 归并用这个，不用下面那些被截断过的展示字段
+        "identity": identity,
         "kind": fields.get("kind") if fields.get("kind") in ("tests", "check") else "check",
         "run_id": str(fields.get("run_id") or ""),
         "tool_call_id": str(fields.get("tool_call_id") or ""),

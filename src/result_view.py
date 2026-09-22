@@ -72,6 +72,8 @@ def validation_rows(snapshot):
             detail.append(f"{duration / 1000:.1f}s")
         rows.append({
             "id": record.get("id") or "",
+            # 归并身份用的指纹（采集时从完整值算），不是下面那些截断过的展示字段
+            "identity": record.get("identity") or "",
             "kind": record.get("kind") or "check",
             "checker": checker,
             "path": record.get("path") or "",
@@ -93,11 +95,19 @@ def validation_rows(snapshot):
 def check_identity(row):
     """两条记录是不是"同一项检查的两次执行"。
 
-    判据是**跑了什么、在哪跑、对谁跑**：检查器 + 目录 + 目标 + 实际命令。
-    只按检查器名归并是不够的——对两个不同文件跑 ruff 是两项检查，不该互相顶替。
+    用采集时算好的指纹（检查器 + 目录 + 目标 + **完整**命令的哈希），
+    **不能拿这里的 argv / command 去比**——它们是展示字段，采集时已经截断过
+    （argv 每项 300 字、命令 400 字）。实测两组 `pytest -k <702 字符>` 只有末尾不同，
+    截断后完全一样，于是第一组的失败被第二组"取代"、卡片写成"已执行检查通过"，
+    而第二组根本没跑那个失败用例。
+
+    没有指纹的旧记录（本批之前存下的）**一律各算各的**，永不互相取代：
+    宁可卡片停在"检查未全部通过"，也不能靠截断数据蒙一个"通过"出来。
     """
-    command = " ".join(row.get("argv") or []) or (row.get("command") or "")
-    return (row.get("kind"), row.get("checker"), row.get("cwd"), row.get("path"), command)
+    fingerprint = row.get("identity")
+    if fingerprint:
+        return ("fp", fingerprint)
+    return ("legacy", row.get("id") or id(row))
 
 
 def effective_rows(snapshot):

@@ -244,7 +244,7 @@ def normalize_last_run(raw):
 
 # 一条验证记录的字段与类型。校验按字段做，坏字段归一成安全值而不是整条丢——
 # 少一条记录会让结果卡把跑过的检查说成没跑过，那比字段缺失更误导。
-_RUN_STR_FIELDS = ("id", "kind", "run_id", "tool_call_id", "checker", "path",
+_RUN_STR_FIELDS = ("id", "identity", "kind", "run_id", "tool_call_id", "checker", "path",
                    "command", "cwd", "started_at", "status", "summary", "reason")
 _VALID_EV_STATUS = ("passed", "failed", "not_run", "timeout", "cancelled", "error", "unknown")
 
