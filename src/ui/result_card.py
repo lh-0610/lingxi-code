@@ -98,6 +98,7 @@ class ResultCard(QFrame):
 
     view_diff_requested = Signal(object)     # 携带本卡的 view dict（含会话/项目/run_id）
     view_output_requested = Signal(object)
+    continue_requested = Signal(object)      # 「继续任务」：同样只带本卡的 view
 
     def __init__(self, view: dict, parent=None):
         super().__init__(parent)
@@ -122,9 +123,11 @@ class ResultCard(QFrame):
             col.addWidget(_label(_soft_wrap(self.view["reason"]),
                                  color=_P["text_sec"], size=12))
 
+        self._continue_btn = None
         self._add_files(col)
         self._add_validations(col)
         self._add_pending(col)
+        self._add_resume(col)
         self._add_save_note(col)
         self._add_buttons(col)
 
@@ -209,6 +212,13 @@ class ResultCard(QFrame):
         text = self.view.get("pending_reason") or "存在尚未验证的改动"
         col.addWidget(_label(_soft_wrap(text), color=_P["text_sec"], size=12))
 
+    def _add_resume(self, col):
+        if not self.view.get("resumable"):
+            return
+        from ..result_view import resume_lines
+        for line in resume_lines(self.view):
+            col.addWidget(_label(_soft_wrap(line), color=_P["text_sec"], size=12))
+
     def _add_save_note(self, col):
         note = self.view.get("save_note")
         if not note:
@@ -219,11 +229,12 @@ class ResultCard(QFrame):
 
     def _add_buttons(self, col):
         specs = []
+        if self.view.get("resumable"):
+            specs.append(("继续任务", self.continue_requested))
         if self.view.get("can_view_diff"):
             specs.append(("查看改动", self.view_diff_requested))
         if self.view.get("can_view_output"):
             specs.append(("查看验证输出", self.view_output_requested))
-        # B04 还没做，所以这里**不放**"继续任务"——放一个点不动的按钮比没有更糟。
         if not specs:
             return
         h = QHBoxLayout()
@@ -231,6 +242,8 @@ class ResultCard(QFrame):
         h.setSpacing(8)
         for text, signal in specs:
             btn = QPushButton(text)
+            if signal is self.continue_requested:
+                self._continue_btn = btn
             btn.setCursor(Qt.PointingHandCursor)
             # 给个下限高度：卡片内容多的时候，布局会把最后一行压扁成一条空边框，
             # 按钮上的字整个消失（截图里见过）。
@@ -247,3 +260,22 @@ class ResultCard(QFrame):
             h.addWidget(btn)
         h.addStretch(1)
         col.addLayout(h)
+
+    def set_continue_busy(self, busy):
+        """点了继续、还没出结果：按钮暂时不可点。继续被拦下（没开出新一轮）时再放开。
+
+        这只是界面提示；真正挡住重复启动的是 chat_window 的归属核对和 worker 屏障。
+        """
+        btn = self._continue_btn
+        if btn is None:
+            return
+        btn.setEnabled(not busy)
+        btn.setText("正在继续…" if busy else "继续任务")
+
+    def mark_continued(self):
+        """已经从这张卡开出了新的一轮：这张卡不再代表当前状态，按钮收起来。"""
+        btn = self._continue_btn
+        if btn is None:
+            return
+        btn.setEnabled(False)
+        btn.setText("已继续")

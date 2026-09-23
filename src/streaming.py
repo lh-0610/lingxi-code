@@ -165,6 +165,11 @@ def _normalize_nonleading_system_messages(messages):
     return normalized
 
 
+_INTERRUPTED_PLACEHOLDER = (
+    "应用恢复提示：未取得执行结果（这次调用被中断，不代表执行成功或失败）。"
+    "如仍需要，请先核对现场，不要直接重复这个操作。")
+
+
 def _sanitize_tool_pairs(messages):
     """保证发给 API 的历史里 tool_use 必配 tool_result（Anthropic / MiMo 硬性要求）。
 
@@ -201,8 +206,9 @@ def _sanitize_tool_pairs(messages):
             for tc in (getattr(m, "tool_calls", None) or []):
                 tid = _tcid(tc)
                 if tid and tid not in answered:
-                    out.append(ToolMessage(
-                        content="[工具调用被中断，无结果]", tool_call_id=tid))
+                    # 措辞不能冒充工具真的返回了什么："无结果"会被读成"执行了、没输出"，
+                    # 而这里只知道没拿到结果——可能执行了，也可能没有。
+                    out.append(ToolMessage(content=_INTERRUPTED_PLACEHOLDER, tool_call_id=tid))
                     answered.add(tid)   # 防同一 id 重复补
     return out
 

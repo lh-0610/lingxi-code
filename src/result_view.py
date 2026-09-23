@@ -156,6 +156,34 @@ def has_fresh_pass(snapshot):
     return summarize_checks(snapshot) == "clear"
 
 
+# 这些终态可以「继续任务」：没做完（停止 / 失败 / 触顶）或做完了但没验证完。
+# completed 不给——任务已经正常结束，"继续"只会让人以为还有什么没做。
+_RESUMABLE_OUTCOMES = ("cancelled", "failed", "limit_reached", "unverified")
+
+_STOP_LABELS = {
+    "cancelled": "用户停止",
+    "failed": "本轮执行失败",
+    "limit_reached": "达到轮数上限",
+    "unverified": "仍有未验证事项",
+}
+
+
+def is_resumable(snapshot, live_run_id=None):
+    """这张卡上能不能放「继续任务」。
+
+    必须能认出归属（session_id + run_id）：继续前要核对"这张卡确实是该会话最新的一轮"，
+    认不出归属的卡给了按钮也只能拒绝，放一个点了必然失败的按钮比不放更糟。
+    正在跑的那一轮不给（它还没停）；磁盘上 phase=running 但不是正在跑的 = 被中断，给。
+    """
+    if not isinstance(snapshot, dict):
+        return False
+    if not snapshot.get("session_id") or not snapshot.get("run_id"):
+        return False
+    if snapshot.get("phase") == "running":
+        return not _is_active_run(snapshot, live_run_id)
+    return snapshot.get("outcome") in _RESUMABLE_OUTCOMES
+
+
 def describe(snapshot, *, live_run_id=None):
     """把快照翻译成结果卡的全部内容。返回纯数据 dict，便于逐条断言。"""
     if not isinstance(snapshot, dict):
@@ -208,6 +236,15 @@ def describe(snapshot, *, live_run_id=None):
     pending_files = list(pending.get("files") or [])
     pending_reason = pending.get("reason") or ""
 
+    # ── 继续入口（B04）──
+    resumable = is_resumable(snapshot, live_run_id)
+    if phase == "running":
+        stop = "运行被中断" if resumable else ""
+    else:
+        stop = _STOP_LABELS.get(outcome, "")
+    plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
+    model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
+
     return {
         "title": title,
         "tone": tone,
@@ -237,6 +274,15 @@ def describe(snapshot, *, live_run_id=None):
         # 有真实资料才给入口：没有目录就点不出差异，没有证据就没有输出可看。
         "can_view_diff": bool(snapshot.get("work_dir") or snapshot.get("project")),
         "can_view_output": any(r["summary"] or r["reason"] or r["argv"] for r in rows),
+        "resumable": resumable,
+        "stop_label": stop,
+        # 计划进度照实标成"模型记录"：勾选是模型自己写的，不是程序验收过的。
+        "plan_done": int(plan.get("done") or 0),
+        "plan_total": int(plan.get("total") or 0),
+        "plan_next": str(plan.get("next") or ""),
+        # 上一轮记录的模型。继续前会按它找回；找不到就要求重新选，不静默换后端。
+        "model_label": str(model.get("name") or model.get("id") or ""),
+        "agent_mode": snapshot.get("agent_mode") or "act",
     }
 
 
@@ -257,6 +303,28 @@ def plain_text(view) -> str:
                      f"{row['checker']}：{row['label']}{stale}（{row['detail']}）")
     if view["has_pending"]:
         lines.append(f"未验证：{view['pending_reason'] or '存在未验证改动'}")
+    if view.get("resumable"):
+        lines.extend(resume_lines(view))
     if view["save_note"]:
         lines.append(f"保存：{view['save_note']}")
     return "\n".join(lines)
+
+
+def resume_lines(view):
+    """「继续任务」上方那几行（方案 §5.6）。卡片与纯文本共用，免得两处说法不一。"""
+    lines = []
+    if view.get("stop_label"):
+        lines.append(f"上次停止：{view['stop_label']}")
+    if view.get("plan_total"):
+        line = f"计划进度：模型记录为 {view['plan_done']} / {view['plan_total']}"
+        lines.append(line)
+        if view.get("plan_next"):
+            lines.append(f"下一步：检查现场后继续「{view['plan_next']}」")
+    else:
+        lines.append("下一步：检查现场后继续")
+    # 只说"上次用的是什么"：卡片是纯数据，不知道那个模型现在还在不在配置里。
+    # 实际用哪个模型由点击后的预检决定并当场显示，找不到就要求重选——卡片不替它打包票。
+    mode = "Plan 模式（只调研，不改动）" if view.get("agent_mode") == "plan" else "Act 模式"
+    model = view.get("model_label") or "未记录"
+    lines.append(f"上次使用：{model} · {mode}")
+    return lines

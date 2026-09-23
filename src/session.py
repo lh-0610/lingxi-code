@@ -89,6 +89,7 @@ class Session:
         "role_snapshot", "session_kind", "rag_kb_dir",
         "snapshot_lock", "progress_revision", "progress_error",
         "active_run_id", "inflight_lock", "worker_token",
+        "last_worker", "resume_pending", "model_user_choice",
     )
 
     def __init__(self):
@@ -135,6 +136,17 @@ class Session:
         # 分辨"这条完成事件是不是当前这一轮的"——旧 worker 的迟到 finished 不能把
         # 新一轮正在用的按钮恢复成可发送。
         self.worker_token = None
+        # 最近一次为本会话起的 worker 线程（纯运行态，**结束后也不清**）。「继续任务」要等
+        # 旧 worker 真正退出才起新的：is_generating 不够——强制停止会立刻把它置 False，
+        # 而那时旧线程可能还在收尾、还会写这个会话。`thread` 字段在收尾时被清掉，靠不住。
+        self.last_worker = None
+        # 「继续任务」已点下、正在等旧 worker 退出 / 做预检（主线程独占使用）。
+        # 这段时间里再点继续、再发消息都要挡住，否则就是两个 worker 抢同一个会话。
+        self.resume_pending = False
+        # 用户在顶栏亲手给这个会话选过模型（纯运行态）。重开的会话模型下标是从前一个会话
+        # 继承来的、不是谁的选择，所以「继续任务」默认按记录找回原模型；但用户特意换过的，
+        # 继续时要尊重，不能又悄悄改回去。
+        self.model_user_choice = False
         self.is_subagent = False
         # 本轮生成开始时冻结的角色卡快照（roles.capture_active_role() 的返回 dict）。
         # None = 用全局当前角色。worker 在 _run_agent 起手拍下、finally 清回 None：

@@ -653,6 +653,8 @@ class TestFinishedGuard:
 
         class Host:
             _on_finished_sess = ChatUI._on_finished_sess
+            _settle_resume_card = ChatUI._settle_resume_card    # B04：finished 顺带收拾继续按钮
+            _resume_cards_by_session = ChatUI._resume_cards_by_session
 
             def __init__(self):
                 self.btn_states = []
@@ -791,19 +793,22 @@ class TestQtRendering:
         assert "通过" not in text
         card.close()
 
-    def test_no_continue_button_before_b04(self, qt_app, isolated_memory):
+    def test_continue_button_only_where_continuing_makes_sense(self, qt_app, isolated_memory):
+        """B04 接上了继续入口：没做完的轮次给按钮，正常完成的不给（B06 时一律不放）。"""
         from PySide6.QtWidgets import QPushButton
         from src.ui.result_card import ResultCard
         sess = _new_session()
         _saved(sess)
         sess.project = "D:/proj"
         run_records.begin_run(sess)
-        view = _describe(_finish(sess, "limit_reached"))
+        unfinished = ResultCard(_describe(_finish(sess, "limit_reached")))
+        assert "继续任务" in [b.text() for b in unfinished.findChildren(QPushButton)]
+        unfinished.close()
 
-        card = ResultCard(view)
-        labels = [b.text() for b in card.findChildren(QPushButton)]
-        assert "继续任务" not in labels, "B04 还没做，不放点不动的按钮"
-        card.close()
+        run_records.begin_run(sess)
+        done = ResultCard(_describe(_finish(sess, "completed")))
+        assert "继续任务" not in [b.text() for b in done.findChildren(QPushButton)]
+        done.close()
 
     def test_buttons_carry_their_own_card_identity(self, qt_app, isolated_memory):
         """按钮带着**这张卡自己的**归属走，不去读当前前台会话。"""

@@ -517,14 +517,29 @@ def _msg_to_dict(msg):
     # 程序注入的消息（自动修复提示 / 完成闸门提示 / 视觉桥接说明）要带着标记落盘。
     # 不存的话，重开会话后 run_records.describe_source 会把程序自己写的那段文字
     # 当成"用户的最新要求"——恰恰是在长任务里最需要这条线索的时候失真。
-    if (getattr(msg, "additional_kwargs", None) or {}).get("lingxi_internal") is True:
+    kwargs = getattr(msg, "additional_kwargs", None) or {}
+    if kwargs.get("lingxi_internal") is True:
         d["lingxi_internal"] = True
+        # 内部消息的种类（如 "resume" = 继续任务的恢复说明）也要落盘：重开之后
+        # 界面靠它把恢复说明画成程序说明而不是"你说的话"，来源判定也靠它认出"继续"。
+        kind = kwargs.get("lingxi_kind")
+        if isinstance(kind, str) and kind:
+            d["lingxi_kind"] = kind
+        # 恢复说明附带的交接记录（被摘出 sidecar 的执行前记录 + 给用户看的那段说明）。
+        # 它是这些操作留下的唯一诊断线索：sidecar 那几条随后就被清掉了。
+        recovery = kwargs.get("lingxi_recovery")
+        if isinstance(recovery, dict):
+            d["lingxi_recovery"] = recovery
     return d
 
 
 def _dict_to_msg(d):
     t = d["type"]
     internal = {"lingxi_internal": True} if d.get("lingxi_internal") is True else {}
+    if internal and isinstance(d.get("lingxi_kind"), str) and d.get("lingxi_kind"):
+        internal["lingxi_kind"] = d["lingxi_kind"]
+    if internal and isinstance(d.get("lingxi_recovery"), dict):
+        internal["lingxi_recovery"] = d["lingxi_recovery"]
     if t == "SystemMessage":
         return SystemMessage(content=d["content"])
     elif t == "HumanMessage":

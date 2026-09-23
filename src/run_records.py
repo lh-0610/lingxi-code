@@ -239,7 +239,28 @@ def normalize_last_run(raw):
         "work_dir": raw.get("work_dir") or "",
         "source": dict(source) if source else {},
         "evidence": _normalize_evidence(evidence),
+        # B04：这一轮用的模型（**稳定配置标识**，不是会变的列表下标；不含密钥）。
+        # 恢复时据此判断"原模型还在不在"，不在就要求重新选，不能静默落到另一种后端。
+        "model": _normalize_model(raw.get("model")),
+        # B04：这一轮结束时的现场锚点。坏掉只当"没有锚点"，恢复时如实报告无法核对。
+        "workspace": _normalize_workspace(raw.get("workspace")),
     }, ""
+
+
+def _normalize_model(raw):
+    if not isinstance(raw, dict):
+        return None
+    model_id = raw.get("id")
+    if not isinstance(model_id, str) or not model_id:
+        return None
+    return {"id": model_id,
+            "name": raw.get("name") if isinstance(raw.get("name"), str) else "",
+            "type": raw.get("type") if isinstance(raw.get("type"), str) else ""}
+
+
+def _normalize_workspace(raw):
+    from . import workspace_anchor
+    return workspace_anchor.normalize(raw)
 
 
 # 一条验证记录的字段与类型。校验按字段做，坏字段归一成安全值而不是整条丢——
@@ -386,12 +407,17 @@ def describe_source(chat_history):
     """
     from langchain_core.messages import HumanMessage
     skipped = 0
+    # 最后一条真实用户消息之后如果有"继续任务"的恢复说明，这一轮就是继续，不是新请求。
+    # 来源仍指向那条真实的用户消息（任务是它提的），kind 标成 continue。
+    resumed = False
     for index in range(len(chat_history) - 1, -1, -1):
         msg = chat_history[index]
         if not isinstance(msg, HumanMessage):
             continue
         if _is_internal(msg):
             skipped += 1
+            if (getattr(msg, "additional_kwargs", None) or {}).get("lingxi_kind") == "resume":
+                resumed = True
             continue
         content = msg.content
         if isinstance(content, list):
@@ -400,7 +426,7 @@ def describe_source(chat_history):
             text = texts[0] if texts else "[图片]"
         else:
             text = str(content)
-        return {"kind": "user_message", "message_index": index,
+        return {"kind": "continue" if resumed else "user_message", "message_index": index,
                 "text": text[:_SOURCE_PREVIEW], "internal_skipped": skipped}
     return {"kind": "unknown", "message_index": -1, "text": "", "internal_skipped": skipped}
 
@@ -443,6 +469,8 @@ def begin_run(sess, *, task_id=None, ui=None):
         "work_dir": _work_dir_of(sess) or "",
         "source": describe_source(getattr(sess, "chat_history", None) or []),
         "evidence": {"changed_files": [], "validation_runs": [], "diff_reviewed": False},
+        "model": _model_of(sess),
+        "workspace": _capture_workspace(sess, None),
     }
     with sess.snapshot_lock:
         sess.last_run = run
@@ -537,6 +565,7 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
         sess.last_run = run
 
     refresh_pending_verification(sess, run_id=run["id"])
+    _refresh_workspace(sess)
     outcome = save_snapshot(sess)
     with sess.snapshot_lock:
         if getattr(sess, "active_run_id", None) == run["id"]:
@@ -592,6 +621,11 @@ def build_result_snapshot(sess, run, *, save=None, source="live"):
         "source": dict(run.get("source") or {}),
         "evidence": _normalize_evidence(run.get("evidence")),
         "pending_verification": dict(pending),
+        # B04：继续入口要的事实。模型是**这一轮记录的**稳定标识（继续前据此找回、找不到就
+        # 要求重选）；计划进度是模型自己勾的，卡片上照实标成"模型记录"，不当验收结论。
+        "model": dict(run["model"]) if isinstance(run.get("model"), dict) else None,
+        "plan": _plan_summary(getattr(sess, "current_plan", None)),
+        "agent_mode": getattr(sess, "agent_mode", "act") or "act",
         # 展示来源：live=本轮刚跑完；restored=从磁盘重绘。后者不该显示成"刚刚发生"。
         "display_source": source,
         "saved": None if save is None else bool(getattr(save, "fully_saved", False)),
@@ -607,10 +641,81 @@ def build_result_snapshot(sess, run, *, save=None, source="live"):
         return snapshot
 
 
+def _plan_summary(plan):
+    steps = [s for s in (plan or []) if isinstance(s, dict)]
+    done = sum(1 for s in steps if s.get("status") == "done")
+    nxt = next((str(s.get("text") or "") for s in steps if s.get("status") != "done"), "")
+    return {"done": done, "total": len(steps), "next": nxt[:200]}
+
+
 def _project_of(sess):
     from . import session as _session_mod
     project = getattr(sess, "project", _session_mod._UNSET)
     return project if isinstance(project, str) else None
+
+
+def _model_of(sess):
+    """这一轮用的模型：稳定的 model_id + 名字 + 类型。**不存下标、不存密钥**。
+
+    下标会随 config 里增删模型而漂移，存下标的话恢复时可能指到另一个模型——
+    甚至另一种执行后端（API ↔ 本地 CLI），那是方案明确禁止的静默切换。
+    """
+    try:
+        from .models import MODEL_LIST
+        index = int(getattr(sess, "current_model_index", -1))
+        if 0 <= index < len(MODEL_LIST):
+            name, mtype, model_id, _ = MODEL_LIST[index]
+            return {"id": model_id, "name": name, "type": mtype}
+    except Exception:
+        pass
+    return None
+
+
+def _anchor_files(sess):
+    """锚点要记指纹的文件：本轮改过的 + 还欠着验证的。"""
+    v = getattr(sess, "verification", None) or {}
+    pending = getattr(sess, "pending_verification", None) or {}
+    files = []
+    for rel in list(v.get("dirty_files") or []) + list(pending.get("files") or []):
+        if isinstance(rel, str) and rel and rel not in files:
+            files.append(rel)
+    return files
+
+
+# 只会写文件、改不了 HEAD / 分支的工具。它们的工具边界上锚点沿用上一次的 git 信息、只重算
+# 文件指纹（省一次几十毫秒的 git 子进程）。清单只列确定的；命令、提交、测试、检查命令、
+# MCP、子 Agent、未知工具都可能动 git 状态，一律照常刷新——与 SIDE_EFFECT_FREE_TOOLS
+# 同一个取舍：宁可多花一点，也不要漏看。
+_FILE_ONLY_TOOLS = frozenset({
+    "write_file", "edit_file", "append_file", "apply_patch",
+    "git_stage", "git_unstage",          # 只动索引，HEAD 与分支不变
+    "remember", "forget", "notify_user", "update_plan", "set_step_status",
+})
+
+
+def _capture_workspace(sess, previous, *, refresh_git=True):
+    """给这一轮拍现场锚点。没有项目的会话不拍（它没有"现场"可言）。"""
+    root = _work_dir_of(sess)
+    if not root:
+        return None
+    from . import workspace_anchor
+    try:
+        return workspace_anchor.capture(root, _anchor_files(sess), previous=previous,
+                                        refresh_git=refresh_git)
+    except Exception as e:           # pragma: no cover - capture 自己不抛，这里只兜底
+        logger.warning(f"记录现场锚点失败: {e}")
+        return None
+
+
+def _refresh_workspace(sess, *, refresh_git=True):
+    run = getattr(sess, "last_run", None)
+    if not isinstance(run, dict):
+        return
+    anchor = _capture_workspace(sess, run.get("workspace"), refresh_git=refresh_git)
+    with sess.snapshot_lock:
+        current = getattr(sess, "last_run", None)
+        if current is run:              # 期间换了一轮就别写到新那轮身上
+            run["workspace"] = anchor
 
 
 def _work_dir_of(sess):
@@ -818,6 +923,10 @@ def commit_operation(sess, operation, *, ui=None) -> CommitReport:
         recent = list(getattr(sess, "recent_operations", None) or [])
         recent.append(receipt)
         sess.recent_operations = recent[-_RECEIPT_RING:]
+    # 锚点在锁外拍：它要跑 git、读文件，不能占着快照锁（锁序约定：临界区里不做 IO）。
+    # 但必须在保存之前——锚点要和这次的工具结果一起落盘，否则崩在这之后的现场核对
+    # 拿到的是上一次工具边界的旧指纹，会把本轮自己刚改的文件误报成"被外部修改"。
+    _refresh_workspace(sess, refresh_git=operation.tool not in _FILE_ONLY_TOOLS)
 
     outcome = save_snapshot(sess)
     if not outcome.body_written:

@@ -33,7 +33,9 @@ src/                     # 主代码
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
   llm_errors.py          # 模型请求错误分类（限流/上下文溢出/鉴权/瞬时）+ Retry-After 解析 + 重试策略
   run_records.py         # 运行身份（run_id/来源/终态）+ 统一 begin/finalize + inflight sidecar + 完成回执 + 待验证义务归一化 + 结果快照
-  result_view.py         # 运行结果快照 → 给人看的结论（纯函数、不依赖 Qt；标题/检查行/过期/保存提示的判定都在这里）
+  result_view.py         # 运行结果快照 → 给人看的结论（纯函数、不依赖 Qt；标题/检查行/过期/保存提示/能否继续的判定都在这里）
+  recovery.py            # 恢复检查与继续入口（B04）：主线程预检 / worker 里现场核对 / 补齐悬空调用 / 把结果未知的操作并入待验证义务 / 恢复说明
+  workspace_anchor.py    # 现场锚点（B04）：涉及文件指纹 + HEAD/分支/根提交；恢复时比对，判断"还是不是那个现场、那个仓库"
   tools_rag.py           # search_knowledge（知识库语义检索，只读、Plan 放行、带 scope 分域参数）
   rag/                   # RAG 知识库引擎（详见「RAG 知识库检索」节）
     chunk.py             # 切块：iter_markdown_chunks（按标题分层）/ iter_plain_chunks（PDF 页，不解析 Markdown）
@@ -226,7 +228,7 @@ python main.py
 - 归属判据是**会话最新那条运行记录的 id**：后台会话的结果不插进前台（只置 `needs_redraw`），旧 run 的迟到结果不覆盖新 run，同一 run 只画一张卡
 - **`finished` 信号带 worker 令牌**（`Session.worker_token`）：旧 worker 的迟到 finished 不能把新一轮正在用的按钮恢复成可发送；`_run_agent` 的 finally 也只在令牌仍是自己时才清运行态
 - 重绘来源：内存 `last_result` → 持久化 `last_run` 重建（`snapshot_from_loaded`）。**render_log 不能是唯一来源**，它只活在内存里，重开程序就没了
-- **显示卡片不往 chat_history 塞伪造的 AIMessage**；不新增总结模型调用；B04 没做完就**不放**"继续任务"按钮（放个点不动的比没有更糟）
+- **显示卡片不往 chat_history 塞伪造的 AIMessage**；不新增总结模型调用。「继续任务」按钮由 B04 接上（见下一节），只在 `result_view.is_resumable` 为真时出现
 - 按钮带着**卡片自己的** `view`（含 session/work_dir/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"明确标注是**当前状态**，不冒充那一轮保存过的历史 diff
 - **"查看改动"用 `work_dir` 不用 `project`**：worktree 里跑的那轮改动在隔离区，拿项目根去 diff 只会回一句"工作区干净"。`work_dir` **持久化在 `last_run` 上**（`begin_run` 初始化、工具边界与收尾各刷一次）——只靠"重建时按当前会话现算"是不行的，重开后 `Session.worktree` 早没了，算出来永远是主仓库。记下来只为历史查看，**不会**被恢复成当前执行用的 `Session.worktree`
 - **记录的目录不存在时禁止回退**：`_project_cwd()` 在路径不存在时会回退到**进程 cwd**，于是 `git_diff` 悄悄查了灵犀自己的目录、回一句"工作区干净"，而弹窗标题还写着那个不存在的路径。`_on_result_view_diff` 先 `os.path.isdir` 校验，失效就明说不可用
@@ -239,6 +241,26 @@ python main.py
 - **证据在工具边界就进 `last_run`**，不是只在 finalize 拷一次：进程死在"工具结果已提交"与收尾之间时，磁盘上工具输出和完成回执都在、检查记录却一条不剩，而那正是最需要它的中断场景。恢复出来的只作**历史展示**，不回填 `verification`，所以不会变成当前一轮的通行凭证
 - **`last_result` 缓存要跟着失效**：`reset_history` 和 `load_session` 都清它（Session 对象会被复用来装别的会话），重绘前还要用 `_result_belongs_here` 核对 run_id + session_id。不清的话"新建对话"之后旧那轮的结果卡会重新画出来，而 `last_run` 明明已经空了
 - **布局上的两个坑（都只有真渲染才暴露）**：① 把卡片包进一层 `QWidget` 再进布局，那层壳不向上传递 heightForWidth，整张卡被算矮、底部按钮被边框整条切掉——检查行和按钮行一律 `addLayout` 直接加，`MessageView.add_result_card` 也直接加卡；② 等宽字体的长行是撑宽卡片的元凶（消息流关掉了横向滚动条，撑宽就是被裁掉），路径中间省略、摘要压成一行省略、无断点长串按字符数强插换行
+
+### 恢复检查与继续任务（src/recovery.py + workspace_anchor.py，B04）
+- **两条入口、一套处置**，都排在 `begin_run` **之前**（`agent_loop` 里的 `recovery.before_run`）：
+  ① 结果卡「继续任务」（mode=continue）；② 上一轮被中断 / 留下结果未知的操作后，用户**没点继续、直接发了新消息**（mode=message）。处置把现场变化和结果未知的操作写进 `pending_verification`，由 begin_run 在 `reset_verification` **之后**填回——排在 begin_run 后面就被本轮重置清掉了
+- **第②条入口不能省**：中断前那次写操作从没进入 dirty 文件，新一轮的工作区基线又建立在它之后，完成闸门会拿"没有已知改动"推出"工作区没变"，一次没验证过的写入按 completed 收尾（方案 §5.5 明令禁止的推断）。这条路径**不阻断**用户的新请求、不做现场比对，只补占位、并入义务、告诉模型哪些结果未知。判定 `needs_adoption`：磁盘 `phase=running` 且不是本进程正在跑的那一轮，或 sidecar 里有没回执的记录；正常结束的会话只多一次 `os.path.exists`
+- **结果未知的写操作一律进盲区**（`tracking_incomplete` → `unknown_changes`），不只是把记录里的路径标脏：`run_command` 这类操作可能写了记录之外的路径。出口仍是显式 `run_tests` + `git_diff`。`_NON_FS_TOOLS`（remember/forget/notify_user/update_plan/set_step_status）结果未知时不碰项目文件，不进盲区
+- **补齐悬空 tool 调用不冒充结果**（方案 §5.4）：占位写"应用恢复提示：未取得执行结果"，并区分「已调度、可能已经执行，不要直接重复」（sidecar 有记录没回执，或 sidecar 读不懂且是有副作用的工具）与「没有执行记录，按未执行处理」。占位带 `lingxi_internal` + `lingxi_kind` **落盘**，重开后不再悬空。`streaming._sanitize_tool_pairs` 的发送副本兜底文案同样改成不冒充成功/失败的说法
+- **注意只读工具不存盘**：崩在某轮第一个有副作用工具里时，磁盘上**根本没有**那条 AIMessage（上一次存盘在它之前），只剩 sidecar。所以结果未知的操作必须在恢复说明里单独列出，不能只靠悬空调用的占位
+- **交接 inflight 的顺序**：恢复说明 + 占位 + 义务**落盘成功之后**才从 sidecar 摘掉交接过的记录（`acknowledge`）；没存上就保留，下次打开仍会提示。摘掉的记录精简后挂在恢复说明的 `lingxi_recovery.operations` 上**随消息落盘**——方案要求"保留 inflight 记录用于诊断"，线索从"进行中"挪到了永久历史，不是删掉
+- **现场锚点**（`last_run.workspace`）：只记**涉及文件**（dirty ∪ 待验证）的 sha256 + HEAD/分支/根提交，不哈希整个项目。begin_run 首拍、工具边界与收尾刷新。两条底线：指纹相同**不等于**测试通过；HEAD 相同**不等于**工作区相同（HEAD 没变照样逐文件比）。上次一个文件都没记录时不说"记录过的文件都没变"这种空话（`compare` 的 `checked` 计数）
+- **只写文件的工具边界不起 git 子进程**（`run_records._FILE_ONLY_TOOLS`，沿用上一次的 HEAD/分支、只重算指纹）：一次 git 子进程几十毫秒，是 B03 整套工具边界提交（7–15 ms）的好几倍。命令、提交、测试、检查命令、MCP、子 Agent、未知工具照常刷新。沿用的信息只会更旧，比对时只会多报、不会漏报
+- **仓库身份靠根提交**（`git rev-list --max-parents=0 HEAD`）：同一路径换成了另一个仓库 / 不再是 git 仓库 / 目录不在了 → 阻断继续。HEAD、分支、外部改动、删除、新出现的文件 → 报告；**上一轮确有待核对的东西时**（`at_stake`）HEAD/分支变化与"无法完整核对"才并入盲区——已结束的纯问答轮次不能因为有人提交了代码就把新一轮拖进测试要求
+- **模型按稳定标识找回**（`last_run.model = {id, name, type}`，不存下标、不存密钥）：`find_model` 要求**类型一致**——同一个 model_id 换了类型就是另一种执行后端，不许静默落过去；找不到就阻断，用户可显式"改用当前模型继续"。配置缺 key 同样阻断。**用户在顶栏亲手换过模型**（`Session.model_user_choice`，`_on_model_changed` 置位；切会话的顶栏同步走 blockSignals 不会误标）就尊重那个选择，不再改回记录的模型——重开的会话模型下标是从前一个会话继承来的、谁也没选过，那种才按记录找回
+- **Plan 仍是 Plan**：继续不改 `agent_mode`；预检只加一条说明
+- **主线程只做便宜的事**（`chat_window._on_result_continue`）：核对归属（卡片的 session_id + 该会话**最新**一条运行记录的 id）→ **屏障**等旧 worker 真正退出（`Session.last_worker.is_alive()`，不只看 `is_generating`——强制停止会立刻把它置 False，而旧线程还在收尾写这个会话）→ 预检 → 起 worker。屏障等待期间 `Session.resume_pending` 挡住再点继续、发送、遥控注入、重试；屏障之后**再核对一次归属**（等的那段时间里可能已经开出了新的一轮）。等待中切走会话 → 取消，不替看不见的会话在后台开跑
+- **项目被挪走**：阻断对话框提供「重新选择项目目录…」（`_relocate_session_project`，按根提交核对是同一个仓库；判断不了就问用户，确定是另一个仓库就拒绝）和「复制原路径」。改挂后照常走继续前的全套核对，且"目录变了"会并入待验证义务
+- **来源**：继续的那一轮 `source.kind="continue"`，文本仍是最后一条真实用户消息（任务是它提的）；中断后直接发消息的那一轮仍是 `user_message`
+- **不恢复**旧确认许可、后台进程控制权、隔离区使用权——它们本来就不持久化；隔离区里跑的那一轮继续时回到主项目并明确说"旧隔离区不会被自动合并"
+- **重绘**：内部 HumanMessage（`lingxi_internal`）一律不画成"你"的气泡。早先只认视觉桥接的文字前缀，自动修复 / 完成闸门的内部提示在重开会话后会被画成用户说的话；恢复说明画成程序说明，优先用当时实时显示的那段（`lingxi_recovery.note`）
+- **测试里必须阻断真实模型与 CLI**：新建的 Session 默认模型下标可能落在 Claude Code 上（backlog 里的默认模型 fallback 问题），漏设一次模型就会真起一个 `claude` 进程——写 B04 的真进程用例时实测踩到过一次。`test_b04_recovery.py` 用 autouse 夹具把 `_create_llm` / `_claude_code_loop` 换成直接报错，子进程脚本里同样显式阻断
 
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。
@@ -322,7 +344,7 @@ python main.py
 | `chat_memory/index.json` | 会话列表（id + title + 时间 + project tag） |
 | `chat_memory/long_term_memory.json` | 跨会话长期记忆（remember/forget 存取，自动注入 system prompt） |
 | `chat_memory/rag_index/chroma/` | RAG 向量库（Chroma PersistentClient 数据目录；collection 名 `kb_<store>_v1`） |
-| `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run`（含 `evidence.validation_runs` 结构化检查记录）/ `pending_verification` / `last_committed_operation` / `recent_operations`） |
+| `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化；内部消息带 `lingxi_internal` / `lingxi_kind`，恢复说明另带 `lingxi_recovery` 交接记录）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run`（含 `evidence.validation_runs` 结构化检查记录、`model` 稳定标识、`workspace` 现场锚点）/ `pending_verification` / `last_committed_operation` / `recent_operations`） |
 | `chat_memory/<session_id>.inflight.json` | 有副作用工具的**执行前**记录（sidecar）：session_id / run_id / operation_id / 工具名 / tool_call_id / 起始 revision / 路径。提交后删除；**不进侧栏索引**，也不能作为复活已删除会话的依据（`delete_session` 会一并删掉） |
 | `chat_memory/projects.json` | 注册的项目列表 + 当前激活项目（`{current, projects: [{path, name}]}`） |
 | `chat_memory/role_config.json` | 当前激活的角色卡名 |

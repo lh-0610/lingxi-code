@@ -320,14 +320,43 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._render_plan_panel(getattr(state, "current_plan", None) or [])
 
     def _is_hidden_bridge_message(self, msg):
-        """内部图片识别桥接消息只给模型看，历史界面不当作用户聊天展示。"""
-        if not isinstance(msg, HumanMessage) or isinstance(msg.content, list):
+        """程序注入、只给模型看的消息，历史界面不当作用户聊天展示。
+
+        判据以 `lingxi_internal` 标记为准：早先只认视觉桥接的文字前缀，自动修复 / 完成闸门
+        的内部提示在重开会话后会被画成"你"说的话——实时界面从来不这么显示它们。
+        恢复说明（B04）不在这里隐藏，它另有画法（`_recovery_note_text`）。
+        """
+        if not isinstance(msg, HumanMessage):
+            return False
+        kwargs = getattr(msg, "additional_kwargs", None) or {}
+        if kwargs.get("lingxi_internal") is True:
+            from ..recovery import RECOVERY_KINDS
+            return kwargs.get("lingxi_kind") not in RECOVERY_KINDS
+        if isinstance(msg.content, list):
             return False
         content = str(msg.content or "").lstrip()
         return (
             content.startswith("[[LINGXI_INTERNAL_VISION_BRIDGE]]")
             or content.startswith("[图片识别结果，由 ")
         )
+
+    @staticmethod
+    def _recovery_note_text(msg):
+        """恢复说明（继续任务 / 中断后的恢复提示）在历史里的显示文字；不是恢复说明返回 None。
+
+        优先用当时实时显示的那段（随消息落盘在 `lingxi_recovery.note`），
+        重开后看到的与当时看到的是同一段话；没有就退回给模型的全文。
+        """
+        if not isinstance(msg, HumanMessage):
+            return None
+        kwargs = getattr(msg, "additional_kwargs", None) or {}
+        from ..recovery import RECOVERY_KINDS
+        if kwargs.get("lingxi_internal") is not True or kwargs.get("lingxi_kind") not in RECOVERY_KINDS:
+            return None
+        record = kwargs.get("lingxi_recovery")
+        if isinstance(record, dict) and isinstance(record.get("note"), str) and record["note"]:
+            return record["note"]
+        return str(msg.content or "")
 
     def _next_img_name(self) -> str:
         """历史图片资源用单调递增名，不能用 id(img)——QImage 临时对象的地址会被复用，
@@ -341,6 +370,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         history_snapshot = list(agent.chat_history)
         for msg in history_snapshot:
             if self._is_hidden_bridge_message(msg):
+                continue
+            note = self._recovery_note_text(msg)
+            if note is not None:
+                # 恢复说明是程序写的，画成程序说明，不画成"你"的气泡
+                rendered_any = True
+                self._append_html(note + "\n\n", "tool_result")
                 continue
             if isinstance(msg, HumanMessage):
                 rendered_any = True
@@ -1580,7 +1615,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
     def _on_remote_submit(self, text: str):
         """远程消息注入槽（主线程）。"""
         from .. import session as _session
-        if not text or _session.get_active().is_generating:
+        _active = _session.get_active()
+        if not text or _active.is_generating or _active.resume_pending:
             return
         state.remote_session = True
         self._do_send(text)
@@ -1590,7 +1626,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         images = self._pending_images[:]
         from .. import session as _session
         active = _session.get_active()
-        if (not text and not images) or active.is_generating:
+        # resume_pending：「继续任务」已点下、正等旧 worker 退出——这时再发一条就是两个 worker
+        # 抢同一个会话（强制停止后 is_generating 已是 False，单看它挡不住）。
+        if (not text and not images) or active.is_generating or active.resume_pending:
             return
         # 知识库模式：未配置目录 / 索引不可用时拦截发送，避免无意义的模型 API 调用；
         # 索引恢复可用后自然放行（每次发送即时校验）。
@@ -1725,10 +1763,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         state.stop_flag = False
         threading.Thread(target=self._run_agent, args=(sess,), daemon=True).start()
 
-    def _run_agent(self, sess=None):
+    def _run_agent(self, sess=None, resume=None):
         # 把这个 worker 线程绑定到它要跑的会话：之后 agent_loop / tools 里所有
         # state.X（会话级）都落到这个 session，不受主线程切换 active 影响。
         # P1 单会话时绑的就是 active，行为等价；多会话时这是隔离的关键。
+        # resume：结果卡「继续任务」的请求（见 _start_resume），None = 普通一轮。
         from .. import session as _session
         if sess is None:
             sess = _session.get_active()
@@ -1736,6 +1775,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         with sess.render_lock:
             sess.render_log.clear()    # 新一轮提问开始：清掉上一轮的渲染事件缓冲
         sess.thread = threading.current_thread()
+        sess.last_worker = sess.thread     # 「继续」的屏障等的就是它真正退出
         # 本 worker 的身份令牌：finished 带着它回来，主线程据此分辨自己是不是"当前这一轮"。
         token = object()
         sess.worker_token = token
@@ -1743,7 +1783,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from .. import roles as _roles
         sess.role_snapshot = _roles.capture_active_role()  # 冻结本轮人格（防生成途中被换卡）
         try:
-            agent.agent_loop(self)
+            agent.agent_loop(self, resume=resume)
         finally:
             # 只有仍然是当前 worker 才清运行态：用户可能在这条 finally 之前就点了发送、
             # 新 worker 已经起来了，这时把 is_generating 清掉会让两轮的按钮状态打架。
@@ -1763,6 +1803,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         with sess.render_lock:
             sess.render_log.clear()    # 新一轮提问开始：清掉上一轮的渲染事件缓冲
         sess.thread = threading.current_thread()
+        sess.last_worker = sess.thread
         token = object()
         sess.worker_token = token
         _session.bind_thread(sess)
@@ -1831,6 +1872,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             # 侧栏照刷（旧那轮的标题/状态确实变了），前台状态一概不碰。
             self._refresh_session_list()
             return
+        self._settle_resume_card(finished_sess)
         if finished_sess is not active_sess:
             # 后台会话完成：只刷侧栏列表（显示新标题/状态），不碰前台 UI
             self._refresh_session_list()
@@ -2121,7 +2163,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """点击重试：重新执行 agent_loop"""
         from .. import session as _session
         sess = _session.get_active()
-        if sess.is_generating:
+        if sess.is_generating or sess.resume_pending:
             return
         # 移除上次失败的 AI 消息（如果最后一条是 AI 的空消息）
         from langchain_core.messages import AIMessage
@@ -2247,6 +2289,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         card = ResultCard(view)
         card.view_diff_requested.connect(self._on_result_view_diff)
         card.view_output_requested.connect(self._on_result_view_output)
+        card.continue_requested.connect(
+            lambda v, c=card: self._on_result_continue(v, card=c))
         self.chat_area.add_result_card(card)
         self._rendered_result_run_id = view.get("run_id") or ""
 
@@ -2350,6 +2394,226 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             lines = ["本轮没有留下验证记录。"]
         lines.append("完整工具输出在上面的对话记录里；这里只保留卡片采集到的摘要。")
         self._show_text_dialog("验证输出", "\n".join(lines))
+
+    # ── 继续任务（B04）──
+    #
+    # 点击只在主线程做三件便宜的事：核对归属、等旧 worker 真正退出、预检（目录/模型/模式）。
+    # 现场核对（git、文件指纹、结果未知的操作）要 IO，放进新 worker 里、在 begin_run 之前做
+    # （recovery.before_run）。整个过程不跑任何项目命令；点了继续才调模型。
+
+    _RESUME_WAIT_MS = 100
+    _RESUME_WAIT_LIMIT = 150      # × 100ms = 15s，旧 worker 还没退就放弃并明说
+
+    @staticmethod
+    def _resume_ownership_problem(sess, view):
+        """这张卡还能不能代表该会话去"继续"。能 → 空串；不能 → 给用户看的原因。
+
+        判据是**会话 id + 该会话最新一条运行记录的 id**：卡片是某一轮的快照，
+        这之后只要开过新的一轮（哪怕是用户直接发的消息），它就不再代表当前状态。
+        """
+        sid = getattr(sess, "current_session_id", None) or ""
+        if not view.get("session_id") or view.get("session_id") != sid:
+            return "这张结果卡不属于当前会话，没有继续"
+        latest = (getattr(sess, "last_run", None) or {}).get("id")
+        if not latest or latest != view.get("run_id"):
+            return "这个会话已经有更新的一轮运行，没有从旧结果继续"
+        return ""
+
+    def _on_result_continue(self, view, card=None, accept_current_model=False):
+        """结果卡的「继续任务」。主线程；不跑任何命令、不调模型。"""
+        from .. import session as _session
+        sess = _session.get_active()
+        problem = self._resume_ownership_problem(sess, view)
+        if problem:
+            self._show_toast(problem, 2500)
+            return
+        if sess.resume_pending:
+            return          # 连点：第一次点击已经在准备了，只起一个 worker
+        sess.resume_pending = True
+        # 按会话记"哪张卡发起了继续"：后台会话的那一轮还没结束、用户又在别的会话点了继续，
+        # 单个槽位会被覆盖，前一个会话的卡就再也收不了尾。
+        self._resume_cards_by_session()[sess] = card
+        if card is not None:
+            card.set_continue_busy(True)
+        self._resume_wait(sess, dict(view), card, accept_current_model, 0)
+
+    def _resume_wait(self, sess, view, card, accept, attempts):
+        """屏障：旧 worker **真正退出**之后才起新的。
+
+        只看按钮 / is_generating 不够：强制停止会立刻把 is_generating 置 False，
+        而旧线程可能还在收尾、还会写这个会话（存盘、结束记录、标题线程）。
+        """
+        worker = getattr(sess, "last_worker", None)
+        if sess.is_generating or (worker is not None and worker.is_alive()):
+            if attempts >= self._RESUME_WAIT_LIMIT:
+                self._resume_abort(sess, card, "上一轮仍在结束，请稍后再点「继续任务」")
+                return
+            QTimer.singleShot(self._RESUME_WAIT_MS,
+                              lambda: self._resume_wait(sess, view, card, accept, attempts + 1))
+            return
+        try:
+            self._start_resume(sess, view, card, accept)
+        except Exception as e:
+            from ..paths import logger
+            logger.error(f"继续任务启动失败: {e}", exc_info=True)
+            self._resume_abort(sess, card, f"继续任务启动失败：{str(e)[:80]}")
+
+    def _resume_cards_by_session(self):
+        cards = getattr(self, "_resume_cards", None)
+        if cards is None:
+            cards = self._resume_cards = {}
+        return cards
+
+    def _resume_abort(self, sess, card, message=""):
+        sess.resume_pending = False
+        self._resume_cards_by_session().pop(sess, None)
+        if card is not None:
+            try:
+                card.set_continue_busy(False)
+            except RuntimeError:
+                pass        # 卡片已随重绘销毁
+        if message:
+            self._show_toast(message, 2500)
+
+    def _start_resume(self, sess, view, card, accept):
+        from .. import recovery
+        from .. import session as _session
+        if sess is not _session.get_active():
+            # 等待期间切走了。不在后台悄悄起：顶栏 / 按钮 / 模型同步都属于前台会话，
+            # 替一个看不见的会话切模型、改按钮状态只会让两个会话的状态互相串。
+            self._resume_abort(sess, card, "已切换到其它会话，继续任务已取消")
+            return
+        problem = self._resume_ownership_problem(sess, view)
+        if problem:
+            self._resume_abort(sess, card, problem)
+            return
+        pre = recovery.precheck(sess, accept_current_model=accept)
+        if pre.blocking:
+            self._resume_abort(sess, card)
+            self._show_resume_blocked(sess, view, card, pre)
+            return
+        if pre.model_index is not None and pre.model_index != sess.current_model_index:
+            # 按记录的稳定标识找回原模型，顶栏跟着显示实际要用的那一个。
+            sess.current_model_index = pre.model_index
+            self._sync_header_from_session()
+        mode = "Plan 模式（只调研，不改动）" if sess.agent_mode == "plan" else "Act 模式"
+        self._append_html(f"\n🔄 继续任务 · 使用模型「{pre.model_label}」· {mode}\n", "tool_result")
+        resume = {"expected_run_id": view.get("run_id") or "", "notes": list(pre.notes)}
+        _session.register(sess)
+        sess.is_generating = True
+        sess.stop_flag = False
+        self._update_btn_state("stop")
+        # 放开 pending 与起线程在同一个主线程回调里：中间插不进别的点击；
+        # 之后再点，is_generating 已为 True，屏障会一直等到这一轮结束，再由归属核对拒绝。
+        sess.resume_pending = False
+        threading.Thread(target=self._run_agent, args=(sess,), kwargs={"resume": resume},
+                         daemon=True).start()
+        self._refresh_session_list()      # 侧栏的"生成中"标记跟上
+
+    def _settle_resume_card(self, sess):
+        """继续发起的那一轮结束了：没开出新一轮（被拦下）就把按钮放开，开出了就收起来。"""
+        card = self._resume_cards_by_session().pop(sess, None)
+        if card is None:
+            return
+        latest = (getattr(sess, "last_run", None) or {}).get("id")
+        try:
+            if latest and latest == card.view.get("run_id"):
+                card.set_continue_busy(False)
+            else:
+                card.mark_continued()
+        except RuntimeError:
+            pass            # 卡片已随重绘销毁
+
+    def _show_resume_blocked(self, sess, view, card, pre):
+        """预检没过：说清原因，给出能走的下一步（改用当前模型 / 重新选择项目目录）。"""
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("暂时无法继续任务")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("继续之前需要先处理：\n\n" + "\n".join(f"• {b}" for b in pre.blocking))
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        use_current = relocate = copy_path = None
+        if pre.model_missing and not pre.project_missing:
+            from ..models import MODEL_LIST
+            idx = int(getattr(sess, "current_model_index", 0) or 0)
+            name = MODEL_LIST[idx][0] if 0 <= idx < len(MODEL_LIST) else "当前模型"
+            use_current = box.addButton(f"改用当前模型「{name}」继续", QMessageBox.AcceptRole)
+        if pre.project_missing:
+            relocate = box.addButton("重新选择项目目录…", QMessageBox.ActionRole)
+            copy_path = box.addButton("复制原路径", QMessageBox.ActionRole)
+        box.addButton("关闭", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is None:
+            return
+        if clicked is use_current:
+            self._on_result_continue(view, card=card, accept_current_model=True)
+        elif clicked is copy_path:
+            QApplication.clipboard().setText(pre.project_missing)
+            self._show_toast("已复制原项目路径")
+        elif clicked is relocate:
+            self._resume_relocate_project(sess, view, card, pre.project_missing)
+
+    def _resume_relocate_project(self, sess, view, card, old_path):
+        """项目被移动了：让用户指到新位置，**核对是同一个仓库**后再把会话改挂过去。
+
+        不核对就改挂，等于允许把一个会话的未验证改动、恢复说明套到另一个项目上——
+        方案要求"实际指向另一个项目时阻止直接继续"，这里就是那道闸。
+        """
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from .. import session as _session
+        picked = QFileDialog.getExistingDirectory(self, "选择项目现在的位置", "")
+        if not picked:
+            return
+        if sess is not _session.get_active():
+            self._show_toast("已切换到其它会话，未修改项目位置")
+            return
+
+        def _confirm(why, path):
+            reply = QMessageBox.question(
+                self, "无法确认是同一个项目",
+                f"{why}。\n\n仍要把这个会话改到下面的目录吗？\n{path}\n\n"
+                "（继续后会重新核对现场，并要求补跑测试、查看改动。）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            return reply == QMessageBox.Yes
+
+        ok, message = self._relocate_session_project(sess, picked, confirm=_confirm)
+        if not ok:
+            if message:
+                QMessageBox.warning(self, "没有修改项目位置", message)
+            return
+        if message:
+            self._show_toast(message, 3000)
+        self._refresh_session_list()
+        if hasattr(self, "_refresh_project_indicator"):
+            self._refresh_project_indicator()
+        self._on_result_continue(view, card=card)
+
+    def _relocate_session_project(self, sess, picked, *, confirm):
+        """把会话改挂到项目的新位置。返回 (是否改了, 给用户的话)。
+
+        判据是**仓库身份**（根提交），不是目录名：确定是另一个仓库就拒绝；判断不了就问用户
+        （`confirm(原因, 路径) -> bool`），用户不点头就不动。改挂后照常经过继续前的全套核对。
+        """
+        from .. import memory, projects as _projects, workspace_anchor
+        picked = os.path.normpath(picked).replace("\\", "/")
+        anchor = (getattr(sess, "last_run", None) or {}).get("workspace")
+        same, why = workspace_anchor.same_repository(anchor, picked)
+        if same is False:
+            return False, f"{picked}\n\n{why}。没有修改这个会话的项目。"
+        if same is None and not confirm(why, picked):
+            return False, ""
+        _projects.add_project(picked)            # 已在列表里会返回 False，无妨
+        note = ""
+        if not _projects.set_current(picked):
+            note = "项目切换未能保存（重启后可能恢复为原项目）"
+        state.current_project = picked
+        sess.project = picked
+        sess.shell_cwd = None
+        outcome = memory.save_session_report(session=sess)
+        if not outcome.body_written and not outcome.skipped:
+            note = f"会话的新项目位置未能保存：{str(outcome.error)[:60]}"
+        return True, note
 
     def _show_text_dialog(self, title, text):
         from PySide6.QtWidgets import QDialog, QPlainTextEdit, QVBoxLayout

@@ -176,18 +176,28 @@ if isinstance(state.chat_history[0], SystemMessage):
 # Agent 循环（全流式）
 # ══════════════════════════════════════
 
-def agent_loop(ui) -> AgentResult:
+def agent_loop(ui, *, resume=None) -> AgentResult:
     """一轮运行的统一入口：begin / finalize 都在这里，主体在 `_agent_loop_body`。
 
-    普通聊天、重试、视觉桥接（它自己做完识别后调本函数）、Claude Code CLI 分支，
-    以及主体里所有提前返回和异常，全都经过这一层——begin/finalize 写在主体内部的话，
-    每加一条 `return` 就多一个漏网路径，而漏网的恰恰是异常和取消这些最需要记录的情形。
+    普通聊天、重试、视觉桥接（它自己做完识别后调本函数）、Claude Code CLI 分支、
+    结果卡上的「继续任务」，以及主体里所有提前返回和异常，全都经过这一层——
+    begin/finalize 写在主体内部的话，每加一条 `return` 就多一个漏网路径，
+    而漏网的恰恰是异常和取消这些最需要记录的情形。
+
+    `resume` 是「继续任务」的请求（`{"expected_run_id", "notes"}`），None = 普通一轮。
 
     收尾在 worker 解绑之前完成（`_run_agent` 的 finally 才解绑），
     并且**持久化成功之后**才发结果通知。
     """
-    from . import run_records
+    from . import recovery, run_records
     sess = _session_mod.current_session()
+    # 恢复处置排在 begin_run **之前**：它把现场变化和结果未知的操作并入
+    # pending_verification，由 begin_run 在 reset_verification 之后填回。
+    # 排在后面，这些义务就被本轮的重置清掉了。
+    # 被拦下（继续前发现目录没了 / 换了仓库 / 已有更新的运行）就不开这一轮：
+    # 没有调用模型、没有写运行记录，磁盘上仍是上一轮的事实。
+    if not recovery.before_run(sess, ui=ui, resume=resume):
+        return AgentResult("failed", "恢复检查未通过，没有启动新的一轮。")
     run = run_records.begin_run(sess, ui=ui)
     result = AgentResult("failed", "Agent 未正常完成。")
     clean_text = ""

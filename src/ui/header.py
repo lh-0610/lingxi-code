@@ -222,6 +222,9 @@ class HeaderMixin:
         if _session.get_active().is_generating:
             self._force_stop_generation()
         agent.switch_model(index)
+        # 用户亲手选的模型：「继续任务」的预检据此不再改回上一轮记录的模型（B04）。
+        # 切会话时的顶栏同步走 blockSignals，不经过这里，所以不会误标。
+        _session.get_active().model_user_choice = True
         # 根据模型是否支持思考，更新开关状态
         _, _, _, supports_think = agent.MODEL_LIST[index]
         self.think_btn.setEnabled(supports_think)
