@@ -76,6 +76,25 @@ _VALID_STEP_STATUS = ("pending", "in_progress", "done")
 
 
 def _normalize_progress(raw, session_id=""):
+    """`_normalize_progress_checked` 的外壳：**永不抛异常**。
+
+    两个调用点都不能被它打断：加载时抛出去，整段聊天就打不开；保存前核对旧文件时抛出去，
+    这个会话之后的每次保存都会失败。各字段的校验应当自己兜住（锚点就是这样降级的），
+    这里是最后一道：意外异常一律按"进度读不懂"处理——保存路径据此把原进度隔离留底，
+    加载路径据此只作废进度、照常恢复聊天。
+    """
+    try:
+        return _normalize_progress_checked(raw, session_id)
+    except Exception as error:
+        logger.warning(f"会话 {session_id} 的进度解析异常：{error}", exc_info=True)
+        from . import run_records as _rr
+        empty = {"current_plan": [], "task_ledger": state.new_task_ledger(), "revision": 0,
+                 "last_run": None, "pending_verification": _rr.empty_pending_verification(),
+                 "last_committed_operation": None, "recent_operations": []}
+        return empty, f"进度无法解析（{type(error).__name__}: {str(error)[:120]}）"
+
+
+def _normalize_progress_checked(raw, session_id=""):
     """把磁盘上的 progress 归一成可用结构，返回 (progress_dict, error_reason)。
 
     容错原则：**进度坏掉不能拖垮聊天历史**。任何字段不合法就整块作废、返回空进度

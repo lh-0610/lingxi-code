@@ -120,32 +120,92 @@ def capture(root, files, *, previous=None, with_roots=True, refresh_git=True):
     return anchor
 
 
+class _Invalid(ValueError):
+    pass
+
+
+# 指纹字段 → 合法取值的判定。多一个认不出的键无妨（向前兼容），已知键类型不对就整张作废。
+_FP_CHECKS = {
+    "sha256": lambda v: isinstance(v, str),
+    "missing": lambda v: v is True,
+    "directory": lambda v: v is True,
+    "too_large": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0,
+    "unreadable": lambda v: isinstance(v, str),
+}
+
+
+def invalid(reason):
+    """"锚点坏了、无法核对"的标记。比对时如实报告，而不是当成没有锚点、更不是当成现场没变。"""
+    return {"invalid": str(reason)[:200]}
+
+
 def normalize(raw):
-    """校验磁盘上的锚点。坏掉就当"没有锚点"（恢复时如实报告无法核对），不牵连别的。"""
-    if not isinstance(raw, dict):
+    """校验磁盘上的锚点。**永不抛异常**。
+
+    坏掉就降级成带原因的"无法核对"标记，不牵连别的——进度坏掉不能拖垮聊天历史，
+    锚点只是进度里的一小块，更不能拖垮整份进度。早先 `errors` 被改成数字时
+    `load_session` 直接抛 TypeError，整段聊天都打不开；保存路径也会对旧文件做同一次
+    归一化，于是这个会话之后每次保存都会失败。
+
+    **逐字段严格校验，不"尽量抢救"**：只丢掉坏字段、留下好字段的话，比如坏的是
+    `errors`，"只记录了前 200 个文件"这类说明就悄悄没了，比对结论反而更乐观。
+    """
+    if raw is None:
         return None
+    try:
+        return _normalize_strict(raw)
+    except _Invalid as e:
+        return invalid(e)
+    except Exception as e:           # 兜底：任何意外都降级，不往上抛
+        return invalid(f"锚点无法解析：{e}")
+
+
+def _normalize_strict(raw):
+    if not isinstance(raw, dict):
+        raise _Invalid("锚点不是对象")
+    if "invalid" in raw:             # 之前就降级过的标记，原样往返
+        return invalid(raw.get("invalid") if isinstance(raw.get("invalid"), str) else "锚点已损坏")
     root = raw.get("root")
     if not isinstance(root, str):
-        return None
-    prints = raw.get("fingerprints")
-    clean = {}
-    if isinstance(prints, dict):
-        for rel, fp in prints.items():
-            if isinstance(rel, str) and isinstance(fp, dict):
-                clean[rel] = {k: v for k, v in fp.items()
-                              if k in ("sha256", "missing", "directory", "too_large",
-                                       "unreadable")}
+        raise _Invalid("root 不是字符串")
+    is_git = raw.get("is_git", False)
+    if not isinstance(is_git, bool):
+        raise _Invalid("is_git 不是布尔值")
+    for key in ("git_head", "git_branch"):
+        value = raw.get(key)
+        if value is not None and not isinstance(value, str):
+            raise _Invalid(f"{key} 类型非法")
     roots = raw.get("git_roots")
+    if roots is not None:
+        if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
+            raise _Invalid("git_roots 不是字符串列表")
+    prints = raw.get("fingerprints", {})
+    if not isinstance(prints, dict):
+        raise _Invalid("fingerprints 不是对象")
+    clean = {}
+    for rel, fp in prints.items():
+        if not isinstance(rel, str) or not isinstance(fp, dict):
+            raise _Invalid("fingerprints 含非法条目")
+        entry = {}
+        for key, check in _FP_CHECKS.items():
+            if key in fp:
+                if not check(fp[key]):
+                    raise _Invalid(f"指纹 {rel} 的 {key} 类型非法")
+                entry[key] = fp[key]
+        if not entry:
+            raise _Invalid(f"指纹 {rel} 没有可识别的内容")
+        clean[rel] = entry
+    errors = raw.get("errors", [])
+    if not isinstance(errors, list) or not all(isinstance(e, str) for e in errors):
+        raise _Invalid("errors 不是字符串列表")
     return {
         "root": root,
-        "is_git": raw.get("is_git") is True,
-        "git_head": raw.get("git_head") if isinstance(raw.get("git_head"), str) else None,
-        "git_branch": (raw.get("git_branch")
-                       if isinstance(raw.get("git_branch"), str) else None),
-        "git_roots": ([r for r in roots if isinstance(r, str)]
-                      if isinstance(roots, list) else None),
+        "is_git": is_git,
+        "git_head": raw.get("git_head"),
+        "git_branch": raw.get("git_branch"),
+        "git_roots": list(roots) if roots is not None else None,
         "fingerprints": clean,
-        "errors": [e for e in (raw.get("errors") or []) if isinstance(e, str)],
+        "errors": list(errors),
     }
 
 
@@ -157,8 +217,9 @@ def same_repository(anchor, path):
     """
     if not os.path.isdir(path or ""):
         return False, "目录不存在"
-    if not isinstance(anchor, dict) or not anchor.get("is_git") or not anchor.get("git_roots"):
-        return None, "上次没有记录仓库身份，无法确认新目录就是原来的项目"
+    if (not isinstance(anchor, dict) or "invalid" in anchor or not anchor.get("is_git")
+            or not anchor.get("git_roots")):
+        return None, "上次没有记录（或记录已损坏）仓库身份，无法确认新目录就是原来的项目"
     out, err = _git(path, "rev-list", "--max-parents=0", "HEAD")
     if out is None:
         if "not a git repository" in (err or "").lower():
@@ -188,6 +249,9 @@ def compare(anchor, root=None):
               "root": root or (anchor or {}).get("root") or ""}
     if not isinstance(anchor, dict):
         report["incomplete"].append("上次运行没有记录现场锚点（可能是本功能之前的会话）")
+        return report
+    if "invalid" in anchor:
+        report["incomplete"].append(f"上次的现场记录已损坏（{anchor.get('invalid')}），无法核对")
         return report
     root = root or anchor.get("root") or ""
     report["root"] = root

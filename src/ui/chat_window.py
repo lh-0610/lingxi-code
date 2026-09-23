@@ -2595,14 +2595,22 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         判据是**仓库身份**（根提交），不是目录名：确定是另一个仓库就拒绝；判断不了就问用户
         （`confirm(原因, 路径) -> bool`），用户不点头就不动。改挂后照常经过继续前的全套核对。
         """
-        from .. import memory, projects as _projects, workspace_anchor
+        from .. import memory, projects as _projects, recovery, workspace_anchor
         picked = os.path.normpath(picked).replace("\\", "/")
-        anchor = (getattr(sess, "last_run", None) or {}).get("workspace")
+        run = getattr(sess, "last_run", None) or {}
+        anchor = run.get("workspace")
         same, why = workspace_anchor.same_repository(anchor, picked)
         if same is False:
             return False, f"{picked}\n\n{why}。没有修改这个会话的项目。"
         if same is None and not confirm(why, picked):
             return False, ""
+        # 确认是同一个项目之后，挂在旧位置上的**活动**追踪路径跟着搬过去——否则完成闸门会
+        # 一直去枚举那个不存在的旧目录，把补做的测试和 diff 结论反复作废。历史锚点保留原值。
+        old = getattr(sess, "project", None)
+        old_roots = [old if isinstance(old, str) else "", run.get("work_dir") or "",
+                     (anchor or {}).get("root") if isinstance(anchor, dict) else ""]
+        old_roots += [os.path.realpath(r) for r in list(old_roots) if r]
+        recovery.relocate_obligations(sess, old_roots, picked)
         _projects.add_project(picked)            # 已在列表里会返回 False，无妨
         note = ""
         if not _projects.set_current(picked):

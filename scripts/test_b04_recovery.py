@@ -265,14 +265,18 @@ class TestWorkspaceAnchor:
         (repo / "app.py").write_text("x = 12345\n", encoding="utf-8")
         assert workspace_anchor.compare(anchor, str(repo))["changed"] == ["app.py"]
 
-    def test_normalize_drops_garbage_instead_of_trusting_it(self):
-        assert workspace_anchor.normalize("nope") is None
-        assert workspace_anchor.normalize({"root": 5}) is None
-        clean = workspace_anchor.normalize({"root": "D:/p", "is_git": "yes",
-                                            "fingerprints": {"a": {"sha256": "x", "evil": 1},
-                                                             "b": "not-a-dict"}})
-        assert clean["is_git"] is False, "只认真正的 True"
-        assert clean["fingerprints"] == {"a": {"sha256": "x"}}
+    def test_normalize_degrades_garbage_to_unverifiable(self):
+        """坏锚点整张降级成"无法核对"，不挑着留好字段——留下的部分会让比对结论更乐观。"""
+        assert workspace_anchor.normalize(None) is None, "没有锚点（旧会话）和坏锚点是两回事"
+        for garbage in ("nope", {"root": 5}, {"root": "D:/p", "is_git": "yes"},
+                        {"root": "D:/p", "fingerprints": {"b": "not-a-dict"}}):
+            degraded = workspace_anchor.normalize(garbage)
+            assert set(degraded) == {"invalid"} and degraded["invalid"], garbage
+        clean = workspace_anchor.normalize({"root": "D:/p", "is_git": True,
+                                            "fingerprints": {"a": {"sha256": "x", "extra": 1}}})
+        assert clean["fingerprints"] == {"a": {"sha256": "x"}}, "认不出的键忽略（向前兼容）"
+        report = workspace_anchor.compare(workspace_anchor.normalize("nope"), "D:/p")
+        assert any("已损坏" in r for r in report["incomplete"])
 
     def test_same_repository_check(self, repo, tmp_path):
         anchor = workspace_anchor.capture(str(repo), [])
@@ -327,7 +331,8 @@ class TestRunRecordAnchor:
         broken = _reopen(sid)
         assert broken.progress_error == "", "坏掉的锚点不能拖垮整份进度"
         assert broken.last_run["id"] == data["progress"]["last_run"]["id"]
-        assert broken.last_run["model"] is None and broken.last_run["workspace"] is None
+        assert broken.last_run["model"] is None
+        assert "invalid" in broken.last_run["workspace"], "坏锚点降级成'无法核对'，不是'没有锚点'"
 
     def test_tool_boundary_refreshes_the_anchor_so_own_edits_are_not_external(
             self, isolated_memory, repo, monkeypatch):
@@ -928,6 +933,7 @@ class TestNothingIsResurrected:
         sess.command_allowlist.add("deploy --token-remembered-once")
         sess.command_prefix_allowlist.add("deploy-prefix-remembered")
         sess.edit_path_allowlist.add("edit-path-remembered.py")
+        (repo / ".lingxi-worktrees" / "wt1").mkdir(parents=True)
         sess.worktree = str(repo / ".lingxi-worktrees" / "wt1")
         run_records.begin_run(sess)
         run_records.finalize_run(sess, sess.last_run, AgentResult("cancelled", "停"))

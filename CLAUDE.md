@@ -203,7 +203,7 @@ python main.py
 
 ### 工具边界的 inflight sidecar（src/run_records.py + streaming._execute_tool）
 - 有副作用的工具**进入调用前**把一条小记录原子写进 `chat_memory/<id>.inflight.json`；写不成功就抛 `InflightWriteError`、**中止该工具调用**并明确报错。假装建立了恢复点再动手，比根本没有这套记录更糟——用户会以为有记录可查
-- **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径（实测恒 480 字节，不随历史增长），不复制历史、长参数或完整输出
+- **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径 / 工作目录（B03 实测恒 480 字节；B04 多记 `work_root` 后随项目路径长度增加，154 字符的路径实测 707 字节；都不随历史增长），不复制历史、长参数或完整输出
 - **sidecar 内是操作列表不是单个对象**：一条记录结构上不可能覆盖另一条未完成的。目前只读工具才并行、写工具串行，但这个前提不该被隐含依赖
 - **判定哪些工具要记录**：只列纯读工具（`SIDE_EFFECT_FREE_TOOLS`），**不在清单里的一律记录**——未知工具、所有 `mcp_*`、以及 `remember`/`forget`/`notify_user`/`update_plan`/`set_step_status`。后面这几个虽在 `PLAN_MODE_READONLY_TOOLS` 里，却真有副作用（写长期记忆 / 推 Telegram / 改计划），**不能拿 Plan 白名单当这份清单用**
 - **`run_tests` / `check_code` 同样要记录**，尽管名字听起来只是检查：`run_tests` 起 pytest，测试代码是项目自己的代码，写文件建目录都合法；`check_code` 一旦配了 config 的 `check_command` 就执行它，那是用户配的任意命令（`_run_code_check` 先判 `check_command`、再判扩展名，所以 Python 文件同样走它，不限于非 Python 项目）。把它们当纯读的后果实测过——测试真的写出了文件、进程在结果返回前死掉，sidecar 前后都是空的，恢复分类返回空列表，连"结果未知"的线索都没有。判据是**「会不会执行项目代码或用户配置的命令」**，不是名字像不像检查
@@ -247,6 +247,9 @@ python main.py
   ① 结果卡「继续任务」（mode=continue）；② 上一轮被中断 / 留下结果未知的操作后，用户**没点继续、直接发了新消息**（mode=message）。处置把现场变化和结果未知的操作写进 `pending_verification`，由 begin_run 在 `reset_verification` **之后**填回——排在 begin_run 后面就被本轮重置清掉了
 - **第②条入口不能省**：中断前那次写操作从没进入 dirty 文件，新一轮的工作区基线又建立在它之后，完成闸门会拿"没有已知改动"推出"工作区没变"，一次没验证过的写入按 completed 收尾（方案 §5.5 明令禁止的推断）。这条路径**不阻断**用户的新请求、不做现场比对，只补占位、并入义务、告诉模型哪些结果未知。判定 `needs_adoption`：磁盘 `phase=running` 且不是本进程正在跑的那一轮，或 sidecar 里有没回执的记录；正常结束的会话只多一次 `os.path.exists`
 - **结果未知的写操作一律进盲区**（`tracking_incomplete` → `unknown_changes`），不只是把记录里的路径标脏：`run_command` 这类操作可能写了记录之外的路径。出口仍是显式 `run_tests` + `git_diff`。`_NON_FS_TOOLS`（remember/forget/notify_user/update_plan/set_step_status）结果未知时不碰项目文件，不进盲区
+- **盲区挂在工具当时实际的工作目录上**：执行前记录写下 `work_root`（`run_records._operation_root(sess)`：按**传进来的会话**借用绑定调 `_project_cwd()`，与工具解析路径同一套规则，不按当前线程碰巧绑着谁算）。无项目会话的工具落在进程工作目录——早先恢复只认"会话的项目根"，无项目时根为空，就把结果未知的写入整个丢掉、sidecar 照样摘掉，没跑任何检查也按 completed 收尾（首轮复核实测）。旧记录没有 `work_root` 就退回会话目录；**实在确定不了**挂在 `recovery.UNKNOWN_ROOT` 占位键上——目录不知道不等于没有改动。消息模式下恢复核对自己出错（`_hold_obligation`）同样留一段盲区，不拿"没核对成"推出"没有改动"
+- **不存在的目录不种基线**（`verification.restore_obligations`）：给已不存在的目录（项目搬走、被删）或占位键种空基线，每次复查都会枚举失败、重新记一段盲区，把刚补做的测试和 diff 结论又作废——按提示补查也收不了尾。盲区照样保留，出口仍是显式 run_tests + git_diff，只是不再追着不存在的目录反复失败
+- **sidecar 里解析不了的条目不丢**（`_read_inflight_raw` 放进 `malformed`，改写时原样带回，`classify_inflight` 报 `unreadable`）：早先静默过滤——唯一那条记录坏了就等于"没有未决操作"，下一次改写还会把它彻底抹掉。恢复按"读不懂"处理（开盲区、有副作用的悬空调用按可能已执行说明），原文预览随恢复说明的 `lingxi_recovery.unreadable_entries` 落盘后才摘除（`drop_malformed`），否则每一轮都会为它重开一次盲区
 - **补齐悬空 tool 调用不冒充结果**（方案 §5.4）：占位写"应用恢复提示：未取得执行结果"，并区分「已调度、可能已经执行，不要直接重复」（sidecar 有记录没回执，或 sidecar 读不懂且是有副作用的工具）与「没有执行记录，按未执行处理」。占位带 `lingxi_internal` + `lingxi_kind` **落盘**，重开后不再悬空。`streaming._sanitize_tool_pairs` 的发送副本兜底文案同样改成不冒充成功/失败的说法
 - **注意只读工具不存盘**：崩在某轮第一个有副作用工具里时，磁盘上**根本没有**那条 AIMessage（上一次存盘在它之前），只剩 sidecar。所以结果未知的操作必须在恢复说明里单独列出，不能只靠悬空调用的占位
 - **交接 inflight 的顺序**：恢复说明 + 占位 + 义务**落盘成功之后**才从 sidecar 摘掉交接过的记录（`acknowledge`）；没存上就保留，下次打开仍会提示。摘掉的记录精简后挂在恢复说明的 `lingxi_recovery.operations` 上**随消息落盘**——方案要求"保留 inflight 记录用于诊断"，线索从"进行中"挪到了永久历史，不是删掉
@@ -257,6 +260,8 @@ python main.py
 - **Plan 仍是 Plan**：继续不改 `agent_mode`；预检只加一条说明
 - **主线程只做便宜的事**（`chat_window._on_result_continue`）：核对归属（卡片的 session_id + 该会话**最新**一条运行记录的 id）→ **屏障**等旧 worker 真正退出（`Session.last_worker.is_alive()`，不只看 `is_generating`——强制停止会立刻把它置 False，而旧线程还在收尾写这个会话）→ 预检 → 起 worker。屏障等待期间 `Session.resume_pending` 挡住再点继续、发送、遥控注入、重试；屏障之后**再核对一次归属**（等的那段时间里可能已经开出了新的一轮）。等待中切走会话 → 取消，不替看不见的会话在后台开跑
 - **项目被挪走**：阻断对话框提供「重新选择项目目录…」（`_relocate_session_project`，按根提交核对是同一个仓库；判断不了就问用户，确定是另一个仓库就拒绝）和「复制原路径」。改挂后照常走继续前的全套核对，且"目录变了"会并入待验证义务
+- **搬家要迁移活动追踪路径**（`recovery.relocate_obligations`）：确认是同一个项目后，`pending_verification` 里挂在旧位置的盲区根目录、旧位置下的绝对文件路径，以及内存验证状态里同样的键，全部换算到新位置；执行前记录里旧位置的 `work_root` 在并入义务时同样换算（`_fold_obligations` 的 `_follow_move`，原始写法与 realpath 两种都认）。**历史锚点不动**（`last_run.work_dir` / `last_run.workspace` 保留原值用于诊断），恢复比对本来就按现在的目录做
+- **锚点逐字段严格校验**（`workspace_anchor.normalize`，永不抛异常）：坏了整张降级成带原因的 `{"invalid": ...}`，比对时报"现场记录已损坏、无法核对"（有待核对的东西时并入盲区），**不挑着留好字段**——比如坏的是 `errors`，"只记录了前 200 个文件"这类说明就悄悄没了，结论反而更乐观。早先 `errors` 被改成数字时 `load_session` 直接抛 TypeError、整段聊天打不开；保存路径也对旧文件做同一次归一化，于是之后每次保存都失败。`memory._normalize_progress` 现在也是永不抛异常的外壳：漏网的意外异常一律按"进度读不懂"处理（保存路径据此隔离留底，加载路径只作废进度、照常恢复聊天）
 - **来源**：继续的那一轮 `source.kind="continue"`，文本仍是最后一条真实用户消息（任务是它提的）；中断后直接发消息的那一轮仍是 `user_message`
 - **不恢复**旧确认许可、后台进程控制权、隔离区使用权——它们本来就不持久化；隔离区里跑的那一轮继续时回到主项目并明确说"旧隔离区不会被自动合并"
 - **重绘**：内部 HumanMessage（`lingxi_internal`）一律不画成"你"的气泡。早先只认视觉桥接的文字前缀，自动修复 / 完成闸门的内部提示在重开会话后会被画成用户说的话；恢复说明画成程序说明，优先用当时实时显示的那段（`lingxi_recovery.note`）
@@ -345,7 +350,7 @@ python main.py
 | `chat_memory/long_term_memory.json` | 跨会话长期记忆（remember/forget 存取，自动注入 system prompt） |
 | `chat_memory/rag_index/chroma/` | RAG 向量库（Chroma PersistentClient 数据目录；collection 名 `kb_<store>_v1`） |
 | `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化；内部消息带 `lingxi_internal` / `lingxi_kind`，恢复说明另带 `lingxi_recovery` 交接记录）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run`（含 `evidence.validation_runs` 结构化检查记录、`model` 稳定标识、`workspace` 现场锚点）/ `pending_verification` / `last_committed_operation` / `recent_operations`） |
-| `chat_memory/<session_id>.inflight.json` | 有副作用工具的**执行前**记录（sidecar）：session_id / run_id / operation_id / 工具名 / tool_call_id / 起始 revision / 路径。提交后删除；**不进侧栏索引**，也不能作为复活已删除会话的依据（`delete_session` 会一并删掉） |
+| `chat_memory/<session_id>.inflight.json` | 有副作用工具的**执行前**记录（sidecar）：session_id / run_id / operation_id / 工具名 / tool_call_id / 起始 revision / 路径 / `work_root`（工具实际的工作目录）。提交后删除；解析不了的条目原样保留、交接到恢复说明后才摘除；**不进侧栏索引**，也不能作为复活已删除会话的依据（`delete_session` 会一并删掉） |
 | `chat_memory/projects.json` | 注册的项目列表 + 当前激活项目（`{current, projects: [{path, name}]}`） |
 | `chat_memory/role_config.json` | 当前激活的角色卡名 |
 | `chat_memory/ui_prefs.json` | UI 偏好（如关闭按钮记住的选择） |

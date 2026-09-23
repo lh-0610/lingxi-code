@@ -813,14 +813,25 @@ def _read_inflight_raw(session_id):
     ver = data.get("version")
     if ver is not None and (not isinstance(ver, int) or ver > INFLIGHT_VERSION):
         return None, f"inflight 版本 {ver!r} 无法识别"
-    ops = [op for op in data["operations"] if isinstance(op, dict) and op.get("operation_id")]
+    # 解析不了的条目**不丢**：它可能正是某个结果未知操作的记录，只是被损坏了。
+    # 早先在这里静默过滤掉，后果是——唯一那条记录坏了，就被当成"没有未决操作"，
+    # 下一次改写 sidecar 时还会把它彻底抹掉。现在单独放进 malformed，改写时原样带回去，
+    # 分类时报"无法解析"（恢复按结果未知处理），只有恢复说明落盘交接之后才摘除。
+    ops, malformed = [], []
+    for op in data["operations"]:
+        if isinstance(op, dict) and isinstance(op.get("operation_id"), str) and op["operation_id"]:
+            ops.append(op)
+        else:
+            malformed.append(op)
     return {"version": INFLIGHT_VERSION, "session_id": data.get("session_id") or session_id,
-            "operations": ops}, ""
+            "operations": ops, "malformed": malformed}, ""
 
 
 def _write_inflight(session_id, doc):
     from . import memory
-    memory._atomic_write_json(inflight_path(session_id), doc)
+    payload = {"version": INFLIGHT_VERSION, "session_id": doc.get("session_id") or session_id,
+               "operations": list(doc.get("operations") or []) + list(doc.get("malformed") or [])}
+    memory._atomic_write_json(inflight_path(session_id), payload)
 
 
 def _inflight_lock(sess):
@@ -861,6 +872,7 @@ def begin_operation(sess, *, tool, tool_call_id, args=None, paths=None):
         paths=list(paths) if paths is not None else extract_paths(args),
         started_at=_now(),
     )
+    work_root = _operation_root(sess)
     entry = {
         "operation_id": operation.operation_id,
         "run_id": operation.run_id,
@@ -869,6 +881,10 @@ def begin_operation(sess, *, tool, tool_call_id, args=None, paths=None):
         "tool_call_id": operation.tool_call_id,
         "base_revision": operation.base_revision,
         "paths": operation.paths,
+        # 这次调用实际落在的目录（和执行中追踪工作区用的是同一个根）。无项目会话的工具
+        # 落在进程工作目录，不记下来的话恢复时就不知道该去哪儿要求补验证——早先正是因此
+        # 把"结果未知的写入"整个丢掉、按 completed 收尾。相对路径也按它解析。
+        "work_root": work_root,
         "started_at": operation.started_at,
         # 「已调度」而不是「已执行」：写文件工具还要等用户在确认卡上点同意。
         "state": "dispatched",
@@ -888,6 +904,29 @@ def begin_operation(sess, *, tool, tool_call_id, args=None, paths=None):
                 f"写执行前记录失败（{write_error}），已中止 {tool}："
                 "没有恢复点就动手，崩溃后无法判断这个操作是否发生过。") from write_error
     return operation
+
+
+def _operation_root(sess):
+    """`sess` 的工具这次实际使用的工作根目录（realpath）。拿不到返回空串。
+
+    按**传进来的会话**算，不按当前线程碰巧绑着谁算：借用绑定调 `_project_cwd()`，
+    与工具自己解析路径用的是同一套规则（worktree → 会话项目 → 进程工作目录），不另抄一份。
+    借用必须用 get_bound / restore_bound——拿 current_session() 存旧值的话，
+    未绑定的线程"还原"时会被永久绑死在别的会话上（B06 踩过）。
+    """
+    from . import session as _session_mod
+    try:
+        from .tools_common import _project_cwd
+        previous = _session_mod.get_bound()
+        _session_mod.bind_thread(sess)
+        try:
+            root = _project_cwd()
+        finally:
+            _session_mod.restore_bound(previous)
+        return os.path.realpath(root) if root else ""
+    except Exception as error:      # pragma: no cover - 只是兜底
+        logger.warning(f"取工具工作目录失败: {error}")
+        return ""
 
 
 def commit_operation(sess, operation, *, ui=None) -> CommitReport:
@@ -963,7 +1002,7 @@ def _clear_operation(sess, session_id, operation_id):
             return False, error
         remaining = [op for op in doc["operations"] if op.get("operation_id") != operation_id]
         try:
-            if remaining:
+            if remaining or doc.get("malformed"):
                 doc["operations"] = remaining
                 _write_inflight(session_id, doc)
             else:
@@ -1024,7 +1063,44 @@ def classify_inflight(session_id, *, last_receipt=None, recent_receipts=None):
             out.append({"operation": op, "status": "unknown",
                         "detail": (f"`{op.get('tool')}` 已调度但没有完成回执："
                                    "可能已执行、也可能没执行，请核对现场后再决定，不自动重放。")})
+    for raw in doc.get("malformed") or []:
+        # 认不出是哪个操作、结果如何——按结果未知对待，交给恢复去要求补验证。
+        out.append({"operation": {"operation_id": "", "tool": "", "paths": [],
+                                  "raw": _preview_raw(raw)},
+                    "status": "unreadable",
+                    "detail": "执行前记录里有一条无法解析：不知道是哪个操作，按结果未知处理。"})
     return out, ""
+
+
+def _preview_raw(raw):
+    try:
+        text = json.dumps(raw, ensure_ascii=False, default=str)
+    except Exception:
+        text = repr(raw)
+    return text[:300]
+
+
+def drop_malformed(sess, session_id):
+    """恢复说明落盘（其中已记下这些条目的原文预览）之后，把 sidecar 里无法解析的条目摘掉。
+
+    不摘的话，下一次打开又会为它们报一遍"结果未知"、再开一次盲区，每一轮都过不了闸门。
+    """
+    with _inflight_lock(sess):
+        doc, error = _read_inflight_raw(session_id)
+        if doc is None or not doc.get("malformed"):
+            return False
+        doc["malformed"] = []
+        try:
+            if doc["operations"]:
+                _write_inflight(session_id, doc)
+            else:
+                path = inflight_path(session_id)
+                if os.path.exists(path):
+                    os.remove(path)
+        except Exception as remove_error:
+            logger.warning(f"清理无法解析的执行前记录失败 {session_id}: {remove_error}")
+            return False
+    return True
 
 
 def _load_receipts_from_disk(session_id):

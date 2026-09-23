@@ -417,7 +417,14 @@ def restore_obligations(v: dict, pending) -> None:
             mark_blind_period(v, root, reason)
             # 种一个空基线：让本轮的复查去重新枚举这个根目录，建立一个新的比较起点。
             # previous=None 不会凭空造出 dirty 文件，也不会追认盲区里发生过什么。
-            snapshots.setdefault(root, None)
+            #
+            # **只给现在确实存在的目录种**。目录没了（项目搬走、被删）或者根本不是路径
+            # （"工作目录无法确定"的占位键）时种下去，每次复查都会枚举失败、重新记一段盲区，
+            # 把刚跑完的测试和 diff 结论又作废掉——用户按提示补查也永远收不了尾。
+            # 盲区本身照样保留：出口仍是显式的 run_tests + git_diff，只是不再追着一个
+            # 不存在的目录反复失败。
+            if os.path.isabs(root) and os.path.isdir(root):
+                snapshots.setdefault(root, None)
 
 
 # ── 自动修复循环 ──
