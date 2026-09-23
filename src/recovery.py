@@ -192,7 +192,9 @@ class SiteCheck:
     at_stake: bool = False                            # 上一轮有没有需要核对的改动
     root: str = ""                                    # 继续将要落在的目录
     inflight_unreadable: str = ""                     # sidecar 读不懂的原因
-    unreadable_entries: list = field(default_factory=list)  # sidecar 里解析不了的条目（预览）
+    unreadable_entries: list = field(default_factory=list)  # sidecar 里解析不了的条目（截断预览）
+    unreadable_raw: list = field(default_factory=list)      # 同一批条目的完整原文（留底用）
+    unreadable_archive: str = ""                      # 完整原文的隔离文件名（留底成功才有）
 
 
 def _dangling_calls(history):
@@ -213,9 +215,10 @@ def _dangling_calls(history):
 
 
 def _unknown_operations(sess):
-    """sidecar 里仍没有完成回执的操作，以及解析不了的条目。返回 (未知操作, 畸形条目预览, 读取错误)。
+    """sidecar 里仍没有完成回执的操作，以及解析不了的条目。
 
-    回执用**内存里的**：本进程里它不比磁盘旧。
+    返回 (未知操作, 畸形条目 [{"preview", "raw"}], 读取错误)。回执用**内存里的**：
+    本进程里它不比磁盘旧。
     """
     from . import run_records
     session_id = getattr(sess, "current_session_id", None)
@@ -226,7 +229,8 @@ def _unknown_operations(sess):
         last_receipt=getattr(sess, "last_committed_operation", None),
         recent_receipts=list(getattr(sess, "recent_operations", None) or []))
     unknown = [e["operation"] for e in entries if e["status"] == "unknown"]
-    unreadable = [e["operation"].get("raw", "") for e in entries if e["status"] == "unreadable"]
+    unreadable = [{"preview": e["operation"].get("raw", ""), "raw": e.get("raw")}
+                  for e in entries if e["status"] == "unreadable"]
     return unknown, unreadable, error
 
 
@@ -236,7 +240,9 @@ def inspect_site(sess, *, compare_site=True):
     check = SiteCheck()
     run = getattr(sess, "last_run", None) or {}
 
-    check.unknown_ops, check.unreadable_entries, error = _unknown_operations(sess)
+    check.unknown_ops, unreadable, error = _unknown_operations(sess)
+    check.unreadable_entries = [u["preview"] for u in unreadable]
+    check.unreadable_raw = [u["raw"] for u in unreadable]
     if error:
         check.inflight_unreadable = error
         check.warnings.append(f"执行前记录无法读取（{error}），无法确认中断时有没有结果未知的操作")
@@ -387,12 +393,20 @@ def _fold_obligations(sess, check):
     pending = dict(getattr(sess, "pending_verification", None) or {})
     files = list(pending.get("files") or [])
     tracking = dict(pending.get("tracking_incomplete") or {})
+    # 文件的**实际位置**也要记下：放行时要求检查覆盖到这里，相对路径本身说不出它在哪个目录
+    located = {f: _follow_move(p) for f, p in dict(pending.get("file_paths") or {}).items()}
+
+    def _add_file(rel, absolute):
+        if rel and rel not in files:
+            files.append(rel)
+        if rel and absolute and os.path.isabs(absolute):
+            located[rel] = os.path.normpath(absolute)
 
     site = check.site or {}
     for rel in list(site.get("changed") or []) + list(site.get("deleted") or []) \
             + list(site.get("appeared") or []):
-        if rel not in files:
-            files.append(rel)
+        # 现场比对的路径是相对于现在这个目录的
+        _add_file(rel, os.path.join(current, rel) if current and not os.path.isabs(rel) else rel)
 
     # 盲区原因：有了它，restore_obligations 会打开"必须 run_tests + git_diff"的要求。
     # 结果未知的写操作**一律**进盲区——它可能写了记录里没有的路径（run_command 尤其如此），
@@ -407,8 +421,7 @@ def _fold_obligations(sess, check):
                 (os.path.join(op_root, path) if op_root else path)
             absolute = _follow_move(absolute)
             rel = _rel(current, absolute) if os.path.isabs(absolute) else absolute.replace("\\", "/")
-            if rel and rel not in files:
-                files.append(rel)
+            _add_file(rel, absolute)
         _add_reason(tracking, op_root or UNKNOWN_ROOT,
                     f"上次运行中断时有结果未知的操作（{op.get('tool') or '?'}），期间的写入无法确认")
     if check.inflight_unreadable:
@@ -430,6 +443,7 @@ def _fold_obligations(sess, check):
     pending["files"] = files
     pending["code_files"] = list(pending.get("code_files") or [])
     pending["tracking_incomplete"] = tracking
+    pending["file_paths"] = {f: p for f, p in located.items() if f in files}
     pending.setdefault("reason", "")
     pending.setdefault("run_id", "")
     with sess.snapshot_lock:
@@ -483,6 +497,9 @@ def relocate_obligations(sess, old_roots, new_root):
             if mapped not in seen:
                 seen.append(mapped)
         pending[name] = seen
+    # 文件的实际位置：旧位置下的换算到新位置，键跟着上面相对化后的路径走
+    pending["file_paths"] = {_file(f): _target(p)
+                             for f, p in dict(pending.get("file_paths") or {}).items()}
     pending.setdefault("reason", "")
     pending.setdefault("run_id", "")
 
@@ -503,6 +520,9 @@ def relocate_obligations(sess, old_roots, new_root):
                 for key in [k for k in snapshots if any(_under(k, old) for old in olds)]:
                     snapshots.pop(key, None)
                     moved += 1
+            located = verification.get("dirty_abs")
+            if isinstance(located, dict):
+                verification["dirty_abs"] = {f: _target(p) for f, p in located.items()}
     return moved
 
 
@@ -533,8 +553,10 @@ def build_summary(sess, check, notes=(), *, mode="continue"):
             where = f"（工作目录 {op['work_root']}）" if op.get("work_root") else ""
             lines.append(f"- {op.get('tool')}：{target}{where}")
     if check.unreadable_entries:
+        kept = (f"原文已完整留存在 chat_memory/{check.unreadable_archive}"
+                if check.unreadable_archive else "原文暂时留在执行前记录里")
         lines.append(f"另有 {len(check.unreadable_entries)} 条执行前记录无法解析，不知道是哪些操作——"
-                     "同样按可能已经执行处理。")
+                     f"同样按可能已经执行处理（{kept}）。")
     site = check.site or {}
     changes = []
     for rel in site.get("changed") or []:
@@ -626,8 +648,12 @@ def apply_resume(sess, check, *, notes=(), mode="continue"):
         "from_outcome": run.get("outcome"),
         "note": note,
         "operations": [_compact_op(op) for op in check.unknown_ops[:_MAX_RECORDED_OPS]],
-        # 解析不了的条目也要留底：交接之后 sidecar 里就摘掉了，这是它们唯一的痕迹。
+        # 解析不了的条目：历史里只放**摘要**（条数 + 截断预览）和对隔离文件的**引用**，
+        # 完整原文在那个文件里。只存预览的话，摘除 sidecar 之后超长部分和超出条数的记录
+        # 就永久丢了（复核实测：21 条只剩 20 条截断预览）。
+        "unreadable_count": len(check.unreadable_entries),
         "unreadable_entries": list(check.unreadable_entries[:_MAX_RECORDED_OPS]),
+        "unreadable_archive": check.unreadable_archive,
         "dangling": [{"id": c["id"], "name": c["name"]} for c in check.dangling[:50]],
     }
     history.append(HumanMessage(
@@ -637,12 +663,12 @@ def apply_resume(sess, check, *, notes=(), mode="continue"):
     return [op.get("operation_id") for op in check.unknown_ops if op.get("operation_id")], note
 
 
-def acknowledge(sess, operation_ids, *, drop_malformed=False):
+def acknowledge(sess, operation_ids, *, archived_malformed=None):
     """恢复说明**落盘之后**，把已交接的 inflight 记录从 sidecar 里摘掉。
 
     记录已经写进了会话历史（恢复说明 + 占位结果 + 附带的操作记录），诊断信息不会丢；
     不摘掉的话，下次打开会为同一批操作再报一遍"结果未知"。只摘交接过的那几条，不碰别的。
-    `drop_malformed`：解析不了的条目也交接出去了（预览已随恢复说明落盘），一并摘掉。
+    `archived_malformed`：已经**完整**写进隔离文件的那批无法解析的条目，只摘它们。
     """
     from . import run_records
     session_id = getattr(sess, "current_session_id", None)
@@ -650,8 +676,8 @@ def acknowledge(sess, operation_ids, *, drop_malformed=False):
         return
     for op_id in operation_ids or []:
         run_records._clear_operation(sess, session_id, op_id)
-    if drop_malformed:
-        run_records.drop_malformed(sess, session_id)
+    if archived_malformed:
+        run_records.drop_malformed(sess, session_id, archived_malformed)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -758,10 +784,20 @@ def prepare_and_apply(sess, *, ui=None, mode="continue", expected_run_id="", not
              + "\n请恢复原目录、或重新选择项目后再继续。\n")
         return False
 
+    # 无法解析的条目先**完整**隔离留底，恢复说明里只放摘要和引用。留底失败就不摘原文：
+    # 截断预览顶替不了原文，摘了就真丢了。
+    if check.unreadable_raw:
+        from . import run_records
+        check.unreadable_archive, archive_error = run_records.archive_malformed(
+            getattr(sess, "current_session_id", None) or "", check.unreadable_raw)
+        if archive_error:
+            check.warnings.append(f"无法解析的执行前记录未能单独留底（{archive_error[:120]}），"
+                                  "原文先保留在执行前记录里")
     op_ids, note = apply_resume(sess, check, notes=notes, mode=mode)
     outcome = memory.save_session_report(session=sess)
     if outcome.body_written:
-        acknowledge(sess, op_ids, drop_malformed=bool(check.unreadable_entries))
+        acknowledge(sess, op_ids,
+                    archived_malformed=check.unreadable_raw if check.unreadable_archive else None)
     else:
         # 没存上就不摘记录：恢复说明只在内存里，摘了就真的什么线索都不剩了。
         logger.warning(f"恢复说明未能落盘，保留 inflight 记录: {outcome.error}")

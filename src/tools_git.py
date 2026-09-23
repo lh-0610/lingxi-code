@@ -12,11 +12,15 @@ from .tools_common import _project_cwd, _resolve_path
 from .verification import mark_diff_reviewed as _v_mark_diff_reviewed
 
 
-def _mark_reviewed():
-    """把"已审阅 diff"记进当前会话的验证状态（无会话/无状态时静默跳过）。"""
+def _mark_reviewed(root):
+    """把"已审阅 diff"记进当前会话的验证状态（无会话/无状态时静默跳过）。
+
+    root：这次 diff **实际覆盖**的范围——全工作区就是执行目录，限定了 path 就是那个路径。
+    按目录记着的义务只能被覆盖到它的 diff 了结。
+    """
     try:
         from . import session as _session
-        _v_mark_diff_reviewed(_session.get_verification())
+        _v_mark_diff_reviewed(_session.get_verification(), root=root)
     except Exception:
         pass
 
@@ -116,8 +120,9 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
         #   - 非空输出：沿用原有行为，照常算（含 path 限定的情形）。
         # 执行失败（git 缺失 / 非仓库 / 非零退出 / 超时 / 异常）一律走不到这里，不放行。
         uncovered_note = ""
+        covered = _resolve_path(path) if path else cwd
         if not empty:
-            _mark_reviewed()
+            _mark_reviewed(covered)
         elif not path and not staged:
             # 默认 `git diff` **只看已跟踪文件的未暂存改动**——已 `git add` 的修改和
             # 未跟踪的新文件它一个都看不见。所以"输出为空"不等于"整个项目干净"：
@@ -134,7 +139,7 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
             if staged_files or untracked:
                 uncovered_note = _describe_uncovered(staged_files, untracked)
             else:
-                _mark_reviewed()
+                _mark_reviewed(covered)
 
         if empty:
             if staged:

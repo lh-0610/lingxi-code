@@ -129,8 +129,9 @@ def test_real_child_success_invalidates_parent_validation(runtime, repo, monkeyp
     def verified_finish():
         child = session.current_session()
         # Test evidence is synthetic; the real loop must consult this child's gate.
-        verification.mark_tests(child.verification, True)
-        verification.mark_diff_reviewed(child.verification)
+        # 证据要说明出处：子 Agent 的检查发生在它自己的隔离区里（B04 复核：按位置核对）
+        verification.mark_tests(child.verification, True, root=child.worktree)
+        verification.mark_diff_reviewed(child.verification, root=child.worktree)
         if committed:
             subprocess.run(["git", "add", "app.py"], cwd=child.worktree, check=True)
             subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",

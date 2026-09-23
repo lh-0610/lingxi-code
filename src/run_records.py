@@ -314,7 +314,7 @@ def _normalize_evidence(raw):
 
 
 def empty_pending_verification():
-    return {"files": [], "code_files": [], "tracking_incomplete": {},
+    return {"files": [], "code_files": [], "tracking_incomplete": {}, "file_paths": {},
             "reason": "", "run_id": ""}
 
 
@@ -342,13 +342,19 @@ def normalize_pending_verification(raw):
     for key, value in tracking.items():
         if not isinstance(key, str) or not isinstance(value, str):
             return empty, "pending_verification.tracking_incomplete 含非字符串项"
+    # 改动文件的实际位置（B04 复核）。旧会话没有这个字段 = 位置未知，照旧按全局检查放行；
+    # 有但读不懂就和别的字段一样整块作废——丢掉它只会让放行变宽松，不能悄悄当成没有。
+    file_paths = raw.get("file_paths", {})
+    if not isinstance(file_paths, dict) or not all(
+            isinstance(k, str) and isinstance(p, str) for k, p in file_paths.items()):
+        return empty, "pending_verification.file_paths 结构非法"
     reason = raw.get("reason", "")
     run_id = raw.get("run_id", "")
     if not isinstance(reason, str) or not isinstance(run_id, str):
         return empty, "pending_verification 的说明字段类型非法"
     return {"files": list(files), "code_files": list(code_files),
-            "tracking_incomplete": dict(tracking), "reason": reason,
-            "run_id": run_id}, ""
+            "tracking_incomplete": dict(tracking), "file_paths": dict(file_paths),
+            "reason": reason, "run_id": run_id}, ""
 
 
 def _normalize_receipt(raw):
@@ -872,7 +878,7 @@ def begin_operation(sess, *, tool, tool_call_id, args=None, paths=None):
         paths=list(paths) if paths is not None else extract_paths(args),
         started_at=_now(),
     )
-    work_root = _operation_root(sess)
+    work_root = _operation_root(sess, tool)
     entry = {
         "operation_id": operation.operation_id,
         "run_id": operation.run_id,
@@ -906,21 +912,23 @@ def begin_operation(sess, *, tool, tool_call_id, args=None, paths=None):
     return operation
 
 
-def _operation_root(sess):
-    """`sess` 的工具这次实际使用的工作根目录（realpath）。拿不到返回空串。
+def _operation_root(sess, tool):
+    """`sess` 的工具 `tool` 这次实际使用的工作目录（realpath）。拿不到返回空串。
 
-    按**传进来的会话**算，不按当前线程碰巧绑着谁算：借用绑定调 `_project_cwd()`，
-    与工具自己解析路径用的是同一套规则（worktree → 会话项目 → 进程工作目录），不另抄一份。
-    借用必须用 get_bound / restore_bound——拿 current_session() 存旧值的话，
-    未绑定的线程"还原"时会被永久绑死在别的会话上（B06 踩过）。
+    按**这个工具自己的目录规则**算（`tools_common.tool_work_root`）：命令类跟随 cd 用
+    shell 工作目录，文件类按项目根。早先一律用项目根——`cd B` 之后命令写在 B，记录却是 A。
+    按**传进来的会话**算，不按当前线程碰巧绑着谁算：借用绑定调它，与工具自己用的是同一套
+    规则（worktree → 会话项目 → 进程工作目录），不另抄一份。借用必须用 get_bound /
+    restore_bound——拿 current_session() 存旧值的话，未绑定的线程"还原"时会被永久绑死在
+    别的会话上（B06 踩过）。
     """
     from . import session as _session_mod
     try:
-        from .tools_common import _project_cwd
+        from .tools_common import tool_work_root
         previous = _session_mod.get_bound()
         _session_mod.bind_thread(sess)
         try:
-            root = _project_cwd()
+            root = tool_work_root(tool)
         finally:
             _session_mod.restore_bound(previous)
         return os.path.realpath(root) if root else ""
@@ -1016,14 +1024,18 @@ def _clear_operation(sess, session_id, operation_id):
 
 
 def discard_inflight(session_id):
-    """删除会话的整个 sidecar（删会话时用）。sidecar 不进侧栏索引，
+    """删除会话的整个 sidecar 及其隔离留底文件（删会话时用）。sidecar 不进侧栏索引，
     也不能作为复活已删除会话的依据。"""
-    path = inflight_path(session_id)
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except Exception as error:
-        logger.warning(f"删除 inflight 文件失败 {session_id}: {error}")
+    import glob
+    paths = [inflight_path(session_id)]
+    paths += glob.glob(os.path.join(memory_dir(),
+                                    f"{glob.escape(session_id)}.inflight.unreadable-*.json"))
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as error:
+            logger.warning(f"删除 inflight 文件失败 {path}: {error}")
 
 
 def classify_inflight(session_id, *, last_receipt=None, recent_receipts=None):
@@ -1065,11 +1077,44 @@ def classify_inflight(session_id, *, last_receipt=None, recent_receipts=None):
                                    "可能已执行、也可能没执行，请核对现场后再决定，不自动重放。")})
     for raw in doc.get("malformed") or []:
         # 认不出是哪个操作、结果如何——按结果未知对待，交给恢复去要求补验证。
+        # `raw` 是**完整原文**（摘除前要整份留底）；operation.raw 只是给人看的截断预览。
         out.append({"operation": {"operation_id": "", "tool": "", "paths": [],
                                   "raw": _preview_raw(raw)},
-                    "status": "unreadable",
+                    "status": "unreadable", "raw": raw,
                     "detail": "执行前记录里有一条无法解析：不知道是哪个操作，按结果未知处理。"})
     return out, ""
+
+
+def _canonical(raw):
+    return json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def archive_malformed(session_id, entries):
+    """把解析不了的执行前条目**完整**写进单独的隔离文件。返回 (文件名, 错误原因)。
+
+    展示可以截断，摘除前的留底必须完整：早先恢复说明里只存每条前 300 字、最多 20 条，
+    随后却把 sidecar 里的全部原文删掉——21 条损坏记录只剩 20 条截断预览，
+    末尾内容和第 21 条永久丢失。现在原文整份隔离留底，历史里只放摘要和对这个文件的引用。
+
+    文件名取内容哈希：同一批条目交接两次（第一次存盘失败、下次重来）落在同一个文件上，
+    不会越攒越多。写不成功就返回错误，调用方据此**不摘** sidecar 里的原文。
+    """
+    if not entries:
+        return "", ""
+    import hashlib
+    body = [raw for raw in entries]
+    digest = hashlib.sha256("\n".join(_canonical(raw) for raw in body).encode("utf-8"))
+    name = f"{session_id}.inflight.unreadable-{digest.hexdigest()[:16]}.json"
+    doc = {"version": INFLIGHT_VERSION, "session_id": session_id, "archived_at": _now(),
+           "reason": "执行前记录里无法解析的条目；按结果未知处理后从 sidecar 摘出，原文在此完整保留",
+           "count": len(body), "entries": body}
+    try:
+        from . import memory
+        memory._atomic_write_json(os.path.join(memory_dir(), name), doc)
+    except Exception as error:
+        logger.warning(f"无法解析的执行前记录留底失败 {session_id}: {error}")
+        return "", str(error)
+    return name, ""
 
 
 def _preview_raw(raw):
@@ -1080,18 +1125,22 @@ def _preview_raw(raw):
     return text[:300]
 
 
-def drop_malformed(sess, session_id):
-    """恢复说明落盘（其中已记下这些条目的原文预览）之后，把 sidecar 里无法解析的条目摘掉。
+def drop_malformed(sess, session_id, archived):
+    """原文已整份留底、恢复说明已落盘之后，把 sidecar 里**这几条**无法解析的条目摘掉。
 
+    `archived` 是已经写进隔离文件的那批原文；只摘它们，不碰期间可能新出现的别的条目。
     不摘的话，下一次打开又会为它们报一遍"结果未知"、再开一次盲区，每一轮都过不了闸门。
     """
+    done = {_canonical(raw) for raw in archived or []}
+    if not done:
+        return False
     with _inflight_lock(sess):
         doc, error = _read_inflight_raw(session_id)
         if doc is None or not doc.get("malformed"):
             return False
-        doc["malformed"] = []
+        doc["malformed"] = [raw for raw in doc["malformed"] if _canonical(raw) not in done]
         try:
-            if doc["operations"]:
+            if doc["operations"] or doc["malformed"]:
                 _write_inflight(session_id, doc)
             else:
                 path = inflight_path(session_id)

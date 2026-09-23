@@ -108,7 +108,9 @@ def refresh_workspace_tracking(v):
             for path in sorted(previous.keys() | current.keys()):
                 before, after = previous.get(path), current.get(path)
                 if before is None or after is None or before[1] != after[1] or before[0][-1] != after[0][-1]:
-                    mark_dirty(v, path)
+                    # 位置一起记：这个根目录不一定是项目根（恢复时会给别的目录种基线），
+                    # 相对路径本身说不出它相对的是谁。
+                    mark_dirty(v, path, abs_path=os.path.join(root, path))
         v["workspace_snapshots"][root] = current
 
 

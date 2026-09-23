@@ -144,7 +144,8 @@ def _norm_vpath(path: str) -> str:
 
 def _mark_current_dirty(full_path: str) -> None:
     try:
-        _v_mark_dirty(_session.get_verification(), _norm_vpath(full_path))
+        _v_mark_dirty(_session.get_verification(), _norm_vpath(full_path),
+                      abs_path=os.path.realpath(_resolve_path(full_path)))
     except Exception as e:
         logger.debug(f"验证状态标记 dirty 失败: {e}")
 
@@ -162,6 +163,18 @@ def _shell_cwd() -> str:
     if base and os.path.isdir(base):
         return base
     return _project_cwd()
+
+
+# 在 shell 工作目录（`_shell_cwd()`，跟随 cd）里执行的工具。其余工具按项目根解析路径
+# （文件类、git 类）。执行前记录据此写下工具**实际**的工作目录——早先一律按项目根记，
+# `cd B` 之后命令明明写在 B，记录却是项目 A，恢复时去 A 要求补验证，B 的改动没人管。
+# 改了某个工具用哪个目录时同步这里；test_b04_second_review.py 有一条用例按源码核对这份清单。
+SHELL_CWD_TOOLS = frozenset({"run_command", "run_tests", "check_code"})
+
+
+def tool_work_root(tool: str) -> str:
+    """工具 `tool` 这次会在哪个目录执行。"""
+    return _shell_cwd() if tool in SHELL_CWD_TOOLS else _project_cwd()
 
 
 def _parse_cd(command: str):

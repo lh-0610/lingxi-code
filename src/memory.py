@@ -204,6 +204,8 @@ def _snapshot_progress(sess):
             pending = {"files": list(pending.get("files") or []),
                        "code_files": list(pending.get("code_files") or []),
                        "tracking_incomplete": dict(pending.get("tracking_incomplete") or {}),
+                       # 改动文件的实际位置：放行时要求检查覆盖到这里（B04 复核）
+                       "file_paths": dict(pending.get("file_paths") or {}),
                        "reason": pending.get("reason") or "",
                        "run_id": pending.get("run_id") or ""}
         else:
@@ -1080,6 +1082,7 @@ def load_session(session_id, *, session=None):
             "files": list(_pv.get("files") or []),
             "code_files": list(_pv.get("code_files") or []),
             "tracking_incomplete": dict(_pv.get("tracking_incomplete") or {}),
+            "file_paths": dict(_pv.get("file_paths") or {}),
             "reason": _pv.get("reason") or "",
             "run_id": _pv.get("run_id") or "",
         }

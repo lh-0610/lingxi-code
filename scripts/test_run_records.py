@@ -1010,8 +1010,9 @@ class TestPendingVerification:
         run_records.begin_run(sess)
         verification.mark_blind_period(sess.verification, root, "枚举项目文件超时")
 
-        verification.mark_tests(sess.verification, True, "3 passed")
-        verification.mark_diff_reviewed(sess.verification)
+        # 合成证据要说明在哪儿做的：盲区按目录记着，只有覆盖到它的检查才算数（B04 复核）
+        verification.mark_tests(sess.verification, True, "3 passed", root=root)
+        verification.mark_diff_reviewed(sess.verification, root=root)
         assert verification.get_verification_gaps(sess.verification) == []
 
         run = sess.last_run
@@ -1043,8 +1044,8 @@ class TestPendingVerification:
         os.makedirs(root, exist_ok=True)
         run_records.begin_run(sess)
         verification.mark_blind_period(sess.verification, root, "第一次超时")
-        verification.mark_tests(sess.verification, True, "3 passed")
-        verification.mark_diff_reviewed(sess.verification)
+        verification.mark_tests(sess.verification, True, "3 passed", root=root)
+        verification.mark_diff_reviewed(sess.verification, root=root)
         assert verification.get_verification_gaps(sess.verification) == []
 
         verification.mark_blind_period(sess.verification, root, "第二次超时")

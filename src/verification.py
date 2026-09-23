@@ -34,6 +34,13 @@ def new_verification() -> dict:
         "tests_reason": "",       # tests_passed=None 时的简短原因
         "diff_reviewed": False,   # 是否调过 git_diff（写入后）
         "gate_prompted": False,   # 完成闸门是否已提示过一次（两次尝试机制）
+        # ── 检查落在哪儿（B04 复核）──
+        # 义务是按目录记的（盲区根目录、改动文件的实际位置），放行却只看上面两个全局标志的话，
+        # A 目录里的改动能被 B 目录的一次检查清掉。所以还要记：本轮测试通过时实际在哪个目录跑、
+        # diff 实际查的是哪个目录；每个改动文件实际在哪儿。失效规则与两个全局标志相同。
+        "tests_roots": [],        # 通过的测试实际运行的目录（realpath）
+        "diff_roots": [],         # 算作审阅过的 diff 实际覆盖的目录 / 路径（realpath）
+        "dirty_abs": {},          # dirty 路径 → 实际绝对位置（位置未知的不在里面）
         # ── B06 结构化证据 ──
         # 每条记录来自**实际执行位置**（run_tests / 各 checker），带 argv / cwd / 退出码 /
         # 耗时。布尔值 + 原因不足以支撑结果卡：那样只能说"通过了"，说不出跑的是什么命令、
@@ -61,6 +68,9 @@ def reset_verification(v: dict) -> None:
     v["tests_reason"] = ""
     v["diff_reviewed"] = False
     v["gate_prompted"] = False
+    v["tests_roots"] = []
+    v["diff_roots"] = []
+    v["dirty_abs"] = {}
     # 证据是**本轮**的执行记录：上一轮的已经随 last_run 落盘，留在内存里只会让结果卡
     # 把上轮跑过的命令算进这一轮。change_revision 同归零，它只在一轮之内用于比新旧。
     v["evidence"] = []
@@ -96,10 +106,12 @@ def bump_change_revision(v: dict) -> int:
     return v["change_revision"]
 
 
-def mark_dirty(v: dict, rel_path: str) -> None:
+def mark_dirty(v: dict, rel_path: str, *, abs_path: str | None = None) -> None:
     """写文件工具成功后调用，标记文件为脏。
 
     rel_path: 相对于项目根的路径（已规范化的）。
+    abs_path: 这个文件**实际**在哪儿（知道的话）。放行时要求检查覆盖到这个位置——
+    相对路径本身说不出它相对的是哪个目录，跨目录的检查就能把它蒙混过去。
     """
     if not rel_path:
         return
@@ -109,15 +121,47 @@ def mark_dirty(v: dict, rel_path: str) -> None:
         v["dirty_files"].append(rel_path)
     if _is_code_file(rel_path) and rel_path not in v["code_dirty_files"]:
         v["code_dirty_files"].append(rel_path)
+    if abs_path:
+        v.setdefault("dirty_abs", {})[rel_path] = _real(abs_path)
     # 写入即失效：该文件的静态检查结果作废
     v["checks"].pop(rel_path, None)
     # 写入即失效：diff 需要重新审查
     v["diff_reviewed"] = False
+    v["diff_roots"] = []
     # 写入即失效：测试结果作废（如果有代码文件被改）
     if _is_code_file(rel_path):
         v["tests_run"] = False
         v["tests_passed"] = None
         v["tests_reason"] = ""
+        v["tests_roots"] = []
+
+
+def _real(path):
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return os.path.normpath(path)
+
+
+def _add_root(v, key, root):
+    real = _real(root)
+    roots = v.setdefault(key, [])
+    if not any(_same(real, r) for r in roots):
+        roots.append(real)
+
+
+def _same(a, b):
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def covers(check_root, target):
+    """在 check_root 做的检查算不算覆盖了 target（target 是它本身或在它下面）。"""
+    try:
+        c = os.path.normcase(os.path.normpath(check_root))
+        t = os.path.normcase(os.path.normpath(target))
+        return os.path.commonpath([c, t]) == c
+    except ValueError:              # 不同盘符
+        return False
 
 
 def mark_blind_period(v: dict, root: str, reason: str) -> None:
@@ -142,6 +186,8 @@ def mark_blind_period(v: dict, root: str, reason: str) -> None:
     v["tests_passed"] = None
     v["tests_reason"] = ""
     v["diff_reviewed"] = False
+    v["tests_roots"] = []
+    v["diff_roots"] = []
 
 
 # 证据的状态枚举。"没跑起来"(not_run) / "超时" / "取消" 必须和 "跑了且失败"(failed) 分开：
@@ -259,20 +305,57 @@ def mark_check(v: dict, rel_path: str, passed: bool | None, checker: str = "") -
     v["checks"][rel_path] = {"passed": passed, "checker": checker}
 
 
-def mark_tests(v: dict, passed: bool | None, reason: str = "") -> None:
+def mark_tests(v: dict, passed: bool | None, reason: str = "", *, root: str | None = None) -> None:
     """run_tests 工具成功后调用，记录测试结果。
 
     passed: True=全部通过, False=有失败, None=无法确定
     reason: 简短原因（如 "0 failed", "解析未命中" 等）
+    root: 这次测试**实际运行的目录**。只有通过时才记；失败 / 结论不明就清空——
+    之后得在对应目录重新跑通，不能靠别处更早的一次绿灯顶替。没有 root 的调用
+    不覆盖任何按目录记着的义务。
     """
     v["tests_run"] = True
     v["tests_passed"] = passed
     v["tests_reason"] = reason
+    if passed is True:
+        if root:
+            _add_root(v, "tests_roots", root)
+    else:
+        v["tests_roots"] = []
 
 
-def mark_diff_reviewed(v: dict) -> None:
-    """git_diff 工具成功后调用。"""
+def mark_diff_reviewed(v: dict, *, root: str | None = None) -> None:
+    """git_diff 工具成功后调用。root：这次 diff 实际覆盖的目录（或限定的路径）。"""
     v["diff_reviewed"] = True
+    if root:
+        _add_root(v, "diff_roots", root)
+
+
+def _located_obligations(v):
+    """按位置记着的义务：(需要测试覆盖的位置, 需要 diff 覆盖的位置)。
+
+    盲区根目录；以及位置已知的改动文件（绝对路径的 dirty 本身就是位置）。
+
+    两类盲区不参与按位置核对，仍由全局的测试 + diff 了结——否则就是永远过不去的死结：
+    占位键 `（工作目录无法确定）` 不是路径，无从谈"覆盖"；**已不存在的目录**没法再在那里
+    跑任何检查（里面的内容也已经不在了）。搬家的情形不走这里：确认是同一个项目后，
+    义务已经迁到新位置、照常按新目录核对。
+    """
+    blind = [r for r in (v.get("unknown_changes") or {})
+             if os.path.isabs(r) and os.path.isdir(r)]
+    located = dict(v.get("dirty_abs") or {})
+    for path in v.get("dirty_files") or []:
+        if path not in located and os.path.isabs(path):
+            located[path] = path
+    code = set(v.get("code_dirty_files") or [])
+    need_tests = blind + [p for f, p in located.items() if f in code]
+    need_diff = blind + [p for f, p in located.items() if f in (v.get("dirty_files") or [])]
+    return need_tests, need_diff
+
+
+def _describe_places(paths, limit=3):
+    shown = "、".join(paths[:limit])
+    return shown + (f" 等 {len(paths)} 处" if len(paths) > limit else "")
 
 
 def get_verification_gaps(v: dict) -> list[str]:
@@ -348,6 +431,28 @@ def gaps_from_state(v: dict) -> list[str]:
         _what = "本轮已有文件修改" if has_any_changes else "本轮可能有未被观察到的文件修改"
         gaps.append(f"{_what}{_blind_note}，但尚未调用 git_diff 查看最终改动。")
 
+    # 4. 检查必须落在义务所在的目录上（B04 复核）。义务按目录记着、放行却只看上面的全局标志的话，
+    #    A 目录里的未知写入能被 B 目录的一次检查清掉——实测过：命令在 A 改了文件后中断，
+    #    在 B 重开、只在 B 跑测试看 diff，agent_loop 返回 completed，A 的改动从头到尾没人看过。
+    #    只在全局标志已满足时才核对位置：没跑 / 没看的情形上面已经各有一条了。
+    need_tests, need_diff = _located_obligations(v)
+    if (has_code_changes or blind) and v["tests_run"] and v["tests_passed"] is True:
+        missing = [p for p in need_tests
+                   if not any(covers(r, p) for r in v.get("tests_roots") or [])]
+        if missing:
+            where = _describe_places(v.get("tests_roots") or []) or "（没有记录运行目录）"
+            gaps.append(f"测试是在 {where} 跑的，没有覆盖 {_describe_places(missing)}——"
+                        "那里的改动还没测过。请先用 run_command 执行 cd 切到对应目录，"
+                        "再调用 run_tests 补跑。")
+    if (has_any_changes or blind) and v["diff_reviewed"]:
+        missing = [p for p in need_diff
+                   if not any(covers(r, p) for r in v.get("diff_roots") or [])]
+        if missing:
+            where = _describe_places(v.get("diff_roots") or []) or "（没有记录查看范围）"
+            gaps.append(f"git_diff 查看的是 {where}，没有覆盖 {_describe_places(missing)}——"
+                        "那里的改动还没看过。git_diff 在项目目录里执行：目录不在当前项目里时，"
+                        "需要把它作为项目打开后再查看；在那之前这一项保持未验证。")
+
     return gaps
 
 
@@ -374,6 +479,9 @@ def summarize_obligations(v) -> dict:
         return pending
     pending["files"] = list(v.get("dirty_files") or [])
     pending["code_files"] = list(v.get("code_dirty_files") or [])
+    # 位置跟着义务一起跨轮：只存相对路径的话，下一轮换了目录跑检查就又能蒙混过去。
+    located = v.get("dirty_abs") or {}
+    pending["file_paths"] = {f: located[f] for f in pending["files"] if f in located}
     # 两个来源都要存：`unknown_changes` 是已经确认过的盲区，`tracking_errors` 是此刻还
     # 读不了（它也意味着刚刚那段时间没人看着）。只存后者的话，"目录已经恢复、但盲区未了结"
     # 这个最关键的状态在重启后就没了。
@@ -396,9 +504,11 @@ def restore_obligations(v: dict, pending) -> None:
     """
     if not isinstance(v, dict) or not isinstance(pending, dict):
         return
+    located = pending.get("file_paths") if isinstance(pending.get("file_paths"), dict) else {}
     for path in pending.get("files") or []:
         if isinstance(path, str) and path:
-            mark_dirty(v, path)
+            where = located.get(path)
+            mark_dirty(v, path, abs_path=where if isinstance(where, str) and where else None)
     # 扩展名判断不出是代码的（比如无后缀的脚本），按上次的判断补回，不靠这次重算。
     for path in pending.get("code_files") or []:
         if isinstance(path, str) and path and path not in v["code_dirty_files"]:

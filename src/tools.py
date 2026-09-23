@@ -1896,7 +1896,9 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
         if _status == "not_run":
             _v_mark_tests(_session.get_verification(), None, _reason)
         else:
-            _v_mark_tests(_session.get_verification(), result.returncode == 0)
+            # root：这次测试**实际**在哪个目录跑（run_cwd 跟随 cd）。按目录记着的义务
+            # 只能被覆盖到那个目录的测试了结——别处的一次绿灯不能替它背书。
+            _v_mark_tests(_session.get_verification(), result.returncode == 0, root=run_cwd)
 
     return summary
 

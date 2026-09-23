@@ -116,8 +116,9 @@ def test_validation_after_command_is_not_invalidated_again(project_dir, monkeypa
     v = session.get_verification()
 
     def validated(args):
-        verification.mark_tests(v, True)
-        verification.mark_diff_reviewed(v)
+        # 合成证据要说明在哪儿做的：改动的位置已知，只有覆盖到它的检查才算数（B04 复核）
+        verification.mark_tests(v, True, root=str(project_dir))
+        verification.mark_diff_reviewed(v, root=str(project_dir))
         return "all passed"
 
     monkeypatch.setattr(streaming, "get_tool_map", lambda: {"run_tests": SimpleNamespace(invoke=validated)})
