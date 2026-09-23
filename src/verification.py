@@ -154,14 +154,57 @@ def _same(a, b):
     return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
-def covers(check_root, target):
-    """在 check_root 做的检查算不算覆盖了 target（target 是它本身或在它下面）。"""
+def covers(check_root, target, *, cache=None):
+    """在 check_root 做的检查算不算覆盖了 target。
+
+    `cache`：同一次核对里复用"某路径属于哪个工作区"的结论（每个路径要逐级查目录）。
+    只在一次计算内有效，不跨调用保留——之后新建的 worktree 不能被旧结论漏掉。
+
+    两个条件都要满足：
+    1. target 就是它本身或在它下面（路径包含）；
+    2. 两者在**同一个 Git 工作区**里——不能跨过 worktree / 子模块 / 嵌套仓库的边界。
+
+    只看路径包含是不够的：灵犀的隔离区就放在主项目的 `.lingxi-worktrees/` 下面，
+    路径上"被包含"，却是另一份文件现场——主项目的测试跑不到它、`git diff` 也看不见它的改动
+    （复核实测：隔离区里改了 app.py 后中断，重开回到主项目、只查主项目，返回 completed）。
+    共享 Git 历史也不算同一个现场。两边都不在 Git 工作区里时，只按路径包含判断。
+    """
     try:
         c = os.path.normcase(os.path.normpath(check_root))
         t = os.path.normcase(os.path.normpath(target))
-        return os.path.commonpath([c, t]) == c
+        if os.path.commonpath([c, t]) != c:
+            return False
     except ValueError:              # 不同盘符
         return False
+    return _work_tree_root(target, cache) == _work_tree_root(check_root, cache)
+
+
+def _work_tree_root(path, cache=None):
+    if cache is not None:
+        key = os.path.normcase(os.path.normpath(path))
+        if key not in cache:
+            cache[key] = _find_work_tree_root(path)
+        return cache[key]
+    return _find_work_tree_root(path)
+
+
+def _find_work_tree_root(path):
+    """path 所在 Git 工作区的根（规范化后），不在任何工作区里返回 None。
+
+    从 path 本身（是目录的话）往上找第一个带 `.git` 的目录。`.git` 是目录（普通仓库、
+    独立的嵌套仓库）或文件（linked worktree、子模块）都算边界。path 不存在（比如被删掉的
+    文件）时从仍然存在的上级目录找起，照样能认出它原来属于哪个工作区。
+    """
+    current = os.path.normpath(path)
+    if not os.path.isdir(current):
+        current = os.path.dirname(current)
+    while True:
+        if os.path.exists(os.path.join(current, ".git")):
+            return os.path.normcase(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
 
 
 def mark_blind_period(v: dict, root: str, reason: str) -> None:
@@ -436,9 +479,10 @@ def gaps_from_state(v: dict) -> list[str]:
     #    在 B 重开、只在 B 跑测试看 diff，agent_loop 返回 completed，A 的改动从头到尾没人看过。
     #    只在全局标志已满足时才核对位置：没跑 / 没看的情形上面已经各有一条了。
     need_tests, need_diff = _located_obligations(v)
+    tree_cache = {}                 # 本次核对内复用"路径属于哪个 Git 工作区"
     if (has_code_changes or blind) and v["tests_run"] and v["tests_passed"] is True:
         missing = [p for p in need_tests
-                   if not any(covers(r, p) for r in v.get("tests_roots") or [])]
+                   if not any(covers(r, p, cache=tree_cache) for r in v.get("tests_roots") or [])]
         if missing:
             where = _describe_places(v.get("tests_roots") or []) or "（没有记录运行目录）"
             gaps.append(f"测试是在 {where} 跑的，没有覆盖 {_describe_places(missing)}——"
@@ -446,12 +490,13 @@ def gaps_from_state(v: dict) -> list[str]:
                         "再调用 run_tests 补跑。")
     if (has_any_changes or blind) and v["diff_reviewed"]:
         missing = [p for p in need_diff
-                   if not any(covers(r, p) for r in v.get("diff_roots") or [])]
+                   if not any(covers(r, p, cache=tree_cache) for r in v.get("diff_roots") or [])]
         if missing:
             where = _describe_places(v.get("diff_roots") or []) or "（没有记录查看范围）"
             gaps.append(f"git_diff 查看的是 {where}，没有覆盖 {_describe_places(missing)}——"
-                        "那里的改动还没看过。git_diff 在项目目录里执行：目录不在当前项目里时，"
-                        "需要把它作为项目打开后再查看；在那之前这一项保持未验证。")
+                        "那里的改动还没看过。git_diff 在项目目录里执行：目录不在当前项目里、"
+                        "或属于另一个 Git 工作区（隔离区 / 子模块 / 嵌套仓库）时，需要把它作为项目"
+                        "打开后再查看；在那之前这一项保持未验证。")
 
     return gaps
 
