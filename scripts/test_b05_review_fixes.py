@@ -255,10 +255,15 @@ def _ui_host(executed=None, *, wait_limit=3):
 
 @pytest.fixture
 def timers(monkeypatch):
-    """把 QTimer.singleShot 换成手动推进：测试里一步一步地走屏障。"""
+    """把 QTimer.singleShot 换成手动推进：测试里一步一步地走屏障。
+
+    生产代码的 singleShot 现在带 receiver 上下文（窗口销毁时自动取消回调），
+    桩按 (ms, receiver, fn) 三参接收——receiver 在这里无需记录，只收集回调。
+    """
     from src.ui import chat_window
     pending = []
-    monkeypatch.setattr(chat_window, "QTimer", SimpleNamespace(singleShot=lambda ms, fn: pending.append(fn)))
+    monkeypatch.setattr(chat_window, "QTimer",
+                        SimpleNamespace(singleShot=lambda ms, receiver, fn: pending.append(fn)))
     return pending
 
 

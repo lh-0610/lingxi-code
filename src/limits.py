@@ -1,7 +1,11 @@
 """Shared limits for conversation, tools, and debug views."""
 
 
-SESSION_HISTORY_LIMIT = 50
+# 侧栏每个分组（项目 / 无项目 / 知识库）初始显示的会话条数，超出部分通过组尾的
+# 「加载更多」按钮按步长追加。这两个数字**只影响界面展示数量**——会话历史
+# （正文 + 索引条目）永远全量保留，删除只能由用户主动发起，与它们无关。
+SIDEBAR_GROUP_VISIBLE_INITIAL = 30
+SIDEBAR_GROUP_VISIBLE_STEP = 30
 
 # agent 主循环单次交互的最大轮数**默认值**（一轮 = 一次模型调用 + 它请求的工具执行）。
 # 实际生效值是 config.AGENT_MAX_ROUNDS（config.json 的 agent_max_rounds 可覆盖，

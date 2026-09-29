@@ -359,9 +359,15 @@ python main.py
 
 ### 持久化（memory.py 并发安全）
 - 所有读写 `chat_memory/` 的函数都被 `threading.RLock` 串行化（`save_session` / `_update_index` / `_write_session_title` / `load_session` / `list_sessions` / `delete_session` / `move_sessions_to_no_project` / `_ensure_memory_dir`）
-- `save_session` 必须在同一临界区内取得 ID/标题/历史快照并写 session/index、rekey；只锁写盘会让 UI 的旧快照覆盖 worker 的新回复。
+- save_session 必须在同一临界区内取得 ID/标题/历史快照并写 session/index、rekey；只锁写盘会让 UI 的旧快照覆盖 worker 的新回复。
 - 用 RLock 不用 Lock：`save_session` 自己持锁时还会调 `_update_index`（也持锁），普通 Lock 会自死锁
 - 修复了原来"快速发两条消息时，标题生成线程和 save_session 同时改 index.json 互相覆盖丢会话"的并发 bug
+
+### 会话历史保留与侧栏加载更多
+- **索引全量保留，删除只能由用户发起**：`_update_index` 不做任何数量截断，新会话插最前、旧条目原地更新（刷新 `updated`）。早先索引截断到 `SESSION_HISTORY_LIMIT=50` 并把挤出名额的会话**正文一并删掉**——内存里还开着的靠注册表检查幸免，没打开的连正文带索引一起消失且无法恢复。`SESSION_HISTORY_LIMIT` 常量已废除：不要把"历史保留"和"界面展示数量"混为一谈。
+- **展示数量是界面状态**（`limits.SIDEBAR_GROUP_VISIBLE_INITIAL/STEP`，各 30）：侧栏每个分组初始显示 30 条，组尾「加载更多」按步长追加；每组按 `collapse_key`（项目路径 / 无项目 / RAG 专用键）**独立计数**——RAG 与编码"无项目"都以 project=None 渲染，计数与折叠共用同一套键区分，互不串用。计数是内存级（`_group_visible_counts`），普通刷新（重渲染）不重置；删除会话后剩余不足时按钮自然消失。
+- **排序**：更新时间倒序，同刻按 id 倒序（id 含"年月日_时分秒_微秒"，跨重启稳定）。保存旧会话会刷新它的 `updated`，把它带回所在分组的近期位置。
+- **正常保存永不触发历史清理**；用户主动删除（`delete_session`）连正文 + 索引条目 + 索引修复登记 + inflight sidecar 一起删，修复路径以正文为唯一真相（正文不在 → 销案不复活），已删除的会话不会因后续保存、索引修复或重启复活。不做孤儿 JSON 扫描重建索引——那会复活用户主动删除的会话，也不声称能恢复已被旧代码删除的数据。
 
 ### 角色卡
 - `roles/*.md` 直接作为 system prompt
@@ -485,6 +491,7 @@ python main.py
 - QTextBrowser 对 `<div margin>` / `<p padding>` 支持差；要给消息按钮留垂直空白用**表格 spacer**（`<table><tr><td style="height:14px">`），HTML 邮件时代的老套路最稳
 - Enter 发送、Shift+Enter 换行 通过 `eventFilter` 在 `self.entry` 上拦截
 - **跨线程 QObject 调用必须用 Signal**：worker 直接动 `QTimer.start/stop` / `widget.update()` 会让 timer 失去 thread affinity 永久失活。范式参考 `SignalBridge.confirm_request`
+- **`QTimer.singleShot` 针对窗口方法的调用必须传 receiver 上下文**：`QTimer.singleShot(ms, self, method)`——窗口销毁时 Qt 自动取消回调；不传 context 的话（`singleShot(ms, method)`），窗口销毁后未到期的回调仍会触发并打向已删除的控件树（复实测：加载会话安排最长 700ms 的滚动回调，销毁窗口后抛 `MessageView already deleted`，进程退出阶段表现为 access violation）。测试侧对应约定见 `scripts/test_sidebar_load_more.py` 的 `_destroy_ui_cleanly`：先在窗口存活时放完挂着的零秒回调，再 deleteLater + DeferredDelete 真正销毁
 - `QPixmap.setDevicePixelRatio(dpr)` 后拿物理像素尺寸要用 `deviceIndependentSize()` 否则在高 DPI 上偏移
 - 加载 `.ico` 当 widget icon 时**别直接 `QPixmap(path).scaled()`**——会从 .ico 多分辨率位图里随便挑一张可能拿到 16×16 那张。要用 `QIcon(path).pixmap(QSize(256,256)).scaled(...)`，QIcon 会挑最接近目标尺寸的内嵌位图
 

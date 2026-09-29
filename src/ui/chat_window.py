@@ -133,7 +133,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._refresh_session_list()
         self._restore_role_card_ui()
         self._show_empty_state()
-        QTimer.singleShot(300, self._show_current_model_config_warning)
+        QTimer.singleShot(300, self, self._show_current_model_config_warning)
 
     # ── 主题工具 ──
     def _t(self, key):
@@ -198,7 +198,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
         _apply()
         # 再延迟一次：有些场景 Qt 在 init 过程中会重置 palette，延一个 tick 再覆盖
-        QTimer.singleShot(0, _apply)
+        QTimer.singleShot(0, self, _apply)
 
     def _apply_theme(self):
         """重新生成全局 QSS，并刷新所有用 setStyleSheet 直接设置的 chrome。"""
@@ -464,7 +464,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 初次打开时 viewport 还没完成最终布局，立刻算出来的 width/height
         # 会偏小导致欢迎态居中错位；延迟几次再 reposition，覆盖到布局稳定后的尺寸。
         for delay in (0, 30, 120):
-            QTimer.singleShot(delay, self._position_empty_state)
+            QTimer.singleShot(delay, self, self._position_empty_state)
 
     def _clear_empty_state(self):
         if getattr(self, "_empty_state_visible", False):
@@ -594,7 +594,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if not hasattr(self, "plan_panel") or not self.plan_panel.isVisible():
             return
         for delay in (0, 30, 120):
-            QTimer.singleShot(delay, self._position_plan_panel)
+            QTimer.singleShot(delay, self, self._position_plan_panel)
 
     def _plan_panel_target_height(self):
         """按当前浮层计算高度。"""
@@ -803,7 +803,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 self.scroll_bottom_btn.raise_()
 
         for delay in (0, 16, 50, 120, 250, 400, 700):
-            QTimer.singleShot(delay, lambda final=(delay == 700): force_bottom(final))
+            QTimer.singleShot(delay, self, lambda final=(delay == 700): force_bottom(final))
 
 
     # ── 输入区 ──
@@ -911,7 +911,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
         wrapper_layout.addWidget(container, 0, Qt.AlignHCenter)
         parent_layout.addWidget(wrapper)
-        QTimer.singleShot(0, self._resize_input_container)
+        QTimer.singleShot(0, self, self._resize_input_container)
 
     def _resize_input_container(self):
         if not hasattr(self, "input_container") or not hasattr(self, "chat_area"):
@@ -936,7 +936,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 的新尺寸/位置重对齐——立即调会拿到布局未稳定的旧几何，导致位置偏
         if hasattr(self, "_file_completer") and self._file_completer.isVisible():
             from PySide6.QtCore import QTimer as _QTimer
-            _QTimer.singleShot(0, self._position_completer)
+            _QTimer.singleShot(0, self, self._position_completer)
 
 
     def _refresh_project_indicator(self):
@@ -1361,7 +1361,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._sidebar_visible = not self._sidebar_visible
         self.sidebar.setVisible(self._sidebar_visible)
         for delay in (0, 30, 120):
-            QTimer.singleShot(delay, self._refresh_responsive_layout)
+            QTimer.singleShot(delay, self, self._refresh_responsive_layout)
 
     def _refresh_responsive_layout(self):
         self._resize_input_container()
@@ -2090,7 +2090,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         toast.show()
         toast.raise_()
         self._toast_label = toast
-        QTimer.singleShot(duration, lambda: self._dismiss_toast(toast))
+        QTimer.singleShot(duration, self, lambda: self._dismiss_toast(toast))
 
     def _dismiss_toast(self, toast):
         try:
@@ -2326,7 +2326,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if attempts >= self._RESUME_WAIT_LIMIT:
                 self._resume_abort(sess, card, "上一轮仍在结束，请稍后再点「继续任务」")
                 return
-            QTimer.singleShot(self._RESUME_WAIT_MS,
+            QTimer.singleShot(self._RESUME_WAIT_MS, self,
                               lambda: self._resume_wait(sess, view, card, accept, attempts + 1))
             return
         try:
@@ -2581,7 +2581,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if retries >= self._RESUME_WAIT_LIMIT:
                 self._undo_switch_abort(sess, "当前运行仍未结束，撤销任务切换没有执行，请稍后再试")
                 return
-            QTimer.singleShot(self._RESUME_WAIT_MS, lambda: self._wait_worker_and_undo_switch(
+            QTimer.singleShot(self._RESUME_WAIT_MS, self, lambda: self._wait_worker_and_undo_switch(
                 sess, new_task_id, switch_version, retries + 1))
             return
         try:

@@ -19,7 +19,6 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Tool
 from . import state
 from .paths import logger, memory_dir, memory_index
 from .roles import get_system_prompt
-from .limits import SESSION_HISTORY_LIMIT
 from .content_blocks import is_text_block, is_think_block, block_text
 
 
@@ -1033,6 +1032,16 @@ def maybe_generate_session_title():
 
 
 def _update_index(session_id, title, project=None, session_kind="code", rag_kb_dir=""):
+    """更新索引条目：已存在的原地更新（刷新 updated，把它带回列表的近期位置），
+    新会话插到最前。
+
+    索引**全量保留**，不做任何数量截断：会话历史是用户数据，删除只能由用户主动
+    发起（delete_session 连正文一起删）。早先这里把索引截断到 SESSION_HISTORY_LIMIT=50，
+    并把挤出名额的会话**正文一并删掉**——内存里还开着的靠注册表检查幸免，
+    没打开的连正文带索引一起消失且无法恢复。50 只是旧的展示数量；如今界面展示
+    数量由侧栏的分组折叠 + 「加载更多」承担（limits.SIDEBAR_GROUP_VISIBLE_*），
+    与历史保留彻底无关。
+    """
     with _LOCK:
         with open(memory_index(), "r", encoding="utf-8") as f:
             index = json.load(f)
@@ -1055,27 +1064,7 @@ def _update_index(session_id, title, project=None, session_kind="code", rag_kb_d
                 "rag_kb_dir": rag_kb_dir,
             })
 
-        kept_ids = {item["id"] for item in index[:SESSION_HISTORY_LIMIT]}
-        dropped_ids = [item["id"] for item in index[SESSION_HISTORY_LIMIT:]]
-        index = index[:SESSION_HISTORY_LIMIT]
         _atomic_write_json(memory_index(), index)
-        for old_id in dropped_ids:
-            if old_id in kept_ids or old_id == state.current_session_id:
-                continue
-            # 内存里还开着的会话（前台或后台正在跑的）不删盘——否则正在用的旧会话被挤出
-            # 50 名额时文件被删，重启即丢整段对话。
-            try:
-                from . import session as _session_mod
-                if _session_mod.get(old_id) is not None:
-                    continue
-            except Exception:
-                pass
-            old_file = os.path.join(memory_dir(), f"{old_id}.json")
-            try:
-                if os.path.exists(old_file):
-                    os.remove(old_file)
-            except Exception as e:
-                logger.warning(f"删除旧会话文件失败 {old_id}: {e}")
 
 
 def load_session(session_id, *, session=None):

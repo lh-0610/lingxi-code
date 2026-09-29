@@ -26,6 +26,7 @@ from langchain_core.messages import SystemMessage
 
 from .. import agent
 from .. import state
+from ..limits import SIDEBAR_GROUP_VISIBLE_INITIAL, SIDEBAR_GROUP_VISIBLE_STEP
 from ._base import BASE_DIR
 from .widgets import HistoryRow
 
@@ -150,7 +151,12 @@ class SidebarMixin:
     # ── 会话列表 ──
 
     def _refresh_session_list(self):
-        """按项目分组渲染：项目在上、无项目在下；每组的会话列表显示在组下方。"""
+        """按项目分组渲染：项目在上、无项目在下；每组的会话列表显示在组下方。
+
+        索引是全量的（历史不因数量被清理），每组初始只显示前
+        SIDEBAR_GROUP_VISIBLE_INITIAL 条，其余靠组尾的「加载更多」追加——
+        展示数量是界面状态，与历史保留无关，刷新不重置用户已展开的数量。
+        """
         # 清空
         while self.history_layout.count() > 1:
             item = self.history_layout.takeAt(0)
@@ -160,18 +166,25 @@ class SidebarMixin:
         from .. import projects as _projects
         from .. import session as _session
 
+        # 排序键：更新时间倒序；同刻按 id 倒序——id 是"年月日_时分秒_微秒"，
+        # 同一时刻创建的会话也能得到与重启无关的稳定顺序。保存旧会话会刷新它的
+        # updated，把它带回所在分组的近期位置。
+        def _recency(e):
+            return (e.get("updated", ""), e.get("id", ""))
+
         # 按当前工作区（活动会话的 session_kind）过滤——两个工作区各显示各自会话，互不串。
         active_kind = getattr(_session.get_active(), "session_kind", "code")
         if active_kind == "rag":
             # 知识库工作区：扁平列表、独立标题、按更新时间倒序，不做项目分组/项目节点。
             rag_sessions = agent.list_sessions("__all__", kind="rag")
-            rag_sessions.sort(key=lambda e: e.get("updated", ""), reverse=True)
+            rag_sessions.sort(key=_recency, reverse=True)
             self._render_project_group(None, "知识库对话", rag_sessions, is_active=True,
                                         collapse_key=self._RAG_FOLD_KEY)
             self.history_widget.setStyleSheet(self.history_widget.styleSheet())
             return
 
         all_sessions = agent.list_sessions("__all__", kind="code")
+        all_sessions.sort(key=_recency, reverse=True)
 
         # 按 project 分组
         grouped = {}  # path -> list[session]
@@ -216,6 +229,10 @@ class SidebarMixin:
         collapse_key：折叠状态用的键，默认用 project_path。RAG「知识库对话」与编码
         「历史会话」都以 project_path=None 渲染，折叠状态却必须各自独立——RAG 传入
         独立的 collapse_key，避免折叠其一连带折叠另一个。
+
+        展示数量同样按 collapse_key 独立维护（内存级）：初始只显示前
+        SIDEBAR_GROUP_VISIBLE_INITIAL 条，组尾「加载更多」按步长追加，刷新不重置；
+        编码项目、无项目、知识库各自计数，互不串用。
         """
         # 折叠状态(按 key,内存级,默认展开)。收起时标题带个数量,提示藏了几条会话。
         if not hasattr(self, "_collapsed_projects"):
@@ -260,13 +277,19 @@ class SidebarMixin:
             self.history_layout.insertWidget(self.history_layout.count() - 1, empty)
             return
 
+        # 展示数量（按组独立、内存级，刷新不重置）：超出部分靠「加载更多」追加
+        if not hasattr(self, "_group_visible_counts"):
+            self._group_visible_counts = {}
+        visible = self._group_visible_counts.get(fold_key, SIDEBAR_GROUP_VISIBLE_INITIAL)
+        shown = sessions[:visible]
+
         # 会话列表
         import time as _time
         from .. import session as _session
         if not hasattr(self, "_gen_started"):
             self._gen_started = {}        # sid → 生成开始 monotonic 时间戳（侧栏秒表用）
         _seen_gen = set()                 # 本轮仍在生成的 sid，循环后据此清理 _gen_started
-        for s in sessions[:30]:
+        for s in shown:
             sid = s["id"]
             title = s["title"]
             is_current = (sid == agent.current_session_id)
@@ -351,6 +374,37 @@ class SidebarMixin:
 
         # 清掉已不再生成的会话的秒表起点（下次再生成重新计时）
         self._gen_started = {k: v for k, v in self._gen_started.items() if k in _seen_gen}
+
+        # 还有没显示的会话 → 组尾「加载更多」（按步长追加本组可见数，只影响展示）
+        hidden = len(sessions) - len(shown)
+        if hidden > 0:
+            more_btn = QPushButton(f"加载更多（还有 {hidden} 条）")
+            more_btn.setObjectName("loadMoreBtn")
+            more_btn.setCursor(Qt.PointingHandCursor)
+            more_btn.setToolTip("显示更早的会话（不会影响历史保留）")
+            more_btn.setStyleSheet(
+                f"QPushButton#loadMoreBtn {{ background: transparent;"
+                f" border: 1px dashed {self._t('sidebar_border')}; border-radius: 6px;"
+                f" padding: 4px 6px; margin: 2px 8px 0 8px;"
+                f" color: {self._t('history_label')}; font-size: 11px; }}"
+                f"QPushButton#loadMoreBtn:hover {{ color: {self._t('new_chat_hover_text')};"
+                f" border-color: {self._t('new_chat_hover_text')}; }}"
+            )
+            more_btn.clicked.connect(lambda checked=False, k=fold_key: self._load_more_group(k))
+            self.history_layout.insertWidget(self.history_layout.count() - 1, more_btn)
+
+    def _load_more_group(self, fold_key):
+        """展开某分组接下来的 SIDEBAR_GROUP_VISIBLE_STEP 条。
+
+        展示数量是内存级界面状态：按分组键独立累加，普通刷新（重渲染）不重置；
+        删除会话后剩余条数变少，按钮自然消失或按剩余量提示。
+        """
+        if not hasattr(self, "_group_visible_counts"):
+            self._group_visible_counts = {}
+        self._group_visible_counts[fold_key] = (
+            self._group_visible_counts.get(fold_key, SIDEBAR_GROUP_VISIBLE_INITIAL)
+            + SIDEBAR_GROUP_VISIBLE_STEP)
+        self._refresh_session_list()
 
     def _toggle_project_fold(self, project_path):
         """收起/展开某项目下的历史会话(内存级状态,重新渲染列表)。"""
