@@ -115,6 +115,7 @@ class Operation:
     base_revision: int
     paths: list = field(default_factory=list)
     started_at: str = ""
+    task_id: str = ""
 
 
 def _now() -> str:
@@ -213,6 +214,9 @@ def normalize_last_run(raw):
     task_id = raw.get("task_id")
     if task_id is not None and not isinstance(task_id, str):
         return None, "last_run.task_id 类型非法"
+    initial_task_id = raw.get("initial_task_id")
+    if initial_task_id is not None and not isinstance(initial_task_id, str):
+        return None, "last_run.initial_task_id 类型非法"
     source = raw.get("source")
     if source is not None and not isinstance(source, dict):
         return None, "last_run.source 不是对象"
@@ -227,6 +231,7 @@ def normalize_last_run(raw):
         "version": RUN_RECORD_VERSION,
         "id": run_id,
         "task_id": task_id,
+        "initial_task_id": initial_task_id if isinstance(initial_task_id, str) else task_id,
         "phase": phase,
         "outcome": outcome,
         "reason": raw.get("reason") or "",
@@ -265,7 +270,7 @@ def _normalize_workspace(raw):
 
 # 一条验证记录的字段与类型。校验按字段做，坏字段归一成安全值而不是整条丢——
 # 少一条记录会让结果卡把跑过的检查说成没跑过，那比字段缺失更误导。
-_RUN_STR_FIELDS = ("id", "identity", "kind", "run_id", "tool_call_id", "checker", "path",
+_RUN_STR_FIELDS = ("id", "identity", "kind", "run_id", "task_id", "tool_call_id", "checker", "path",
                    "command", "cwd", "started_at", "status", "summary", "reason")
 _VALID_EV_STATUS = ("passed", "failed", "not_run", "timeout", "cancelled", "error", "unknown")
 
@@ -368,6 +373,7 @@ def _normalize_receipt(raw):
         "operation_id": raw["operation_id"],
         "run_id": raw["run_id"],
         "session_id": raw["session_id"],
+        "task_id": raw.get("task_id") if isinstance(raw.get("task_id"), str) else "",
         "tool": raw.get("tool") if isinstance(raw.get("tool"), str) else "",
         "tool_call_id": (raw.get("tool_call_id")
                          if isinstance(raw.get("tool_call_id"), str) else ""),
@@ -410,6 +416,14 @@ def describe_source(chat_history):
     自动修复提示、完成闸门提示、视觉桥接说明都带 lingxi_internal 标记，在这里被跳过。
     不跳过的话，一轮自动修复就会把来源改写成程序自己写的那段文字，
     于是"用户要求了什么"这条线索在最需要它的长任务里最先失真。
+
+    返回的 kind 约定（B05 起）：
+      - "continue"：这一轮是「继续任务」，来源指向那条被继续的消息
+      - "user_input"：发送入口打过标的真实用户输入（verified_user=True）
+      - "legacy_unknown"：从旧会话读回、没有来源标记的消息——说不清是不是用户原话
+      - "user_message"：内存里未打标的 HumanMessage（测试、未接入打标的旧入口）
+      - "unknown"：找不到任何非内部的 HumanMessage
+    只有 verified_user 为真时才能把它当作程序确认过的用户原话。
     """
     from langchain_core.messages import HumanMessage
     skipped = 0
@@ -432,9 +446,15 @@ def describe_source(chat_history):
             text = texts[0] if texts else "[图片]"
         else:
             text = str(content)
-        return {"kind": "continue" if resumed else "user_message", "message_index": index,
-                "text": text[:_SOURCE_PREVIEW], "internal_skipped": skipped}
-    return {"kind": "unknown", "message_index": -1, "text": "", "internal_skipped": skipped}
+        mid = (getattr(msg, "id", None) or (getattr(msg, "additional_kwargs", None) or {}).get("lingxi_message_id") or "")
+        raw_kind = (getattr(msg, "additional_kwargs", None) or {}).get("lingxi_kind")
+        verified_user = (raw_kind == "user_input" and not _is_internal(msg))
+        kind = "continue" if resumed else (raw_kind or "user_message")
+        return {"kind": kind, "message_index": index, "message_id": mid,
+                "text": text[:_SOURCE_PREVIEW], "internal_skipped": skipped,
+                "verified_user": verified_user}
+    return {"kind": "unknown", "message_index": -1, "message_id": "", "text": "",
+            "internal_skipped": skipped, "verified_user": False}
 
 
 def begin_run(sess, *, task_id=None, ui=None):
@@ -463,10 +483,12 @@ def begin_run(sess, *, task_id=None, ui=None):
     if not records_enabled(sess):
         return None
 
+    tid = task_id or (getattr(sess, "current_task", None) or {}).get("id")
     run = {
         "version": RUN_RECORD_VERSION,
         "id": new_id("run"),
-        "task_id": task_id,
+        "task_id": tid,
+        "initial_task_id": tid,
         "phase": "running",
         "outcome": None,
         "reason": "",
@@ -565,6 +587,9 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
         run["outcome"] = status if status in _VALID_OUTCOME else None
         run["reason"] = str(getattr(result, "reason", "") or "")
         run["ended_at"] = _now()
+        ending_task_id = (getattr(sess, "current_task", None) or {}).get("id")
+        if ending_task_id:
+            run["task_id"] = ending_task_id
         run["evidence"] = collect_evidence(getattr(sess, "verification", None))
         # worktree 可能是开跑之后才挂上的，收尾时按实际落点再刷一次。
         run["work_dir"] = _work_dir_of(sess) or run.get("work_dir") or ""
@@ -619,6 +644,7 @@ def build_result_snapshot(sess, run, *, save=None, source="live"):
         "work_dir": (run.get("work_dir") or _work_dir_of(sess)),
         "run_id": run.get("id") or "",
         "task_id": run.get("task_id"),
+        "initial_task_id": run.get("initial_task_id"),
         "phase": run.get("phase") or "",
         "outcome": run.get("outcome"),
         "reason": run.get("reason") or "",
@@ -866,6 +892,7 @@ def begin_operation(sess, *, tool, tool_call_id, args=None, paths=None):
         # 如实返回 None，不假装记录已建立。
         return None
     run_id = getattr(sess, "active_run_id", None) or ""
+    task_id = (getattr(sess, "current_task", None) or {}).get("id") or ""
     with sess.snapshot_lock:
         base_revision = int(getattr(sess, "progress_revision", 0) or 0)
     operation = Operation(
@@ -877,12 +904,14 @@ def begin_operation(sess, *, tool, tool_call_id, args=None, paths=None):
         base_revision=base_revision,
         paths=list(paths) if paths is not None else extract_paths(args),
         started_at=_now(),
+        task_id=task_id,
     )
     work_root = _operation_root(sess, tool)
     entry = {
         "operation_id": operation.operation_id,
         "run_id": operation.run_id,
         "session_id": operation.session_id,
+        "task_id": operation.task_id,
         "tool": operation.tool,
         "tool_call_id": operation.tool_call_id,
         "base_revision": operation.base_revision,
@@ -951,6 +980,7 @@ def commit_operation(sess, operation, *, ui=None) -> CommitReport:
         "operation_id": operation.operation_id,
         "run_id": operation.run_id,
         "session_id": operation.session_id,
+        "task_id": getattr(operation, "task_id", ""),
         "tool": operation.tool,
         "tool_call_id": operation.tool_call_id,
         "revision": 0,              # 由 _save_session_locked 填成本次保存的 revision

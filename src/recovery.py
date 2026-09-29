@@ -656,10 +656,13 @@ def apply_resume(sess, check, *, notes=(), mode="continue"):
         "unreadable_archive": check.unreadable_archive,
         "dangling": [{"id": c["id"], "name": c["name"]} for c in check.dangling[:50]],
     }
-    history.append(HumanMessage(
+    from . import task_state as _ts
+    msg = HumanMessage(
         content=build_summary(sess, check, notes, mode=mode),
         additional_kwargs={"lingxi_internal": True, "lingxi_kind": kind,
-                           "lingxi_recovery": record}))
+                           "lingxi_recovery": record})
+    _ts.tag_internal_message(msg, kind=kind)
+    history.append(msg)
     return [op.get("operation_id") for op in check.unknown_ops if op.get("operation_id")], note
 
 

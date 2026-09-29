@@ -11,12 +11,12 @@ import threading
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel,
-    QSizePolicy, QFileDialog, QMenu, QDialog, QFrame, QProgressBar, QScrollArea,
+    QSizePolicy, QFileDialog, QMenu, QDialog,
 )
 from PySide6.QtCore import Qt, QSize, QTimer, QPoint
 from PySide6.QtGui import (
     QFont, QIcon, QTextCursor, QColor, QTextCharFormat, QPixmap, QImage,
-    QPainter, QAction, QTextDocument,
+    QPainter, QAction,
 )
 from langchain_core.messages import HumanMessage
 
@@ -561,154 +561,29 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         sb.rangeChanged.connect(self._on_scroll_changed)
 
     def _build_plan_panel(self, parent_layout=None):
-        # 浮层：挂主窗口、定位到 chat_area 右上角（不进垂直布局流，避免占输入框上方整行）。
-        # parent_layout 保留参数兼容旧调用，但不再 addWidget——跟 scroll_bottom_btn 同套路。
-        self.plan_panel = QFrame(self)
-        self.plan_panel.setObjectName("planPanel")
-        self.plan_panel.setVisible(False)            # 无计划不占位
-        self.plan_panel.setFixedWidth(344)           # 浮层（design_handoff 任务计划卡），少遮挡正文
-        self.plan_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
-        from PySide6.QtWidgets import QGraphicsDropShadowEffect
-        _psh = QGraphicsDropShadowEffect(self)
-        _psh.setBlurRadius(30)
-        _psh.setXOffset(0)
-        _psh.setYOffset(8)
-        _psh.setColor(QColor(40, 50, 90, 18))
-        self.plan_panel.setGraphicsEffect(_psh)
-        lay = QVBoxLayout(self.plan_panel)
-        lay.setContentsMargins(18, 16, 18, 16)
-        lay.setSpacing(0)
-
-        title_row = QWidget(self.plan_panel)
-        title_row.setStyleSheet("background:transparent;")
-        title_row.setFixedHeight(26)
-        title_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        title_layout = QHBoxLayout(title_row)
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(6)
-        self.plan_title_icon = QLabel(title_row)
-        self.plan_title_icon.setFixedSize(17, 17)
-        self.plan_title = QLabel("任务计划", title_row)
-        self.plan_title.setTextFormat(Qt.RichText)
-        self.plan_count = QLabel(title_row)
-        self.plan_count.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        title_layout.addWidget(self.plan_title_icon, 0, Qt.AlignVCenter)
-        title_layout.addWidget(self.plan_title, 0, Qt.AlignVCenter)
-        title_layout.addStretch(1)
-        title_layout.addWidget(self.plan_count, 0, Qt.AlignVCenter)
-        lay.addWidget(title_row)
-        lay.addSpacing(7)
-
-        self.plan_progress = QProgressBar(self.plan_panel)
-        self.plan_progress.setRange(0, 100)
-        self.plan_progress.setTextVisible(False)
-        self.plan_progress.setFixedHeight(6)
-        lay.addWidget(self.plan_progress)
-        lay.addSpacing(9)
-
-        self._plan_items = []
-        self._plan_spinner_angle = 0
-        self._plan_spinner_timer = QTimer(self)
-        self._plan_spinner_timer.timeout.connect(self._tick_plan_spinner)
-
-        self.plan_scroll = QScrollArea(self.plan_panel)
-        self.plan_scroll.setFrameShape(QFrame.NoFrame)
-        self.plan_scroll.setWidgetResizable(False)
-        self.plan_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.plan_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.plan_scroll.setStyleSheet(
-            "QScrollArea { background:transparent; border:none; }"
-            "QScrollBar:vertical {"
-            "  background:transparent; width:6px; margin:2px 0 2px 0;"
-            "}"
-            "QScrollBar::handle:vertical {"
-            f"  background:{self._t('scroll_btn_border')};"
-            "  border-radius:3px; min-height:28px;"
-            "}"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
-            "  height:0; border:none; background:transparent;"
-            "}"
-            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
-            "  background:transparent;"
-            "}"
-        )
-        self.plan_scroll.viewport().setStyleSheet("background:transparent;")
-
-        self.plan_body = QLabel()
-        self.plan_body.setStyleSheet("background:transparent;")
-        self.plan_body.setTextFormat(Qt.RichText)
-        self.plan_body.setWordWrap(True)
-        self.plan_body.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.plan_body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.plan_scroll.setWidget(self.plan_body)
-        lay.addWidget(self.plan_scroll)
-        self._style_plan_panel()                     # 卡片底色/边框（浮层压在正文上必须有背景）
+        # 浮层：挂主窗口、定位到 chat_area 右上角（三段式任务目标与计划面板 B05）
+        from .task_panel import TaskPanel
+        self.plan_panel = TaskPanel(self, theme_lookup=self._t)
+        self.plan_panel.on_undo_request = self._on_undo_task_switch
+        # 兼容旧属性别名
+        self.plan_title_icon = self.plan_panel.plan_title_icon
+        self.plan_title = self.plan_panel.plan_title
+        self.plan_count = self.plan_panel.plan_count
+        self.plan_progress = self.plan_panel.plan_progress
+        self.plan_scroll = self.plan_panel.plan_scroll
+        self.plan_body = self.plan_panel.plan_body
+        self._plan_items = self.plan_panel._plan_items
+        self._plan_spinner_timer = self.plan_panel._plan_spinner_timer
 
     def _style_plan_panel(self):
-        # 复用 scroll 按钮的主题 token（明暗都有），objectName 选择器不波及子 QLabel。
-        self.plan_panel.setStyleSheet(
-            f"QFrame#planPanel {{"
-            f"  background: {self._t('scroll_btn_bg')};"
-            f"  border: 1px solid {self._t('sidebar_border')};"
-            f"  border-radius: 16px;"
-            f"}}"
-        )
-        title_color = self._t("thinking")
-        muted_color = self._t("thinking_msg")
-        self.plan_title.setStyleSheet(
-            "background:transparent; font-size:16px; font-weight:700;"
-        )
-        self.plan_count.setStyleSheet(
-            f"background:{self._t('thinking_msg_bg')};"
-            f"color:{muted_color};"
-            f"border:1px solid {self._t('scroll_btn_border')};"
-            "border-radius:9px;"
-            "padding:2px 7px;"
-            "font-size:12px;"
-        )
-        self.plan_title_icon.setPixmap(
-            self._svg_icon("clipboard-list.svg", title_color).pixmap(15, 15)
-        )
-        self.plan_progress.setStyleSheet(
-            "QProgressBar {"
-            f"  background: {self._t('thinking_msg_bg')};"
-            "  border: none;"
-            "  border-radius: 3px;"
-            "  padding: 0;"
-            "}"
-            "QProgressBar::chunk {"
-            f"  background: {title_color};"
-            "  border-radius: 3px;"
-            "}"
-        )
-        if hasattr(self, "plan_scroll"):
-            self.plan_scroll.setStyleSheet(
-                "QScrollArea { background:transparent; border:none; }"
-                "QScrollBar:vertical {"
-                "  background:transparent; width:6px; margin:2px 0 2px 0;"
-                "}"
-                "QScrollBar::handle:vertical {"
-                f"  background:{self._t('scroll_btn_border')};"
-                "  border-radius:3px; min-height:28px;"
-                "}"
-                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
-                "  height:0; border:none; background:transparent;"
-                "}"
-                "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
-                "  background:transparent;"
-                "}"
-            )
+        if hasattr(self, "plan_panel"):
+            self.plan_panel.apply_theme()
 
     def _position_plan_panel(self):
-        """将计划浮层定位到 chat_area 右上角（先按内容 adjustSize 再贴角）。"""
-        if not hasattr(self, "plan_panel"):
+        """将计划浮层定位到 chat_area 右上角。"""
+        if not hasattr(self, "plan_panel") or not self.plan_panel.isVisible():
             return
         panel = self.plan_panel
-        if panel.isVisible() and getattr(self, "_plan_items", None):
-            self._fit_plan_body_height(self.plan_body.text())
-            panel.setFixedHeight(self._plan_panel_target_height())
-        else:
-            panel.adjustSize()
         pos = self.chat_area.mapTo(self, self.chat_area.rect().topRight())
         scrollbar_width = self.chat_area.verticalScrollBar().width()
         right_clearance = scrollbar_width + 28
@@ -722,16 +597,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             QTimer.singleShot(delay, self._position_plan_panel)
 
     def _plan_panel_target_height(self):
-        """按当前正文精确计算浮层高度，避免父布局变化后保留旧高度。"""
-        margins = self.plan_panel.layout().contentsMargins()
-        chrome = (
-            margins.top() + margins.bottom()
-            + 26  # 标题行
-            + 7   # 标题与进度条
-            + self.plan_progress.height()
-            + 9   # 进度条与正文
-        )
-        return chrome + self.plan_scroll.height()
+        """按当前浮层计算高度。"""
+        if hasattr(self, "plan_panel"):
+            return self.plan_panel.height()
+        return 200
 
     def _build_empty_state(self):
         self.empty_state = QWidget(self.chat_area.viewport())
@@ -1740,6 +1609,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             return
 
         # 构造消息
+        from .. import task_state as _ts
         if images:
             # Anthropic / MiMo 官方建议：图片在前、文字在后，模型才能正确关联问题与图片
             content = []
@@ -1748,9 +1618,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 content.append(_build_image_content_block(ext, b64))
             if send_text:
                 content.append({"type": "text", "text": send_text})
-            agent.chat_history.append(HumanMessage(content=content))
+            user_msg = HumanMessage(content=content)
         else:
-            agent.chat_history.append(HumanMessage(content=send_text))
+            user_msg = HumanMessage(content=send_text)
+        _ts.tag_user_message(user_msg)
+        agent.chat_history.append(user_msg)
+        _ts.sync_user_requests(sess)
 
         # 立即存盘 + 刷侧栏：让会话马上出现在侧栏，长任务时开新对话也能切回它
         # （否则要等 worker 跑完才 save 进 index → 正在跑的会话在侧栏找不到）。
@@ -1830,17 +1703,22 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 f"[图片识别结果，由 {detected_name} 提供，供 {original_model_name} 继续处理]\n"
                 f"{description}"
             )
+            from .. import task_state as _ts
             content = []
             for path, b64 in images:
                 ext = os.path.splitext(path)[1].lower().lstrip(".")
                 content.append(_build_image_content_block(ext, b64))
             if text:
                 content.append({"type": "text", "text": text})
-            agent.chat_history.append(HumanMessage(content=content))
+            user_msg = HumanMessage(content=content)
+            _ts.tag_user_message(user_msg)
+            agent.chat_history.append(user_msg)
             # 视觉桥接说明是程序生成的转述，不是用户的新要求——打上内部标记，
             # 否则运行记录会把"图片识别结果…"当成本轮用户的最新要求。
-            agent.chat_history.append(HumanMessage(
-                content=bridge_text, additional_kwargs={"lingxi_internal": True}))
+            bridge_msg = HumanMessage(content=bridge_text)
+            _ts.tag_internal_message(bridge_msg, kind="vision_bridge")
+            agent.chat_history.append(bridge_msg)
+            _ts.sync_user_requests(sess)
             # 立即存盘 + 刷侧栏（worker 线程→主线程信号），让该会话马上进侧栏可切回
             try:
                 agent.save_session()
@@ -2643,114 +2521,109 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._render_plan_panel(items)
 
     def _tick_plan_spinner(self):
-        self._plan_spinner_angle = (self._plan_spinner_angle + 30) % 360
-        if getattr(self, "_plan_items", None):
-            self._render_plan_rows(self._plan_items)
-
-    def _plan_spinner_svg(self, color, size=16):
-        svg = (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
-            f'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="3" '
-            f'stroke-linecap="round" stroke-linejoin="round">'
-            f'<g transform="rotate({self._plan_spinner_angle} 12 12)">'
-            f'<path d="M21 12a9 9 0 1 1-3.2-6.9"/></g></svg>'
-        )
-        data = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-        return (
-            f'<img src="data:image/svg+xml;base64,{data}" width="{size}" height="{size}" '
-            f'style="vertical-align:middle;" />'
-        )
+        if hasattr(self, "plan_panel"):
+            self.plan_panel._tick_plan_spinner()
 
     def _render_plan_rows(self, items):
-        title_color = self._t("thinking")
-        muted_color = self._t("thinking_msg")
-        hl_bg = self._t("thinking_bg")     # 进行中那一行的高亮底色
-        rows = []
-        for it in items:
-            txt = (it.get("text") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            status = it.get("status")
-            # 三态：待办 ○ / 进行中 ⟳（高亮整行）/ 完成 ✓（弱化）。状态词前缀对齐设计图。
-            if status == "done":
-                icon = self._inline_svg_img("circle-check.svg", muted_color, 16)
-                label, label_color = "完成", muted_color
-                text_style = f"color:{muted_color};"
-                cell_bg = ""
-            elif status == "in_progress":
-                icon = self._plan_spinner_svg(title_color, 16)
-                label, label_color = "进行中", title_color
-                text_style = f"color:{title_color};font-weight:600;"
-                cell_bg = f"background:{hl_bg};"
-            else:
-                icon = self._inline_svg_img("circle_lucide.svg", muted_color, 16)
-                label, label_color = "待办", muted_color
-                text_style = ""
-                cell_bg = ""
-            rows.append(
-                '<tr>'
-                f'<td width="24" style="{cell_bg}padding:3px 0 5px 6px;vertical-align:top;">'
-                f'{icon}</td>'
-                f'<td style="{cell_bg}{text_style}padding:3px 8px 5px 4px;line-height:1.4;">'
-                f'<span style="color:{label_color};font-size:11px;">{label}</span>&nbsp;{txt}</td>'
-                '</tr>'
-            )
-        html = (
-            '<table cellspacing="0" cellpadding="0" width="100%">'
-            + "".join(rows)
-            + "</table>"
-        )
-        self.plan_body.setText(html)
-        self._fit_plan_body_height(html)
+        if hasattr(self, "plan_panel"):
+            self.plan_panel._render_plan_rows(items)
 
-    def _fit_plan_body_height(self, html):
-        margins = self.plan_panel.layout().contentsMargins()
-        body_width = self.plan_panel.width() - margins.left() - margins.right()
-        self.plan_body.setFixedWidth(body_width)
-        self.plan_scroll.setFixedWidth(body_width)
-
-        doc = QTextDocument()
-        doc.setDefaultFont(self.plan_body.font())
-        doc.setTextWidth(body_width)
-        doc.setHtml(html)
-        # QLabel 的 RichText sizeHint 对 table + word wrap 会低估高度；QTextDocument
-        # 按实际文本宽度计算，再多给 6px 防止最后一行 descender 被裁。
-        body_height = int(doc.size().height()) + 6
-        self.plan_body.setFixedHeight(body_height)
-        self.plan_scroll.setFixedHeight(min(body_height, self._plan_body_max_height()))
-
-    def _plan_body_max_height(self):
-        """计划正文最大高度：限制浮层不把聊天区撑满，内容超出时滚动。"""
-        if hasattr(self, "chat_area"):
-            # 留出上下空隙和标题/进度条高度。确认卡出现时 chat_area 会变矮，
-            # 这里必须跟着缩，不能用旧的 160px 下限把浮层挤到确认卡上。
-            available = max(80, self.chat_area.height() - 105)
-        else:
-            available = 360
-        return min(420, available)
-
-    def _render_plan_panel(self, items):
-        """主线程 slot：渲染任务计划面板"""
-        self._plan_items = list(items or [])
-        if not items:
-            self._plan_spinner_timer.stop()
-            self.plan_body.clear()
-            self.plan_scroll.setFixedHeight(0)
+    def _render_plan_panel(self, items=None):
+        """主线程 slot：渲染任务目标与计划面板（B05 三段式：要求限制、计划、执行验证）。"""
+        from .. import session as _session
+        sess = _session.get_active()
+        if not hasattr(self, "plan_panel"):
+            return
+        if not sess:
             self.plan_panel.setVisible(False)
             return
-        done = sum(1 for it in items if it.get("status") == "done")
-        self.plan_count.setText(f"{done}/{len(items)} 完成")
-        self.plan_progress.setValue(round(done / len(items) * 100))
-        self._render_plan_rows(items)
-        if any(it.get("status") == "in_progress" for it in items):
-            if not self._plan_spinner_timer.isActive():
-                self._plan_spinner_timer.start(80)
+        self.plan_panel.render_session(sess)
+        if self.plan_panel.isVisible():
+            self._position_plan_panel()
+
+    def _on_undo_task_switch(self):
+        """用户点击【撤销任务切换】。"""
+        from .. import session as _session
+        sess = _session.get_active()
+        if not sess:
+            return
+
+        last_switch = getattr(sess, "last_task_switch", None)
+        if not isinstance(last_switch, dict):
+            return
+
+        # 屏障与「继续任务」共用 resume_pending：等待期间发消息、点继续都会被挡住，
+        # 否则撤销还没落地，新一轮 worker 就已经在按切换后的任务干活了。
+        if sess.resume_pending:
+            self.show_message("上一个操作还在等待当前运行结束，请稍后再撤销。", "system")
+            return
+        sess.resume_pending = True
+        if sess.is_generating:
+            # 走强制停止而不是只打 stop_flag：worker 可能正停在确认卡上等用户，
+            # 不放掉确认它永远不会去看 stop_flag，屏障就只能等到超时。
+            self._force_stop_generation(wait=False)
+            self.show_message("正在停止当前生成，结束后撤销任务切换…", "system")
+        self._wait_worker_and_undo_switch(
+            sess, last_switch.get("new_task_id", ""), last_switch.get("switch_version", 0))
+
+    def _wait_worker_and_undo_switch(self, sess, new_task_id, switch_version, retries=0):
+        """屏障：旧 worker **真正退出**之后才撤销；超时或切走就放弃，不硬改。
+
+        worker 还活着时撤销，它随后的写入（计划、任务、存盘）会覆盖刚恢复的任务。
+        """
+        from .. import session as _session
+        if sess is not _session.get_active():
+            # 等待期间切到了别的会话。撤销结果、提示都属于那个看不见的会话，不在后台悄悄改。
+            self._undo_switch_abort(sess, "已切换到其它会话，撤销任务切换已取消")
+            return
+        worker = getattr(sess, "last_worker", None)
+        if sess.is_generating or (worker is not None and worker.is_alive()):
+            if retries >= self._RESUME_WAIT_LIMIT:
+                self._undo_switch_abort(sess, "当前运行仍未结束，撤销任务切换没有执行，请稍后再试")
+                return
+            QTimer.singleShot(self._RESUME_WAIT_MS, lambda: self._wait_worker_and_undo_switch(
+                sess, new_task_id, switch_version, retries + 1))
+            return
+        try:
+            self._execute_undo_task_switch(sess, new_task_id, switch_version)
+        finally:
+            sess.resume_pending = False
+
+    def _undo_switch_abort(self, sess, message):
+        sess.resume_pending = False
+        self._show_toast(message, 2500)
+
+    def _execute_undo_task_switch(self, sess, new_task_id, switch_version):
+        from .. import task_state as _ts
+        from .. import memory
+        from ..paths import logger
+        success, msg = _ts.undo_task_switch(sess, new_task_id, switch_version)
+        if success:
+            outcome = memory.save_session_report(session=sess)
+            save_error = outcome.error
+            if save_error is not None:
+                logger.error(f"撤销任务切换后保存失败（正文已写入={outcome.body_written}）: {save_error}")
+            if hasattr(self, "plan_panel"):
+                self.plan_panel.render_session(sess)
+                self._position_plan_panel()
+            if save_error is None:
+                self.show_message(msg, "system")
+            elif outcome.body_written:
+                # 正文已落盘、只是索引没更新：撤销结果重开也在，不能说成"尚未写入磁盘"。
+                self.show_message(
+                    f"{msg}\n⚠️ 撤销结果已保存，但会话列表索引更新失败（{str(save_error)[:120]}），"
+                    "下次读取会话列表时会自动修复。", "error")
+            else:
+                # 内存里已经撤销，但磁盘上还是切换后的状态。不说出来的话，重开会话会
+                # "莫名其妙"回到新任务，用户还以为撤销成功了。
+                self.show_message(
+                    f"{msg}\n⚠️ 但保存失败（{str(save_error)[:120]}），撤销结果尚未写入磁盘；"
+                    "下次保存成功前重开会话，会回到切换后的状态。", "error")
         else:
-            self._plan_spinner_timer.stop()
-        self.plan_panel.layout().invalidate()
-        self.plan_panel.layout().activate()
-        self.plan_panel.setVisible(True)
-        self.plan_panel.raise_()          # 浮在聊天区之上
-        self.plan_panel.setFixedHeight(self._plan_panel_target_height())
-        self._position_plan_panel()       # 贴右上角（adjustSize 后定位）
+            self.show_message(f"撤销任务切换失败：{msg}", "error")
+        # 撤销被拒（版本不符、记录已失效）时横幅也要跟着刷新，不留一个点不动的按钮
+        if not success and hasattr(self, "plan_panel"):
+            self.plan_panel.render_session(sess)
 
     def show_retry(self, error_msg):
         """线程安全：显示错误信息和重试按钮"""

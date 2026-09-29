@@ -327,6 +327,14 @@ def get_volatile_context() -> str:
             "- 如果用户在 Plan 模式下问『快帮我改 X』，**先给方案不要直接改**，提醒他切到 Act 模式"
         )
 
+    # ── B05 任务要求、固定限制、计划变动与未解决义务（独立 3000 字符预算）──
+    from . import session as _session_mod
+    from . import task_state as _ts
+    _cur_sess = _session_mod.current_session()
+    task_sections = _ts.format_task_volatile_context(_cur_sess)
+    if task_sections:
+        parts.extend(task_sections)
+
     plan = getattr(_st, "current_plan", None)
     if plan:
         parts.append(

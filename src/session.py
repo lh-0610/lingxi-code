@@ -69,6 +69,15 @@ _SESSION_FIELDS = {
     # 都从这里重绘；程序重开则由 run_records.snapshot_from_loaded 从持久化记录重建。
     # 不拿 render_log 当唯一来源——它只活在内存里，重启就没了。
     "last_result": lambda: None,
+    # ── B05 任务身份、来源追溯与固定限制（随会话 JSON 的 progress 持久化）──
+    # 当前任务快照（id, request_message_ids, pinned_constraints 等）。None = 尚未建立任务（普通问答）。
+    "current_task": lambda: None,
+    # 已归档的历史任务快照列表。
+    "archived_tasks": list,
+    # 最近一次新任务切换的可撤销记录。None = 无可撤销记录。
+    "last_task_switch": lambda: None,
+    # 任务切换修订版本号（用于安全比对，防迟到撤销）。
+    "task_switch_version": lambda: 0,
 }
 
 # 哨兵：Session.project 的"尚未锚定"初值，区别于合法的 None（无项目/全局）。

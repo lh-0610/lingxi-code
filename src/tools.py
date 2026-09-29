@@ -1212,7 +1212,7 @@ def _auto_advance_plan(plan: list) -> None:
 
 
 @tool
-def update_plan(plan: str, explanation: str = "") -> str:
+def update_plan(plan: str, explanation: str = "", new_task: bool = False) -> str:
     """创建计划；已有计划默认只允许按原文、原顺序推进状态。
 
     任务需要 3 步以上、或要改多个文件时，动手前先调一次列出全部步骤。
@@ -1222,8 +1222,13 @@ def update_plan(plan: str, explanation: str = "") -> str:
 
     plan: 多行文本，每行一个步骤，行首标记：[ ] 未开始  [~] 进行中  [x] 已完成
     explanation: 调整原因（例如需求变化、发现新依赖、用户取消某项或开始新任务）；不是向用户申请确认。
+    new_task: 是否明确开始一个新任务（默认为 False）。当用户提出完全不相干的新目标时设为 True。
     """
     from . import state
+    from . import task_state as _ts
+    from . import session as _session_mod
+
+    sess = _session_mod.current_session()
     # 历史压缩摘要曾被模型续接进 plan 参数；摘要不是计划的一部分，硬截断防污染。
     clean_plan = re.split(
         r"\s*\[(?:历史摘要|之前已有摘要|新增对话)\]\s*:?",
@@ -1233,8 +1238,33 @@ def update_plan(plan: str, explanation: str = "") -> str:
     items = state.parse_plan(clean_plan)
     if plan and not items:
         return "计划未更新：没有检测到合法 checklist 行，请用 [ ] / [~] / [x] 标记。"
-    current = state.current_plan
+
     explanation = explanation.strip()
+
+    # 明确开始新任务（B05）。还没有任务时这只是首次建立，走下面的普通路径，不留撤销记录。
+    has_task = isinstance(sess.current_task, dict) and bool(sess.current_task.get("id"))
+    if new_task:
+        if not explanation:
+            return "开始新任务必须填写 explanation 说明切换原因与背景。"
+        if not items:
+            return "计划未更新：开始新任务至少需要一个计划步骤。"
+    if new_task and has_task:
+        new_task_obj, _ = _ts.switch_to_new_task(sess, items, explanation)
+        _ui = getattr(state, "ui_ref", None)
+        if _ui is not None and hasattr(_ui, "show_plan"):
+            try:
+                _ui.show_plan([dict(it) for it in items])
+            except Exception:
+                pass
+        done = sum(1 for it in items if it["status"] == "done")
+        return (
+            f"已开启新任务（ID: {new_task_obj['id']}，切换原因: {explanation}）：\n"
+            f"进度 {done}/{len(items)} 完成。\n"
+            + state.render_plan(items)
+        )
+
+    # 同一任务的计划推进或调整（B05）
+    current = state.current_plan
     if current and not explanation:
         if [it["text"] for it in items] != [it["text"] for it in current]:
             return (
@@ -1251,11 +1281,33 @@ def update_plan(plan: str, explanation: str = "") -> str:
             )
     if items == current:
         return "计划未变化，无需重复更新。\n" + state.render_plan(current)
-    # 持快照锁改：save_session 在同一把锁内一次取走"计划 + 台账"，不加锁的话存盘
-    # 可能拍到"计划已换、台账还停在上一轮"的半截状态。临界区只有一次赋值。
-    from . import session as _session_mod
-    with _session_mod.current_session().snapshot_lock:
-        state.current_plan = items
+
+    # 首次有效计划建立任务身份；已有任务则更新其版本与变动摘要。
+    # 任务与计划在同一个快照锁临界区里一起改：save_session 在这把锁内一次取走整份进度，
+    # 分两段改的话存盘可能拍到"新任务 + 旧计划"或"任务已建立、计划仍为空"。
+    # 结构调整 = 步骤文字/顺序/数量变了，或有进度回退。单纯推进进度不算：它不改原因、
+    # 不涨版本——否则推进一步就把上次调整的原因抹成空串，面板和模型都看不到那次为什么改。
+    structural = (
+        [it["text"] for it in items] != [it["text"] for it in (current or [])]
+        or any(_plan_status_regresses(old["status"], new["status"])
+               for old, new in zip(current or [], items))
+    )
+    with sess.snapshot_lock:
+        task = getattr(sess, "current_task", None)
+        if not isinstance(task, dict) or not task.get("id"):
+            if items:
+                _ts.create_or_attach_task(sess, plan=items, explanation=explanation)
+            else:
+                # 清空计划不是"首次有效计划"：没有步骤就不建立任务身份。
+                sess.current_plan = items
+        else:
+            if structural:
+                task["last_plan_change_reason"] = explanation
+                task["last_plan_change_summary"] = _ts.summarize_plan_change(current, items)
+                task["plan_version"] = task.get("plan_version", 1) + 1
+            _ts.sync_user_requests(sess)
+            sess.current_plan = items
+
     _ui = getattr(state, "ui_ref", None)
     if _ui is not None and hasattr(_ui, "show_plan"):
         try:
@@ -1786,6 +1838,9 @@ def _record_run_evidence(**fields):
         run = getattr(sess, "last_run", None)
         if isinstance(run, dict) and not fields.get("run_id"):
             fields["run_id"] = run.get("id") or ""
+        task = getattr(sess, "current_task", None)
+        if isinstance(task, dict) and not fields.get("task_id"):
+            fields["task_id"] = task.get("id") or ""
         return _rec(sess.verification, **fields)
     except Exception as e:
         logger.debug(f"记录验证证据失败（已忽略）: {e}")

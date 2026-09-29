@@ -309,6 +309,7 @@ def record_evidence(v: dict, **fields) -> dict | None:
         "identity": identity,
         "kind": fields.get("kind") if fields.get("kind") in ("tests", "check") else "check",
         "run_id": str(fields.get("run_id") or ""),
+        "task_id": str(fields.get("task_id") or ""),
         "tool_call_id": str(fields.get("tool_call_id") or ""),
         "checker": str(fields.get("checker") or ""),
         "path": str(fields.get("path") or ""),

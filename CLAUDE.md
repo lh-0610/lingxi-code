@@ -36,6 +36,7 @@ src/                     # 主代码
   result_view.py         # 运行结果快照 → 给人看的结论（纯函数、不依赖 Qt；标题/检查行/过期/保存提示/能否继续的判定都在这里）
   recovery.py            # 恢复检查与继续入口（B04）：主线程预检 / worker 里现场核对 / 补齐悬空调用 / 把结果未知的操作并入待验证义务 / 恢复说明
   workspace_anchor.py    # 现场锚点（B04）：涉及文件指纹 + HEAD/分支/根提交；恢复时比对，判断"还是不是那个现场、那个仓库"
+  task_state.py          # 任务身份、来源追溯与边界控制（B05）：任务 ID / 白名单 / 固定限制校验 / 计划变动比对 / 新任务切换与撤销
   tools_rag.py           # search_knowledge（知识库语义检索，只读、Plan 放行、带 scope 分域参数）
   rag/                   # RAG 知识库引擎（详见「RAG 知识库检索」节）
     chunk.py             # 切块：iter_markdown_chunks（按标题分层）/ iter_plain_chunks（PDF 页，不解析 Markdown）
@@ -67,6 +68,7 @@ src/                     # 主代码
     chat_window.py       # ChatUI 主窗口（__init__/build_ui/eventFilter/agent 集成/渲染原语 _append_html/show_message/_t）
     message_view.py      # 消息流的块级真控件渲染（圆角卡/阴影/可展开思考块）—— 逐步替代 QTextBrowser
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
+    task_panel.py        # 任务面板浮层与限制编辑对话框（B05）：三段式要求/计划/执行状态，可撤销横幅，硬预算校验
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 浮窗搜索
@@ -268,6 +270,56 @@ python main.py
 - **不恢复**旧确认许可、后台进程控制权、隔离区使用权——它们本来就不持久化；隔离区里跑的那一轮继续时回到主项目并明确说"旧隔离区不会被自动合并"
 - **重绘**：内部 HumanMessage（`lingxi_internal`）一律不画成"你"的气泡。早先只认视觉桥接的文字前缀，自动修复 / 完成闸门的内部提示在重开会话后会被画成用户说的话；恢复说明画成程序说明，优先用当时实时显示的那段（`lingxi_recovery.note`）
 - **测试里必须阻断真实模型与 CLI**：新建的 Session 默认模型下标可能落在 Claude Code 上（backlog 里的默认模型 fallback 问题），漏设一次模型就会真起一个 `claude` 进程——写 B04 的真进程用例时实测踩到过一次。`test_b04_recovery.py` 用 autouse 夹具把 `_create_llm` / `_claude_code_loop` 换成直接报错，子进程脚本里同样显式阻断
+
+### 任务身份、来源追溯与要求计划分离（src/task_state.py + ui/task_panel.py，B05）
+- **稳定消息 ID 与来源追溯**：
+  - 真实用户消息打上稳定 `msg-uuid`（`tag_user_message`）与 `lingxi_kind="user_input"`。
+  - 程序内部消息打上 `tag_internal_message`（`resume`, `recovery`, `repair`, `gate`, `vision_bridge`），历史重载时不被误识别为用户要求。
+  - 旧会话消息若缺少类型标记，一律回退为 `legacy_unknown`。
+  - `memory._msg_to_dict` 严格执行元数据白名单（`lingxi_message_id`, `lingxi_internal`, `lingxi_kind`, `lingxi_recovery`），非法键名直接剔除，防提权与伪造。
+- **任务身份建立与保持（`task_id`）**：
+  - 首次有效计划建立任务身份（`create_or_attach_task`），生成 `task-<hex>` 并绑定当前会话与需求消息 ID。
+  - 语法非法或未检出 checklist 的失败调用不产生半截任务。
+  - 任务推进进度、调整步骤均保留原 `task_id`，绝不因换做法而变成新任务。
+- **计划变动对比与版本递增**：
+  - 单纯推进步骤（`[x]` / `[~]`）无需 explanation，更新计划但**不动** `plan_version` / `last_plan_change_reason` / 摘要（即使顺手带了 explanation）。早先每推进一步就把原因覆写成空串、版本 +1，面板和模型都看不到上一次结构调整为什么改；判据是「步骤文字/顺序/数量变了或有进度回退」，与 `set_step_status` 一致；
+  - 清空计划不是"首次有效计划"：没有任务时 `update_plan("")` 只清计划、不建立任务身份；
+  - 增删重排步骤、步骤回退或清空等结构变动，必须填写 `explanation` 说明具体原因，否则工具拒绝并原样回退，避免模型随意重排；
+  - 结构变动生效时保留 `task_id`，递增 `plan_version`，记录 `last_plan_change_reason` 与 `last_plan_change_summary`（由 `summarize_plan_change` 比对）。
+- **显式新任务切换（`update_plan(..., new_task=True)`）**：
+  - 用户明确开始另一件事时设 `new_task=True`，必须附带 `explanation` 说明切换原因；
+  - 旧任务自动快照归档进 `sess.archived_tasks`；
+  - 生成新 `task_id` 并建立新任务；
+  - 记录可撤销记录 `sess.last_task_switch`，递增 `task_switch_version`。
+- **任务切换撤销与 Worker 屏障**：
+  - UI 浮层顶部展示可撤销横幅：`已开始新任务（原因：……）[撤销任务切换]`；
+  - 用户点击撤销时核对 `switch_version` 与 `new_task_id`，恢复原任务要求、固定限制与计划；只移除这次切换归档的那一项，被撤销的新任务以 `archive_kind="undone_switch"` 留在归档里；
+  - `undone_switch` 归档**不算认领**要求消息（它的要求已并回原任务）：否则撤销后没等用户再开口就重做切换，触发消息拿不回来，新任务一条来源都没有；
+  - **核心准则：撤销任务切换绝不回滚文件改动，绝不删除新任务已执行的工具记录或待验证义务**；
+  - 若模型正处于生成或执行中，走强制停止并与「继续任务」共用 `resume_pending` 屏障，等 worker **真正退出**后再撤销；超时或等待中切走会话就放弃，不硬改；
+  - 保存用 `save_session_report` 区分结果：正文已落盘、只有索引失败时如实说"已保存、索引待修复"，不说成"尚未写入磁盘"。
+- **固定限制（`pinned_constraints`）**：
+  - 仅用户可编辑（对话框 `EditConstraintsDialog` 修改或删除，即刻落盘）；模型工具无权改写；
+  - **按输入原文保存**（复验最终裁定）：不解析、不剥除任何行首字符——`- * 参数`、`- - 参数`、`--force`、`- 列表`、编号、圆点统统是用户内容；项目符号只存在于显示层（面板画 `•`，模型上下文每条一行，编辑框示例不引导打列表符号）。过程中的中间契约（正则剥 `-*•·`、首存剥一层 `- `、known 保护已存行）全部废弃——只要还根据内容猜哪些字符属于用户，改句尾、敲多层横线就会丢字符。逐行拆分只为"每行一条"的输入形态与字符计数，由此存入/还原/再次解析天然可逆。打开/保存/重开/修改/再存，用户写下的字符不得增删；
+  - 打开 → 保存 → 重新打开 → 不修改再保存，内容必须逐字一致；字符计数、校验、存储、重载用同一约定（都按存储后的内容字符数计）；
+  - 对话框编辑的是**打开时**那个任务：模态对话框挡不住 worker，编辑期间模型可能切换任务或建立首个任务。保存时任务 ID 对不上就拒绝这一次（内容保留、改指向现任务，用户再点一次才存），不把 A 的限制写到 B 上；
+  - 保存失败只在**正文没写进去**时回滚内存（`save_session_report().body_written`）；正文已落盘而索引失败时保留并提示——回滚的话内存说"没保存"、磁盘上却有，下次保存前退出就是反的结论；
+  - 实时字符计数，硬预算上限 1000 字符，超限拒绝保存，绝不静默截断；
+  - 对话框带生效时机提示（下次模型调用生效）。
+- **尾部运行态注入与 Prompt Caching 保护**：
+  - 任务目标、用户固定限制、原始/补充要求来源以及计划变动摘要注入在 `roles.get_volatile_context()`（作为 `<system-reminder>` 挂在历史尾部）；
+  - 任务上下文独立预算 3000 字符，**对最终实际输出计数（含标题、换行、各段分隔），是硬上限**：固定限制完整保留（内容 ≤1000 字符时最坏渲染成本 ≈2×1000+标题，必然放得下——上下文里每条限制独占一行、不加项目符号）；任务目标段内**原始目标保底**（选入顺序原始优先：标题 + 消息 ID + 最小摘录必然在场，最新补充其后，扩展时仍最新优先）——早先选入顺序最新优先，预算一紧原始目标的正文和来源会整个消失、只剩"另有 N 条未展示"；模型摘要这类装饰内容装不下时先让位；验证义务与计划说明装不下时折叠成一行摘要并注明省略了什么，补读入口只指向真实存在的任务面板与 run_tests / git_diff。计划说明连摘要都放不下时，把义务全文降为摘要换它入场——被省略的每段都要有交代，不悄悄消失；
+  - `roles.get_system_prompt()` 保持稳定前缀，绝不将易变的任务信息注入顶层系统提示，确保 API 提供商 prompt caching 命中率不受影响。
+- **验证状态只有一套结论（`task_state.verification_status`，复验收敛）**：
+  - "还有哪些义务未解决"复用 `verification.gaps_from_state`（含检查范围、Git 工作区边界、证据过期、复查取代），面板与模型上下文共用，不另养一套放行规则；内部判定失败时如实报"无法核对"，不因异常显示成没有缺口；
+  - `dirty_files` / `unknown_changes` 只是**记录**（本轮涉及过哪些改动、发生过哪些盲区），记录还在不等于义务没解除——解除与否以 gaps 为准。早先把"记录非空"当"义务未了"，验证通过后面板仍写"待验证改动 / 无法确认已验证"、上下文仍要求重复验证；
+  - 两个时态：运行态里有内容（begin_run 之后，快照义务已并入）→ 以 `gaps_from_state` 实时判定为准（pending_verification 在运行中可能还没刷新，不能只信上一次持久化快照）；运行态还是全新的（刚加载、恢复未并入）→ 持久化快照是义务的唯一线索，原样转述、不做解除判断，此时也没有本轮检查证据，不可能显示"已验证"；
+  - "checked" 只认当前运行态里未被改动作废的检查证据，历史成功不是当前运行的通行凭证；显示通过不靠删除记录——dirty/盲区记录与证据保留原样。
+- **三段式任务目标与计划面板（`ui/task_panel.py`）**：
+  - 区域 1：要求与固定限制（原始要求、补充要求及来源 ID，固定限制，带编辑限制按钮）；
+  - 区域 2：执行计划步骤（可撤销切换横幅、计划步骤三态图标、spinner 动效、进度条、变动原因/摘要）；
+  - 区域 3：执行与验证状态（待验证文件列表与义务提示）；
+  - 普通问答无任务无计划时整卡隐藏，保持界面极简不干扰用户。
 
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。

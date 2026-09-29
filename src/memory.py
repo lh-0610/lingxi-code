@@ -89,6 +89,7 @@ def _normalize_progress(raw, session_id=""):
         logger.warning(f"会话 {session_id} 的进度解析异常：{error}", exc_info=True)
         from . import run_records as _rr
         empty = {"current_plan": [], "task_ledger": state.new_task_ledger(), "revision": 0,
+                 "task": None, "archived_tasks": [], "last_task_switch": None, "task_switch_version": 0,
                  "last_run": None, "pending_verification": _rr.empty_pending_verification(),
                  "last_committed_operation": None, "recent_operations": []}
         return empty, f"进度无法解析（{type(error).__name__}: {str(error)[:120]}）"
@@ -105,8 +106,11 @@ def _normalize_progress_checked(raw, session_id=""):
     对应操作退回"结果未知"（保守方向）；整块作废反而会让所有已提交操作一起退回未知。
     """
     from . import run_records as _rr
+    from . import task_state as _ts
 
     empty = {"current_plan": [], "task_ledger": state.new_task_ledger(), "revision": 0,
+             "task": None, "archived_tasks": [], "last_task_switch": None,
+             "task_switch_version": 0,
              "last_run": None, "pending_verification": _rr.empty_pending_verification(),
              "last_committed_operation": None, "recent_operations": []}
     if raw is None:
@@ -162,6 +166,20 @@ def _normalize_progress_checked(raw, session_id=""):
     if not isinstance(rev, int) or rev < 0:
         rev = 0
 
+    # ── B05 任务身份、来源与切换 ──
+    task, why = _ts.normalize_task(raw.get("task"), session_id)
+    if why:
+        return empty, why
+    archived_tasks, why = _ts.normalize_archived_tasks(raw.get("archived_tasks"), session_id)
+    if why:
+        return empty, why
+    last_switch, why = _ts.normalize_task_switch(raw.get("last_task_switch"), session_id)
+    if why:
+        return empty, why
+    task_switch_ver = raw.get("task_switch_version", 0)
+    if not isinstance(task_switch_ver, int) or task_switch_ver < 0:
+        task_switch_ver = 0
+
     # ── B03 的运行记录与待验证义务 ──
     last_run, why = _rr.normalize_last_run(raw.get("last_run"))
     if why:
@@ -173,8 +191,11 @@ def _normalize_progress_checked(raw, session_id=""):
                                                  raw.get("recent_operations"))
 
     return {"current_plan": plan, "task_ledger": ledger, "revision": rev,
+            "task": task, "archived_tasks": archived_tasks,
+            "last_task_switch": last_switch, "task_switch_version": task_switch_ver,
             "last_run": last_run, "pending_verification": pending,
             "last_committed_operation": last_op, "recent_operations": recent_ops}, ""
+
 
 
 def _snapshot_progress(sess):
@@ -214,9 +235,18 @@ def _snapshot_progress(sess):
         last_op = dict(last_op) if isinstance(last_op, dict) else None
         recent = [dict(r) for r in (getattr(sess, "recent_operations", None) or [])
                   if isinstance(r, dict)]
-    return {"plan": plan, "ledger": ledger, "revision": rev, "last_run": last_run,
-            "pending_verification": pending, "last_committed_operation": last_op,
-            "recent_operations": recent}
+        task = getattr(sess, "current_task", None)
+        task = json.loads(json.dumps(task)) if isinstance(task, dict) else None
+        archived_tasks = [json.loads(json.dumps(t)) for t in (getattr(sess, "archived_tasks", None) or [])
+                          if isinstance(t, dict)]
+        last_switch = getattr(sess, "last_task_switch", None)
+        last_switch = json.loads(json.dumps(last_switch)) if isinstance(last_switch, dict) else None
+        task_switch_ver = int(getattr(sess, "task_switch_version", 0) or 0)
+    return {"plan": plan, "ledger": ledger, "revision": rev,
+            "task": task, "archived_tasks": archived_tasks,
+            "last_task_switch": last_switch, "task_switch_version": task_switch_ver,
+            "last_run": last_run, "pending_verification": pending,
+            "last_committed_operation": last_op, "recent_operations": recent}
 
 
 def _json_fingerprint(value):
@@ -341,6 +371,10 @@ def _clear_progress(sess):
         # 结果卡的快照缓存也要清：重绘优先读它，不清的话"新建对话"之后
         # 旧那一轮的结果卡会重新画出来，而 last_run 明明已经空了。
         sess.last_result = None
+        sess.current_task = None
+        sess.archived_tasks = []
+        sess.last_task_switch = None
+        sess.task_switch_version = 0
 
 
 def _repair_pending_index_entries():
@@ -527,6 +561,19 @@ def _msg_to_dict(msg):
     d = {"type": msg.__class__.__name__}
     # content 可能是 str 或 list（含 thinking blocks 等），直接保留原结构
     d["content"] = msg.content or ""
+
+    # 稳定消息 ID（B05）：真实用户消息与内部消息均分配 stable ID，存盘重载保持一致。
+    # 约定：AI / Tool 消息的 id 多半是服务商给的（如 run-xxx），照样原样保存——它只是
+    # 消息身份，不是来源凭据。能否算"用户要求"只看类型 + lingxi_kind，不看 id。
+    from . import task_state as _ts
+    mid = getattr(msg, "id", None)
+    kwargs = getattr(msg, "additional_kwargs", None) or {}
+    if not mid and kwargs.get("lingxi_message_id"):
+        mid = kwargs.get("lingxi_message_id")
+    if isinstance(mid, str) and mid:
+        d["id"] = mid
+        d["lingxi_message_id"] = mid
+
     if isinstance(msg, AIMessage) and msg.tool_calls:
         d["tool_calls"] = msg.tool_calls
     if isinstance(msg, AIMessage):
@@ -535,36 +582,52 @@ def _msg_to_dict(msg):
             d["reasoning_content"] = ak['reasoning_content']
     if isinstance(msg, ToolMessage):
         d["tool_call_id"] = msg.tool_call_id
-    # 程序注入的消息（自动修复提示 / 完成闸门提示 / 视觉桥接说明）要带着标记落盘。
-    # 不存的话，重开会话后 run_records.describe_source 会把程序自己写的那段文字
-    # 当成"用户的最新要求"——恰恰是在长任务里最需要这条线索的时候失真。
-    kwargs = getattr(msg, "additional_kwargs", None) or {}
+
+    # 元数据白名单（B05）：只持久化允许的键名，防止任意 kwargs 原样保存或冒充授权
     if kwargs.get("lingxi_internal") is True:
         d["lingxi_internal"] = True
-        # 内部消息的种类（如 "resume" = 继续任务的恢复说明）也要落盘：重开之后
-        # 界面靠它把恢复说明画成程序说明而不是"你说的话"，来源判定也靠它认出"继续"。
         kind = kwargs.get("lingxi_kind")
-        if isinstance(kind, str) and kind:
+        if isinstance(kind, str) and kind in _ts.VALID_MESSAGE_KINDS:
             d["lingxi_kind"] = kind
-        # 恢复说明附带的交接记录（被摘出 sidecar 的执行前记录 + 给用户看的那段说明）。
-        # 它是这些操作留下的唯一诊断线索：sidecar 那几条随后就被清掉了。
         recovery = kwargs.get("lingxi_recovery")
         if isinstance(recovery, dict):
             d["lingxi_recovery"] = recovery
+    else:
+        kind = kwargs.get("lingxi_kind")
+        if isinstance(kind, str) and kind in _ts.VALID_MESSAGE_KINDS:
+            d["lingxi_kind"] = kind
     return d
 
 
 def _dict_to_msg(d):
+    from . import task_state as _ts
     t = d["type"]
-    internal = {"lingxi_internal": True} if d.get("lingxi_internal") is True else {}
-    if internal and isinstance(d.get("lingxi_kind"), str) and d.get("lingxi_kind"):
-        internal["lingxi_kind"] = d["lingxi_kind"]
-    if internal and isinstance(d.get("lingxi_recovery"), dict):
-        internal["lingxi_recovery"] = d["lingxi_recovery"]
+    internal = {}
+    mid = d.get("id") or d.get("lingxi_message_id") or ""
+    if isinstance(mid, str) and mid:
+        internal["lingxi_message_id"] = mid
+
+    if d.get("lingxi_internal") is True:
+        internal["lingxi_internal"] = True
+        kind = d.get("lingxi_kind")
+        if isinstance(kind, str) and kind in _ts.VALID_MESSAGE_KINDS:
+            internal["lingxi_kind"] = kind
+        recovery = d.get("lingxi_recovery")
+        if isinstance(recovery, dict):
+            internal["lingxi_recovery"] = recovery
+    else:
+        kind = d.get("lingxi_kind")
+        if isinstance(kind, str) and kind in _ts.VALID_MESSAGE_KINDS:
+            internal["lingxi_kind"] = kind
+        elif t == "HumanMessage":
+            # 旧版消息无来源元数据时，如实标为 legacy_unknown，不追认为用户原话（B05）
+            internal["lingxi_kind"] = "legacy_unknown"
+
+    msg = None
     if t == "SystemMessage":
-        return SystemMessage(content=d["content"])
+        msg = SystemMessage(content=d["content"])
     elif t == "HumanMessage":
-        return HumanMessage(content=d["content"], additional_kwargs=internal)
+        msg = HumanMessage(content=d["content"], additional_kwargs=internal)
     elif t == "AIMessage":
         ak = dict(internal)
         if "reasoning_content" in d:
@@ -574,11 +637,15 @@ def _dict_to_msg(d):
             tool_calls=d.get("tool_calls", []),
             additional_kwargs=ak,
         )
-        return msg
     elif t == "ToolMessage":
-        return ToolMessage(content=d["content"], tool_call_id=d.get("tool_call_id", ""),
-                           additional_kwargs=internal)
-    return HumanMessage(content=d["content"], additional_kwargs=internal)
+        msg = ToolMessage(content=d["content"], tool_call_id=d.get("tool_call_id", ""),
+                          additional_kwargs=internal)
+    else:
+        msg = HumanMessage(content=d["content"], additional_kwargs=internal)
+
+    if mid and isinstance(mid, str):
+        msg.id = mid
+    return msg
 
 
 def _build_ai_message(gathered, clean_text, tool_calls):
@@ -753,6 +820,11 @@ def _save_session_locked(*, session=None, started=None):
             "revision": rev,
             "current_plan": snap["plan"],
             "task_ledger": snap["ledger"],
+            # ── B05 任务身份、来源与切换 ──
+            "task": snap["task"],
+            "archived_tasks": snap["archived_tasks"],
+            "last_task_switch": snap["last_task_switch"],
+            "task_switch_version": snap["task_switch_version"],
             # 本轮运行记录：phase 说的是"程序有没有收到本轮结果"，outcome 是实际返回的
             # AgentResult。重开时看到 phase=running 就展示"上次运行被中断"，
             # 绝不凭空补一个 completed/failed。
@@ -1089,6 +1161,12 @@ def load_session(session_id, *, session=None):
         _lo = progress["last_committed_operation"]
         tgt.last_committed_operation = dict(_lo) if isinstance(_lo, dict) else None
         tgt.recent_operations = [dict(r) for r in progress["recent_operations"]]
+        # ── B05 任务身份、历史与切换恢复 ──
+        tgt.current_task = json.loads(json.dumps(progress["task"])) if isinstance(progress.get("task"), dict) else None
+        tgt.archived_tasks = [json.loads(json.dumps(t)) for t in (progress.get("archived_tasks") or [])
+                              if isinstance(t, dict)]
+        tgt.last_task_switch = json.loads(json.dumps(progress["last_task_switch"])) if isinstance(progress.get("last_task_switch"), dict) else None
+        tgt.task_switch_version = int(progress.get("task_switch_version", 0) or 0)
         # 加载不等于在跑：活动 run 是纯运行态，恢复出来的会话没有正在跑的 run。
         tgt.active_run_id = None
         # 同一个 Session 对象可能被复用来装另一个会话（侧栏切换就是这么干的）。

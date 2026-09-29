@@ -159,7 +159,7 @@ def resolve_model(name_hint: str) -> int:
 def run_once(case, workdir, model_index):
     """在 workdir 上跑一遍 agent。返回 (输出文本, 指标 dict, 错误 或 None)。"""
     from langchain_core.messages import HumanMessage, SystemMessage
-    from src import session as _session, state
+    from src import session as _session, state, task_state as _ts
     from src.roles import get_system_prompt
     from src.subagent import HeadlessUI
     from src import agent as _agent
@@ -184,8 +184,9 @@ def run_once(case, workdir, model_index):
     try:
         state.current_project = workdir
         system_prompt = get_system_prompt()
+        # 用例的 prompt 扮演用户原话，按真实发送入口打标；否则任务要求来源会被标成"来源未确认"。
         sess.chat_history = [SystemMessage(content=system_prompt),
-                             HumanMessage(content=case["prompt"])]
+                             _ts.tag_user_message(HumanMessage(content=case["prompt"]))]
         _session.register(sess)
         result = _agent.agent_loop(ui)
         if not isinstance(result, AgentResult):

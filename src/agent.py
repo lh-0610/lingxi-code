@@ -469,11 +469,11 @@ def _agent_loop_body(ui):
                             )
                             if allowed:
                                 prompt = inject_repair_prompt(_verification)
-                                # 程序注入，不是用户的新要求：打上标记，
-                                # 免得运行来源被改写成这段自动生成的诊断文字。
-                                state.chat_history.append(HumanMessage(
-                                    content=prompt,
-                                    additional_kwargs={"lingxi_internal": True}))
+                                from . import task_state as _ts
+                                repair_msg = _ts.tag_internal_message(
+                                    HumanMessage(content=prompt), kind="repair"
+                                )
+                                state.chat_history.append(repair_msg)
                                 try:
                                     ui.show_message(
                                         "\n⚠️ 验证失败，正在自动诊断并尝试修复…\n",
@@ -541,11 +541,11 @@ def _agent_loop_body(ui):
                                   "允许最终结束，但必须明确说明原因和风险。"
                             )
                             ui.show_message("\n⚠️ 检测到改动尚未完成验证，正在继续检查…\n", "tool_result")
-                            # Anthropic 只允许 SystemMessage 连续出现在历史开头。
-                            # 这是对当前任务的内部续作指令，按 HumanMessage 注入最稳妥。
-                            state.chat_history.append(HumanMessage(
-                                content=_gap_msg,
-                                additional_kwargs={"lingxi_internal": True}))
+                            from . import task_state as _ts
+                            gate_msg = _ts.tag_internal_message(
+                                HumanMessage(content=_gap_msg), kind="gate"
+                            )
+                            state.chat_history.append(gate_msg)
                             continue
                         clean_text = (
                             "⚠️ 验证仍未完整完成：\n"
