@@ -655,6 +655,17 @@ class TestFinishedGuard:
             _on_finished_sess = ChatUI._on_finished_sess
             _settle_resume_card = ChatUI._settle_resume_card    # B04：finished 顺带收拾继续按钮
             _resume_cards_by_session = ChatUI._resume_cards_by_session
+            # B09a：finished 收尾末尾会尝试接纳待启动请求，借入真实实现
+            # （本用例没有排队请求，接纳路径不会真正走到 _do_send）
+            _admit_pending_run_for = ChatUI._admit_pending_run_for
+            _admit_pending_run = ChatUI._admit_pending_run
+            _pending_wait_tick = ChatUI._pending_wait_tick
+            _pending_runs_by_session = ChatUI._pending_runs_by_session
+            _pending_run_for = ChatUI._pending_run_for
+            _worker_alive = ChatUI._worker_alive
+            _pending_invalid_reason = ChatUI._pending_invalid_reason
+            _notify_remote_unaccepted = ChatUI._notify_remote_unaccepted
+            _clear_sent_input = ChatUI._clear_sent_input
 
             def __init__(self):
                 self.btn_states = []

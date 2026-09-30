@@ -475,10 +475,16 @@ class SidebarMixin:
         menu.exec(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
 
     def _stop_session_generation(self, sess, wait: bool = False, timeout: float = 3.0):
-        if sess is None or not getattr(sess, "is_generating", False):
+        """停一条（可能是后台）会话的 worker。
+
+        忙碌判据是 worker 线程本身而非 is_generating 标志（B09a）：非阻塞停止会
+        立刻把标志清 False，线程却还在收尾——此时删正文，收尾的 save_session 会把
+        已删会话原样存回来。wait=True 时 join 到线程真正退出为止。
+        """
+        if sess is None or not self._worker_alive(sess):
             return True
         import threading
-        thread = getattr(sess, "thread", None)
+        thread = getattr(sess, "thread", None) or getattr(sess, "last_worker", None)
         sess.stop_flag = True
         pc = getattr(sess, "pending_confirm", None)
         if pc:
@@ -505,12 +511,20 @@ class SidebarMixin:
     def _delete_session(self, session_id):
         from .. import session as _session
         _sess = _session.get(session_id)
-        if _sess and getattr(_sess, "is_generating", False):
+        if _sess is not None:
+            # B09a：会话要没了，挂着的待启动请求一并取消（不发给别的会话）
+            self._cancel_pending_run(_sess, "会话已删除，待发送的消息已取消")
+        if _sess is not None and self._worker_alive(_sess):
+            # 忙碌判据是线程而非 is_generating：非阻塞停止已清掉标志、旧线程还在收尾，
+            # 现在删正文，收尾的 save_session 会把已删会话连正文带索引原样存回来。
+            # 必须等到线程真正退出再删；等不到（卡在长工具里）就明说放弃。
             if agent.current_session_id == session_id:
                 if not self._force_stop_generation(wait=True):
+                    self._show_toast("会话仍在结束中，删除未执行，请稍后再试", 3000)
                     return
             else:
                 if not self._stop_session_generation(_sess, wait=True):
+                    self._show_toast("会话仍在结束中，删除未执行，请稍后再试", 3000)
                     return
         # 删除会话前回收其 worktree
         try:
@@ -554,6 +568,10 @@ class SidebarMixin:
             if not agent.load_session(session_id, session=target):
                 return
             _session.register(target)
+        if _prev is not target:
+            # B09a：离开当前会话，挂待启动请求的消息不跟着走（也不发给新会话）——
+            # 明确取消，输入保留在输入框。
+            self._cancel_pending_run(_prev, "已切换到其它会话，待发送的消息已取消（输入保留在输入框）")
         _session.set_active(target)
         target.needs_redraw = False  # 切过去查看了 → 清"完成未读"标记（侧栏绿点消失）
         self._sync_header_from_session()  # 顶栏 model/Plan-Act/思考 同步到该会话
@@ -711,6 +729,9 @@ class SidebarMixin:
         #    若正在后台跑则继续——不再 _force_stop_generation、也不清空它的 chat_history
         #    （那会和正在跑的 worker 抢同一个 list，正是"无项目对话被归到新项目"的来源）。
         _prev = _session.get_active()  # 继承当前会话的 model/mode（切项目不改这些）
+        # B09a：切项目 = 切到新会话，旧会话挂着的待启动请求明确取消（输入保留在输入框），
+        # 绝不在后台把消息发进旧项目的会话。
+        self._cancel_pending_run(_prev, "已切换项目，待发送的消息已取消（输入保留在输入框）")
         new_sess = _session.Session()  # 默认 session_kind="code"
         new_sess.current_model_index = _prev.current_model_index
         new_sess.agent_mode = _prev.agent_mode

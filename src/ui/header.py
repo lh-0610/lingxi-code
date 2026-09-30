@@ -320,6 +320,11 @@ class HeaderMixin:
                 agent.set_role_card(content, role_name, path)
 
                 # 新建对话应用角色
+                # B09a：这个 Session 对象马上要被 reset_history"回收"成空白新对话，
+                # 挂在它身上的待启动请求一并取消（输入保留在输入框）。
+                from .. import session as _session
+                self._cancel_pending_run(_session.get_active(),
+                                         "已开始新对话，待发送的消息已取消（输入保留在输入框）")
                 agent.reset_history()
                 self.chat_area.clear()
                 self._refresh_session_list()
@@ -387,6 +392,10 @@ class HeaderMixin:
 
         elif action == clear_action:
             agent.clear_role_card()
+            # B09a：reset_history 会回收当前 Session 对象，先取消挂着的待启动请求
+            from .. import session as _session
+            self._cancel_pending_run(_session.get_active(),
+                                     "已开始新对话，待发送的消息已取消（输入保留在输入框）")
             agent.reset_history()
             self.chat_area.clear()
             self._refresh_session_list()

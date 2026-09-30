@@ -42,6 +42,37 @@ from .header import HeaderMixin
 from .rag_sidebar import RagSidebarMixin
 
 
+class _PendingRunRequest:
+    """一次待启动的运行请求（B09a 退出屏障）。
+
+    上一轮 worker 还没真正退出时，发送 / 遥控入口不丢请求也不立刻启动，而是把它
+    登记成这样一个对象，由非阻塞轮询等旧线程退出后再重新核对、接纳。这只是
+    「一次待启动请求」的内存状态，不是多条输入队列。
+
+    请求在登记时定格内容与上下文（文本 / 附件快照、旧 worker 线程、会话与项目归属），
+    接纳时逐项复核——任何一项漂移都拒绝启动，绝不把输入发到别处。
+    """
+
+    __slots__ = ("session", "source", "text", "images", "old_worker",
+                 "session_id", "session_project", "global_project", "worktree",
+                 "attempts", "cancelled")
+
+    def __init__(self, session, source, text="", images=None,
+                 old_worker=None, session_id=None,
+                 session_project=None, global_project=None, worktree=None):
+        self.session = session
+        self.source = source          # "send"（普通发送） / "remote"（遥控注入）
+        self.text = text
+        self.images = list(images or [])
+        self.old_worker = old_worker  # 登记时还活着的那条旧 worker 线程
+        self.session_id = session_id
+        self.session_project = session_project
+        self.global_project = global_project
+        self.worktree = worktree      # 登记时的隔离区（实际工作目录）身份
+        self.attempts = 0
+        self.cancelled = False
+
+
 # 聊天区 HTML 文本里的彩色 emoji → icons/ 下的 SVG 文件（见 docs/emoji_inventory.md）。
 # 8 个概念复用现有 *_lucide.svg，其余用合并进来的 lucide 图标。✓/✗/⚙ 等单色字符符号
 # 按 README 决定保留为字体字形、不在此映射。SVG 走 currentColor，由 _inline_svg_img 按主题着色。
@@ -1293,17 +1324,20 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         return text + hint
 
     def _force_stop_generation(self, wait: bool = False, timeout: float = 3.0):
-        """强制停止当前生成，立即更新 UI 状态。
+        """强制停止当前生成，立即更新 UI 状态（默认非阻塞）。
 
-        与 _on_send_click 中的 stop 不同：这里会同步把 is_generating 置 False
-        并立即刷新按钮/输入框，这样调用方（切会话 / 新对话等）可以继续往下执行，
-        而不用等 worker 线程退出。
+        停的对象是这条会话的 **worker 线程本身**（thread / last_worker），不是
+        is_generating 标志——非阻塞停止会立刻把标志清 False，而旧线程可能还在
+        收尾写这个会话，删除会话这类操作若只看标志就会漏掉它（实测会复活已删正文）。
+        wait=True 时 join 这条线程直到真正退出或超时；超时返回 False、不动任何状态，
+        由调用方决定放弃。这段"已停止但旧 worker 还在收尾"的窗口里，发送只会登记
+        待启动请求，旧线程真正退出后才启动下一轮。
         """
         from .. import session as _session
         sess = _session.get_active()
-        if not sess.is_generating:
+        if not self._worker_alive(sess):
             return True
-        thread = getattr(sess, "thread", None)
+        thread = getattr(sess, "thread", None) or getattr(sess, "last_worker", None)
         state.stop_flag = True
         self._release_pending_confirm()
         self._release_pending_edit()
@@ -1324,9 +1358,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from .. import session as _session
         sess = _session.get_active()
         if sess.is_generating:
-            # wait=True：join 旧 worker。若超时未退则保持 is_generating=True、按钮停"停止"态，
-            # 用户无法立刻再发 → 杜绝"旧 worker 还在跑就起新 worker"双开乱写同一会话。
-            self._force_stop_generation(wait=True)
+            # 非阻塞停止：立即恢复按钮、不等线程退出（不能在主线程 join 3 秒）。
+            # "停止后旧 worker 还在收尾"的窗口由 B09a 退出屏障兜住——这期间点发送
+            # 只会登记待启动请求，旧线程真正退出后才启动下一轮，绝不双开。
+            self._force_stop_generation()
         elif self._has_input or self._pending_images:
             self._send_message()
 
@@ -1477,27 +1512,231 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     # ── 发送消息 ──
 
+    # ── B09a 统一退出屏障：上一轮真正退出前，同一会话不启动下一轮 ──
+    # 判据只有一条：sess.last_worker 这条线程还活着就不算结束。is_generating 会被
+    # 强制停止立刻置 False（旧线程还在收尾写这个会话），finished 信号也可能先于
+    # 线程退出到达——都不能作为"可以开新一轮"的依据。
+
+    def _worker_alive(self, sess) -> bool:
+        """这个会话是否还有一条没退出的 worker 线程（含正在收尾的）。"""
+        worker = getattr(sess, "last_worker", None)
+        return bool(getattr(sess, "is_generating", False)) or (
+            worker is not None and worker.is_alive())
+
+    def _pending_runs_by_session(self) -> dict:
+        """待启动请求表（Session → _PendingRunRequest）。每会话最多一条。"""
+        runs = getattr(self, "_pending_runs", None)
+        if runs is None:
+            runs = self._pending_runs = {}
+        return runs
+
+    def _pending_run_for(self, sess):
+        return self._pending_runs_by_session().get(sess)
+
+    def _gate_new_run_request(self, sess, source, text="", images=None) -> str:
+        """所有"开新一轮"入口的统一启动闸。返回：
+        - "start"  —— 会话空闲，调用方可以立刻启动（_do_send / 重试线程）
+        - "queued" —— 已登记为待启动请求，旧 worker 退出后由屏障接纳（仅 send/remote）
+        - "busy"   —— 拒绝（正常生成中 / 已有等待请求 / 继续或撤销正持有屏障）
+
+        正常生成中不代停、不排队（点发送按钮 = 停止的语义留在 _on_send_click）；
+        只有"已停止但旧 worker 还在收尾"的窗口才排队等待。
+        """
+        if self._pending_run_for(sess) is not None:
+            self._show_toast("已有一条消息在等待上一轮结束，未重复登记", 2500)
+            if source == "remote":
+                self._notify_remote_unaccepted("已有一条消息在等待发送，本条未接收")
+            return "busy"
+        if getattr(sess, "resume_pending", False):
+            self._show_toast("「继续/撤销」正在等待当前运行结束，请稍后再试", 2500)
+            if source == "remote":
+                self._notify_remote_unaccepted("正在等待当前运行结束，消息未接收")
+            return "busy"
+        if getattr(sess, "is_generating", False):
+            self._show_toast("正在生成中，请先停止再发送", 2000)
+            if source == "remote":
+                self._notify_remote_unaccepted("当前正在生成中，消息未接收")
+            return "busy"
+        if self._worker_alive(sess):
+            if source == "retry":
+                # 重试要动 chat_history（弹掉空消息），等旧 worker 退出前不能碰
+                self._show_toast("上一轮仍在结束，暂时无法重试，请稍后再试", 2500)
+                return "busy"
+            req = _PendingRunRequest(
+                sess, source, text=text, images=images,
+                old_worker=getattr(sess, "last_worker", None),
+                session_id=getattr(sess, "current_session_id", None),
+                session_project=getattr(sess, "project", None),
+                global_project=state.current_project,
+                worktree=getattr(sess, "worktree", None),
+            )
+            self._pending_runs_by_session()[sess] = req
+            self._show_toast("上一轮仍在结束，将在其退出后自动发送…", 2500)
+            if source == "remote":
+                self._notify_remote_unaccepted("上一轮正在结束，消息将在其退出后发送")
+            QTimer.singleShot(self._RESUME_WAIT_MS, self,
+                              lambda req=req: self._pending_wait_tick(req))
+            return "queued"
+        return "start"
+
+    def _pending_wait_tick(self, req):
+        """非阻塞轮询：旧 worker 退出 → 尝试接纳；超时 → 放弃（不强行放行）。"""
+        sess = req.session
+        if req.cancelled or self._pending_runs_by_session().get(sess) is not req:
+            return          # 已被取消或被取代：一次性请求，绝不二次启动
+        if self._worker_alive(sess):
+            req.attempts += 1
+            if req.attempts >= self._RESUME_WAIT_LIMIT:
+                self._pending_runs_by_session().pop(sess, None)
+                req.cancelled = True
+                self._show_toast("上一轮仍在结束，消息未自动发送；输入已保留，可稍后重试", 4000)
+                if req.source == "remote":
+                    self._notify_remote_unaccepted("等待上一轮结束超时，消息未发送")
+                # 旧线程仍在运行这一事实不动：不假装它结束了，也不清任何运行标记
+                return
+            QTimer.singleShot(self._RESUME_WAIT_MS, self,
+                              lambda req=req: self._pending_wait_tick(req))
+            return
+        self._admit_pending_run(req)
+
+    def _admit_pending_run(self, req):
+        """接纳一次待启动请求：一次性弹出 → 完整复核 → 按来源启动。"""
+        sess = req.session
+        if self._pending_runs_by_session().get(sess) is not req:
+            return
+        if self._worker_alive(sess):
+            # finished 信号可能先于线程退出到达：回到轮询，绝不带病启动
+            self._pending_wait_tick(req)
+            return
+        del self._pending_runs_by_session()[sess]
+        reason = self._pending_invalid_reason(req)
+        if reason:
+            if req.source == "remote":
+                self._notify_remote_unaccepted(reason + "，消息未发送")
+            self._show_toast(f"消息未发送：{reason}" +
+                             ("（输入已保留）" if req.source == "send" else ""), 4000)
+            return
+        if req.source == "remote":
+            state.remote_session = True
+            if not self._do_send(req.text):
+                self._notify_remote_unaccepted("消息发送失败（无法启动新一轮）")
+            return
+        if self._do_send(req.text, req.images):
+            self._clear_sent_input(req)     # 只清理实际发送的那份
+        else:
+            self._show_toast("消息发送失败：无法创建工作线程，输入已保留，可重试", 4000)
+
+    def _admit_pending_run_for(self, sess):
+        """worker 结束信号到达时主动尝试接纳一次（轮询是兜底，不必等下一跳）。"""
+        req = self._pending_run_for(sess)
+        if req is not None and not req.cancelled:
+            self._admit_pending_run(req)
+
+    def _pending_invalid_reason(self, req) -> str:
+        """接纳前的复核：会话、请求、项目归属、工作目录、运行身份任何一项漂移都拒绝。"""
+        from .. import session as _session
+        sess = req.session
+        if req.cancelled:
+            return "请求已取消"
+        if sess is not _session.get_active():
+            return "已切换到其它会话"
+        if getattr(sess, "current_session_id", None) != req.session_id:
+            return "会话已被重置或重新载入"
+        if getattr(sess, "project", None) != req.session_project \
+                or state.current_project != req.global_project:
+            return "项目归属已改变"
+        # 实际工作目录也要复核：项目根没动、隔离区从 A 换到 B，照样不算原来的现场
+        if getattr(sess, "worktree", None) != req.worktree:
+            return "工作目录（隔离区）已改变"
+        if getattr(sess, "last_worker", None) is not req.old_worker:
+            return "已有新一轮运行"
+        return ""
+
+    def _cancel_pending_run(self, sess, message):
+        """明确取消某会话的待启动请求（切会话 / 重置 / 删除时调用）。"""
+        req = self._pending_runs_by_session().pop(sess, None)
+        if req is None:
+            return
+        req.cancelled = True
+        if message:
+            self._show_toast(message, 3000)
+            if req.source == "remote":
+                self._notify_remote_unaccepted(message)
+
+    def _clear_sent_input(self, req):
+        """接纳成功后清理输入：只清实际发送的那份，等待期间的新编辑 / 新附件一律保留。"""
+        if self.entry.toPlainText().strip() == req.text:
+            self.entry.clear()
+        for _img in req.images:
+            try:
+                self._pending_images.remove(_img)
+            except ValueError:
+                pass
+        self._refresh_image_preview()
+        self._check_input_state()
+
+    def _notify_remote_unaccepted(self, message):
+        """遥控注入无法接纳时给手机端一个明确回执（不能静默丢弃请求）。"""
+        try:
+            from .. import telegram_push
+            telegram_push.push("info", "灵犀消息未发送", str(message)[:300])
+        except Exception:
+            pass
+
+    def _spawn_worker_thread(self, sess, target, args=(), kwargs=None) -> bool:
+        """起 worker 线程的统一出口：启动失败回滚运行态并如实反馈，不让会话卡在"生成中"。"""
+        # 先作废上一轮的令牌：新运行已经"接纳"，旧 worker 的 finished 无论何时到达
+        # 都按迟到处理，不能抢在新线程登记自己的令牌之前把忙碌状态解掉。
+        sess.worker_token = None
+        # 线程身份在 start() **之前**登记：Thread.start() 返回后，线程未必马上进入
+        # target（target 内部那几行登记代码更没执行）。这个窗口里点停止会清掉
+        # is_generating，若屏障还看不到线程占用，下一条消息就会双开同一会话。
+        try:
+            thread = threading.Thread(target=target, args=args, kwargs=kwargs or {},
+                                      daemon=True)
+        except Exception as e:
+            from ..paths import logger
+            logger.error(f"worker 线程创建失败: {e}", exc_info=True)
+            sess.is_generating = False
+            self._update_btn_state("enabled" if self._has_input else "disabled")
+            return False
+        sess.thread = thread
+        sess.last_worker = thread   # 未启动成功的线程 is_alive() 恒 False，屏障不受影响
+        try:
+            thread.start()
+            return True
+        except Exception as e:
+            from ..paths import logger
+            logger.error(f"worker 线程启动失败: {e}", exc_info=True)
+            if sess.thread is thread:
+                sess.thread = None
+            sess.is_generating = False
+            self._update_btn_state("enabled" if self._has_input else "disabled")
+            return False
+
     def submit_from_remote(self, text: str):
         """遥控消息注入入口（可从任意线程调用，通过 Signal 跨线程）。"""
         self.bridge.remote_submit.emit(text)
 
     def _on_remote_submit(self, text: str):
-        """远程消息注入槽（主线程）。"""
+        """远程消息注入槽（主线程）。归属在接收时确定：绑定此刻的前台会话，
+        等待接纳期间不随前台漂移（复核不过就不发）。"""
         from .. import session as _session
         _active = _session.get_active()
-        if not text or _active.is_generating or _active.resume_pending:
+        if not text:
             return
-        state.remote_session = True
-        self._do_send(text)
+        if self._gate_new_run_request(_active, "remote", text=text) == "start":
+            state.remote_session = True
+            # 立即发送与"等待后接纳"两条路径都要给手机端回执，不能静默丢
+            if not self._do_send(text):
+                self._notify_remote_unaccepted("消息发送失败（无法启动新一轮）")
 
     def _send_message(self):
         text = self.entry.toPlainText().strip()
         images = self._pending_images[:]
         from .. import session as _session
         active = _session.get_active()
-        # resume_pending：「继续任务」已点下、正等旧 worker 退出——这时再发一条就是两个 worker
-        # 抢同一个会话（强制停止后 is_generating 已是 False，单看它挡不住）。
-        if (not text and not images) or active.is_generating or active.resume_pending:
+        if not text and not images:
             return
         # 知识库模式：未配置目录 / 索引不可用时拦截发送，避免无意义的模型 API 调用；
         # 索引恢复可用后自然放行（每次发送即时校验）。
@@ -1526,12 +1765,17 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             # 索引确认可用后才绑定空锚点——被拦下的发送不该把空会话提前钉死在某个库
             if not anchor:
                 active.rag_kb_dir = cur_kb
-        # GUI 专属清理
+        # B09a 统一启动闸：旧 worker 真正退出前不开新一轮。排队 / 被拒时输入
+        # 原样保留（不清空、不画成已发送、不提前进历史），接纳成功才清理。
+        if self._gate_new_run_request(active, "send", text=text, images=images) != "start":
+            return
+        if not self._do_send(text, images):
+            return
+        # 只有真的启动了新一轮才清理输入；等待接纳期间修改过的草稿不受影响
         self.entry.clear()
         self._pending_images.clear()
         self._refresh_image_preview()
         self._has_input = False
-        self._do_send(text, images)
 
     def _append_user_text(self, text):
         """显示用户消息：@文件引用渲染成靛蓝加粗，其余普通（MessageView 用户气泡）。"""
@@ -1549,9 +1793,16 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             parts.append(_html.escape(text[pos:]))
         self.chat_area.append_user_html("".join(parts).replace("\n", "<br>"))
 
-    def _do_send(self, text: str, images=None):
-        """核心发送逻辑，GUI 和远程共用。"""
+    def _do_send(self, text: str, images=None) -> bool:
+        """核心发送逻辑，GUI 和远程共用。返回是否真的启动了新一轮 worker。"""
         images = images or []
+        from .. import session as _session
+        # ── B09a 底层硬闸：旧 worker 没真正退出就不准再开一轮 ──
+        # 所有入口都应先过 _gate_new_run_request；这里是最后一道，防止绕过入口
+        # 直接调本方法时双开 worker 抢同一个会话。拒绝时不产生任何副作用。
+        if self._worker_alive(_session.get_active()):
+            self._show_toast("上一轮仍在结束，消息未发送，请稍后重试", 3000)
+            return False
         self._clear_empty_state()
 
         # @文件引用：聊天区只显示原文 display_text，完整文件内容只注入发给 AI 的 send_text
@@ -1579,7 +1830,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                     "\n⚠️ 当前模型不支持图片。请先在「设置 → 图片识别模型」里选一个能看图的模型。\n",
                     "tool_result",
                 )
-                return
+                return False
             vision_model_name = agent.MODEL_LIST[vision_idx][0]
 
         self._update_btn_state("stop")
@@ -1601,12 +1852,13 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
         if use_vision_bridge:
             state.stop_flag = False
-            threading.Thread(
-                target=self._run_vision_bridge_agent,
-                args=(send_text, images, vision_model_name, original_model_name, sess),
-                daemon=True,
-            ).start()
-            return
+            # 视觉桥接的用户消息在工作线程里追加，启动失败不留半截历史
+            if not self._spawn_worker_thread(
+                    sess, self._run_vision_bridge_agent,
+                    args=(send_text, images, vision_model_name, original_model_name, sess)):
+                self._show_toast("发送失败：无法创建工作线程，消息未发送", 4000)
+                return False
+            return True
 
         # 构造消息
         from .. import task_state as _ts
@@ -1625,16 +1877,39 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         agent.chat_history.append(user_msg)
         _ts.sync_user_requests(sess)
 
+        state.stop_flag = False
+        if not self._spawn_worker_thread(sess, self._run_agent, args=(sess,)):
+            # 启动失败：这一轮要像从未发生过一样撤干净——历史、任务要求引用、磁盘。
+            # 存盘在启动成功之后才做（见下），所以磁盘上本来就没有这条消息；
+            # 内存里撤掉消息 + 摘掉刚记的任务要求引用，重发不会重复。
+            try:
+                if agent.chat_history and agent.chat_history[-1] is user_msg:
+                    agent.chat_history.pop()
+                _mid = getattr(user_msg, "id", None)
+                _task = getattr(sess, "current_task", None)
+                if _mid and isinstance(_task, dict):
+                    _ids = _task.get("request_message_ids")
+                    if isinstance(_ids, list) and _mid in _ids:
+                        _ids.remove(_mid)
+                    _sources = _task.get("request_sources")
+                    if isinstance(_sources, dict):
+                        _sources.pop(_mid, None)
+            except Exception:
+                pass
+            self._append_html(
+                "\n⚠️ 消息发送失败（无法创建工作线程），没有发给模型；"
+                "输入已保留，可直接重发。\n", "tool_result")
+            self._show_toast("发送失败：无法创建工作线程，消息未发送", 4000)
+            return False
         # 立即存盘 + 刷侧栏：让会话马上出现在侧栏，长任务时开新对话也能切回它
         # （否则要等 worker 跑完才 save 进 index → 正在跑的会话在侧栏找不到）。
+        # 必须在启动成功之后：失败时磁盘上不能留下一条"从未发送"的消息。
         try:
             agent.save_session()
         except Exception:
             pass
         self._refresh_session_list()
-
-        state.stop_flag = False
-        threading.Thread(target=self._run_agent, args=(sess,), daemon=True).start()
+        return True
 
     def _run_agent(self, sess=None, resume=None):
         # 把这个 worker 线程绑定到它要跑的会话：之后 agent_loop / tools 里所有
@@ -1764,6 +2039,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if hasattr(self, "undo_btn"):
             self._style_undo_btn()
         state.remote_session = False
+        # B09a：这一轮真正结束了。若有待启动请求（停止后排队的那条消息），
+        # 立即尝试接纳——接纳前仍会完整复核会话 / 项目 / 运行身份；轮询是兜底。
+        self._admit_pending_run_for(finished_sess)
 
     def _show_retry(self, error_msg):
         """在聊天区显示错误信息和重试按钮（MessageView）。"""
@@ -2041,7 +2319,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """点击重试：重新执行 agent_loop"""
         from .. import session as _session
         sess = _session.get_active()
-        if sess.is_generating or sess.resume_pending:
+        # 统一启动闸：正常生成中 / 已有等待请求 / 旧 worker 还在收尾，都不能重试
+        # （重试要动 chat_history，等旧 worker 退出前碰不得）。拒绝时明确反馈。
+        if self._gate_new_run_request(sess, "retry") != "start":
             return
         # 移除上次失败的 AI 消息（如果最后一条是 AI 的空消息）
         from langchain_core.messages import AIMessage
@@ -2060,7 +2340,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         sess.is_generating = True
         self._update_btn_state("stop")
         state.stop_flag = False
-        threading.Thread(target=self._run_agent, args=(sess,), daemon=True).start()
+        if not self._spawn_worker_thread(sess, self._run_agent, args=(sess,)):
+            self._show_toast("重试失败：无法创建工作线程，请稍后再试", 4000)
 
 
     def _show_toast(self, text, duration=1500):
@@ -2307,6 +2588,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             return
         if sess.resume_pending:
             return          # 连点：第一次点击已经在准备了，只起一个 worker
+        if self._pending_run_for(sess) is not None:
+            # B09a：有一条待发送的消息也在等旧 worker 退出。两条请求不能同时接纳，
+            # 让用户先处理消息（发出去或等它超时撤回），否则它会在继续之后突然发出。
+            self._show_toast("有消息正在等待上一轮结束，请先处理再继续任务", 3000)
+            return
         sess.resume_pending = True
         # 按会话记"哪张卡发起了继续"：后台会话的那一轮还没结束、用户又在别的会话点了继续，
         # 单个槽位会被覆盖，前一个会话的卡就再也收不了尾。
@@ -2320,9 +2606,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
         只看按钮 / is_generating 不够：强制停止会立刻把 is_generating 置 False，
         而旧线程可能还在收尾、还会写这个会话（存盘、结束记录、标题线程）。
+        忙碌判据统一走 _worker_alive（B09a）。
         """
-        worker = getattr(sess, "last_worker", None)
-        if sess.is_generating or (worker is not None and worker.is_alive()):
+        if self._worker_alive(sess):
             if attempts >= self._RESUME_WAIT_LIMIT:
                 self._resume_abort(sess, card, "上一轮仍在结束，请稍后再点「继续任务」")
                 return
@@ -2383,9 +2669,14 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._update_btn_state("stop")
         # 放开 pending 与起线程在同一个主线程回调里：中间插不进别的点击；
         # 之后再点，is_generating 已为 True，屏障会一直等到这一轮结束，再由归属核对拒绝。
+        # args=(sess,) 必须带上：_run_agent 的 sess=None 会退回"线程启动那一刻的
+        # active"——点继续后、线程进入主体前切了会话，worker 就会绑到别的会话上
+        # （覆盖人家的 worker 身份、恢复检查拒了继续，收尾却把那个会话标成空闲）。
+        if not self._spawn_worker_thread(sess, self._run_agent,
+                                         args=(sess,), kwargs={"resume": resume}):
+            self._resume_abort(sess, card, "继续任务启动失败：无法创建工作线程")
+            return
         sess.resume_pending = False
-        threading.Thread(target=self._run_agent, args=(sess,), kwargs={"resume": resume},
-                         daemon=True).start()
         self._refresh_session_list()      # 侧栏的"生成中"标记跟上
 
     def _settle_resume_card(self, sess):
@@ -2557,6 +2848,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if sess.resume_pending:
             self.show_message("上一个操作还在等待当前运行结束，请稍后再撤销。", "system")
             return
+        if self._pending_run_for(sess) is not None:
+            # B09a：有一条待发送的消息也在等旧 worker 退出。先处理消息再撤销，
+            # 否则消息会在撤销落地后突然发出、落进刚恢复的任务里。
+            self.show_message("有消息正在等待当前运行结束，请先等它发出或撤回后再撤销任务切换。",
+                              "system")
+            return
         sess.resume_pending = True
         if sess.is_generating:
             # 走强制停止而不是只打 stop_flag：worker 可能正停在确认卡上等用户，
@@ -2570,14 +2867,14 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """屏障：旧 worker **真正退出**之后才撤销；超时或切走就放弃，不硬改。
 
         worker 还活着时撤销，它随后的写入（计划、任务、存盘）会覆盖刚恢复的任务。
+        忙碌判据统一走 _worker_alive（B09a）。
         """
         from .. import session as _session
         if sess is not _session.get_active():
             # 等待期间切到了别的会话。撤销结果、提示都属于那个看不见的会话，不在后台悄悄改。
             self._undo_switch_abort(sess, "已切换到其它会话，撤销任务切换已取消")
             return
-        worker = getattr(sess, "last_worker", None)
-        if sess.is_generating or (worker is not None and worker.is_alive()):
+        if self._worker_alive(sess):
             if retries >= self._RESUME_WAIT_LIMIT:
                 self._undo_switch_abort(sess, "当前运行仍未结束，撤销任务切换没有执行，请稍后再试")
                 return

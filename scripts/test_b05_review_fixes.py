@@ -229,6 +229,11 @@ def _ui_host(executed=None, *, wait_limit=3):
         _on_undo_task_switch = ChatUI._on_undo_task_switch
         _wait_worker_and_undo_switch = ChatUI._wait_worker_and_undo_switch
         _undo_switch_abort = ChatUI._undo_switch_abort
+        # B09a：撤销入口现在会先核对有没有待启动请求、忙碌判据走 _worker_alive，
+        # 借入真实实现
+        _worker_alive = ChatUI._worker_alive
+        _pending_runs_by_session = ChatUI._pending_runs_by_session
+        _pending_run_for = ChatUI._pending_run_for
 
         def __init__(self):
             self.messages, self.toasts, self.stops = [], [], 0

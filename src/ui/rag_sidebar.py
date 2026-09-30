@@ -244,6 +244,10 @@ class RagSidebarMixin:
         """把一个内存 Session 设为前台并同步全部 UI（新建 / 未存盘会话走这条；
         已存盘历史会话走 _load_session 的完整重绘路径）。"""
         from .. import session as _session
+        _prev = _session.get_active()
+        if _prev is not None and _prev is not sess:
+            # B09a：离开当前会话，挂待启动请求的消息明确取消（输入保留在输入框）
+            self._cancel_pending_run(_prev, "已切换到其它会话，待发送的消息已取消（输入保留在输入框）")
         _session.set_active(sess)
         sess.needs_redraw = False
         self.chat_area.clear()

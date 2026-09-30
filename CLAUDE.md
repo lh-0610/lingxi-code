@@ -321,6 +321,24 @@ python main.py
   - 区域 3：执行与验证状态（待验证文件列表与义务提示）；
   - 普通问答无任务无计划时整卡隐藏，保持界面极简不干扰用户。
 
+### 统一退出屏障：停止后启动下一轮（src/ui/chat_window.py，B09a）
+- **忙碌判据只有一条**：`_worker_alive(sess)` = `is_generating` 或 `last_worker.is_alive()`。强制停止会立刻把 `is_generating` 置 False 而旧线程还在收尾写会话；`finished` 信号也可能先于线程退出到达——两者都不能作为"可以开新一轮"的依据。各入口的忙碌判断统一走这个谓词（`_resume_wait` / `_wait_worker_and_undo_switch` 亦然），不各养一套。
+- **统一启动闸 `_gate_new_run_request(sess, source, ...)`**：普通发送（按钮 / Enter）、遥控注入、重试都过它，返回 `start`（会话空闲，调用方自己启动）/ `queued`（已登记待启动请求）/ `busy`（拒绝）。`_do_send` 顶部还有一道**底层硬闸**（拒绝时不产生任何副作用）——防绕过入口直接调它双开 worker。`_spawn_worker_thread` 是起 worker 线程的唯一出口：**线程身份在 `start()` 之前就写进 `thread` / `last_worker`**——`start()` 返回后线程未必马上进入 target，这个窗口里点停止会清掉 `is_generating`，若屏障还看不到线程占用，下一条消息就会双开同一会话（实测复现）；启动失败回滚 `is_generating` + 按钮态并如实反馈，不让会话卡在"生成中"（`Thread(...)` 构造本身也可能抛，回滚要覆盖它）。
+- **只有"已停止但旧 worker 还在收尾"的窗口才排队**。仍正常生成时发送被拒（点发送按钮 = 停止的语义不变，不代停、不新增排队）；**重试不排队**（它要动 `chat_history`，等旧 worker 退出前碰不得）——被拒时 toast 明确反馈。遥控注入被拒时经 `telegram_push.push` 给手机端明确回执（正常生成中、排队、超时、**立即发送启动失败**——两条路径都要回执，不静默丢弃）；归属在接收时绑定当时的前台会话。
+- **停止按钮不再 join**：`_on_send_click` 的停止分支改走 `_force_stop_generation()`（wait=False）——不能在主线程 join 3 秒；收尾窗口由屏障兜住，这期间点发送只会登记待启动请求。
+- **停止辅助函数停的是线程，不是标志**：`_force_stop_generation` / `sidebar._stop_session_generation` 的忙碌判据是 `_worker_alive`，不再因 `is_generating=False` 提前返回——非阻塞停止清掉标志后线程还在收尾，此时删正文，收尾的 save_session 会把已删会话连正文带索引原样存回来（实测复现）。`_delete_session` 用同一判据：worker 活着就 join 等真正退出再删；等不到（卡在长工具里）toast 明说"删除未执行"。已知边界：标题生成线程不属于 `last_worker`，删会话若恰好撞上它写标题，仍可能复活索引条目（先于本批存在，待单独立项）。
+- **待启动请求 `_PendingRunRequest`**：一次请求的内存状态（不是多条输入队列），登记时定格内容与上下文——`source` / 文本与附件快照 / `old_worker`（登记时活着的旧线程）/ `session_id` / `session_project` / `global_project`；每会话最多一条（重复点击明确拒绝，不二次登记）。
+- **接纳是渐进复核 + 一次性弹出**：worker 结束信号到达时主动 `_admit_pending_run_for`（轮询 100ms 是兜底），`_worker_alive` 仍忙则回到轮询（绝不带病启动）；弹出后逐项复核——active 未切换、`current_session_id` 未变（重置/重载）、项目归属未漂移、**隔离区（实际工作目录）未换**（项目根没动、worktree 从 A 换到 B 照样不算原来的现场）、`last_worker` 还是登记那条、请求未取消——任何一项漂移都拒绝发送，绝不把输入发到别处。重复回调、迟到 finished 因一次性 pop 而无第二次启动。
+- **`_do_send` 的存盘在启动成功之后**：失败路径要像这轮从未发生过一样撤干净——历史 pop、**任务要求引用显式摘除**（`sync_user_requests` 只加不减，撤销必须自己从 `request_message_ids` / `request_sources` 里拿掉消息 ID）+ 聊天区内联失败说明；存盘后移保证磁盘上根本不会出现一条"从未发送"的消息（否则重开时它又变成已发送记录，实测复现）。
+- **输入保留语义**：排队期间**不清输入、不画用户气泡、不进历史**（等待不画成已发送）；接纳成功后只清理实际发送的那份——输入框文本与快照**逐字相等**才清空（期间改过就保留新稿），附件按快照逐个移除（新加的附件保留）。超时 / 取消 / 失效时 toast 说明"未发送"，输入原样保留可重试。
+- **超时不强行放行**（复用 `_RESUME_WAIT_MS × _RESUME_WAIT_LIMIT` = 15s）：超时只释放本次等待占用并说明，不启动新 worker、不清任何运行标记——旧线程仍在运行这一事实不被清除等待标记所掩盖。
+- **与 B04/B05 互斥**：「继续任务」/「撤销任务切换」发现有待发消息时明确拒绝（先处理消息），不让两条请求在屏障后同时被接纳；反向的 `resume_pending` 挡发送在闸里照旧。
+- **「继续任务」起线程必须带 `args=(sess,)`**（`_start_resume` → `_spawn_worker_thread`）：`_run_agent` 的 `sess=None` 会退回"线程启动那一刻的 active"——点继续后、线程进入主体前切了会话，worker 就会绑到别的会话上：覆盖那边的 worker 身份、恢复检查拒掉继续、收尾却把那个会话标成空闲，屏障随之失效（实测复现）。回归见 `TestContinueBindsItsOwnSession`（用延迟启动的 Thread 包装把线程钉在 target 第一行之前，恢复检查与 begin/finalize 走真实实现）。
+- **明确取消钩子**：`_load_session` / `_activate_session`（含新建会话、切工作区）/ `_switch_project` / `_delete_session` / 角色卡切换与恢复默认（reset_history 会回收 Session 对象）各自调用 `_cancel_pending_run(sess, 说明)`——待发请求不跟着会话切走、不发给别的会话。
+- **起线程前作废旧令牌**：`_spawn_worker_thread` 先 `sess.worker_token = None` 再 start——新运行已接纳，旧 worker 的 finished 无论何时到达都按迟到处理；否则"轮询先接纳、旧 finished 后到"会抢在新线程登记令牌之前把按钮恢复成可发送。
+- **回归**：`scripts/test_b09_exit_barrier.py`（真实 ChatUI + 假 agent_loop + threading.Event + 真 Qt 事件循环）。测试造数注意：conftest 的全新 active 会话历史是**空列表**，`save_session` 会按"历史过短"跳过、会话拿不到 id——屏障用例须先补 SystemMessage + HumanMessage 再存（`_make_saved_session`），否则重置/重载核对（比对 `current_session_id`）形同虚设。要钉"已启动未登记"窗口，用 stub 替换 `_run_agent` 并在第一行阻塞——等它进入假模型循环就错过窗口了。
+- **worker 线程的隔离数据根**（`paths.set_data_dir` 是**线程本地**的，`isolated_memory` 只覆盖主线程）：worker 里做真实存盘（恢复检查 / begin / finalize / save_session）的用例必须在主线程先 `paths.get_data_dir()` 取根、闭包捕获、线程入口 `set_data_dir(root)`、finally 还原——进线程后再取拿到的就是默认根（等于没隔离，实测一次用例越界往真实 `chat_memory/` 写正文 + index 共 6 次；B04 的 shaped loop 同病，同批修掉）。该文件用 autouse 的 `_memory_write_guard` 夹具盯 `memory._atomic_write_json` 的落盘路径，越界当场失败——其他有 worker 真实存盘的测试文件建议照搬。
+
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。
 - **命令与 MCP 本地写入**：`workspace_changes.py` 在调用前后追踪项目文件，工具执行及完成检查时复查；变化使旧测试/diff 失效。Git 项目遵循 ignore，非 Git 项目跳过依赖/构建目录。无法完整枚举（权限、子模块、文件数上限等）保持未验证；它不是进程沙箱，不保证跟踪项目外或任务结束后的写入。

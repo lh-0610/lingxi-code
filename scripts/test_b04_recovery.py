@@ -1065,6 +1065,17 @@ def host(qt_app, monkeypatch, isolated_memory, no_config_issues):
         _run_agent = ChatUI._run_agent
         _on_finished_sess = ChatUI._on_finished_sess
         _on_remote_submit = ChatUI._on_remote_submit
+        # B09a 退出屏障：远程注入入口现在走统一启动闸，屏障方法一并借入
+        _worker_alive = ChatUI._worker_alive
+        _pending_runs_by_session = ChatUI._pending_runs_by_session
+        _pending_run_for = ChatUI._pending_run_for
+        _gate_new_run_request = ChatUI._gate_new_run_request
+        _pending_wait_tick = ChatUI._pending_wait_tick
+        _admit_pending_run = ChatUI._admit_pending_run
+        _admit_pending_run_for = ChatUI._admit_pending_run_for
+        _pending_invalid_reason = ChatUI._pending_invalid_reason
+        _notify_remote_unaccepted = ChatUI._notify_remote_unaccepted
+        _spawn_worker_thread = ChatUI._spawn_worker_thread
 
         def __init__(self):
             super().__init__()
@@ -1095,6 +1106,7 @@ def host(qt_app, monkeypatch, isolated_memory, no_config_issues):
 
         def _do_send(self, text, images=None):
             self.sent.append(text)
+            return True
 
         def show_message(self, text, tag):
             pass
@@ -1130,16 +1142,24 @@ def _wait_calls(app, host, n, seconds=3.0):
 class TestContinueButton:
     def test_double_click_starts_exactly_one_worker(self, qt_app, host, repo, monkeypatch):
         from src import agent as _agent
+        from src import paths as _paths
+        # worker 里 begin/finalize 要真实存盘：set_data_dir 是线程本地的，
+        # 必须在主线程先把隔离数据根取出来带过去，否则写进真实 chat_memory（实测复现）。
+        data_root = _paths.get_data_dir()
         sess, view = _stopped_session(repo)
         card = _card(view)
         release = threading.Event()
 
         def _real_shaped_loop(ui, *, resume=None):
-            # 和真的一样：一开跑就有了新的运行记录
-            host.calls.append({"resume": resume, "session": session.current_session()})
-            run = run_records.begin_run(session.current_session())
-            release.wait(10)
-            run_records.finalize_run(session.current_session(), run, AgentResult("completed"))
+            _paths.set_data_dir(data_root)
+            try:
+                # 和真的一样：一开跑就有了新的运行记录
+                host.calls.append({"resume": resume, "session": session.current_session()})
+                run = run_records.begin_run(session.current_session())
+                release.wait(10)
+                run_records.finalize_run(session.current_session(), run, AgentResult("completed"))
+            finally:
+                _paths.set_data_dir(None)
             return AgentResult("completed")
 
         monkeypatch.setattr(_agent, "agent_loop", _real_shaped_loop)
@@ -1250,16 +1270,22 @@ class TestContinueButton:
                                                      monkeypatch):
         """A 在后台继续着、用户又在 B 点了继续：两张卡各自收尾，互不覆盖。"""
         from src import agent as _agent
+        from src import paths as _paths
+        data_root = _paths.get_data_dir()   # worker 里真实存盘，线程本地数据根要带过去
         first, view_a = _stopped_session(repo)
         card_a = _card(view_a)
         release = threading.Event()
 
         def _loop(ui, *, resume=None):
-            current = session.current_session()
-            host.calls.append({"session": current})
-            run = run_records.begin_run(current)
-            release.wait(10)
-            run_records.finalize_run(current, run, AgentResult("completed"))
+            _paths.set_data_dir(data_root)
+            try:
+                current = session.current_session()
+                host.calls.append({"session": current})
+                run = run_records.begin_run(current)
+                release.wait(10)
+                run_records.finalize_run(current, run, AgentResult("completed"))
+            finally:
+                _paths.set_data_dir(None)
             return AgentResult("completed")
 
         monkeypatch.setattr(_agent, "agent_loop", _loop)
@@ -1277,13 +1303,19 @@ class TestContinueButton:
 
     def test_card_settles_after_the_run(self, qt_app, host, repo, monkeypatch):
         from src import agent as _agent
+        from src import paths as _paths
+        data_root = _paths.get_data_dir()   # worker 里真实存盘，线程本地数据根要带过去
         sess, view = _stopped_session(repo)
         card = _card(view)
 
         def _new_run_then_finish(ui, *, resume=None):
-            host.calls.append({"resume": resume})
-            run_records.begin_run(sess)
-            run_records.finalize_run(sess, sess.last_run, AgentResult("completed"))
+            _paths.set_data_dir(data_root)
+            try:
+                host.calls.append({"resume": resume})
+                run_records.begin_run(sess)
+                run_records.finalize_run(sess, sess.last_run, AgentResult("completed"))
+            finally:
+                _paths.set_data_dir(None)
             return AgentResult("completed")
 
         monkeypatch.setattr(_agent, "agent_loop", _new_run_then_finish)
