@@ -17,6 +17,7 @@ state.X / agent.X 读写代码无需改动，自动按"当前线程的当前会�
 state.py 的全局字段（行为与重构前完全等价）。
 """
 import threading
+import uuid
 
 
 # 会话级字段名 → 默认值工厂。state.py 的代理 property 依赖这份清单（单一事实源）。
@@ -104,6 +105,7 @@ class Session:
         "active_run_id", "inflight_lock", "worker_token",
         "last_worker", "resume_pending", "model_user_choice",
         "last_run_save_failed",
+        "background_owner_id",
     )
 
     def __init__(self):
@@ -114,6 +116,8 @@ class Session:
         self.thread = None
         # 多会话生命周期（P2）
         self.key = None           # 注册表里的键（已存盘=session_id；新会话=临时键 _new_<n>）
+        # 后台进程控制只在本进程有效；保存/rekey 不变，复用为别的逻辑会话时换令牌。
+        self.background_owner_id = uuid.uuid4().hex
         self.needs_redraw = False  # 后台会话跑完置 True，切回时触发重绘
         # 会话级命令/编辑白名单（用户"允许并记住"只影响本会话，不泄漏到别的会话）
         self.command_allowlist = set()         # 精确命令字符串（旧版，向后兼容）

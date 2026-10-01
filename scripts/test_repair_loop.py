@@ -101,7 +101,7 @@ class TestSessionRepairState:
 
 
 class TestAgentRepairIntegration:
-    def test_agent_injects_human_message(self, monkeypatch):
+    def test_agent_injects_human_message(self, monkeypatch, isolated_memory):
         from src import agent, session as session_mod, state
         from src.verification import mark_dirty
 

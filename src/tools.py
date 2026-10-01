@@ -6,8 +6,6 @@ import contextlib
 import difflib
 import shutil
 import subprocess
-import threading
-from collections import deque
 from langchain_core.tools import tool
 
 from . import state
@@ -15,13 +13,15 @@ from . import session as _session
 from . import checkpoint as _checkpoint
 from .verification import mark_tests as _v_mark_tests
 from .paths import logger
+from . import background as _bg
+from .background import _decode_chunk, _kill_proc_tree
 from .tools_common import (  # 共享底座（拆包：路径/项目根/子 Agent 沙箱/验证标记/shell cwd/搜索常量）
     _project_cwd, _resolve_path, _subagent_path_rejection, _subagent_command_rejection,
     _mark_current_dirty, _mark_current_check, _shell_cwd, _parse_cd, _norm_vpath,
     _SEARCH_IGNORE_DIRS, _SEARCH_MAX_FILE_SIZE,
 )
 from .limits import (
-    BG_MAX_RETAINED_EXITED,
+    BG_TOOL_OUTPUT_CHARS,
     READ_FILE_DEFAULT_LIMIT,
     RUN_COMMAND_MAX_OUTPUT_CHARS,
     RUN_COMMAND_TIMEOUT_S,
@@ -599,78 +599,6 @@ def _scrubbed_env():
     return env
 
 
-def _kill_proc_tree(proc):
-    """跨平台杀整个进程树。
-
-    Windows: `shell=True` 的 Popen 启动的是 cmd.exe，cmd 又 spawn 真正的命令进程。
-    `proc.kill()` 只杀 cmd，子进程会继续跑（"中断不掉"的根因）。这里用
-    `taskkill /F /T /PID` 把进程树整个连根拔。
-    Unix: 进程组可以一起杀，但 shell=True 也有类似问题，这里 fallback 到 proc.kill()。
-    """
-    if proc is None or proc.poll() is not None:
-        return
-    import sys as _sys
-    if _sys.platform == "win32":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=3,
-                check=False,
-            )
-            return
-        except Exception:
-            pass
-    try:
-        proc.kill()
-    except Exception:
-        pass
-
-
-def _decode_chunk(b: bytes) -> str:
-    """命令输出按 utf-8 → gbk 顺序兜底解码。Windows 中文环境下 npm/pip/git 走 UTF-8、
-    cmd 内置走 GBK，混着来很常见。"""
-    if not b:
-        return ""
-    for enc in ("utf-8", "gbk"):
-        try:
-            return b.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return b.decode("utf-8", errors="replace")
-
-
-# ══════════════════════════════════════
-# 后台进程注册表
-# ══════════════════════════════════════
-# bg_id → {proc, command, output: deque(maxlen=2000), start_ts}
-_bg_procs: dict[str, dict] = {}
-_bg_lock = threading.Lock()
-_bg_counter = [0]
-
-
-def _new_bg_id() -> str:
-    with _bg_lock:
-        _bg_counter[0] += 1
-        return f"bg{_bg_counter[0]}"
-
-
-def _evict_old_exited_bg() -> None:
-    """淘汰积累的【已退出】后台进程，保留最近 BG_MAX_RETAINED_EXITED 个仍可读最终输出。
-
-    必须在持有 _bg_lock 时调用。只淘汰已退出项（proc.poll() 非 None），运行中的从不动；
-    按 start_ts 淘汰最老的。防长会话里崩溃/跑完的后台任务连同 2000 行输出 deque 无限驻留。
-    """
-    exited = [(sid, info) for sid, info in _bg_procs.items()
-              if info["proc"].poll() is not None]
-    if len(exited) <= BG_MAX_RETAINED_EXITED:
-        return
-    exited.sort(key=lambda kv: kv[1]["start_ts"])  # 最老的在前
-    for sid, _info in exited[:len(exited) - BG_MAX_RETAINED_EXITED]:
-        _bg_procs.pop(sid, None)
-
-
 @tool
 def run_command(command: str, timeout: int | None = None, background: bool = False) -> str:
     """执行系统命令并**流式**返回输出（边跑边显示，不必等命令结束）。
@@ -691,6 +619,7 @@ def run_command(command: str, timeout: int | None = None, background: bool = Fal
 def _run_command(command: str, timeout: int | None, background: bool) -> str:
     import threading as _thr_local
 
+    caller_session = _session.current_session()
     effective_timeout = timeout if timeout is not None else RUN_COMMAND_TIMEOUT_S
 
     cmd_lower = command.lower().strip()
@@ -713,7 +642,6 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
 
     # ── 用户确认（同原逻辑）──
     try:
-        from . import session as _session
         if getattr(_session.current_session(), "is_subagent", False):
             ui = None
         else:
@@ -738,6 +666,16 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
     if reject:
         return reject
 
+    if background:
+        try:
+            _bg.ensure_accepting()
+        except RuntimeError as exc:
+            return f"启动失败: {exc}"
+        identity = _bg.capture_session_identity(caller_session)
+        project = caller_session.project
+        if project is _session._UNSET:
+            project = state.current_project
+
     # stderr 合并进 stdout 走同一管道，按时间顺序输出（不再分开拼接）
     try:
         _env = _scrubbed_env()          # None = 配置关了脱敏 → 不传 env，继承宿主环境
@@ -752,46 +690,17 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
     except Exception as e:
         return f"启动失败: {e}"
 
-    # ── 后台模式：起 reader 线程写 deque，立即返回 ──
+    # ── 后台模式：归属冻结（创建线程绑定的 Session），注册进统一管理层 ──
     if background:
-        bg_id = _new_bg_id()
-        out_deque: deque[str] = deque(maxlen=2000)
-        start_ts = time.time()
-
-        def _bg_reader():
-            """后台 reader：把输出 append 进 deque，不刷 UI。"""
-            try:
-                buf = b""
-                while True:
-                    raw = proc.stdout.read(4096)
-                    if not raw:
-                        if buf:
-                            text = _decode_chunk(buf)
-                            with _bg_lock:
-                                out_deque.append(text)
-                        break
-                    buf += raw
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        text = _decode_chunk(line + b"\n")
-                        with _bg_lock:
-                            out_deque.append(text)
-            except Exception:
-                pass  # 进程被杀时 stdout 关闭会抛异常，忽略
-
-        with _bg_lock:
-            _evict_old_exited_bg()   # 注册新进程前先淘汰积累的已退出项，防无限驻留
-            _bg_procs[bg_id] = {
-                "proc": proc,
-                "command": command,
-                "output": out_deque,
-                "start_ts": start_ts,
-            }
-        bg_thread = threading.Thread(target=_bg_reader, daemon=True)
-        bg_thread.start()
-        logger.info(f"后台命令已启动 [{bg_id}]: {command}")
+        try:
+            bg_id = _bg.start(command, proc, cwd=run_cwd, project=project, **identity)
+        except _bg.BackgroundStartError as exc:
+            snap = _bg.get_snapshot(exc.bg_id)
+            status = "已确认主进程退出" if snap and snap["running"] is False else "尚未确认退出，可重试停止"
+            return f"后台管理启动失败 [{exc.bg_id}]: {exc}；{status}。"
         return (
             f"已后台启动 [{bg_id}]: {command}\n"
+            f"（会话 {identity['session_id']}，目录 {run_cwd}）\n"
             f"用 read_background_output('{bg_id}') 看输出，"
             f"stop_background_command('{bg_id}') 停止。"
         )
@@ -1384,96 +1293,122 @@ def set_step_status(step: int, status: str, explanation: str = "") -> str:
 
 
 # ══════════════════════════════════════
-# 后台命令管理工具
+# 后台命令管理工具（B10a：数据与操作来自 src/background.py 的统一管理层，
+# 归属在创建时冻结；这里只做文案格式化，不解析、不维护并行状态）
 # ══════════════════════════════════════
 
 
 @tool
 def read_background_output(bg_id: str, tail: int = 50) -> str:
-    """读后台命令的累积输出（最后 tail 行）。tail<=0 看全部缓冲。"""
-    with _bg_lock:
-        info = _bg_procs.get(bg_id)
-    if info is None:
+    """读本会话后台命令的输出（最后 tail 行/段）。tail<=0 读全部缓冲，
+    每次返回仍有字符上限；丢弃与本次节选会明确标注。"""
+    snap = _bg.get_snapshot(bg_id, owner_id=_session.current_session().background_owner_id)
+    if snap is None:
         return f"未找到后台命令 '{bg_id}'。可用 list_background_commands() 查看所有。"
 
-    proc = info["proc"]
-    with _bg_lock:
-        lines = list(info["output"])
-    total = len(lines)  # 锁内快照长度；下面不再锁外迭代 deque（reader 并发 append 会 RuntimeError）
+    head = (f"[{bg_id}] {_background_status(snap)} | {snap['elapsed_s']}s | {snap['command'][:1000]}"
+            f" | 会话 {snap['session_id']}\n目录：{(snap['cwd'] or '')[:1000]}\n"
+            f"缓冲保留 {len(snap['output_tail'])} 段 / {snap['output_chars']} 字符；"
+            f"累计已读 {snap['output_total_lines']} 段 / {snap['output_total_chars']} 字符")
 
-    status = "运行中" if proc.poll() is None else f"已退出(码 {proc.returncode})"
-    elapsed = int(time.time() - info["start_ts"])
-
-    if tail > 0 and total > tail:
+    lines = list(snap["output_tail"])
+    if tail > 0 and len(lines) > tail:
         lines = lines[-tail:]
-        truncated_hint = f"\n... (仅显示最后 {tail} 行，共缓冲 {total} 段)"
+        truncated_hint = f"\n... (仅显示最后 {tail} 行/段，缓冲保留 {len(snap['output_tail'])} 段)"
     else:
         truncated_hint = ""
+    notes = []
+    if snap["output_truncated"]:
+        notes.append(f"缓冲已截断，累计丢弃 {snap['output_dropped_chars']} 字符 / "
+                     f"{snap['output_dropped_lines']} 个完整段；以下是保留的尾部")
+    if snap["read_error"]:
+        notes.append(f"输出读取失败：{snap['read_error']}")
+    if snap["process_error"]:
+        notes.append(f"进程状态核对失败：{snap['process_error']}")
+    if snap["stop_error"]:
+        notes.append(f"上次停止操作提示：{snap['stop_error']}")
+    if snap["tree_error"]:
+        notes.append(f"进程树停止提示：{snap['tree_error']}")
+    if not snap["output_complete"]:
+        notes.append("输出仍在读取，当前内容可能尚未齐全")
+    note_text = ("\n⚠ " + "；".join(notes)) if notes else ""
 
-    return (
-        f"[{bg_id}] {status} | {elapsed}s | {info['command']}\n"
-        + "".join(lines) + truncated_hint
-    )
+    body = "".join(lines)
+    # 本次返回的节选与注册表丢弃是两件事；入口自己控制预算，避免发送层砍中段。
+    allowance = max(0, BG_TOOL_OUTPUT_CHARS - len(head + truncated_hint + note_text) - 100)
+    if len(body) > allowance:
+        omitted = len(body) - allowance
+        body = body[-allowance:] if allowance else ""
+        truncated_hint += f"\n[本次只展示尾部，省略 {omitted} 字符；缓冲保留量见上方说明]"
+    return head + note_text + "\n" + body + truncated_hint
+
+
+def _background_status(snap):
+    if snap["running"] is None:
+        return "状态未知"
+    if snap["running"]:
+        return "停止中" if snap["stop_in_progress"] else "运行中"
+    return f"已退出(码 {snap['exit_code']})"
 
 
 @tool
 def list_background_commands() -> str:
-    """列出所有后台命令：bg_id / 命令 / 运行中或已退出 / 启动多久。"""
-    with _bg_lock:
-        if not _bg_procs:
-            return "没有后台命令在运行。"
-        rows = []
-        for bg_id, info in _bg_procs.items():
-            proc = info["proc"]
-            status = "运行中" if proc.poll() is None else f"已退出(码 {proc.returncode})"
-            elapsed = int(time.time() - info["start_ts"])
-            rows.append(f"  [{bg_id}] {status} | {elapsed}s | {info['command']}")
+    """列出本会话后台命令：bg_id / 状态 / 归属 / 耗时。已退出记录有限保留。"""
+    snaps = _bg.list_snapshots(owner_id=_session.current_session().background_owner_id)
+    if not snaps:
+        return "没有后台命令在运行。"
+    rows = []
+    for snap in snaps:
+        sub = " [子Agent]" if snap["is_subagent"] else ""
+        row = (f"  [{snap['bg_id']}] {_background_status(snap)} | {snap['elapsed_s']}s | "
+               f"{snap['command'][:300]} | 会话 {snap['session_id']}{sub}")
+        if sum(len(item) + 1 for item in rows) + len(row) > BG_TOOL_OUTPUT_CHARS - 100:
+            rows.append(f"[本次列表已节选，尚有 {len(snaps) - len(rows)} 项未显示；注册表保留全部运行项]")
+            break
+        rows.append(row)
     return "后台命令列表:\n" + "\n".join(rows)
 
 
 @tool
 def stop_background_command(bg_id: str) -> str:
-    """停止一个后台命令（taskkill 杀进程树），并从注册表移除。"""
-    with _bg_lock:
-        info = _bg_procs.pop(bg_id, None)
-    if info is None:
+    """停止一个后台命令（taskkill 杀进程树）。记录保留供查看；结果如实报告：
+    确认退出才算停止，超时/失败可重试。Windows 下杀整棵进程树，但"确认"仅覆盖
+    主进程的退出状态，不逐一核实树中其余成员。"""
+    result = _bg.stop(bg_id, owner_id=_session.current_session().background_owner_id)
+    if not result.get("found"):
         return f"未找到后台命令 '{bg_id}'。"
+    if result.get("authorized") is False:
+        return f"拒绝停止 [{bg_id}]：它属于其他会话；请切回创建它的会话管理。"
+    if result.get("already_exited"):
+        how = "此前停止请求后已退出" if result["end_kind"] == _bg.END_STOPPED else "已自行退出"
+        return (f"[{bg_id}] 进程{how}（码 {result['exit_code']}，"
+                f"运行 {result['elapsed_s']}s），无需停止；记录保留供查看。")
+    if result.get("confirmed"):
+        notes = [result.get(key) for key in ("stop_error", "tree_error", "read_error") if result.get(key)]
+        note = "\n注意：" + "；".join(notes) if notes else ""
+        how = "已停止" if result["end_kind"] == _bg.END_STOPPED else "进程已退出"
+        return (f"{how} [{bg_id}]: {result['command'][:1000]}（运行 {result['elapsed_s']}s，"
+                f"退出码 {result['exit_code']}）；已确认主进程退出，进程树其余成员"
+                f"的实际状态未逐一核实。{note}")
+    if result.get("in_progress"):
+        return f"[{bg_id}] 已有停止操作正在进行，本次等待超时；尚未确认退出，记录保留。"
+    err = result.get("stop_error") or result.get("process_error") or ""
+    extra = f"停止请求出错：{err[:80]}；" if err else ""
+    state_note = "进程状态未知" if result["alive"] is None else "进程仍在运行"
+    sent = "终止请求已发出" if result["stop_dispatched"] else "尚未成功发送终止请求"
+    return (f"[{bg_id}] {sent}，{result['wait_timeout']}s 内尚未确认退出（{state_note}）；"
+            f"{extra}记录已保留，可重试停止或用 read_background_output 查看输出。")
 
-    proc = info["proc"]
-    _kill_proc_tree(proc)
-    elapsed = int(time.time() - info["start_ts"])
-    logger.info(f"已停止后台命令 [{bg_id}]: {info['command']}（运行 {elapsed}s）")
-    return f"已停止 [{bg_id}]: {info['command']}（运行 {elapsed}s）"
 
-
-def stop_all_background(wait_timeout: float = 5.0):
-    """停止所有后台命令（应用退出时调用）。
-
-    先全部发杀、再统一等它们**真的**退出：只发不等的话函数返回时进程可能还活着，
-    端口也还占着（这个清理本来就是为了防端口残留），紧接着重启应用就会撞端口。
-    先杀后等而不是逐个 kill+wait，是为了让多个进程的退出时间重叠，总耗时取最慢的
-    那个而不是求和。等不到就记 warning 放行——退出流程不能被一个赖着不死的进程卡住。
-    """
-    with _bg_lock:
-        procs = list(_bg_procs.items())
-        _bg_procs.clear()
-    for bg_id, info in procs:
-        try:
-            _kill_proc_tree(info["proc"])
-            logger.info(f"退出清理：停止 [{bg_id}] {info['command']}")
-        except Exception:
-            pass
-    deadline = time.time() + wait_timeout
-    for bg_id, info in procs:
-        proc = info.get("proc")
-        if proc is None:
-            continue
-        try:
-            proc.wait(timeout=max(0.0, deadline - time.time()))
-        except subprocess.TimeoutExpired:
-            logger.warning(f"退出清理：[{bg_id}] {info['command']} 在 {wait_timeout}s 内未退出，放弃等待")
-        except Exception:
-            pass
+def stop_all_background(wait_timeout: float = 5.0, *, shutdown: bool = False):
+    """停止所有后台命令（应用退出时调用）：先全部发停止请求，再统一有界等待。
+    等不到的如实记录、记录保留——不把仍存活的进程标成已停止。"""
+    snaps = _bg.shutdown(wait_timeout) if shutdown else _bg.stop_all(wait_timeout)
+    for snap in snaps:
+        if snap["running"] is not False:
+            logger.warning(f"退出清理：[{snap['bg_id']}] {snap['command']} "
+                           f"未确认退出")
+    return snaps
 
 
 def _locate_symbol(src: str, name: str):

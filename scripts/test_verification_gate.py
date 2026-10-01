@@ -309,7 +309,7 @@ class TestEdgeCases:
 class TestAgentGateIntegration:
     """最小集成：确保 agent_loop 的完成闸门实际可达。"""
 
-    def test_first_final_text_is_blocked_until_verification_attempt(self, monkeypatch):
+    def test_first_final_text_is_blocked_until_verification_attempt(self, monkeypatch, isolated_memory):
         from src import agent, session as _session, state
 
         sess = _session.Session()

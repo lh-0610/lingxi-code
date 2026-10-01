@@ -59,7 +59,7 @@ if __name__ == "__main__":
         # 停止所有后台命令（dev server / watch 等）
         try:
             from src.tools import stop_all_background
-            stop_all_background()
+            stop_all_background(shutdown=True)
         except Exception:
             pass
         launcher = getattr(window, "_gpt_sovits_launcher", None)

@@ -28,6 +28,7 @@ src/                     # 主代码
   verification.py        # 编码任务**完成闸门** + 自动修复循环（标记 dirty/check/test 状态；check_repair_allowed 封顶修复轮次）
   tools.py               # 内置 @tool 聚合器（read/write/edit/run_command/search/test/patch/plan/find_* 等）+ build_all_tools/get_tool_map（含 MCP）
   tools_common.py        # 工具共享底座（_project_cwd / _resolve_path / 子 Agent 沙箱 / 验证状态标记 / shell cwd）—— 不 import tools，避免循环
+  background.py          # 后台命令唯一注册表（B10a）：冻结归属 / 结构化快照 / 有界停止 / 有界输出；工具与后续面板共用
   tools_git.py           # git 工具：git_diff/log/status/stage/unstage/commit（写操作弹确认、无 push）
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
@@ -353,6 +354,19 @@ python main.py
 - **遥控共用入队服务**：`_on_remote_submit` 运行中 → 入队（回执"已排队"），空闲直发，收尾窗口走 B09a 待启动请求；`telegram_poll._dispatch` 不再以"正忙"拒绝。回执区分已排队/未保存/未接收/启动失败。
 - **测试**（`scripts/test_b09b_input_queue.py`，34 条；3 组变异验证 + 复核修复 5 条回归确认能抓旧缺陷）：真新进程崩溃窗口用子进程脚本（child 里同样阻断数据根越界写入）；UI 用例用带 B03 记录的 shaped loop（`_worker_data_root` 把主线程数据根带进 worker——**必须在主线程取根再传参，进线程再取就是默认根**）+ autouse 写路径守卫；面板按钮按 `queue-row-<item_id>` objectName 定位，编辑对话框独立成 `_show_queue_edit_dialog` 便于整只替换。造数注意：入队/保存都需要会话历史 ≥2 条（否则 save 按"历史过短"跳过、无 ID）。
 
+### 后台进程管理（B10a，src/background.py）
+- **唯一注册表**：`background.py` 提供 `start / get_snapshot / list_snapshots / stop / stop_all`；工具层只格式化文案，后续 B10b 面板直接消费相同快照，不解析工具返回文本、不另存一套状态。
+- **启动前冻结归属**：会话创建时的持久化 ID（无 ID 时用 `unsaved:<运行期令牌>`）、注册表键、项目锚点、实际 cwd、run_id、B05 task_id（可为空）、is_subagent。reader/退出观察线程不读 active。`bg_id` 是进程记录身份，与 B05 task_id 不同；记录展示身份不会随保存/rekey/切任务漂移。
+- **控制范围**：模型 read/list/stop 只管理创建它们的逻辑会话；子 Agent 同样只管理自己创建的进程。`Session.background_owner_id` 是不持久化的运行期令牌，保存/rekey 不变，reset_history 或加载另一会话时更新（同对象重载同一会话不变）。新会话不能继承被复用 Session 的旧进程。应用退出的 `stop_all` 明确覆盖所有会话；管理层不带 owner_id 的调用是应用级接口，不能直接给模型用。
+- **真实状态与证据**：`running=True/False/None` 分别表示运行中/已确认退出/状态核对失败，拿不到退出码是 None。退出观察线程在锁外等实际进程结束，耗时用单调时钟并在首次观察退出时定格，不延长到下次刷新。后台启动/退出码 0 均不产生测试通过证据，也不代表任务完成。
+- **停止请求与退出分开**：stop_requested 记录用户意图，stop_dispatched 记录终止请求已接受，主进程退出要另行 poll/wait 核对。`end_kind=stopped` 只表示请求接受后观察到退出，不证明因果，也不证明所有后代都退出。重复停止保留原来的终态，不把此前停止改说成自然退出。
+- **单任务控制互斥**：锁内只做短小状态操作和非阻塞 poll，taskkill / wait / 管道读取在锁外。单个 stop 的锁等待、终止请求、退出等待共用截止时间；stop_all 先请求再等待，整批共用预算，不为每个任务额外等 5 秒。并发 stop 不重复发送进行中的请求；失败/超时/核对错误保留记录，活进程不淘汰，可重试。若线程启动失败，保留诊断、尝试有界停止刚创建的进程并报告失败。应用退出走 `shutdown` 永久关闭启动入口（`main.py` 调 `stop_all_background(shutdown=True)`）；Popen 与关闸交错时，刚创建的进程仍登记并尝试停止，不能直接丢掉引用。普通 stop_all 不关闸。
+- **Windows 进程树边界**：请求 `taskkill /F /T /PID`；非零退出/异常保留 tree_error，再尝试只杀主进程。即使 fallback 成功也不声称整棵树已停止；Unix 目前仅终止主进程。实际 Windows 父子进程用例通过固定子进程句柄核对退出；生产快照只确认主进程，未逐一检查所有后代。
+- **输出双限**：单任务保留最新 2000 行/段、最多 200000 字符；无换行半行缓冲最多 65536 字节，在 UTF-8/GBK 字符边界分段。总已读字符 = 保留字符 + 丢弃字符，标记不混入原始输出；reader 异常前的半行也保留，read_error 与进程退出状态分开。output_complete 说明读流已结束（错误看 read_error），进程退出但输出未齐全时会提示仍在读取。
+- **工具输出另有预算**：read/list 每次最多约 12000 字符，明确区分注册表已丢弃与本次展示节选，低于发送层 24000 硬上限；不会按被发送层截过的文本判断状态。已退出记录最多保留最近 10 个，注册/刷新/观察退出时清理；运行中或状态未知的记录始终保留，停止进行中的记录暂缓淘汰。
+- **本批边界**：只有后端与现有模型工具，没有新增 GUI 面板、stdin、自动重启或调度器；记录不持久化，重启不接管旧 PID。bg_id 带启动期 UUID，历史里的旧 bg_id 不会在重启后指向另一个新进程。父进程已自然退出后遗留的脱离子进程不在控制范围；后台运行期间/结束后持续写文件仍受现有 workspace_changes 跟踪边界限制。
+- **测试**：`scripts/test_background.py` 的真实输出/自然退出/Windows 子进程树，`scripts/test_background_manager.py` 的跨会话/子 Agent 控制、保存与重置、失败重试、共享停止预算、读取失败、无换行与 UTF-8/GBK 分段、真实发送层。只在仓库外副本与仓库外 basetemp 跑；Windows 子 Agent 命令用 PATH 中的 Python，显式引用隔离区外解释器路径应被沙箱拒绝，不能为测试放宽权限。
+
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。
 - **命令与 MCP 本地写入**：`workspace_changes.py` 在调用前后追踪项目文件，工具执行及完成检查时复查；变化使旧测试/diff 失效。Git 项目遵循 ignore，非 Git 项目跳过依赖/构建目录。无法完整枚举（权限、子模块、文件数上限等）保持未验证；它不是进程沙箱，不保证跟踪项目外或任务结束后的写入。
@@ -466,7 +480,7 @@ python main.py
 | `edit_file` | 精确字符串替换（比 write_file 安全省 token；**弹 diff 预览卡** + 路径白名单） |
 | `list_directory` | 列目录 |
 | `run_command` | 执行命令（默认 300s 超时、可传 `timeout`；屏蔽交互式，**执行前弹内联确认卡**；cwd = 项目根；流式输出 + taskkill 杀进程树；**`background=True` 转后台**跑 dev server/长服务，立即返回 bg_id） |
-| `read_background_output` / `list_background_commands` / `stop_background_command` | 管理后台命令（read·list 进 `PLAN_MODE_READONLY_TOOLS`、不弹确认；`_bg_procs` 全程 `_bg_lock` 保护、杀进程锁外调；退出时 `stop_all_background` 清理防端口残留） |
+| `read_background_output` / `list_background_commands` / `stop_background_command` | 管理本会话后台命令（read·list 进 `PLAN_MODE_READONLY_TOOLS`、不弹确认）；通过 `background.py` 获取快照/请求停止，停止后保留结果，失败可重试；应用退出时 `stop_all_background` 统一有界清理 |
 | `search_in_file` | 单文件关键词（`offset`/`limit` 分页） |
 | `search_files` | 跨文件正则搜索（ripgrep 风格，忽略噪声目录） |
 | `find_definition` / `find_references` | 跳符号定义 / 找所有引用（LSP→jedi→search 降级链，比正则准；只读、Plan 放行） |

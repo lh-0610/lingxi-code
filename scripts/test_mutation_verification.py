@@ -126,7 +126,7 @@ def test_validation_after_command_is_not_invalidated_again(project_dir, monkeypa
     assert verification.get_verification_gaps(v) == []
 
 
-def test_agent_cannot_silently_finish_after_command_write(project_dir, monkeypatch):
+def test_agent_cannot_silently_finish_after_command_write(project_dir, isolated_memory, monkeypatch):
     from langchain_core.messages import AIMessage, SystemMessage
     from src import agent
     from src.subagent import HeadlessUI

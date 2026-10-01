@@ -12,6 +12,7 @@ import json
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
@@ -1128,6 +1129,8 @@ def load_session(session_id, *, session=None):
         logger.warning(f"会话 {session_id} 的进度无法恢复：{progress_error}")
 
     tgt = _session_mod.current_session() if session is None else session
+    if tgt.current_session_id != session_id:
+        tgt.background_owner_id = uuid.uuid4().hex
     if session is None:
         state.session_token_usage = {"input": 0, "output": 0, "total": 0}
         state.chat_history.clear()
@@ -1367,6 +1370,7 @@ def reset_history(*, session=None):
         state.compaction["summary"] = ""
         state.compaction["covered_upto"] = 0
         _clear_progress(_sess)
+        _sess.background_owner_id = uuid.uuid4().hex
         # 关键：这个 Session 对象已被"回收"成空白新对话，但注册表里还以旧 id 指向它。
         # 必须把旧 id 摘掉 + 清 key，否则点击侧栏旧会话会命中这个被清空的对象、显示空白
         # 且不重读盘（本会话"加载不出来"）。摘掉后旧会话内容仍在盘上，点击时重新读盘恢复。
@@ -1383,3 +1387,4 @@ def reset_history(*, session=None):
         session.shell_cwd = None
         session.compaction = {"summary": "", "covered_upto": 0}
         _clear_progress(session)
+        session.background_owner_id = uuid.uuid4().hex

@@ -11,8 +11,9 @@ import pytest
 
 from src import state
 from src.tools import (
-    run_command, stop_all_background, _bg_procs, _bg_lock, _scrubbed_env,
+    run_command, stop_all_background, _scrubbed_env,
 )
+from src import background
 
 
 @pytest.fixture(autouse=True)
@@ -108,14 +109,16 @@ class TestShutdownQuiescence:
         """退出清理返回时进程必须真的没了——只发 kill 不等，端口可能还占着。"""
         res = run_command.func('python -c "import time; time.sleep(30)"', background=True)
         assert "bg" in res
-        with _bg_lock:
-            procs = [info["proc"] for info in _bg_procs.values()]
-        assert procs, "后台进程没注册上"
-        stop_all_background()
-        for p in procs:
-            assert p.poll() is not None, "stop_all_background 返回时进程仍在运行"
-        assert not _bg_procs
+        snapshots = background.list_snapshots()
+        assert any(s["running"] for s in snapshots), "后台进程没注册上"
+        try:
+            ended = stop_all_background()
+            assert all(s["running"] is False for s in ended)
+            assert all(s["exit_code"] is not None for s in ended)
+            assert background.list_snapshots(), "退出记录保留供查看"
+        finally:
+            stop_all_background()
 
     def test_stop_all_background_is_safe_when_empty(self):
         stop_all_background()          # 不该抛
-        assert not _bg_procs
+        assert not any(s["running"] is not False for s in background.list_snapshots())

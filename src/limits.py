@@ -48,6 +48,12 @@ TOOL_RESULT_PREVIEW_CHARS = 500
 # 运行中的进程从不被淘汰。
 BG_MAX_RETAINED_EXITED = 10
 
+# B10a 后台任务：输出上限（行数与总量双限；无换行的超长输出也必须受限）
+BG_MAX_OUTPUT_LINES = 2000         # 单任务输出缓冲的行数上限（超出丢最老行，计入丢弃统计）
+BG_MAX_OUTPUT_CHARS = 200_000      # 保留最新尾部，丢弃量单独计数
+BG_MAX_NO_NEWLINE_BYTES = 65_536   # reader 无换行临时缓冲的字节上限（防无限积累）
+BG_TOOL_OUTPUT_CHARS = 12_000      # 工具文案预算，低于发送层 24000 硬上限
+
 DEBUG_MAX_RECORDS = 50
 DEBUG_BASE64_PREVIEW_CHARS = 200
 DEBUG_TEXT_PREVIEW_CHARS = 4000
