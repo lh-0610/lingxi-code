@@ -547,6 +547,9 @@ class SidebarMixin:
     def _load_session(self, session_id):
         from .. import session as _session
         _prev = _session.get_active()  # 切换前的会话，新建会话继承它的 model/mode
+        # B09b：切走前把旧会话的队列暂停（保留条目；尚未接纳的派发等待由
+        # 下面的 _cancel_pending_run 取消）。在保存前改，本次 save 顺带落盘。
+        self._queue_pause_for_switch(_prev)
         # 存当前 active（不打断正在后台跑的会话；save 内部会把它 re-key 进注册表）
         agent.save_session()
         # 命中注册表 → 该会话已在内存（可能正在后台跑），直接切 active，绝不重读盘覆盖它。
@@ -628,6 +631,7 @@ class SidebarMixin:
         else:
             self._update_btn_state("enabled" if self._has_input else "disabled")
 
+        self._refresh_queue_panel()      # B09b：队列面板切到新会话的队列
         # 该会话在后台跑时积压的确认（命令/编辑）→ 现在切过来了，弹出来让用户处理。
         # worker 一直阻塞在 done.wait()，弹卡点完才会继续。
         pc = target.pending_confirm
@@ -709,6 +713,8 @@ class SidebarMixin:
         from ..roles import get_system_prompt
         from .. import session as _session
 
+        # B09b：切项目 = 切会话，旧会话的队列暂停（条目保留，切回后明确恢复）
+        self._queue_pause_for_switch(_session.get_active())
         # 1. 先存当前会话（用它自己锚定的 project；set_current 不会影响它的 tag）
         agent.save_session()
 

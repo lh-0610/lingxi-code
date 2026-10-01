@@ -655,9 +655,19 @@ class TestFinishedGuard:
             _on_finished_sess = ChatUI._on_finished_sess
             _settle_resume_card = ChatUI._settle_resume_card    # B04：finished 顺带收拾继续按钮
             _resume_cards_by_session = ChatUI._resume_cards_by_session
-            # B09a：finished 收尾末尾会尝试接纳待启动请求，借入真实实现
-            # （本用例没有排队请求，接纳路径不会真正走到 _do_send）
+            # B09a/B09b：finished 收尾会尝试接纳待启动请求、给队列条目记终态并
+            # 评估自动推进——借入真实实现（本用例无队列，推进评估空转返回）
             _admit_pending_run_for = ChatUI._admit_pending_run_for
+            _settle_finished_queue_item = ChatUI._settle_finished_queue_item
+            _maybe_auto_advance_queue = ChatUI._maybe_auto_advance_queue
+            _persist_queue_change = ChatUI._persist_queue_change
+            _queue_scene = ChatUI._queue_scene
+            _refresh_queue_panel = ChatUI._refresh_queue_panel
+            _queue_begin_dispatch = ChatUI._queue_begin_dispatch
+            _admit_queue_dispatch = ChatUI._admit_queue_dispatch
+            _queue_dispatch_aborted = ChatUI._queue_dispatch_aborted
+            _queue_hold_and_save = ChatUI._queue_hold_and_save
+            _worker_alive = ChatUI._worker_alive
             _admit_pending_run = ChatUI._admit_pending_run
             _pending_wait_tick = ChatUI._pending_wait_tick
             _pending_runs_by_session = ChatUI._pending_runs_by_session

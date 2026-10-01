@@ -71,14 +71,9 @@ def _dispatch(text: str):
     if ui is None:
         return
 
-    from . import session as _session
-    if _session.get_active().is_generating:  # is_generating 已迁到 Session（ui.is_generating 是 fallback）
-        from . import telegram_push
-        telegram_push.push("info", "灵犀正忙", "当前正在生成中，请稍后再试～")
-        logger.info(f"遥控消息被拒（忙）: {text[:50]}")
-        return
-
-    # 通过 Signal 跨线程注入 ChatUI 主线程
+    # 通过 Signal 跨线程注入 ChatUI 主线程。不再以"正在生成"为由拒绝：
+    # B09b 起运行中的遥控消息与桌面一样进队列（UI 层回执"已排队，当前轮结束
+    # 后处理"），保存失败 / 容量拒绝也有明确回执，不再静默丢弃。
     ui.submit_from_remote(text)
 
 

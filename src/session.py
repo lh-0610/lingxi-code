@@ -78,6 +78,10 @@ _SESSION_FIELDS = {
     "last_task_switch": lambda: None,
     # 任务切换修订版本号（用于安全比对，防迟到撤销）。
     "task_switch_version": lambda: 0,
+    # ── B09b 运行中输入队列（随会话 JSON 的 progress 持久化）──
+    # 排队等待派发的用户输入。入队不进 chat_history；派发（接纳）时沿用入队时
+    # 分配的 message_id 走 _do_send。队列属于 Session，切会话/重启不丢。
+    "input_queue": lambda: __import__("src.input_queue", fromlist=["new_queue"]).new_queue(),
 }
 
 # 哨兵：Session.project 的"尚未锚定"初值，区别于合法的 None（无项目/全局）。
@@ -99,6 +103,7 @@ class Session:
         "snapshot_lock", "progress_revision", "progress_error",
         "active_run_id", "inflight_lock", "worker_token",
         "last_worker", "resume_pending", "model_user_choice",
+        "last_run_save_failed",
     )
 
     def __init__(self):
@@ -156,6 +161,9 @@ class Session:
         # 继承来的、不是谁的选择，所以「继续任务」默认按记录找回原模型；但用户特意换过的，
         # 继续时要尊重，不能又悄悄改回去。
         self.model_user_choice = False
+        # 上一轮 finalize 的正文保存是否失败（纯运行态，B09b 队列的自动推进据此暂停：
+        # 即便收尾的补存成功，"本轮保存失败"这一事实也要求先暂停、由用户决定是否继续）。
+        self.last_run_save_failed = False
         self.is_subagent = False
         # 本轮生成开始时冻结的角色卡快照（roles.capture_active_role() 的返回 dict）。
         # None = 用全局当前角色。worker 在 _run_agent 起手拍下、finally 清回 None：

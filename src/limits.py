@@ -67,3 +67,10 @@ RAG_MIN_CHUNK_SIZE = 100        # 切块下限：太小（如 1）会把 1MB 文
 RAG_MAX_TOTAL_CHUNKS = 100_000  # 单次重建的切片总数上限：超出直接拒绝（增大 chunk_size / 缩减目录）
 RAG_MAX_SOURCE_FILE_BYTES = 50 * 1024 * 1024   # 单个 Markdown 最大 50 MiB，防 f.read() 先把进程打爆
 RAG_MAX_TOTAL_SOURCE_BYTES = 200 * 1024 * 1024  # 单次扫描源文件总量上限
+
+# ── B09b 运行中输入队列 ──
+# 超限拒绝并保留输入，绝不静默截断：队列是用户消息的暂存区，容量是硬边界。
+QUEUE_MAX_ITEMS = 20                 # 每会话排队条数上限
+QUEUE_MAX_TEXT_CHARS = 20_000        # 单条正文上限（字符）
+QUEUE_MAX_TOTAL_CHARS = 100_000      # 队列正文总量上限（字符）
+QUEUE_EXCERPT_CHARS = 80             # 面板摘录长度（仅展示，保存仍用全文）

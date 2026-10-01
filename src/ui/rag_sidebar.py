@@ -248,6 +248,8 @@ class RagSidebarMixin:
         if _prev is not None and _prev is not sess:
             # B09a：离开当前会话，挂待启动请求的消息明确取消（输入保留在输入框）
             self._cancel_pending_run(_prev, "已切换到其它会话，待发送的消息已取消（输入保留在输入框）")
+            # B09b：旧会话的队列同样暂停（条目保留，切回后明确恢复）
+            self._queue_pause_for_switch(_prev)
         _session.set_active(sess)
         sess.needs_redraw = False
         self.chat_area.clear()
@@ -266,6 +268,7 @@ class RagSidebarMixin:
         else:
             self._show_empty_state()
         self._refresh_session_list()
+        self._refresh_queue_panel()      # B09b：队列面板切到新会话的队列
         self._sync_header_from_session()          # 内含 _sync_rag_sidebar_from_session
         self._refresh_project_indicator()
         self._refresh_token_label_from_session()

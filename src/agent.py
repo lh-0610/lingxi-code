@@ -209,6 +209,10 @@ def agent_loop(ui, *, resume=None) -> AgentResult:
         # finalize_run 自己幂等、自己拒绝旧 run，这里不必再判。
         try:
             _report = run_records.finalize_run(sess, run, result, ui=ui)
+            # B09b：本轮 finalize 的正文保存结果留给队列的收尾评估——正文保存失败
+            # 时即便随后有补存成功，"保存失败后暂停"的约定也要求先停下来。
+            sess.last_run_save_failed = bool(
+                _report is None or not getattr(_report, "saved", False))
             # 结果卡在**解绑之前**推出去，且带着本函数手上的 run_id——
             # 迟到的回调里再去读 sess.last_run 猜"我是哪一轮"是不行的，那时它可能
             # 已经是下一轮的记录了。stale / duplicate 不出卡（snapshot 为 None）。

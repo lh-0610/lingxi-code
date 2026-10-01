@@ -74,6 +74,11 @@ class SessionFormatTooNewError(Exception):
 _VALID_STEP_STATUS = ("pending", "in_progress", "done")
 
 
+def _new_input_queue():
+    from . import input_queue as _iq
+    return _iq.new_queue()
+
+
 def _normalize_progress(raw, session_id=""):
     """`_normalize_progress_checked` 的外壳：**永不抛异常**。
 
@@ -90,7 +95,8 @@ def _normalize_progress(raw, session_id=""):
         empty = {"current_plan": [], "task_ledger": state.new_task_ledger(), "revision": 0,
                  "task": None, "archived_tasks": [], "last_task_switch": None, "task_switch_version": 0,
                  "last_run": None, "pending_verification": _rr.empty_pending_verification(),
-                 "last_committed_operation": None, "recent_operations": []}
+                 "last_committed_operation": None, "recent_operations": [],
+                 "input_queue": _new_input_queue()}
         return empty, f"进度无法解析（{type(error).__name__}: {str(error)[:120]}）"
 
 
@@ -111,7 +117,8 @@ def _normalize_progress_checked(raw, session_id=""):
              "task": None, "archived_tasks": [], "last_task_switch": None,
              "task_switch_version": 0,
              "last_run": None, "pending_verification": _rr.empty_pending_verification(),
-             "last_committed_operation": None, "recent_operations": []}
+             "last_committed_operation": None, "recent_operations": [],
+             "input_queue": _new_input_queue()}
     if raw is None:
         return empty, ""
     if not isinstance(raw, dict):
@@ -120,6 +127,12 @@ def _normalize_progress_checked(raw, session_id=""):
     ver = raw.get("version")
     if ver is not None and (not isinstance(ver, int) or ver > _PROGRESS_VERSION):
         return empty, f"progress 版本 {ver!r} 无法识别"
+
+    # ── B09b 输入队列：损坏/版本不认识整块作废，原始数据由调用方隔离留底 ──
+    from . import input_queue as _iq
+    queue, queue_why = _iq.normalize(raw.get("input_queue"))
+    if queue_why:
+        return empty, f"input_queue {queue_why}"
 
     plan_raw = raw.get("current_plan", [])
     if not isinstance(plan_raw, list):
@@ -193,7 +206,8 @@ def _normalize_progress_checked(raw, session_id=""):
             "task": task, "archived_tasks": archived_tasks,
             "last_task_switch": last_switch, "task_switch_version": task_switch_ver,
             "last_run": last_run, "pending_verification": pending,
-            "last_committed_operation": last_op, "recent_operations": recent_ops}, ""
+            "last_committed_operation": last_op, "recent_operations": recent_ops,
+            "input_queue": queue}, ""
 
 
 
@@ -241,11 +255,15 @@ def _snapshot_progress(sess):
         last_switch = getattr(sess, "last_task_switch", None)
         last_switch = json.loads(json.dumps(last_switch)) if isinstance(last_switch, dict) else None
         task_switch_ver = int(getattr(sess, "task_switch_version", 0) or 0)
+        # ── B09b 输入队列：与历史/运行记录同一临界区取走，队列-接纳关联才是同一快照 ──
+        from . import input_queue as _iq
+        queue_snap = _iq.snapshot(getattr(sess, "input_queue", None) or _iq.new_queue())
     return {"plan": plan, "ledger": ledger, "revision": rev,
             "task": task, "archived_tasks": archived_tasks,
             "last_task_switch": last_switch, "task_switch_version": task_switch_ver,
             "last_run": last_run, "pending_verification": pending,
-            "last_committed_operation": last_op, "recent_operations": recent}
+            "last_committed_operation": last_op, "recent_operations": recent,
+            "input_queue": queue_snap}
 
 
 def _json_fingerprint(value):
@@ -373,6 +391,9 @@ def _clear_progress(sess):
         sess.current_task = None
         sess.archived_tasks = []
         sess.last_task_switch = None
+        # B09b：新会话不继承旧会话的待发队列（reset_history = 开新对话）。
+        from . import input_queue as _iq
+        sess.input_queue = _iq.new_queue()
         sess.task_switch_version = 0
 
 
@@ -835,6 +856,8 @@ def _save_session_locked(*, session=None, started=None):
             # 别的保存同样推进 revision。
             "last_committed_operation": last_op,
             "recent_operations": recent_ops,
+            # ── B09b 输入队列：随同一份快照落盘，队列-接纳-历史保持一致 ──
+            "input_queue": snap["input_queue"],
         },
         # list() 先快照：worker 线程可能正在 append（切会话时主线程存后台会话），
         # 直接迭代会撞 "list changed size during iteration"。
@@ -1156,6 +1179,9 @@ def load_session(session_id, *, session=None):
                               if isinstance(t, dict)]
         tgt.last_task_switch = json.loads(json.dumps(progress["last_task_switch"])) if isinstance(progress.get("last_task_switch"), dict) else None
         tgt.task_switch_version = int(progress.get("task_switch_version", 0) or 0)
+        # ── B09b 输入队列：normalize 已按进程重启语义恢复（默认暂停、待核对）──
+        tgt.input_queue = json.loads(json.dumps(progress.get("input_queue")
+                                               or _new_input_queue()))
         # 加载不等于在跑：活动 run 是纯运行态，恢复出来的会话没有正在跑的 run。
         tgt.active_run_id = None
         # 同一个 Session 对象可能被复用来装另一个会话（侧栏切换就是这么干的）。

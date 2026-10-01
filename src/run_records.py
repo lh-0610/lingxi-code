@@ -475,6 +475,9 @@ def begin_run(sess, *, task_id=None, ui=None):
     """
     from .verification import reset_verification, restore_obligations
 
+    # B09b：新的一轮开始，上一轮的保存失败标记就此作废（每轮各自评估）。
+    sess.last_run_save_failed = False
+
     verification = getattr(sess, "verification", None)
     if verification is not None:
         reset_verification(verification)

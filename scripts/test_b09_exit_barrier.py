@@ -273,24 +273,54 @@ class TestSendWaitsForWorkerExit:
         assert _history_texts(sess).count("second") == 1
         assert ui._pending_run_for(sess) is None
 
-    def test_enter_while_still_generating_is_rejected_not_queued(self, ui, qapp, fake_loop):
-        """仍正常生成时按 Enter 发送：明确拒绝，不排队（排队只属于停止后的收尾窗口）。"""
+    def test_enter_while_generating_queues_for_next_round(self, ui, qapp, fake_loop,
+                                                          monkeypatch):
+        """B09b：仍正常生成时按 Enter 提交 → 进队列（不启动第二轮、不进历史）；
+        当前轮正常结束（B03 记录 completed）后自动按顺序派发。
+        点发送按钮仍是停止（另一个用例覆盖）。"""
+        from src import paths as _paths, recovery, run_records
+        data_root = _paths.get_data_dir()
+        runs = []
+
+        def _shaped(ui_, *, resume=None):
+            with _worker_data_root(data_root):
+                s = session.current_session()
+                ev = threading.Event()
+                runs.append(ev)
+                if not recovery.before_run(s, ui=ui_, resume=resume):
+                    return AgentResult("failed", "恢复检查未通过")
+                run = run_records.begin_run(s)
+                ev.wait(10)
+                run_records.finalize_run(s, run, AgentResult("completed"))
+                return AgentResult("completed")
+
+        monkeypatch.setattr(agent, "agent_loop", _shaped)
         _toasts(ui)
+        _make_saved_session(session.get_active())
         _type(ui, "first")
         ui._on_send_click()
-        assert _wait_until(qapp, lambda: len(fake_loop) == 1)
+        assert _wait_until(qapp, lambda: len(runs) == 1)
         sess = session.get_active()
 
-        _type(ui, "趁生成中再发一条")
-        ui._send_message()
+        _type(ui, "生成中的补充")
+        ui._send_message()                      # Enter：入队
         _pump(qapp, 0.2)
-        assert len(fake_loop) == 1
-        assert ui._pending_run_for(sess) is None, "正常生成中不新增排队"
-        assert ui.entry.toPlainText() == "趁生成中再发一条"
-        assert any("生成中" in t for t in _toasts(ui))
+        assert len(runs) == 1, "生成中不得双开第二轮"
+        assert ui.entry.toPlainText() == "", "入队成功才清输入"
+        assert not any("生成中的补充" in t for t in _history_texts(sess)), "入队不进历史"
+        assert any("已排队" in t for t in _toasts(ui))
+        q = sess.input_queue
+        assert len(q["items"]) == 1 and q["items"][0]["state"] == "queued"
 
-        fake_loop[0]["gate"].set()
-        _pump(qapp, 0.3)
+        runs[0].set()                           # 当前轮正常结束 → 自动派发队列项
+        assert _wait_until(qapp, lambda: len(runs) == 2), "结束后自动派发队列项"
+        assert any("生成中的补充" in t for t in _history_texts(sess)), "派发时才进历史"
+        item = sess.input_queue["items"][0]
+        assert item["state"] == "admitted"
+        runs[1].set()
+        _pump(qapp, 0.5)
+        assert sess.input_queue["items"][0]["state"] == "done"
+        assert sess.input_queue["items"][0]["outcome_status"] == "completed"
 
     def test_double_click_queues_one_request_only(self, ui, qapp, fake_loop):
         """收尾窗口里连点发送：只有一条待启动请求，退出后恰好一轮。"""
@@ -720,23 +750,51 @@ class TestInvalidation:
         assert _wait_until(qapp, lambda: ui._pending_run_for(sess) is not None)
         return sess, fake_loop[0]
 
-    def test_remote_while_generating_gets_explicit_feedback(self, ui, qapp, fake_loop):
-        """正常生成中遥控注入：明确回执，不静默丢弃，也不排队。"""
-        notes = []
-        ui._notify_remote_unaccepted = lambda msg: notes.append(str(msg))
+    def test_remote_while_generating_is_queued_with_receipt(self, ui, qapp, fake_loop,
+                                                            monkeypatch):
+        """B09b：正常生成中遥控注入 → 与桌面同一入队服务，回执"已排队"；
+        当前轮 completed 后自动派发。"""
+        from src import input_queue as _iq
+        from src import paths as _paths, recovery, run_records
+        pushed = []
+        monkeypatch.setattr(ui, "_notify_remote_queued",
+                            lambda index_note="": pushed.append("queued:" + str(index_note)))
+        data_root = _paths.get_data_dir()
+        runs = []
+
+        def _shaped(ui_, *, resume=None):
+            with _worker_data_root(data_root):
+                s = session.current_session()
+                ev = threading.Event()
+                runs.append(ev)
+                if not recovery.before_run(s, ui=ui_, resume=resume):
+                    return AgentResult("failed", "恢复检查未通过")
+                run = run_records.begin_run(s)
+                ev.wait(10)
+                run_records.finalize_run(s, run, AgentResult("completed"))
+                return AgentResult("completed")
+
+        monkeypatch.setattr(agent, "agent_loop", _shaped)
+        _make_saved_session(session.get_active())
         _type(ui, "first")
         ui._on_send_click()
-        assert _wait_until(qapp, lambda: len(fake_loop) == 1)
+        assert _wait_until(qapp, lambda: len(runs) == 1)
         sess = session.get_active()
 
-        ui.submit_from_remote(" remote ")
+        ui.submit_from_remote(" remote 补充 ")
         _pump(qapp, 0.3)
-        assert len(fake_loop) == 1
+        assert len(runs) == 1, "生成中不得双开第二轮"
         assert ui._pending_run_for(sess) is None
-        assert any("生成中" in n for n in notes), "手机端必须收到未发送的回执"
+        q = sess.input_queue
+        assert len(q["items"]) == 1 and q["items"][0]["source"] == "remote"
+        assert _iq.excerpt(q["items"][0]["text"]) == "remote 补充"
+        assert any(p.startswith("queued") for p in pushed), "手机端必须收到已排队回执"
 
-        fake_loop[0]["gate"].set()
-        _pump(qapp, 0.3)
+        runs[0].set()
+        assert _wait_until(qapp, lambda: len(runs) == 2), "结束后自动派发遥控队列项"
+        assert "remote 补充" in "".join(_history_texts(sess))
+        runs[1].set()
+        _pump(qapp, 0.4)
 
     def test_remote_double_submit_single_pending(self, ui, qapp, fake_loop):
         """重复遥控注入：只有一条待启动请求，第二次明确回执。"""
