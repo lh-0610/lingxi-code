@@ -10,7 +10,8 @@ from src import file_transaction, session, tools
 
 @pytest.fixture(autouse=True)
 def no_side_effects(monkeypatch):
-    monkeypatch.setattr(tools._checkpoint, "make_checkpoint", lambda *args: None)
+    # B11a 起补丁工具不再打 git stash 快照（file_history 取代，且 apply_patch 明确
+    # 不承诺整体撤销），这里只需放行确认卡与检查。
     monkeypatch.setattr(tools, "_confirm_file_write", lambda *args: (True, None))
     monkeypatch.setattr(tools, "_run_code_check", lambda *args, **k: ("", None, []))
 

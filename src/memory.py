@@ -1344,6 +1344,13 @@ def delete_session(session_id):
         # 留着只会让下次启动为一个不存在的会话报"有操作结果未知"。
         from .run_records import discard_inflight
         discard_inflight(session_id)
+        # B11a：文件撤销恢复材料（写前字节 + 归属记录）同样随会话删除。
+        # 只删 file_history 自己目录下的记录文件，不碰用户 stash / Git。
+        try:
+            from .file_history import discard_session
+            discard_session(session_id)
+        except Exception as error:
+            logger.warning(f"清理文件撤销记录失败 {session_id}: {error}")
     # 同步清除会话注册表（不再持有该 Session 对象）
     drop_session(session_id)
     logger.info(f"会话已删除: {session_id}")

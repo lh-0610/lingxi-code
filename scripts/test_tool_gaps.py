@@ -38,15 +38,12 @@ class TestReadFile:
 
 class TestWriteTools:
     def test_write_file_creates_parent_directories(self, project_dir, monkeypatch):
-        monkeypatch.setattr("src.tools._checkpoint.make_checkpoint", lambda *args: None)
-
         result = write_file.func("nested/new.txt", "hello")
 
         assert "成功写入" in result
         assert (project_dir / "nested" / "new.txt").read_text(encoding="utf-8") == "hello"
 
     def test_append_file_appends_content(self, project_dir, monkeypatch):
-        monkeypatch.setattr("src.tools._checkpoint.make_checkpoint", lambda *args: None)
         path = project_dir / "notes.txt"
         path.write_text("first\n", encoding="utf-8")
 

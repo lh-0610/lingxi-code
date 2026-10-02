@@ -80,7 +80,6 @@ class TestAutoCheckSuffix:
 
     def test_write_file_appends_auto_check(self, project_dir, monkeypatch):
         monkeypatch.setattr(config, "AUTO_CHECK_AFTER_EDIT", True)
-        monkeypatch.setattr("src.tools._checkpoint.make_checkpoint", lambda *a: None)
         r = write_file.func("bad.py", "def f(:\n")
         assert "成功写入" in r and "自动校验" in r
 

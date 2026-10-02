@@ -1449,6 +1449,9 @@ def _execute_tool(tc, ui, _preinvoked=None):
     # 仍按结果未知处理。
     _sess = _session.current_session()
     operation = None
+    # 上一个工具若经 BaseException 泄漏了 TLS，这里兜底清掉；本线程本次调用只认
+    # 自己 begin_operation 建立的那条记录。
+    _rr.clear_current_operation()
     if _rr.needs_record(name):
         if _preinvoked is not None:
             # 不变量被破坏了：`_can_parallel` 本该把需要记录的工具挡在并行预取之外。
@@ -1468,6 +1471,8 @@ def _execute_tool(tc, ui, _preinvoked=None):
             ))
             logger.error(f"执行前记录写入失败，已中止工具 {name}: {_if_err}")
             return
+        # B11a：写文件工具建立撤销记录时从这里取本次调用的运行归属。
+        _rr.set_current_operation(operation)
 
     try:
         tracking = track_workspace_changes(_project_cwd()) if name.startswith("mcp_") else nullcontext()
@@ -1485,6 +1490,8 @@ def _execute_tool(tc, ui, _preinvoked=None):
             pass
     finally:
         refresh_workspace_tracking(verification)
+        if operation is not None:
+            _rr.clear_current_operation()
 
     # 流式工具（run_command）执行过程中已经把每行 stdout 实时 push 到 UI 了；
     # 这里若再 push 一次 result，会把所有输出在末尾**重复显示一遍**。

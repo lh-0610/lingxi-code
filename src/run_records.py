@@ -118,6 +118,26 @@ class Operation:
     task_id: str = ""
 
 
+# 当前线程正在执行的工具操作（`_execute_tool` 在 begin_operation 成功后设置、invoke
+# 结束后清除）。写文件工具建立 B11a 撤销记录时从这里取本次调用的运行归属——
+# 复用程序已有的身份，不从模型文本或"当前前台会话"猜。线程局部保证多会话
+# 并发（后台会话各自 worker）互不可见。
+_operation_tls = threading.local()
+
+
+def set_current_operation(operation) -> None:
+    _operation_tls.op = operation
+
+
+def current_operation():
+    """当前线程正在执行的操作（`Operation`）；不在 `_execute_tool` 流程内时为 None。"""
+    return getattr(_operation_tls, "op", None)
+
+
+def clear_current_operation() -> None:
+    _operation_tls.op = None
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 from . import state
 from . import session as _session
-from . import checkpoint as _checkpoint
+from . import file_history as _file_history
 from .verification import mark_tests as _v_mark_tests
 from .paths import logger
 from . import background as _bg
@@ -142,6 +142,89 @@ def _confirm_file_write(full: str, old_content: str, new_content: str):
     return True, None
 
 
+def _read_pre_raw(full):
+    """写前核对用的原始字节快照（B11a）。
+
+    返回 bytes = 当时的内容；`_file_history.NO_FILE` = 当时不存在；
+    None = 存在但读不了（核对跳过，备份环节再读并如实记录读失败——
+    不存在和读不了是两种状态，不把读失败当成空文件）。
+    """
+    if not os.path.lexists(full):
+        return _file_history.NO_FILE
+    try:
+        with open(full, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _undo_note(prep, expected_bytes) -> str:
+    """写入成功后的可撤销性说明：写后版本核对成功 = 无需说明；失败则如实附原因。"""
+    if prep.record is None:
+        return f"\n⚠️ 本次改动不可撤销（{prep.reason}）"
+    undoable, why = _file_history.complete_write(prep.record, expected_bytes=expected_bytes)
+    if undoable:
+        return ""
+    return f"\n⚠️ 本次改动不可撤销（{why}）"
+
+
+def _write_failure_result(prep, error, expected_bytes, action: str) -> str:
+    """写盘失败时的结果：用**本次操作的预期完整写后内容**核对磁盘现状——一致说明
+    写入实际完成（可撤销恢复写前内容）；不一致说明写后状态未知（不认领磁盘内容），
+    明确不可撤销。"""
+    if prep.record is not None:
+        undoable, why = _file_history.complete_write(prep.record, expected_bytes=expected_bytes)
+        if undoable:
+            return (f"{action}失败: {error}\n"
+                    "⚠️ 磁盘现状与本次写入内容核对一致（写入可能实际完成）；"
+                    "可撤销本次改动恢复写前内容。")
+        note = f"（{why}）" if why else ""
+        return f"{action}失败: {error}\n⚠️ 写后状态未知，本次改动不可撤销{note}"
+    return f"{action}失败: {error}\n⚠️ 本次改动不可撤销（{prep.reason}）"
+
+
+def _locked_write(tool_name: str, full: str, pre_raw, new_text: str, action: str,
+                  *, append_mode: bool = False):
+    """用户允许写入之后的实际写入段（B11a）：与撤销共用同一把锁。
+
+    重新核对、备份、**实际写盘**、写后定格全部在 `file_history._LOCK` 的同一
+    临界区内完成——两会话写同一文件时，后到者在锁内重新核对会看到先到者的
+    写入并拒绝，不会出现"A 备份旧内容 → B 写入 → A 继续写 → 撤销 A 丢掉 B
+    改动"的交错。确认卡等待发生在锁之外。
+
+    追加是**真追加**（`"ab"`，绝不读-改-写整文件）——备份之后、写入之前其它
+    进程追加的内容不会被覆盖。写后指纹取自本次操作**预期的完整写后内容**：
+    覆盖/编辑 = 新文本编码；追加到已有文件 = 写前备份原文 + 追加字节；
+    追加到不存在的文件 = 追加字节本身（基础内容明确是 b""）；无备份原文时
+    预期内容未知 → 读回核对必然不定，按不可撤销处理（禁用撤销，不覆盖外部内容）。
+    读回与预期不一致（并发写入）→ post_failed，同样只禁用撤销、不覆盖外部内容。
+
+    返回 (True, undo_note) 或 (False, 中止/失败文案)。
+    """
+    with _file_history.write_lock():
+        prep = _file_history.prepare_write(tool_name, full, expected_raw=pre_raw)
+        if prep.abort:
+            return False, prep.reason
+        tail = _file_history.encode_text_bytes(new_text)
+        if not append_mode:
+            expected = tail
+        else:
+            base = b""
+            if prep.record is not None and (prep.record.get("pre") or {}).get("existed"):
+                base, _blob_error = _file_history._read_blob(prep.record)
+            expected = (base + tail) if base is not None else None
+        try:
+            if append_mode:
+                with open(full, "ab") as f:
+                    f.write(tail)
+            else:
+                with open(full, "wb") as f:
+                    f.write(expected)
+        except Exception as e:
+            return False, _write_failure_result(prep, e, expected, action)
+        return True, _undo_note(prep, expected)
+
+
 @tool
 def write_file(path: str, content: str) -> str:
     """写入内容到文件（覆盖）。path: 文件路径, content: 要写入的内容"""
@@ -150,6 +233,8 @@ def write_file(path: str, content: str) -> str:
         reject = _subagent_path_rejection(full, "文件")
         if reject:
             return reject
+        # 写前原始字节快照：供"允许写入之后、实际写入之前"核对目标是否被外部改动
+        pre_raw = _read_pre_raw(full)
         # 读旧内容算 diff（文件不存在视为空）
         old_content = ""
         if os.path.exists(full):
@@ -163,16 +248,11 @@ def write_file(path: str, content: str) -> str:
         if not allowed:
             return reject
         os.makedirs(os.path.dirname(os.path.abspath(full)), exist_ok=True)
-        # 改动前打 checkpoint（git 项目自动 stash 一份，方便用户撤销）
-        proj = _project_cwd()
-        try:
-            _checkpoint.make_checkpoint(proj, "write_file", full)
-        except Exception as e:
-            logger.warning(f"checkpoint 失败（不影响写入）: {e}")
-        with open(full, "w", encoding="utf-8") as f:
-            f.write(content)
+        ok, note = _locked_write("write_file", full, pre_raw, content, "写入")
+        if not ok:
+            return note
         _mark_current_dirty(full)
-        return f"成功写入文件: {full}" + _auto_check_suffix(full)
+        return f"成功写入文件: {full}{note}" + _auto_check_suffix(full)
     except Exception as e:
         return f"写入失败: {e}"
 
@@ -185,6 +265,8 @@ def append_file(path: str, content: str) -> str:
         reject = _subagent_path_rejection(full, "文件")
         if reject:
             return reject
+        # 写前原始字节快照（B11a 写前核对用）
+        pre_raw = _read_pre_raw(full)
         # 读旧内容算 diff（追加 = 旧内容 + 新内容）
         old_content = ""
         if os.path.exists(full):
@@ -196,15 +278,12 @@ def append_file(path: str, content: str) -> str:
         allowed, reject = _confirm_file_write(full, old_content, old_content + content)
         if not allowed:
             return reject
-        proj = _project_cwd()
-        try:
-            _checkpoint.make_checkpoint(proj, "append_file", full)
-        except Exception as e:
-            logger.warning(f"checkpoint 失败（不影响追加）: {e}")
-        with open(full, "a", encoding="utf-8") as f:
-            f.write(content)
+        ok, note = _locked_write("append_file", full, pre_raw, content, "追加",
+                                 append_mode=True)
+        if not ok:
+            return note
         _mark_current_dirty(full)
-        return f"成功追加到文件: {full}" + _auto_check_suffix(full)
+        return f"成功追加到文件: {full}{note}" + _auto_check_suffix(full)
     except Exception as e:
         return f"追加失败: {e}"
 
@@ -473,6 +552,9 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     except Exception as e:
         return f"读取失败: {e}"
 
+    # 写前原始字节快照（B11a 写前核对用）：与读取正文同时取，供写入前比对
+    pre_raw = _read_pre_raw(full)
+
     # ── 分层匹配级联 ──
     status, spans, new_texts, info = _locate_edit(content, old_string, new_string, replace_all)
     match_desc, line_nos = info
@@ -505,17 +587,11 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     if not allowed:
         return reject
 
-    # 写盘前打 checkpoint
-    try:
-        _checkpoint.make_checkpoint(_project_cwd(), "edit_file", full)
-    except Exception as e:
-        logger.warning(f"checkpoint 失败（不影响编辑）: {e}")
-
-    try:
-        with open(full, "w", encoding="utf-8") as f:
-            f.write(new_content)
-    except Exception as e:
-        return f"写入失败: {e}"
+    # B11a：核对目标 + 备份 + 实际写盘 + 写后定格在同一临界区（与撤销共用锁）。
+    # 确认期间目标被外部改动 → 锁内核对拒绝写入；备份失败仍写入但如实报告不可撤销。
+    ok, note = _locked_write("edit_file", full, pre_raw, new_content, "写入")
+    if not ok:
+        return note
 
     _mark_current_dirty(full)
 
@@ -525,9 +601,9 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     level_hint = f"（{match_desc}）" if "L1" not in match_desc else ""
     suffix = _auto_check_suffix(full)
     if count == 1:
-        return f"成功编辑 {full}（第 {primary_line} 行附近替换 1 处）{level_hint}" + suffix
+        return f"成功编辑 {full}（第 {primary_line} 行附近替换 1 处）{level_hint}{note}" + suffix
     else:
-        return f"成功编辑 {full}（替换全部 {count} 处出现，第一处在第 {primary_line} 行）{level_hint}" + suffix
+        return f"成功编辑 {full}（替换全部 {count} 处出现，第一处在第 {primary_line} 行）{level_hint}{note}" + suffix
 
 
 @tool
@@ -2379,12 +2455,12 @@ def apply_patch(patch: str) -> str:
     if not allowed:
         return reject
 
-    # checkpoint 会短暂 stash 工作区，必须在创建事务临时文件之前完成。
-    for action, path, resolved, _, new_content in resolved_ops:
-        try:
-            _checkpoint.make_checkpoint(root, f"apply_patch_{action}", resolved)
-        except Exception as e:
-            logger.warning(f"checkpoint 失败（不影响 patch 应用）: {e}")
+    # B11a 审计：旧实现在这里对每个目标文件做 git stash 快照（push -u + 立即 pop）。
+    # 这会改写用户的 stash 列表，且 stash 记录没有会话/run 归属与写后指纹，无法通过
+    # B11a 的归属与现场校验（撤销按钮也已切换到新接口，不再消费它）——留着只会在用户
+    # 仓库里堆积假恢复材料。本轮明确**不支持补丁整体撤销**；写入失败时的逐文件回滚
+    # 与备份保留由 file_transaction 负责（含"审批期间目标变化拒绝覆盖"的写前核对）。
+    # 未来若承诺补丁撤销，应为每个目标建立 file_history 逐文件记录并实现版本链核对。
 
     from .file_transaction import PatchApplyError, apply_file_changes
     try:

@@ -56,7 +56,8 @@ src/                     # 主代码
   telegram_poll.py       # Telegram 遥控：后台长轮询 getUpdates → from.id 白名单 → 注入 ChatUI / 处理 inline 按钮回调
   memory_store.py        # 长期记忆持久化（原子写 + RLock；remember/forget 存取，注入 system prompt）
   memory.py              # 会话历史 JSON 持久化（RLock 串行化所有读写）+ _build_ai_message + move_sessions_to_no_project（同步磁盘 + 内存锚点）
-  checkpoint.py          # edit/write/append 写盘前 git stash 快照 + 撤销（路径级 git checkout 恢复）
+  file_history.py        # 文件改动的安全撤销底层（B11a）：写前逐文件备份 + 归属记录 + 预检/执行；edit/write/append 接入
+  checkpoint.py          # 【已退役】旧 git stash checkpoint：B11a 起无调用方，撤销按钮已切换到 file_history
   projects.py            # 项目（工作区）管理：chat_memory/projects.json 读写（RLock + 原子写 + 损坏备份）
   roles.py               # 角色卡加载 + get_system_prompt（**只拼跨轮稳定的**：角色卡/项目上下文/项目规则/记忆）+ get_volatile_context（每轮都变的：Plan 提示/计划/台账，由 streaming 追到历史尾部）+ get_external_agent_context
   images.py              # 图片输入格式归一化（视觉/多模态，Anthropic/OpenAI/Gemini 协议差异）
@@ -367,6 +368,22 @@ python main.py
 - **本批边界**：只有后端与现有模型工具，没有新增 GUI 面板、stdin、自动重启或调度器；记录不持久化，重启不接管旧 PID。bg_id 带启动期 UUID，历史里的旧 bg_id 不会在重启后指向另一个新进程。父进程已自然退出后遗留的脱离子进程不在控制范围；后台运行期间/结束后持续写文件仍受现有 workspace_changes 跟踪边界限制。
 - **测试**：`scripts/test_background.py` 的真实输出/自然退出/Windows 子进程树，`scripts/test_background_manager.py` 的跨会话/子 Agent 控制、保存与重置、失败重试、共享停止预算、读取失败、无换行与 UTF-8/GBK 分段、真实发送层。只在仓库外副本与仓库外 basetemp 跑；Windows 子 Agent 命令用 PATH 中的 Python，显式引用隔离区外解释器路径应被沙箱拒绝，不能为测试放宽权限。
 
+### 文件改动的安全撤销（B11a，src/file_history.py）
+- **实际支持的操作**：只有 `edit_file` / `write_file` / `append_file` 中**有完整记录**的最近一次文件操作（按 会话 + 实际工作区 查最近一条 `undoable` 记录；同一文件连续修改按版本链逐次撤销，跳过后续修改会被指纹校验拒绝）。`apply_patch` 明确**不支持**撤销（多文件事务 + 写入失败时的逐文件回滚由 `file_transaction` 负责；旧实现里的 git stash 快照已随退役一并移除，不伪装可恢复）；`run_command` / MCP / 子 Agent / 外部编辑的变化无恢复材料，一律不可撤销。
+- **记录属于真实操作**：记录在「用户允许写入之后、实际写盘之前」由 `prepare_write` 建立，身份直接取自 B03 执行前记录（`run_records.current_operation` 线程局部，`_execute_tool` 在 `begin_operation` 成功后设置、invoke 结束即清）：session_id / run_id / task_id（可空）/ operation_id / 工具名 / 实际工作区与 realpath 目标路径 / 写前是否存在 + 原始字节 + 指纹 / 写后版本指纹 / 记录阶段与失败原因。无运行归属（子 Agent、会话未落盘、无 run 的直接调用）→ 不建记录，工具结果如实注明"本次改动不可撤销"。
+- **记录阶段**：只有 `undoable`（真实写入完成**且**写后版本已定格）可撤销；`prepared`（崩溃窗口，写后未记录）、`post_failed`、`backup_failed`（目标存在但读不了——**不存在和读不了是两种状态**，read_error 单独保留）都明确不可撤销；`undo_failed` 材料保留可重试；`undone` 终态。拒绝/取消发生在 prepare 之前，根本不建记录；写盘失败时用**写出的目标字节**核对磁盘现状——一致说明写入实际完成（可撤销），不一致或读不回就如实 post_failed（写后状态未知，不认领磁盘内容）。
+- **写后指纹来自本次操作的预期完整写后内容，读回只用于核对**（P1 复核修复）：`complete_write(record, expected_bytes=...)` 的指纹取自预期的完整文件内容（`encode_text_bytes`：`
+` → os.linesep，与原文本模式写盘逐字节一致）；读回磁盘若与预期不一致（并发写入 / 部分写入）→ `post_failed` 明确不可撤销，**绝不把用户随后保存的内容认领成“本次写入版本”**（否则撤销会覆盖外部内容）。覆盖/编辑的预期内容 = 新文本编码；追加 = 写前备份原文 + 追加字节；追加到不存在的文件 = 追加字节本身（基础内容明确是 b""，记录可撤销）；无备份原文的追加预期未知 → 不可撤销。
+- **追加是真追加，绝不读-改-写整文件**（P1 复核修复）：`_locked_write` 对追加一律 `"ab"` 写入——备份之后、写入之前其它进程追加的内容不会被“旧内容＋追加内容”的整文件覆盖；并发变化只让本次改动不可撤销（post_failed），不破坏外部内容。
+- **实际写入在共享锁内**（P1 复核修复）：`tools._locked_write` 让“锁内重新核对 → 备份 → **写盘** → 写后定格”四步全部在 `file_history._LOCK` 的同一临界区完成（确认卡等待在锁外）；两会话写同一文件时后到者的锁内核对会看到先到者的写入并拒绝，不会出现“A 备份旧内容 → B 写入 → A 继续写 → 撤销 A 丢掉 B 改动”。外部进程不遵守应用内锁——对覆盖写靠锁内重新核对拒绝（确认期间被改 → 未写入），对追加靠真追加语义保证不覆盖（见上）。
+- **记录严格校验且类型安全**（P1/P2 复核修复）：`_valid_record` 逐字段校验——`pre.existed` 必须是布尔（缺失/错型整条作废，绝不解释成“原本不存在”而把原文件删掉）；带备份必须有 64 位十六进制指纹 + 非负大小；存在但无备份必须带读失败原因且不得声称指纹；“原本不存在”不得携带任何材料；post 指纹按形状校验；task_id/reason/created_at/completed_at/undo 值也纳入类型校验。**先查类型、再跑正则**（pre.sha256 是数字/列表时 `_HEX64.match` 会抛 TypeError），`_load_record` 再兜一层——任意 JSON 输入只得到“该条记录无效”，绝不打断扫描、连累同会话其它完好记录的撤销。
+- **版本链核对**（P2 复核修复）：同工作区同一路径上若存在**更晚且未撤销**的记录（任何非 undone 阶段），即使当前内容与写后指纹恰好一致（如 v0→v1→v2→v1 后请求撤销第一次操作），也拒绝并要求先撤销最近一次——相同内容不能证明没有跳过后续修改。
+- **恢复材料在哪**：`chat_memory/file_history/<checkpoint_id>.json`（记录）+ `<checkpoint_id>.bin`（写前**原始字节**，恢复时逐字节写回，BOM/CRLF 原样保留）。全部原子写（临时文件 + os.replace）；容量上限 100 条，淘汰最旧的，`prepared`（在途）与各 (session, workspace) 最新的可撤销记录受保护；更旧的可撤销记录随淘汰失去撤销能力（与旧 checkpoint 栈上限同一取舍）。`delete_session` 一并清理本会话记录。
+- **预检与执行**（撤销按钮消费的接口）：`precheck` 输出 `restorable` / `conflict` / `unsupported` / `not_found` + 原因 + 差异信息（写前/写后/当前指纹与大小、blob 路径，供后续预览界面用）。`execute_undo` 在锁内**重新**做全套核对——①归属（session_id + 工作区一致）；②当前内容指纹 == 记录的写后指纹（预检后文件又被改 → conflict 拒绝，绝不覆盖）；③路径 realpath 未变（符号链接/junction 顶替 → 拒绝）、仍在工作区内；④材料指纹与大小吻合。原本存在的文件恢复写前字节并读回校验；原本不存在的文件只在确认仍是本次产物时删除。不做整项目 reset/clean/checkout，不碰 Git index / 分支 / stash。
+- **撤销按钮（header.py）**：沿用原样式；只查询当前会话 + 当前实际工作区的记录（不取全局栈顶误撤其它会话）。点击后：查询 → precheck（冲突/不支持只提示，材料保留）→ 与「继续任务」同一套屏障（`resume_pending` + `_worker_alive` 轮询，超时取消、不到点硬做）→ `execute_undo` → **会话侧簿记 `apply_undo_to_session`（按钮与测试共用，按 `changed` 触发）**：`mark_dirty` 作废旧测试/检查/diff 结论 + `refresh_pending_verification` 接入待验证义务 + `save_session_report` 可靠保存。**「文件已改变」与「恢复校验成功」分开**（P1 复核修复）：结果带 `changed` / `verified` 两个字段——os.replace 原子完成即 `changed=True`，随后的读回校验失败只影响 `verified`（提示人工核对），绝不把已完成的恢复报告成“撤销未执行”、更不跳过簿记；恢复、记录保存、义务接入与快照保存的结果各自分开报告。等待/执行期间 `resume_pending` 被既有运行准入闸消费，同一会话的新一轮发送/遥控/重试/队列派发全部被挡（不另写只看 is_generating 的判断）。
+- **边界**：跨进程恢复以实际保存的材料为准（新解释器读盘可预检 + 恢复，session_id + 工作区匹配即可）；非 Git 项目同样可用（备份是文件系统级的，Git 只是无需参与）；外部编辑竞态的窗口是「预检之后、恢复写入之前」由锁内复核兜住，「恢复写入进行中」外部编辑器的并发写不被声称原子阻止（与方案 §13.5 一致）。锁序：`memory._LOCK → file_history._LOCK`（delete_session 持前者拿后者），本模块从不反向获取 memory._LOCK，也绝不持锁等待确认卡。`checkpoint.py` 已退役（docstring 有注记），保留只为历史参考，勿再接入。
+- **测试**：`scripts/test_b11a_file_history.py`（42 条，真实入口 `_execute_tool` 驱动写入；含 CRLF/BOM 逐字节恢复、连续修改逐次撤销、预检后再改拒绝、双会话/linked worktree 归属隔离、暂存区/用户 stash/无关文件不变、撤销后旧验证结论作废并落盘、新解释器子进程恢复、并发一致性；复核修复回归：写后指纹不被用户保存内容认领、写后核对不一致 post_failed、写入临界区串行且后到者被拒、版本链缺口拒绝、恢复未校验仍作废验证结论、损坏 pre 字段不误删原文件、追加保留外部并发写入、追加新建文件可撤销、指纹/时间戳类型损坏不连累其它记录）与 `scripts/test_b11a_undo_button.py`（11 条真实 ChatUI：worker 未退出不撤销/超时取消、准入闸被占住、切会话取消、冲突提示、恢复未校验仍作废验证并如实报告、结果分开报告）。10 组针对性变异（去写后指纹比较、去会话归属核对、去材料指纹校验、去写前核对、去版本链核对、去 pre.existed 严格校验、写后指纹改回读回磁盘现状、追加改回整文件覆盖、追加新建文件记成未知、校验对非字符串指纹抛 TypeError 且无兜底）在副本上验证全部被对应测试抓住。
+
 ### 验证闭环与自动修复（src/verification.py，编码核心）
 - **完成闸门**：编码任务声称"完成"前要先验证（改了代码须 `run_tests` / `git_diff`）。会话级 `verification` 状态记 dirty 文件 / check 结果 / 测试是否过。`tests_passed=None` 表示未验证，必须保留原因，不等同于通过。
 - **命令与 MCP 本地写入**：`workspace_changes.py` 在调用前后追踪项目文件，工具执行及完成检查时复查；变化使旧测试/diff 失效。Git 项目遵循 ignore，非 Git 项目跳过依赖/构建目录。无法完整枚举（权限、子模块、文件数上限等）保持未验证；它不是进程沙箱，不保证跟踪项目外或任务结束后的写入。
@@ -462,6 +479,7 @@ python main.py
 | `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化；内部消息带 `lingxi_internal` / `lingxi_kind`，恢复说明另带 `lingxi_recovery` 交接记录）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run`（含 `evidence.validation_runs` 结构化检查记录、`model` 稳定标识、`workspace` 现场锚点）/ `pending_verification`（含 `file_paths`：改动文件的实际位置）/ `last_committed_operation` / `recent_operations`） |
 | `chat_memory/<session_id>.inflight.unreadable-<哈希>.json` | 执行前记录里无法解析的条目的**完整原文**（交接前隔离留底；恢复说明里只有摘要和对它的引用）。随 `delete_session` 删除 |
 | `chat_memory/<session_id>.inflight.json` | 有副作用工具的**执行前**记录（sidecar）：session_id / run_id / operation_id / 工具名 / tool_call_id / 起始 revision / 路径 / `work_root`（工具实际的工作目录）。提交后删除；解析不了的条目原样保留、交接到恢复说明后才摘除；**不进侧栏索引**，也不能作为复活已删除会话的依据（`delete_session` 会一并删掉） |
+| `chat_memory/file_history/<id>.json` + `.bin` | 文件撤销的恢复材料（B11a）：归属记录（session/run/task/operation_id + 工具 + 工作区 + 目标路径 + 写前/写后指纹 + 阶段）与写前原始字节。随 `delete_session` 删除；不进侧栏索引 |
 | `chat_memory/projects.json` | 注册的项目列表 + 当前激活项目（`{current, projects: [{path, name}]}`） |
 | `chat_memory/role_config.json` | 当前激活的角色卡名 |
 | `chat_memory/ui_prefs.json` | UI 偏好（如关闭按钮记住的选择） |

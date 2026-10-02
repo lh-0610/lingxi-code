@@ -1,6 +1,11 @@
 """AI 改文件前自动 checkpoint（git stash），改坏了能一键撤销。
 
-设计：
+**B11a 起本模块退役**：edit/write/append/apply_patch 已改用 `file_history` 的
+逐文件备份（不动用户的 stash 列表与暂存区、记录带会话/run 归属与写后指纹、
+撤销前做现场校验），撤销按钮也切换到新接口。这里保留原实现仅为历史参考，
+不再有任何调用方。
+
+原设计（已不生效）：
 - 每次 `edit_file` / `write_file` / `append_file` 之前调 `make_checkpoint(project_root)`：
     - 如果项目是 git 仓库 → `git stash push -u -m "lingxi-checkpoint <ts>"` 把当前修改打包，
       但**立刻 pop 回来**（这样工作目录不变，只是 stash 列表里多了一份"动手前快照"）

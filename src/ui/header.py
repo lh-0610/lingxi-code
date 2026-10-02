@@ -13,7 +13,7 @@ self._refresh_session_list / self._refresh_header_compactness
 """
 import os
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QHBoxLayout, QLabel, QMenu, QMessageBox,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from .. import agent
 from .. import state
+from ..paths import logger
 from ._base import BASE_DIR
 from .helpers import _make_upload_icon
 
@@ -79,7 +80,7 @@ class HeaderMixin:
         # 撤销按钮：把 AI 上次对文件的改动用 git stash 复原。无 checkpoint 时按钮禁用
         self.undo_btn = QPushButton("↶ 撤销")
         self.undo_btn.setCursor(Qt.PointingHandCursor)
-        self.undo_btn.setToolTip("撤销 AI 最近一次对文件的修改（git stash 恢复）\n仅 git 项目可用")
+        self.undo_btn.setToolTip("撤销 AI 最近一次有完整记录的文件修改（恢复写前内容）\n仅当前会话与当前工作区")
         self.undo_btn.clicked.connect(self._on_undo_click)
         self._style_undo_btn()
         layout.addWidget(self.undo_btn)
@@ -238,11 +239,129 @@ class HeaderMixin:
         agent.set_reasoning(enabled)
 
     def _on_undo_click(self):
-        """撤销按钮回调：调 checkpoint.undo_last_checkpoint。"""
-        from .. import checkpoint as _cp
-        ok, msg = _cp.undo_last_checkpoint()
-        self._show_toast(("✓ " if ok else "⚠ ") + msg, duration=3000 if ok else 5000)
-        self._style_undo_btn()  # 刷新按钮状态（栈空了就灰掉）
+        """撤销按钮（B11a）：只撤当前会话、当前实际工作区里最近一次有完整记录的
+        文件写入。全程走 file_history 的归属与现场校验，不取全局栈顶误撤其它会话。
+
+        当前会话的 worker 真正退出前不执行（等待复用继续任务的轮询参数，超时取消、
+        不到点硬做）；等待与执行期间占用 resume_pending，让既有的运行准入闸挡住
+        新一轮发送 / 遥控 / 重试 / 队列派发，避免恢复与队列派发同时写入。
+        """
+        from .. import file_history as _fh
+        from .. import session as _session
+        sess = _session.get_active()
+        if getattr(sess, "resume_pending", False):
+            return      # 继续/撤销/任务切换正持有屏障：连点不叠加
+        sid = getattr(sess, "current_session_id", None) or ""
+        root = _fh.session_workspace()
+        cand = _fh.latest_undoable(sid, root) if sid else None
+        if cand is None:
+            self._show_toast("当前会话没有可撤销的 AI 文件改动", 2500)
+            self._style_undo_btn()
+            return
+        pre = _fh.precheck(cand["checkpoint_id"], session_id=sid, workspace=root)
+        if pre["status"] != _fh.ST_RESTORABLE:
+            # 材料与记录原样保留；原因里说明是冲突还是不支持
+            self._show_toast(f"⚠ {pre['reason']}", 5000)
+            self._style_undo_btn()
+            return
+        if self._pending_run_for(sess) is not None:
+            # 有一条待发送的消息也在等旧 worker 退出：先处理消息，否则撤销一结束
+            # 它就被接纳，两条写入路径撞在同一个会话上。
+            self._show_toast("有消息正在等待上一轮结束，请先处理再撤销", 3000)
+            return
+        sess.resume_pending = True
+        try:
+            if self._worker_alive(sess):
+                self._undo_wait(sess, cand["checkpoint_id"], sid, 0)
+                return
+            self._perform_undo(sess, cand["checkpoint_id"], root)
+        except Exception:
+            sess.resume_pending = False
+            raise
+
+    def _undo_wait(self, sess, checkpoint_id, sid, attempts):
+        """屏障：旧 worker **真正退出**后才撤销。非阻塞轮询（带 receiver 上下文的
+        QTimer），超时取消——绝不到点硬做。等待期间 resume_pending 已置位，
+        运行准入闸挡住同一会话的新一轮与队列派发。"""
+        if not self._undo_still_owned(sess, sid):
+            return
+        if self._worker_alive(sess):
+            if attempts >= self._RESUME_WAIT_LIMIT:
+                sess.resume_pending = False
+                self._show_toast("上一轮仍在结束，撤销已取消；可稍后重试", 4000)
+                return
+            QTimer.singleShot(self._RESUME_WAIT_MS, self,
+                              lambda: self._undo_wait(sess, checkpoint_id, sid, attempts + 1))
+            return
+        self._perform_undo(sess, checkpoint_id, self._undo_workspace_for(sess))
+
+    def _undo_still_owned(self, sess, sid) -> bool:
+        """等待期间核对归属：切走会话 / 会话被重置（id 变化）就取消，不替看不见的
+        会话改文件。"""
+        from .. import session as _session
+        if sess is not _session.get_active() or \
+                (getattr(sess, "current_session_id", None) or "") != sid:
+            sess.resume_pending = False
+            self._show_toast("已切换到其它会话，撤销已取消", 3000)
+            return False
+        return True
+
+    def _undo_workspace_for(self, sess) -> str:
+        """撤销执行时的实际工作区：仍按会话自己的规则现算（worktree → 项目 → 进程目录）。
+        execute_undo 内部还会与记录里的工作区再核对一次，不一致会拒绝。"""
+        from .. import file_history as _fh
+        from .. import session as _session_mod
+        previous = _session_mod.get_bound()
+        _session_mod.bind_thread(sess)
+        try:
+            root = _fh.session_workspace()
+        finally:
+            _session_mod.restore_bound(previous)
+        return root
+
+    def _perform_undo(self, sess, checkpoint_id, root):
+        """屏障通过后的实际撤销：执行 → 验证义务接入 → 保存。三类结果分开报告，
+        不用一句"撤销成功"掩盖记录或保存失败。会话侧簿记与测试共用
+        file_history.apply_undo_to_session，保证两条路径行为一致。
+
+        「文件已经改变」与「恢复校验成功」是两回事：changed=True（哪怕读回校验
+        失败）都说明目标文件被改过，必须作废旧测试/diff 结论并接入待验证义务；
+        只有两边都没发生（conflict / unsupported / 恢复写入失败）才是"撤销未执行"。
+        """
+        from .. import file_history as _fh
+        try:
+            result = _fh.execute_undo(
+                checkpoint_id,
+                session_id=getattr(sess, "current_session_id", "") or "",
+                workspace=root)
+        finally:
+            sess.resume_pending = False
+            self._style_undo_btn()
+        changed = bool(result.get("changed"))
+        if result["status"] != "ok" and not changed:
+            self._show_toast(f"⚠ 撤销未执行：{result['reason']}", 5000)
+            return
+        name = os.path.basename(result.get("path") or "文件")
+        parts = []
+        if result["status"] == "ok":
+            parts.append(f"已撤销 {result['tool']} 对 {name} 的修改：{result['reason']}")
+            if result.get("verified") is False:
+                parts.append("⚠️ 恢复后读回校验未完成，请人工核对文件内容")
+            if not result.get("record_saved", False):
+                parts.append("⚠️ 撤销记录保存失败（下次启动无法确认它已撤销）")
+        else:
+            parts.append(f"⚠ 文件已按写前内容恢复，但恢复校验失败：{result['reason']}")
+        if changed:
+            book = _fh.apply_undo_to_session(sess, result)
+            if book["verification_noted"]:
+                parts.append("旧测试与 diff 结论已作废、重新要求验证")
+            else:
+                parts.append(f"⚠️ 验证义务更新失败：{book['verification_error'][:120]}")
+            if book["saved"]:
+                parts.append("撤销结果已保存")
+            elif book["saved"] is False:
+                parts.append(f"⚠️ 撤销结果保存失败：{book['save_error'][:120]}")
+        self._show_toast("；".join(parts), 6000)
 
     def _set_agent_mode(self, mode):
         """段控点击：设置 state.agent_mode + 同步两个段按钮的选中态。"""
@@ -433,9 +552,20 @@ class HeaderMixin:
         )
 
     def _style_undo_btn(self):
-        """撤销按钮配色：有 checkpoint 时高亮可点，无则灰禁。"""
-        from .. import checkpoint as _cp
-        has_cp = _cp.has_undoable_checkpoint()
+        """撤销按钮配色：当前会话 + 当前实际工作区有可撤销记录时高亮，否则灰禁。
+
+        只做便宜检查（记录存在、材料文件在）；完整的现场核对在点击后的 precheck /
+        execute_undo 里做。样式沿用旧版（B11a 仅换数据来源）。"""
+        from .. import file_history as _fh
+        from .. import session as _session
+        sess = _session.get_active()
+        sid = getattr(sess, "current_session_id", None) or ""
+        cand = None
+        try:
+            cand = _fh.latest_undoable(sid, _fh.session_workspace()) if sid else None
+        except Exception as e:
+            logger.warning(f"查询可撤销记录失败: {e}")
+        has_cp = cand is not None
         self.undo_btn.setEnabled(has_cp)
         if has_cp:
             self.undo_btn.setStyleSheet(
@@ -447,12 +577,13 @@ class HeaderMixin:
                 f"QPushButton:hover {{ background: {self._t('history_hover_bg')};"
                 f"  border-color: {self._t('warn')}; }}"
             )
-            info = _cp.latest_checkpoint_info() or {}
+            info = cand or {}
             tool = info.get("tool", "")
             path = info.get("path", "")
             name = path.split("/")[-1].split("\\")[-1] if path else ""
             self.undo_btn.setToolTip(
-                f"撤销 AI 最近一次对文件的修改\n上次：{tool} → {name}"
+                f"撤销 AI 最近一次有完整记录的文件修改（恢复写前内容）\n上次：{tool} → {name}\n"
+                "执行前会再次核对现场；文件在写入后又被改过时会拒绝"
             )
         else:
             self.undo_btn.setStyleSheet(
