@@ -130,12 +130,27 @@ class SidebarMixin:
         self._style_settings_btn()
         self.settings_btn.installEventFilter(self)
         footer_layout.addWidget(self.settings_btn)
-        footer_layout.addStretch()  # 右侧留白，后续可加用户 / 角色信息
+        self.background_btn = QPushButton("后台任务")
+        self.background_btn.setCursor(Qt.PointingHandCursor)
+        self.background_btn.setToolTip("查看本次启动的后台命令、输出和停止结果")
+        self.background_btn.clicked.connect(self._open_background_panel)
+        footer_layout.addWidget(self.background_btn)
+        footer_layout.addStretch()
 
         layout.addWidget(footer)
         self._style_sidebar_scroll()
 
     def _style_sidebar_scroll(self):
+        if hasattr(self, "background_btn"):
+            self.background_btn.setIcon(self._svg_icon("clipboard-list.svg", self._t("history_item")))
+            self.background_btn.setIconSize(QSize(15, 15))
+            self.background_btn.setFixedHeight(34)
+            self.background_btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {self._t('history_item')}; "
+                f"border: 1px solid {self._t('sidebar_border')}; border-radius: 7px; padding: 6px 11px; font-size: 12px; }}"
+                f"QPushButton:hover {{ background: {self._t('history_hover_bg')}; "
+                f"color: {self._t('history_hover_text')}; }}"
+            )
         self.history_scroll.setStyleSheet(
             f"QScrollArea {{ background: {self._t('sidebar_bg')}; border: none; }}"
             f"QScrollBar:vertical {{ width: 5px; background: transparent; }}"

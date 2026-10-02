@@ -368,6 +368,14 @@ python main.py
 - **本批边界**：只有后端与现有模型工具，没有新增 GUI 面板、stdin、自动重启或调度器；记录不持久化，重启不接管旧 PID。bg_id 带启动期 UUID，历史里的旧 bg_id 不会在重启后指向另一个新进程。父进程已自然退出后遗留的脱离子进程不在控制范围；后台运行期间/结束后持续写文件仍受现有 workspace_changes 跟踪边界限制。
 - **测试**：`scripts/test_background.py` 的真实输出/自然退出/Windows 子进程树，`scripts/test_background_manager.py` 的跨会话/子 Agent 控制、保存与重置、失败重试、共享停止预算、读取失败、无换行与 UTF-8/GBK 分段、真实发送层。只在仓库外副本与仓库外 basetemp 跑；Windows 子 Agent 命令用 PATH 中的 Python，显式引用隔离区外解释器路径应被沙箱拒绝，不能为测试放宽权限。
 
+### 后台任务面板（B10b，src/ui/background_panel.py）
+- **入口与范围**：侧栏底部「后台任务」打开非模态面板，支持全部会话 / 当前会话筛选。它是用户主动操作的应用级入口，可以查看和停止本次启动中其他会话或子 Agent 的后台命令；不改变 active/bound Session，不放宽模型工具的 owner_id 约束。
+- **同源状态**：直接消费 background.list_snapshots/get_snapshot，不解析工具文案、不持有 Popen。显示命令、创建时的来源/项目/cwd/run_id/task_id、真实主进程状态、耗时和退出码；无退出码显示「—」。正常退出与任务验证分开，不生成检查通过证据。
+- **停止与迟到回执**：点击时重新核对并捕获 bg_id，在 daemon Python 线程调用 background.stop；只通过带 bg_id 的 Qt 队列 Signal 更新主线程。重复操作由面板 busy 与管理器 stop_lock 共同约束。切会话、切筛选、改选择、隐藏或销毁面板都不会把停止请求改指向其他进程；状态仍从最新快照读取，失败/超时可重试，进程树诊断单独保留。
+- **有界输出与生命周期**：显示注册表保留的纯文本尾部，区分缓冲丢弃、输出尚未读完与读取失败；诊断区可滚动，读取旧输出时暂停自动跟随。主线程 500ms 定时刷新，只有面板可见时启动；关闭/主窗隐藏只停刷新、不停止命令，应用退出仍走 B10a shutdown。已退出记录被管理器淘汰后禁用控制，不凭消失推断已停止。面板不持久化历史、不恢复旧 PID 控制权，不新增 stdin/重启/调度。
+- **窄窗口布局**：输出区至少保留 90px；主布局、详情与输出容器按实际内容传播最小尺寸，展开信息或出现停止回执时可相应增高窗口，不能以固定 560px 下限挤掉或裁切输出。宽度下限仍为 600px，长命令与诊断可滚动。
+- **测试**：scripts/test_background_panel.py 用真实 Qt 控件/队列与真实 Python 子进程验证定点停止、归属、迟到回执、失败重试、关闭/销毁、输出上限和新进程无旧控制权；模型、Claude CLI、网络均阻断。模拟 Proc 只能调用模拟 kill；安全守卫使用独立 MonkeyPatch 上下文，覆盖恢复失败注入后的 stop_all 清理，不能将 pid=0 交给真实 taskkill。scripts/test_background_panel_isolation.py 用真实 pytest 子进程监测清理阶段的系统终止调用。离屏测试与截图显式加载系统字体（msyh.ttc / consola.ttf），并使用 main.py 的 14px 微软雅黑；否则字体与尺寸偏差无法用于视觉验收。
+
 ### 文件改动的安全撤销（B11a，src/file_history.py）
 - **实际支持的操作**：只有 `edit_file` / `write_file` / `append_file` 中**有完整记录**的最近一次文件操作（按 会话 + 实际工作区 查最近一条 `undoable` 记录；同一文件连续修改按版本链逐次撤销，跳过后续修改会被指纹校验拒绝）。`apply_patch` 明确**不支持**撤销（多文件事务 + 写入失败时的逐文件回滚由 `file_transaction` 负责；旧实现里的 git stash 快照已随退役一并移除，不伪装可恢复）；`run_command` / MCP / 子 Agent / 外部编辑的变化无恢复材料，一律不可撤销。
 - **记录属于真实操作**：记录在「用户允许写入之后、实际写盘之前」由 `prepare_write` 建立，身份直接取自 B03 执行前记录（`run_records.current_operation` 线程局部，`_execute_tool` 在 `begin_operation` 成功后设置、invoke 结束即清）：session_id / run_id / task_id（可空）/ operation_id / 工具名 / 实际工作区与 realpath 目标路径 / 写前是否存在 + 原始字节 + 指纹 / 写后版本指纹 / 记录阶段与失败原因。无运行归属（子 Agent、会话未落盘、无 run 的直接调用）→ 不建记录，工具结果如实注明"本次改动不可撤销"。

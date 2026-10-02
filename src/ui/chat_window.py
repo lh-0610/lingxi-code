@@ -252,6 +252,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._style_sidebar_scroll()
         if hasattr(self, "settings_btn"):
             self._style_settings_btn()
+        if getattr(self, "_background_panel", None) is not None:
+            self._background_panel.apply_theme()
         if hasattr(self, "chat_area"):
             self._style_chat_area()
         if hasattr(self, "empty_state"):
@@ -2886,6 +2888,21 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                         (ov.height() - pm.height()) // 2,
                         pm.width(), pm.height()
                     )
+
+    def _open_background_panel(self):
+        """用户主动打开的应用级入口，不改变当前会话或模型的工具权限。"""
+        from .background_panel import BackgroundPanel
+        if getattr(self, "_background_panel", None) is None:
+            self._background_panel = BackgroundPanel(self._t, self)
+        self._background_panel.show()
+        self._background_panel.raise_()
+        self._background_panel.activateWindow()
+
+    def hideEvent(self, event):
+        # 主窗隐藏到托盘时同时停面板刷新；后台命令沿用应用退出清理规则。
+        if getattr(self, "_background_panel", None) is not None:
+            self._background_panel.hide()
+        super().hideEvent(event)
 
     def closeEvent(self, event):
         # 关窗前先唤醒任何还挂着的命令 / edit diff 确认请求——否则 worker 线程
