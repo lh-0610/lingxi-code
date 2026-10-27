@@ -286,6 +286,9 @@ def _agent_loop_body(ui):
 
     注意：验证状态的重置已挪到 `run_records.begin_run`，因为恢复未了的验证义务
     必须紧跟在重置之后；留在这里的话，两者中间任何一次提前返回都会让义务蒸发。
+
+    每一轮按 取样（_stream_round）→ 解析 → 执行（_run_tool_calls / _maybe_inject_repair）
+    → 闸门（_completion_gate）走，各步骤的细节与取舍写在对应函数里。
     """
     result = AgentResult("failed", "Agent 未正常完成。")
     clean_text = ""
@@ -298,20 +301,7 @@ def _agent_loop_body(ui):
 
         # Claude Code 模式：直接调 CLI
         if mtype == "claude-code":
-            # 知识库(RAG)模式不支持 Claude Code：CLI 没有 search_knowledge、也不吃 RAG
-            # 提示词——放行等于变回完整编码 agent，静默绕过知识库约束。明确拦下。
-            if getattr(state, "rag_mode", False):
-                ui.show_message(
-                    "\n⚠️ 知识库模式不支持 Claude Code 模型（它走本地 CLI、无法使用知识库检索）。"
-                    "请在顶栏换一个 API 模型，或切回「编码」模式再用 Claude Code。\n",
-                    "ai_msg")
-                return AgentResult("failed", "知识库模式不支持 Claude Code。"), clean_text
-            result = _claude_code_loop(ui)
-            if state.stop_flag:
-                return AgentResult("cancelled", "用户停止生成。"), clean_text
-            if not isinstance(result, AgentResult):
-                return AgentResult("failed", "Claude Code 未返回有效运行结果。"), clean_text
-            return result, clean_text
+            return _run_claude_code(ui), clean_text
 
         # 本地模型需要检测 Ollama 服务
         if mtype == "ollama" and not check_ollama():
@@ -325,8 +315,7 @@ def _agent_loop_body(ui):
         display_name = get_current_role_name() or model_name
 
         # 完成闸门：外层循环（验证间隙时重跑一轮）
-        _gate_active = True
-        while _gate_active:
+        while True:
             round_i += 1
 
             if state.stop_flag:
@@ -334,21 +323,9 @@ def _agent_loop_body(ui):
                 result = AgentResult("cancelled", "用户停止生成。")
                 break
 
-            # 轮次上限：模型持续返回 tool_calls 时主循环没有自然终点，触顶就停下来说明情况。
-            # 每轮重读 config（而不是 import 时定长），设置里改完重启即生效、测试也好 patch。
-            # **0 = 不限**（用户在设置里显式关掉了刹车）。
-            from . import config as _cfg_mod
-            _max_rounds = getattr(_cfg_mod, "AGENT_MAX_ROUNDS", 50)
-            # 把结论写进 chat_history（而不是只弹 UI 提示）——否则用户接着发消息时，模型看不到
-            # 上一轮"被截断"这件事，会以为自己顺利做完了。
-            if _max_rounds > 0 and round_i >= _max_rounds:
-                _msg = (f"⚠️ 已达单次交互轮次上限（{_max_rounds} 轮）并自动停止。"
-                        "模型可能陷入了循环。请查看上面的执行记录，把任务拆小后重新提出。"
-                        "（如需不限轮次，可在设置 → 高级里把上限设为 0）")
-                logger.warning(f"agent_loop 触顶 {_max_rounds} 轮，强制停止")
-                state.chat_history.append(AIMessage(content=_msg))
-                ui.show_message(f"\n{_msg}\n", "tool_result")
-                result = AgentResult("limit_reached", _msg)
+            limit_result = _check_round_limit(ui, round_i)
+            if limit_result is not None:
+                result = limit_result
                 break
 
             # 只在第一轮显示标签
@@ -358,240 +335,337 @@ def _agent_loop_body(ui):
 
             logger.info(f"第 {round_i+1} 轮流式调用...")
 
-            # 全流式调用，实时显示思考过程 + 收集 tool_calls（Ollama 解析错误自动重试）
-            retries = 0
-            overflow_retries = 0
-            overflow_fatal = False
-            while True:
-                try:
-                    raw_text, tool_calls, round_usage, gathered = _stream_with_tools(ui)
-                    break
-                except _ContextOverflowError as of_err:
-                    # provider 明确说超窗了。原样重试必然再溢出——收紧预算档位，让下一次
-                    # _prepare_stream_history 压得更狠，然后重发。封顶 _MAX_OVERFLOW_RETRIES：
-                    # 收紧到地板还溢出说明不是历史长度的问题（比如单条消息本身就超窗），
-                    # 再试下去只是烧钱，把原始错误交给用户。
-                    overflow_retries += 1
-                    if overflow_retries > _MAX_OVERFLOW_RETRIES:
-                        logger.error(f"上下文溢出，收紧 {_MAX_OVERFLOW_RETRIES} 次后仍失败: {of_err}")
-                        ui.show_retry(
-                            "对话超出模型上下文窗口，自动压缩后仍然放不下。"
-                            "请新建对话，或换一个上下文窗口更大的模型。"
-                        )
-                        result = AgentResult("failed", f"上下文压缩后仍然溢出: {of_err}")
-                        overflow_fatal = True
-                        break
-                    state.overflow_squeeze = int(getattr(state, "overflow_squeeze", 0) or 0) + 1
-                    logger.warning(
-                        f"上下文溢出，收紧档位 → {state.overflow_squeeze}，压缩后重试"
-                        f"（{overflow_retries}/{_MAX_OVERFLOW_RETRIES}）"
-                    )
-                    ui.show_message("\n⚠️ 超出上下文窗口，正在压缩历史后重试…\n", "tool_result")
-                except Exception as stream_err:
-                    retries += 1
-                    err_msg = str(stream_err)
-                    if retries <= 2 and ("XML syntax error" in err_msg or "ResponseError" in err_msg):
-                        logger.warning(f"Ollama 解析错误，第 {retries} 次重试: {err_msg[:100]}")
-                        ui.show_message(f"\n⚠️ 模型输出格式异常，正在重试({retries}/2)...\n", "tool_result")
-                    else:
-                        raise
-
-            if overflow_fatal:
+            # ── 取样 ──
+            streamed, fatal = _stream_round(ui)
+            if fatal is not None:
                 # 压到地板仍装不下：本轮没有任何结果变量可用，直接结束整个 agent_loop。
+                result = fatal
                 break
-
-            # 累计本轮 token 用量并通知 UI
-            if round_usage and round_usage['total'] > 0:
-                state.session_token_usage['input'] += round_usage['input']
-                state.session_token_usage['output'] += round_usage['output']
-                state.session_token_usage['total'] += round_usage['total']
-                # 缓存命中量（会话级字段可能是老结构，用 setdefault 兼容）
-                for _k in ("cache_read", "cache_write"):
-                    state.session_token_usage[_k] = (
-                        state.session_token_usage.get(_k, 0) + round_usage.get(_k, 0))
-                ui.show_token_usage(state.session_token_usage.copy(), round_usage)
-                # 缓存命中率进日志：prompt caching 省的是钱不是 token（命中部分照样计进
-                # input，只是按约 10% 计费），不单独打出来就完全看不见有没有生效。
-                _cr = round_usage.get("cache_read", 0)
-                _hit = f"，缓存命中 {_cr}（{_cr * 100 // max(round_usage['input'], 1)}%）" if _cr else ""
-                logger.info(f"Token 用量 - 输入: {round_usage['input']}, 输出: {round_usage['output']}, "
-                            f"总计: {round_usage['total']}{_hit}")
+            raw_text, tool_calls, round_usage, gathered = streamed
+            _record_round_usage(ui, round_usage)
 
             if state.stop_flag:
-                # 被中断，保存已有内容（保留 thinking blocks 以便回传）
-                clean = re.sub(r"<think>.*?</think>|<thought>.*?</thought>", "", raw_text, flags=re.DOTALL).strip()
-                if clean or (gathered is not None and isinstance(gathered.content, list)):
-                    state.chat_history.append(_build_ai_message(gathered, clean, []))
+                _save_interrupted_reply(raw_text, gathered)
                 result = AgentResult("cancelled", "用户停止生成。")
                 break
 
-            clean_text = re.sub(r"<think>.*?</think>|<thought>.*?</thought>", "", raw_text, flags=re.DOTALL).strip()
+            # ── 解析 ──
+            clean_text = _strip_thinking_tags(raw_text)
 
+            # ── 执行 ──
             if tool_calls:
-                logger.info(f"工具调用: {[tc['name'] for tc in tool_calls]}")
-                # 用 _build_ai_message 构造 AIMessage，保留 thinking blocks 供下轮回传
-                ai_msg = _build_ai_message(gathered, clean_text, tool_calls)
-                state.chat_history.append(ai_msg)
-                if clean_text:
-                    # 中间轮：只渲染 markdown，不朗读（朗读留给最终回复）
-                    ui.render_final_markdown(clean_text, speak=False)
-                # 该轮 AI 已固化到 chat_history → 清 render_log（切回靠 _redraw_chat 画它）
-                from . import session as _session
-                _session.seal_render_log()
-
-                # 同一轮有多个【只读无副作用】工具 → 先并行 invoke 取结果（IO 并行提速），
-                # 再按 tool_calls 原顺序串行渲染 + append（保证不交错、ToolMessage 顺序对）。
-                # 混入写类 / 需确认 / 改状态的工具，或 Plan / 遥控模式，一律走串行（现状）。
-                # 判定逻辑抽到 streaming._can_parallel（与 PARALLEL_SAFE_TOOLS/_parallel_invoke
-                # 集中一处、可单元测）。注意它不要求 args 非空——带默认参数的只读工具用 {} 调也合法。
-                from .streaming import _parallel_invoke, _can_parallel
-                _pre = _parallel_invoke(tool_calls) if _can_parallel(tool_calls) else {}
-                for i, tc in enumerate(tool_calls):
-                    if state.stop_flag:
-                        break
-                    _execute_tool(tc, ui, _preinvoked=_pre.get(i))
-
-                # ── 自动修复循环：工具失败后注入诊断 + 重试提示 ──
-                # 当 run_tests / check_code 等返回失败时，自动注入一条 HumanMessage
-                # 提示模型诊断原因并重新调用工具，最多修复 _MAX_REPAIR_ROUNDS 轮。
-                if not state.stop_flag and state.agent_mode != "plan":
-                    try:
-                        from .verification import check_repair_allowed, inject_repair_prompt
-                        _verification = _session_mod.current_session().verification
-                        for tc in reversed(tool_calls):
-                            tool_name = tc.get("name", "")
-                            tool_id = tc.get("id", "")
-                            # 从 chat_history 找刚执行的 ToolMessage
-                            tool_output = ""
-                            for msg in reversed(state.chat_history):
-                                if (hasattr(msg, "tool_call_id")
-                                        and msg.tool_call_id == tool_id):
-                                    tool_output = msg.content or ""
-                                    break
-                            allowed, _reason = check_repair_allowed(
-                                _verification, tool_name, tool_output,
-                            )
-                            if allowed:
-                                prompt = inject_repair_prompt(_verification)
-                                from . import task_state as _ts
-                                repair_msg = _ts.tag_internal_message(
-                                    HumanMessage(content=prompt), kind="repair"
-                                )
-                                state.chat_history.append(repair_msg)
-                                try:
-                                    ui.show_message(
-                                        "\n⚠️ 验证失败，正在自动诊断并尝试修复…\n",
-                                        "tool_result",
-                                    )
-                                except Exception:
-                                    pass
-                                break  # 每轮最多注入一条修复提示
-                    except Exception as _re_err:
-                        logger.debug(f"修复循环检查异常（已忽略）: {_re_err}")
-
+                _run_tool_calls(ui, tool_calls, gathered, clean_text)
+                _maybe_inject_repair(ui, tool_calls)
                 continue
-            else:
-                # 纯文本回复，先过完成闸门，再渲染 Markdown 并结束。
-                if not clean_text:
-                    # 这一轮没收到正文。两种成因要分开报，否则全甩锅"连接被中断"会误导：
-                    #  ① 输出额度耗尽(stop_reason=max_tokens / finish_reason=length)：reasoning
-                    #     模型思考太长把 max_tokens 吃光，根本没轮到吐正文。raw_text 只装正文不装
-                    #     思考，于是为空。F12 表现：output 顶在 max_tokens、状态却是"成功"。
-                    #  ② 真·空流：服务端 / 代理 idle 超时切断，一个 chunk 都没来。
-                    stop_reason = ""
-                    try:
-                        _meta = getattr(gathered, "response_metadata", {}) or {}
-                        stop_reason = _meta.get("stop_reason") or _meta.get("finish_reason") or ""
-                    except Exception:
-                        stop_reason = ""
-                    if stop_reason in ("max_tokens", "length"):
-                        _had_think = bool(_extract_thinking(gathered))
-                        ui.show_retry(
-                            "模型把本轮输出额度（max_tokens）用尽了"
-                            + ("（深度思考占满，没轮到输出正文）" if _had_think else "")
-                            + "。可关掉「思考」开关、把问题拆细后重试，或换更高额度的模型。"
-                        )
-                        logger.warning(
-                            f"第 {round_i+1} 轮 output 到达 max_tokens（stop_reason={stop_reason}），"
-                            f"无正文，疑似思考耗尽额度"
-                        )
-                    else:
-                        ui.show_retry(
-                            "连接被中断（服务端或代理在思考期间关闭了连接）。"
-                            "请重试，或换一个模型。"
-                        )
-                        logger.warning(
-                            f"第 {round_i+1} 轮流结束但未收到任何内容（stop_reason={stop_reason or '空'}），"
-                            f"疑似服务端 idle timeout 中断"
-                        )
-                    result = AgentResult("failed", f"模型未返回正文（结束原因: {stop_reason or '空流'}）。")
-                    break
-                result = AgentResult("completed")
-                try:
-                    from .verification import get_verification_gaps as _v_gaps
-                    _cur_sess = _session_mod.current_session()
-                    _verification = _cur_sess.verification
-                    _gaps = _v_gaps(_verification)
-                    if _gaps:
-                        result = AgentResult("unverified", "\n".join(_gaps))
-                    if _gaps and not state.stop_flag and getattr(state, "agent_mode", "act") != "plan":
-                        if not _verification.get("gate_prompted"):
-                            _verification["gate_prompted"] = True
-                            _gap_msg = (
-                                "[内部验证要求]\n"
-                                "你刚才试图结束任务，但本轮改动尚未完成验证：\n"
-                                + "\n".join(f"- {g}" for g in _gaps)
-                                + "\n\n请继续调用合适的工具验证。若验证不可用或失败，"
-                                  "允许最终结束，但必须明确说明原因和风险。"
-                            )
-                            ui.show_message("\n⚠️ 检测到改动尚未完成验证，正在继续检查…\n", "tool_result")
-                            from . import task_state as _ts
-                            gate_msg = _ts.tag_internal_message(
-                                HumanMessage(content=_gap_msg), kind="gate"
-                            )
-                            state.chat_history.append(gate_msg)
-                            continue
-                        clean_text = (
-                            "⚠️ 验证仍未完整完成：\n"
-                            + "\n".join(f"- {g}" for g in _gaps)
-                            + "\n\n"
-                            + (clean_text or "")
-                        )
-                except Exception as _ge:
-                    result = AgentResult("unverified", f"验证闸门检查失败: {_ge}")
-                    logger.warning(result.reason)
-                    clean_text = f"⚠️ {result.reason}\n\n{clean_text}"
 
-                state.chat_history.append(_build_ai_message(gathered, clean_text, []))
-                if clean_text:
-                    ui.render_final_markdown(clean_text)
-                logger.info(f"回复完成: {clean_text[:100]}...")
+            # ── 闸门：纯文本回复，先过完成闸门，再渲染 Markdown 并结束 ──
+            if not clean_text:
+                result = _empty_reply_result(ui, gathered, round_i)
                 break
+            result, clean_text, rerun = _completion_gate(ui, clean_text)
+            if rerun:
+                continue
+            state.chat_history.append(_build_ai_message(gathered, clean_text, []))
+            if clean_text:
+                ui.render_final_markdown(clean_text)
+            logger.info(f"回复完成: {clean_text[:100]}...")
+            break
 
         # 保存不再在这里做：`agent_loop` 的 finalize 会连同结束记录一次存盘，
         # 正常/取消/异常/提前返回四条路径共用同一次保存。留在这里的话，
         # 只有成功路径会存，而异常路径恰恰是最需要留下记录的。
 
     except Exception as e:
-        ui.remove_thinking_indicator()
-        logger.error(f"agent_loop 异常: {e}", exc_info=True)
-        # Telegram 通知：agent 异常
-        try:
-            from .notify import notify as _notify
-            _notify("error", "Agent 异常", str(e)[:300], "agent_error")
-        except Exception:
-            pass
-        # 简化错误信息显示
-        err_msg = str(e)
-        if "XML syntax error" in err_msg or "ResponseError" in err_msg:
-            display_err = "Ollama 模型输出格式异常"
-        elif "Connection" in err_msg or "refused" in err_msg:
-            display_err = "无法连接 Ollama 服务"
-        else:
-            display_err = err_msg[:100]
-        ui.show_retry(display_err)
-        result = AgentResult("failed", err_msg)
+        result = _report_loop_error(ui, e)
 
     if state.stop_flag:
         return AgentResult("cancelled", "用户停止生成。"), clean_text
     return result, clean_text
+
+
+def _run_claude_code(ui):
+    """Claude Code 模式：直接调 CLI，返回本轮结果。"""
+    # 知识库(RAG)模式不支持 Claude Code：CLI 没有 search_knowledge、也不吃 RAG
+    # 提示词——放行等于变回完整编码 agent，静默绕过知识库约束。明确拦下。
+    if getattr(state, "rag_mode", False):
+        ui.show_message(
+            "\n⚠️ 知识库模式不支持 Claude Code 模型（它走本地 CLI、无法使用知识库检索）。"
+            "请在顶栏换一个 API 模型，或切回「编码」模式再用 Claude Code。\n",
+            "ai_msg")
+        return AgentResult("failed", "知识库模式不支持 Claude Code。")
+    result = _claude_code_loop(ui)
+    if state.stop_flag:
+        return AgentResult("cancelled", "用户停止生成。")
+    if not isinstance(result, AgentResult):
+        return AgentResult("failed", "Claude Code 未返回有效运行结果。")
+    return result
+
+
+def _check_round_limit(ui, round_i):
+    """轮次上限：模型持续返回 tool_calls 时主循环没有自然终点，触顶就停下来说明情况。
+
+    触顶返回 limit_reached 结果，否则 None。
+    每轮重读 config（而不是 import 时定长），设置里改完重启即生效、测试也好 patch。
+    **0 = 不限**（用户在设置里显式关掉了刹车）。
+    """
+    from . import config as _cfg_mod
+    _max_rounds = getattr(_cfg_mod, "AGENT_MAX_ROUNDS", 50)
+    if not (_max_rounds > 0 and round_i >= _max_rounds):
+        return None
+    # 把结论写进 chat_history（而不是只弹 UI 提示）——否则用户接着发消息时，模型看不到
+    # 上一轮"被截断"这件事，会以为自己顺利做完了。
+    _msg = (f"⚠️ 已达单次交互轮次上限（{_max_rounds} 轮）并自动停止。"
+            "模型可能陷入了循环。请查看上面的执行记录，把任务拆小后重新提出。"
+            "（如需不限轮次，可在设置 → 高级里把上限设为 0）")
+    logger.warning(f"agent_loop 触顶 {_max_rounds} 轮，强制停止")
+    state.chat_history.append(AIMessage(content=_msg))
+    ui.show_message(f"\n{_msg}\n", "tool_result")
+    return AgentResult("limit_reached", _msg)
+
+
+def _stream_round(ui):
+    """取样：一次全流式调用，实时显示思考过程 + 收集 tool_calls。
+
+    返回 ((raw_text, tool_calls, round_usage, gathered), None)；
+    上下文压缩到底仍然溢出时返回 (None, 失败结果)。
+    Ollama 解析错误自动重试两次，其余异常照常抛给调用方。
+    """
+    retries = 0
+    overflow_retries = 0
+    while True:
+        try:
+            raw_text, tool_calls, round_usage, gathered = _stream_with_tools(ui)
+            return (raw_text, tool_calls, round_usage, gathered), None
+        except _ContextOverflowError as of_err:
+            # provider 明确说超窗了。原样重试必然再溢出——收紧预算档位，让下一次
+            # _prepare_stream_history 压得更狠，然后重发。封顶 _MAX_OVERFLOW_RETRIES：
+            # 收紧到地板还溢出说明不是历史长度的问题（比如单条消息本身就超窗），
+            # 再试下去只是烧钱，把原始错误交给用户。
+            overflow_retries += 1
+            if overflow_retries > _MAX_OVERFLOW_RETRIES:
+                logger.error(f"上下文溢出，收紧 {_MAX_OVERFLOW_RETRIES} 次后仍失败: {of_err}")
+                ui.show_retry(
+                    "对话超出模型上下文窗口，自动压缩后仍然放不下。"
+                    "请新建对话，或换一个上下文窗口更大的模型。"
+                )
+                return None, AgentResult("failed", f"上下文压缩后仍然溢出: {of_err}")
+            state.overflow_squeeze = int(getattr(state, "overflow_squeeze", 0) or 0) + 1
+            logger.warning(
+                f"上下文溢出，收紧档位 → {state.overflow_squeeze}，压缩后重试"
+                f"（{overflow_retries}/{_MAX_OVERFLOW_RETRIES}）"
+            )
+            ui.show_message("\n⚠️ 超出上下文窗口，正在压缩历史后重试…\n", "tool_result")
+        except Exception as stream_err:
+            retries += 1
+            err_msg = str(stream_err)
+            if retries <= 2 and ("XML syntax error" in err_msg or "ResponseError" in err_msg):
+                logger.warning(f"Ollama 解析错误，第 {retries} 次重试: {err_msg[:100]}")
+                ui.show_message(f"\n⚠️ 模型输出格式异常，正在重试({retries}/2)...\n", "tool_result")
+            else:
+                raise
+
+
+def _record_round_usage(ui, round_usage):
+    """累计本轮 token 用量并通知 UI。"""
+    if not (round_usage and round_usage['total'] > 0):
+        return
+    state.session_token_usage['input'] += round_usage['input']
+    state.session_token_usage['output'] += round_usage['output']
+    state.session_token_usage['total'] += round_usage['total']
+    # 缓存命中量（会话级字段可能是老结构，用 setdefault 兼容）
+    for _k in ("cache_read", "cache_write"):
+        state.session_token_usage[_k] = (
+            state.session_token_usage.get(_k, 0) + round_usage.get(_k, 0))
+    ui.show_token_usage(state.session_token_usage.copy(), round_usage)
+    # 缓存命中率进日志：prompt caching 省的是钱不是 token（命中部分照样计进
+    # input，只是按约 10% 计费），不单独打出来就完全看不见有没有生效。
+    _cr = round_usage.get("cache_read", 0)
+    _hit = f"，缓存命中 {_cr}（{_cr * 100 // max(round_usage['input'], 1)}%）" if _cr else ""
+    logger.info(f"Token 用量 - 输入: {round_usage['input']}, 输出: {round_usage['output']}, "
+                f"总计: {round_usage['total']}{_hit}")
+
+
+def _strip_thinking_tags(raw_text):
+    """去掉正文里内联的 <think>/<thought> 段。"""
+    return re.sub(r"<think>.*?</think>|<thought>.*?</thought>", "", raw_text, flags=re.DOTALL).strip()
+
+
+def _save_interrupted_reply(raw_text, gathered):
+    """被中断，保存已有内容（保留 thinking blocks 以便回传）。"""
+    clean = _strip_thinking_tags(raw_text)
+    if clean or (gathered is not None and isinstance(gathered.content, list)):
+        state.chat_history.append(_build_ai_message(gathered, clean, []))
+
+
+def _run_tool_calls(ui, tool_calls, gathered, clean_text):
+    """执行：把带工具调用的这一轮 AI 消息固化进历史，再依次执行工具。"""
+    logger.info(f"工具调用: {[tc['name'] for tc in tool_calls]}")
+    # 用 _build_ai_message 构造 AIMessage，保留 thinking blocks 供下轮回传
+    ai_msg = _build_ai_message(gathered, clean_text, tool_calls)
+    state.chat_history.append(ai_msg)
+    if clean_text:
+        # 中间轮：只渲染 markdown，不朗读（朗读留给最终回复）
+        ui.render_final_markdown(clean_text, speak=False)
+    # 该轮 AI 已固化到 chat_history → 清 render_log（切回靠 _redraw_chat 画它）
+    from . import session as _session
+    _session.seal_render_log()
+
+    # 同一轮有多个【只读无副作用】工具 → 先并行 invoke 取结果（IO 并行提速），
+    # 再按 tool_calls 原顺序串行渲染 + append（保证不交错、ToolMessage 顺序对）。
+    # 混入写类 / 需确认 / 改状态的工具，或 Plan / 遥控模式，一律走串行（现状）。
+    # 判定逻辑抽到 streaming._can_parallel（与 PARALLEL_SAFE_TOOLS/_parallel_invoke
+    # 集中一处、可单元测）。注意它不要求 args 非空——带默认参数的只读工具用 {} 调也合法。
+    from .streaming import _parallel_invoke, _can_parallel
+    _pre = _parallel_invoke(tool_calls) if _can_parallel(tool_calls) else {}
+    for i, tc in enumerate(tool_calls):
+        if state.stop_flag:
+            break
+        _execute_tool(tc, ui, _preinvoked=_pre.get(i))
+
+
+def _maybe_inject_repair(ui, tool_calls):
+    """自动修复循环：工具失败后注入诊断 + 重试提示。
+
+    当 run_tests / check_code 等返回失败时，自动注入一条 HumanMessage
+    提示模型诊断原因并重新调用工具，最多修复 _MAX_REPAIR_ROUNDS 轮。
+    """
+    if state.stop_flag or state.agent_mode == "plan":
+        return
+    try:
+        from .verification import check_repair_allowed, inject_repair_prompt
+        _verification = _session_mod.current_session().verification
+        for tc in reversed(tool_calls):
+            tool_name = tc.get("name", "")
+            tool_id = tc.get("id", "")
+            # 从 chat_history 找刚执行的 ToolMessage
+            tool_output = ""
+            for msg in reversed(state.chat_history):
+                if (hasattr(msg, "tool_call_id")
+                        and msg.tool_call_id == tool_id):
+                    tool_output = msg.content or ""
+                    break
+            allowed, _reason = check_repair_allowed(
+                _verification, tool_name, tool_output,
+            )
+            if allowed:
+                prompt = inject_repair_prompt(_verification)
+                from . import task_state as _ts
+                repair_msg = _ts.tag_internal_message(
+                    HumanMessage(content=prompt), kind="repair"
+                )
+                state.chat_history.append(repair_msg)
+                try:
+                    ui.show_message(
+                        "\n⚠️ 验证失败，正在自动诊断并尝试修复…\n",
+                        "tool_result",
+                    )
+                except Exception:
+                    pass
+                break  # 每轮最多注入一条修复提示
+    except Exception as _re_err:
+        logger.debug(f"修复循环检查异常（已忽略）: {_re_err}")
+
+
+def _empty_reply_result(ui, gathered, round_i):
+    """这一轮没收到正文：提示用户并返回失败结果。
+
+    两种成因要分开报，否则全甩锅"连接被中断"会误导：
+     ① 输出额度耗尽(stop_reason=max_tokens / finish_reason=length)：reasoning
+        模型思考太长把 max_tokens 吃光，根本没轮到吐正文。raw_text 只装正文不装
+        思考，于是为空。F12 表现：output 顶在 max_tokens、状态却是"成功"。
+     ② 真·空流：服务端 / 代理 idle 超时切断，一个 chunk 都没来。
+    """
+    stop_reason = ""
+    try:
+        _meta = getattr(gathered, "response_metadata", {}) or {}
+        stop_reason = _meta.get("stop_reason") or _meta.get("finish_reason") or ""
+    except Exception:
+        stop_reason = ""
+    if stop_reason in ("max_tokens", "length"):
+        _had_think = bool(_extract_thinking(gathered))
+        ui.show_retry(
+            "模型把本轮输出额度（max_tokens）用尽了"
+            + ("（深度思考占满，没轮到输出正文）" if _had_think else "")
+            + "。可关掉「思考」开关、把问题拆细后重试，或换更高额度的模型。"
+        )
+        logger.warning(
+            f"第 {round_i+1} 轮 output 到达 max_tokens（stop_reason={stop_reason}），"
+            f"无正文，疑似思考耗尽额度"
+        )
+    else:
+        ui.show_retry(
+            "连接被中断（服务端或代理在思考期间关闭了连接）。"
+            "请重试，或换一个模型。"
+        )
+        logger.warning(
+            f"第 {round_i+1} 轮流结束但未收到任何内容（stop_reason={stop_reason or '空'}），"
+            f"疑似服务端 idle timeout 中断"
+        )
+    return AgentResult("failed", f"模型未返回正文（结束原因: {stop_reason or '空流'}）。")
+
+
+def _completion_gate(ui, clean_text):
+    """闸门：模型给出纯文本、想结束时核对验证义务。返回 (result, clean_text, rerun)。
+
+    有未验证的改动且还没催过：注入一条内部验证要求，rerun=True 让主循环再跑一轮。
+    已经催过仍有缺口（或 Plan 模式 / 已停止）：允许结束，结果记为 unverified，
+    缺口写在回复最前面。闸门自身出错同样记为 unverified，不当作已验证。
+    """
+    result = AgentResult("completed")
+    try:
+        from .verification import get_verification_gaps as _v_gaps
+        _cur_sess = _session_mod.current_session()
+        _verification = _cur_sess.verification
+        _gaps = _v_gaps(_verification)
+        if _gaps:
+            result = AgentResult("unverified", "\n".join(_gaps))
+        if _gaps and not state.stop_flag and getattr(state, "agent_mode", "act") != "plan":
+            if not _verification.get("gate_prompted"):
+                _verification["gate_prompted"] = True
+                _gap_msg = (
+                    "[内部验证要求]\n"
+                    "你刚才试图结束任务，但本轮改动尚未完成验证：\n"
+                    + "\n".join(f"- {g}" for g in _gaps)
+                    + "\n\n请继续调用合适的工具验证。若验证不可用或失败，"
+                      "允许最终结束，但必须明确说明原因和风险。"
+                )
+                ui.show_message("\n⚠️ 检测到改动尚未完成验证，正在继续检查…\n", "tool_result")
+                from . import task_state as _ts
+                gate_msg = _ts.tag_internal_message(
+                    HumanMessage(content=_gap_msg), kind="gate"
+                )
+                state.chat_history.append(gate_msg)
+                return result, clean_text, True
+            clean_text = (
+                "⚠️ 验证仍未完整完成：\n"
+                + "\n".join(f"- {g}" for g in _gaps)
+                + "\n\n"
+                + (clean_text or "")
+            )
+    except Exception as _ge:
+        result = AgentResult("unverified", f"验证闸门检查失败: {_ge}")
+        logger.warning(result.reason)
+        clean_text = f"⚠️ {result.reason}\n\n{clean_text}"
+    return result, clean_text, False
+
+
+def _report_loop_error(ui, e):
+    """主循环里未处理的异常：清掉思考指示、记日志、发通知、给用户一条简化错误，返回失败结果。"""
+    ui.remove_thinking_indicator()
+    logger.error(f"agent_loop 异常: {e}", exc_info=True)
+    # Telegram 通知：agent 异常
+    try:
+        from .notify import notify as _notify
+        _notify("error", "Agent 异常", str(e)[:300], "agent_error")
+    except Exception:
+        pass
+    # 简化错误信息显示
+    err_msg = str(e)
+    if "XML syntax error" in err_msg or "ResponseError" in err_msg:
+        display_err = "Ollama 模型输出格式异常"
+    elif "Connection" in err_msg or "refused" in err_msg:
+        display_err = "无法连接 Ollama 服务"
+    else:
+        display_err = err_msg[:100]
+    ui.show_retry(display_err)
+    return AgentResult("failed", err_msg)
