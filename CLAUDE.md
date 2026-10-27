@@ -14,8 +14,8 @@ Agent 工具调用 · 写盘确认闸门 · 改完自检的验证闭环 · RAG �
 |---|---|---|
 | [overview.md](docs/architecture/overview.md) | 目录与模块一览；支持的模型、自定义模型 | 找文件在哪、加模型 |
 | [core.md](docs/architecture/core.md) | 对话核心、项目（工作区）、`agent` facade、多会话并发、Prompt 缓存分层、主循环边界与错误恢复 | `agent.py` `streaming.py` `session.py` `state.py` `roles.py` `llm_errors.py` `projects.py` |
-| [runs-and-recovery.md](docs/architecture/runs-and-recovery.md) | 运行记录与中断恢复（B03）、工具边界 inflight sidecar、运行结果卡（B06）、恢复检查与继续任务（B04） | `run_records.py` `result_view.py` `ui/result_card.py` `recovery.py` `workspace_anchor.py` |
-| [tasks-and-input-queue.md](docs/architecture/tasks-and-input-queue.md) | 任务身份与要求/计划分离（B05）、统一退出屏障（B09a）、运行中输入队列（B09b） | `task_state.py` `ui/task_panel.py` `input_queue.py` `ui/queue_panel.py`，以及 `ui/` 里的发送、准入、排队 |
+| [runs-and-recovery.md](docs/architecture/runs-and-recovery.md) | 运行记录与中断恢复（B03）、工具边界 inflight sidecar、运行结果卡（B06）、恢复检查与继续任务（B04） | `run_records.py` `result_view.py` `ui/result_card.py` `ui/run_results.py` `recovery.py` `workspace_anchor.py` |
+| [tasks-and-input-queue.md](docs/architecture/tasks-and-input-queue.md) | 任务身份与要求/计划分离（B05）、统一退出屏障（B09a）、运行中输入队列（B09b） | `task_state.py` `ui/task_panel.py` `input_queue.py` `ui/queue_panel.py` `ui/send.py` `ui/run_admission.py` `ui/queue_dispatch.py` |
 | [background.md](docs/architecture/background.md) | 后台进程管理（B10a）、后台任务面板（B10b） | `background.py` `ui/background_panel.py` |
 | [undo-and-verification.md](docs/architecture/undo-and-verification.md) | 文件改动的安全撤销（B11a）、验证闭环与自动修复 | `file_history.py` `file_transaction.py` `verification.py`，以及写盘工具 |
 | [tools.md](docs/architecture/tools.md) | 工具列表、计划稳定性、改后自我校验 | `tools*.py`：新增或修改工具 |

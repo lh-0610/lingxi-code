@@ -819,13 +819,13 @@ class TestInvalidation:
                                                           monkeypatch):
         """立即发送分支失败同样要有手机端回执（与等待后接纳的分支一致）。"""
         import types
-        from src.ui import chat_window as cw
+        from src.ui import send as send_mod
 
         class _BrokenThread:
             def __init__(self, *a, **k):
                 raise RuntimeError("cannot start new thread")
 
-        monkeypatch.setattr(cw, "threading", types.SimpleNamespace(
+        monkeypatch.setattr(send_mod, "threading", types.SimpleNamespace(
             Thread=_BrokenThread,
             current_thread=threading.current_thread,
             Event=threading.Event))
@@ -888,7 +888,7 @@ class TestSessionIndependenceAndSpawnFailure:
                                                             monkeypatch):
         """新 worker 启动失败：如实反馈、不留半截历史、输入仍可重试。"""
         import types
-        from src.ui import chat_window as cw
+        from src.ui import send as send_mod
 
         class _BrokenThread:
             def __init__(self, *a, **k):
@@ -897,7 +897,7 @@ class TestSessionIndependenceAndSpawnFailure:
         fake_threading = types.SimpleNamespace(Thread=_BrokenThread,
                                                current_thread=threading.current_thread,
                                                Event=threading.Event)
-        monkeypatch.setattr(cw, "threading", fake_threading)
+        monkeypatch.setattr(send_mod, "threading", fake_threading)
 
         _toasts(ui)
         _type(ui, "只此一份的草稿")
@@ -918,13 +918,13 @@ class TestSessionIndependenceAndSpawnFailure:
         import types
         from langchain_core.messages import AIMessage, SystemMessage
         from src import memory as _memory
-        from src.ui import chat_window as cw
+        from src.ui import send as send_mod
 
         class _BrokenThread:
             def __init__(self, *a, **k):
                 raise RuntimeError("cannot start new thread")
 
-        monkeypatch.setattr(cw, "threading", types.SimpleNamespace(
+        monkeypatch.setattr(send_mod, "threading", types.SimpleNamespace(
             Thread=_BrokenThread,
             current_thread=threading.current_thread,
             Event=threading.Event))
@@ -971,7 +971,7 @@ class TestContinueBindsItsOwnSession:
         """
         import types
         from src import models, paths as _paths, recovery, run_records
-        from src.ui import chat_window as cw
+        from src.ui import send as send_mod
 
         monkeypatch.setattr(models, "get_model_config_issues", lambda *a, **k: [])
         hold = threading.Event()
@@ -989,7 +989,7 @@ class TestContinueBindsItsOwnSession:
 
                 self._target = _runner
 
-        monkeypatch.setattr(cw, "threading", types.SimpleNamespace(
+        monkeypatch.setattr(send_mod, "threading", types.SimpleNamespace(
             Thread=_DelayedThread,
             current_thread=threading.current_thread,
             Event=threading.Event))

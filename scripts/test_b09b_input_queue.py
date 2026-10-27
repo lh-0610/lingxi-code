@@ -714,7 +714,7 @@ class TestQueueUIFlows:
                                                   monkeypatch):
         """线程构造失败：条目保留、状态如实、可重试。"""
         import types
-        from src.ui import chat_window as cw
+        from src.ui import send as send_mod
 
         class _BrokenThread:
             def __init__(self, *a, **k):
@@ -730,7 +730,7 @@ class TestQueueUIFlows:
         _pump(qapp, 0.2)
         assert len(sess.input_queue["items"]) == 1
 
-        monkeypatch.setattr(cw, "threading", types.SimpleNamespace(
+        monkeypatch.setattr(send_mod, "threading", types.SimpleNamespace(
             Thread=_BrokenThread, current_thread=threading.current_thread,
             Event=threading.Event))
         _toasts(ui).clear()

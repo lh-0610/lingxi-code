@@ -9,6 +9,7 @@
 3. **继续的是不是同一件事？** 以会话 + run_id 核对归属；旧卡、后台会话、还在收尾的旧 worker
    都不能把两轮搅在一起。模型按稳定标识找回，找不到就要求重选；Plan 仍是 Plan。
 """
+import inspect
 import json
 import os
 import shutil
@@ -1055,7 +1056,8 @@ def host(qt_app, monkeypatch, isolated_memory, no_config_issues):
         _RESUME_WAIT_MS = ChatUI._RESUME_WAIT_MS
         _RESUME_WAIT_LIMIT = ChatUI._RESUME_WAIT_LIMIT
         # 静态方法要连同描述符一起借，否则挂到别的类上会被绑成实例方法
-        _resume_ownership_problem = ChatUI.__dict__["_resume_ownership_problem"]
+        # （getattr_static 沿 MRO 找，方法在 mixin 里也拿得到原始描述符）
+        _resume_ownership_problem = inspect.getattr_static(ChatUI, "_resume_ownership_problem")
         _on_result_continue = ChatUI._on_result_continue
         _resume_wait = ChatUI._resume_wait
         _resume_abort = ChatUI._resume_abort

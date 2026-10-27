@@ -52,7 +52,7 @@
   - 区域 3：执行与验证状态（待验证文件列表与义务提示）；
   - 普通问答无任务无计划时整卡隐藏，保持界面极简不干扰用户。
 
-## 统一退出屏障：停止后启动下一轮（src/ui/chat_window.py，B09a）
+## 统一退出屏障：停止后启动下一轮（src/ui/run_admission.py，B09a）
 - **忙碌判据只有一条**：`_worker_alive(sess)` = `is_generating` 或 `last_worker.is_alive()`。强制停止会立刻把 `is_generating` 置 False 而旧线程还在收尾写会话；`finished` 信号也可能先于线程退出到达——两者都不能作为"可以开新一轮"的依据。各入口的忙碌判断统一走这个谓词（`_resume_wait` / `_wait_worker_and_undo_switch` 亦然），不各养一套。
 - **统一启动闸 `_gate_new_run_request(sess, source, ...)`**：普通发送（按钮 / Enter）、遥控注入、重试都过它，返回 `start`（会话空闲，调用方自己启动）/ `queued`（已登记待启动请求）/ `busy`（拒绝）。`_do_send` 顶部还有一道**底层硬闸**（拒绝时不产生任何副作用）——防绕过入口直接调它双开 worker。`_spawn_worker_thread` 是起 worker 线程的唯一出口：**线程身份在 `start()` 之前就写进 `thread` / `last_worker`**——`start()` 返回后线程未必马上进入 target，这个窗口里点停止会清掉 `is_generating`，若屏障还看不到线程占用，下一条消息就会双开同一会话（实测复现）；启动失败回滚 `is_generating` + 按钮态并如实反馈，不让会话卡在"生成中"（`Thread(...)` 构造本身也可能抛，回滚要覆盖它）。
 - **只有"已停止但旧 worker 还在收尾"的窗口才排队**。仍正常生成时发送被拒（点发送按钮 = 停止的语义不变，不代停、不新增排队）；**重试不排队**（它要动 `chat_history`，等旧 worker 退出前碰不得）——被拒时 toast 明确反馈。遥控注入被拒时经 `telegram_push.push` 给手机端明确回执（正常生成中、排队、超时、**立即发送启动失败**——两条路径都要回执，不静默丢弃）；归属在接收时绑定当时的前台会话。

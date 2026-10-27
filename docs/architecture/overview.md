@@ -62,7 +62,11 @@ src/                     # 主代码
 
   ui/                    # UI 包（chat_window.py 用 mixin 拆分）
     __init__.py          # 导出 ChatUI / SettingsDialog
-    chat_window.py       # ChatUI 主窗口（__init__/build_ui/eventFilter/agent 集成/渲染原语 _append_html/show_message/_t）
+    chat_window.py       # ChatUI 主窗口（__init__/build_ui/eventFilter/渲染原语 _append_html/show_message/_t），组装下列 mixin
+    send.py              # SendMixin：发送入口（按钮/回车/遥控）、起 worker 跑 agent_loop、视觉桥接、结束回调、强制停止
+    run_admission.py     # RunAdmissionMixin + _PendingRunRequest：待启动请求的准入（B09a 统一退出屏障）
+    queue_dispatch.py    # QueueDispatchMixin：运行中输入队列的入队、派发与收尾（B09b）
+    run_results.py       # RunResultMixin：运行结果卡（B06）与「继续任务」（B04）的 UI 侧
     message_view.py      # 消息流的块级真控件渲染（圆角卡/阴影/可展开思考块）—— 逐步替代 QTextBrowser
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
     task_panel.py        # 任务面板浮层与限制编辑对话框（B05）：三段式要求/计划/执行状态，可撤销横幅，硬预算校验
