@@ -63,7 +63,10 @@ roles/*.md
 
 # ─── 项目文档（规格 / 方案 / 临时，不进仓库）───
 # 给 AI agent 读的实现规格、修复方案、设计讨论等。
-docs/
+# 例外：docs/architecture/ 是从 CLAUDE.md 拆出的架构说明，跟代码一起提交。
+# （必须写成 docs/* 而不是 docs/：整个目录被忽略时，git 不会再进去看里面的例外规则。）
+docs/*
+!docs/architecture/
 
 # 临时输出
 output/

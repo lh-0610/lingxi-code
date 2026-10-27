@@ -16,7 +16,7 @@ from . import state as _state
 from . import state  # 公开给 ui.py 直接用：ui 里所有"写入"改成 src.state.X = ...
 from .paths import logger
 # ⚠️ 本模块是 facade(门面):下面很多名字在 agent.py 内部"未使用",但它们是**出口**——
-# UI 层(chat_window/sidebar/header)统一经 `agent.X` 访问(见 CLAUDE.md 架构说明)。
+# UI 层(chat_window/sidebar/header)统一经 `agent.X` 访问(见 docs/architecture/core.md「模块级 facade」节)。
 # 用 noqa: F401 标记,**任何 linter / AI 清理"未使用 import"都不许删**,删了 UI 运行时直接
 # AttributeError(发图视觉桥接/角色卡切换/会话侧栏全炸,且单测覆盖不到这些 UI 路径)。
 from .models import (

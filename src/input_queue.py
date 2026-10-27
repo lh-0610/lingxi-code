@@ -11,7 +11,7 @@
   正式派发（接纳）时沿用入队时就分配好的 message_id，由调用方走 _do_send 接入
   真实用户输入标记、B03 run_id 与 B05 要求来源。模型无法触达本模块。
 
-条目状态机（最小集，每个转换的落盘位置见 CLAUDE.md「B09b」节）：
+条目状态机（最小集，每个转换的落盘位置见 docs/architecture/tasks-and-input-queue.md「B09b」节）：
     queued      待派发（可编辑/删除/立即处理）
     held        暂停（附件/归属问题；重试通过校验后回 queued）
     dispatching 派发准备已落盘、等待运行占用（崩溃后 → needs_check）

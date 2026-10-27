@@ -513,7 +513,7 @@ def summarize_obligations(v) -> dict:
     """把当前验证状态里**尚未解决**的部分整理成可持久化的义务摘要。
 
     只读内存状态，不扫磁盘。没有缺口时返回空义务——这时"已跑的检查都过了"，
-    但它仍然只是"已执行的检查通过"，不等于任务做对了（见 CLAUDE.md 的两条边界）。
+    但它仍然只是"已执行的检查通过"，不等于任务做对了（见 docs/architecture/undo-and-verification.md 的两条边界）。
     """
     from .run_records import empty_pending_verification
 
