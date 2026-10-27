@@ -3,6 +3,7 @@
 共同主题：**结果卡上的结论不能比证据更乐观**，而且展示这件事本身不许改坏
 会话路由、证据持久化和缓存归属这些底下的东西。
 """
+import shutil
 import subprocess
 
 import pytest
@@ -93,8 +94,22 @@ def tool_session(isolated_memory, tmp_path):
     session.unbind_thread()
 
 
+@pytest.fixture()
+def mypy_on_path(monkeypatch):
+    """让 _run_type_check 认为装了 mypy，测试结果不随运行环境变化。
+
+    下面两条测的是退出码怎么记，subprocess.run 已打桩，mypy 本身从不真跑；
+    但没装 mypy 时 _run_type_check 在 find_spec / which 处就静默返回，到不了被测分支。
+    装了 mypy 时走 find_spec 那支，这个假 which 用不上，结果一样。
+    """
+    real_which = shutil.which
+    monkeypatch.setattr(shutil, "which",
+                        lambda name, *a, **k: "mypy" if name == "mypy" else real_which(name, *a, **k))
+
+
 class TestCheckerFatalExit:
-    def test_mypy_fatal_exit_is_error_not_passed(self, tool_session, tmp_path, monkeypatch):
+    def test_mypy_fatal_exit_is_error_not_passed(self, tool_session, tmp_path, monkeypatch,
+                                                 mypy_on_path):
         """筛完没剩下诊断 ≠ 检查跑成功了。
 
         mypy 退出码 ≥2 是致命错误（语法错、用法错），它根本没完成分析。
@@ -122,7 +137,8 @@ class TestCheckerFatalExit:
         assert mypy["summary"], "错误摘要不能被丢掉"
 
     def test_filtered_out_low_signal_errors_still_count_as_passed(self, tool_session,
-                                                                  tmp_path, monkeypatch):
+                                                                  tmp_path, monkeypatch,
+                                                                  mypy_on_path):
         """退出码 1 + 高信号筛选后无命中 = 按我们的判据通过。这是有意的，别一起改掉。"""
         monkeypatch.setattr(config, "CHECK_COMMAND", "")
         monkeypatch.setattr(config, "TYPE_CHECK_AFTER_EDIT", True)
