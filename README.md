@@ -108,8 +108,11 @@
 ### 1. 安装 Python 依赖
 
 ```bash
-# 主程序依赖
-pip install langchain langchain-ollama langchain-openai langchain-anthropic langchain-google-genai PySide6 markdown requests pillow
+# 推荐：按 requirements.lock 里验证过的版本一次装齐（含下面的可选依赖）
+pip install -r requirements.txt -c requirements.lock
+
+# 或者只装主程序依赖，可选功能按需补装（同样建议带上 -c requirements.lock）
+pip install -c requirements.lock langchain langchain-ollama langchain-openai langchain-anthropic langchain-google-genai PySide6 markdown requests pillow numpy chromadb
 
 # MCP 客户端依赖（可选，没装则 MCP 功能静默跳过）
 pip install mcp

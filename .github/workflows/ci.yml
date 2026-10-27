@@ -16,8 +16,9 @@ jobs:
           python-version: "3.14"
 
       # ── ruff 仓库级 lint：轻量、稳定，主门禁（规则集见 pyproject.toml）──
+      # 所有 pip install 都带 -c requirements.lock：版本钉死，CI 结果不随上游发版漂移。
       - name: Install ruff
-        run: pip install "ruff>=0.6"
+        run: pip install ruff -c requirements.lock
       - name: Ruff check
         run: python -m ruff check src/
 
@@ -25,8 +26,8 @@ jobs:
       # 可选依赖（mcp / tree-sitter / lsp）不装——代码在缺失时优雅降级，测试覆盖降级路径。
       - name: Install core deps
         run: >-
-          pip install langchain langchain-core langchain-ollama langchain-openai
-          langchain-anthropic langchain-google-genai PySide6 markdown requests
-          pillow numpy chromadb pypdf jedi pytest
+          pip install -c requirements.lock langchain langchain-core langchain-ollama
+          langchain-openai langchain-anthropic langchain-google-genai PySide6 markdown
+          requests pillow numpy chromadb pypdf jedi pytest
       - name: Pytest
         run: python -m pytest scripts/ -q
