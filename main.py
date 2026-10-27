@@ -54,7 +54,7 @@ if __name__ == "__main__":
     from src.telegram_poll import start as _tg_poll_start, shutdown as _tg_poll_shutdown
     _tg_poll_start()
 
-    # 退出前清理 GPT-SoVITS 子进程和后台命令，避免端口残留
+    # 退出前清理后台命令和各类子进程，避免端口残留
     def _cleanup_on_exit():
         # 停止所有后台命令（dev server / watch 等）
         try:
@@ -62,12 +62,6 @@ if __name__ == "__main__":
             stop_all_background(shutdown=True)
         except Exception:
             pass
-        launcher = getattr(window, "_gpt_sovits_launcher", None)
-        if launcher is not None:
-            try:
-                launcher.stop()
-            except Exception:
-                pass
         # 关闭 LSP 客户端（释放 pyright/pylsp 子进程）
         try:
             from src.lsp_client import shutdown as _lsp_shutdown

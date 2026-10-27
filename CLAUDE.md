@@ -57,7 +57,6 @@ src/                     # 主代码
   memory_store.py        # 长期记忆持久化（原子写 + RLock；remember/forget 存取，注入 system prompt）
   memory.py              # 会话历史 JSON 持久化（RLock 串行化所有读写）+ _build_ai_message + move_sessions_to_no_project（同步磁盘 + 内存锚点）
   file_history.py        # 文件改动的安全撤销底层（B11a）：写前逐文件备份 + 归属记录 + 预检/执行；edit/write/append 接入
-  checkpoint.py          # 【已退役】旧 git stash checkpoint：B11a 起无调用方，撤销按钮已切换到 file_history
   projects.py            # 项目（工作区）管理：chat_memory/projects.json 读写（RLock + 原子写 + 损坏备份）
   roles.py               # 角色卡加载 + get_system_prompt（**只拼跨轮稳定的**：角色卡/项目上下文/项目规则/记忆）+ get_volatile_context（每轮都变的：Plan 提示/计划/台账，由 streaming 追到历史尾部）+ get_external_agent_context
   images.py              # 图片输入格式归一化（视觉/多模态，Anthropic/OpenAI/Gemini 协议差异）
@@ -389,7 +388,7 @@ python main.py
 - **恢复材料在哪**：`chat_memory/file_history/<checkpoint_id>.json`（记录）+ `<checkpoint_id>.bin`（写前**原始字节**，恢复时逐字节写回，BOM/CRLF 原样保留）。全部原子写（临时文件 + os.replace）；容量上限 100 条，淘汰最旧的，`prepared`（在途）与各 (session, workspace) 最新的可撤销记录受保护；更旧的可撤销记录随淘汰失去撤销能力（与旧 checkpoint 栈上限同一取舍）。`delete_session` 一并清理本会话记录。
 - **预检与执行**（撤销按钮消费的接口）：`precheck` 输出 `restorable` / `conflict` / `unsupported` / `not_found` + 原因 + 差异信息（写前/写后/当前指纹与大小、blob 路径，供后续预览界面用）。`execute_undo` 在锁内**重新**做全套核对——①归属（session_id + 工作区一致）；②当前内容指纹 == 记录的写后指纹（预检后文件又被改 → conflict 拒绝，绝不覆盖）；③路径 realpath 未变（符号链接/junction 顶替 → 拒绝）、仍在工作区内；④材料指纹与大小吻合。原本存在的文件恢复写前字节并读回校验；原本不存在的文件只在确认仍是本次产物时删除。不做整项目 reset/clean/checkout，不碰 Git index / 分支 / stash。
 - **撤销按钮（header.py）**：沿用原样式；只查询当前会话 + 当前实际工作区的记录（不取全局栈顶误撤其它会话）。点击后：查询 → precheck（冲突/不支持只提示，材料保留）→ 与「继续任务」同一套屏障（`resume_pending` + `_worker_alive` 轮询，超时取消、不到点硬做）→ `execute_undo` → **会话侧簿记 `apply_undo_to_session`（按钮与测试共用，按 `changed` 触发）**：`mark_dirty` 作废旧测试/检查/diff 结论 + `refresh_pending_verification` 接入待验证义务 + `save_session_report` 可靠保存。**「文件已改变」与「恢复校验成功」分开**（P1 复核修复）：结果带 `changed` / `verified` 两个字段——os.replace 原子完成即 `changed=True`，随后的读回校验失败只影响 `verified`（提示人工核对），绝不把已完成的恢复报告成“撤销未执行”、更不跳过簿记；恢复、记录保存、义务接入与快照保存的结果各自分开报告。等待/执行期间 `resume_pending` 被既有运行准入闸消费，同一会话的新一轮发送/遥控/重试/队列派发全部被挡（不另写只看 is_generating 的判断）。
-- **边界**：跨进程恢复以实际保存的材料为准（新解释器读盘可预检 + 恢复，session_id + 工作区匹配即可）；非 Git 项目同样可用（备份是文件系统级的，Git 只是无需参与）；外部编辑竞态的窗口是「预检之后、恢复写入之前」由锁内复核兜住，「恢复写入进行中」外部编辑器的并发写不被声称原子阻止（与方案 §13.5 一致）。锁序：`memory._LOCK → file_history._LOCK`（delete_session 持前者拿后者），本模块从不反向获取 memory._LOCK，也绝不持锁等待确认卡。`checkpoint.py` 已退役（docstring 有注记），保留只为历史参考，勿再接入。
+- **边界**：跨进程恢复以实际保存的材料为准（新解释器读盘可预检 + 恢复，session_id + 工作区匹配即可）；非 Git 项目同样可用（备份是文件系统级的，Git 只是无需参与）；外部编辑竞态的窗口是「预检之后、恢复写入之前」由锁内复核兜住，「恢复写入进行中」外部编辑器的并发写不被声称原子阻止（与方案 §13.5 一致）。锁序：`memory._LOCK → file_history._LOCK`（delete_session 持前者拿后者），本模块从不反向获取 memory._LOCK，也绝不持锁等待确认卡。旧的 git stash 方案 `checkpoint.py` 已删除，需要时查 Git 历史，勿再接回。
 - **测试**：`scripts/test_b11a_file_history.py`（42 条，真实入口 `_execute_tool` 驱动写入；含 CRLF/BOM 逐字节恢复、连续修改逐次撤销、预检后再改拒绝、双会话/linked worktree 归属隔离、暂存区/用户 stash/无关文件不变、撤销后旧验证结论作废并落盘、新解释器子进程恢复、并发一致性；复核修复回归：写后指纹不被用户保存内容认领、写后核对不一致 post_failed、写入临界区串行且后到者被拒、版本链缺口拒绝、恢复未校验仍作废验证结论、损坏 pre 字段不误删原文件、追加保留外部并发写入、追加新建文件可撤销、指纹/时间戳类型损坏不连累其它记录）与 `scripts/test_b11a_undo_button.py`（11 条真实 ChatUI：worker 未退出不撤销/超时取消、准入闸被占住、切会话取消、冲突提示、恢复未校验仍作废验证并如实报告、结果分开报告）。10 组针对性变异（去写后指纹比较、去会话归属核对、去材料指纹校验、去写前核对、去版本链核对、去 pre.existed 严格校验、写后指纹改回读回磁盘现状、追加改回整文件覆盖、追加新建文件记成未知、校验对非字符串指纹抛 TypeError 且无兜底）在副本上验证全部被对应测试抓住。
 
 ### 验证闭环与自动修复（src/verification.py，编码核心）

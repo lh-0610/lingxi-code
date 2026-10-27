@@ -77,7 +77,7 @@ class HeaderMixin:
 
         layout.addStretch()
 
-        # 撤销按钮：把 AI 上次对文件的改动用 git stash 复原。无 checkpoint 时按钮禁用
+        # 撤销按钮：用 file_history 的写前备份复原 AI 最近一次文件修改。无可撤销记录时按钮禁用
         self.undo_btn = QPushButton("↶ 撤销")
         self.undo_btn.setCursor(Qt.PointingHandCursor)
         self.undo_btn.setToolTip("撤销 AI 最近一次有完整记录的文件修改（恢复写前内容）\n仅当前会话与当前工作区")

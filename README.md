@@ -42,7 +42,7 @@
 - ✅ **自我校验闭环**：`edit_file` / `write_file` 成功后自动跑 ruff（正确性）/ mypy（类型，抓臆造 API/参数错）/ 语法检查，把发现的问题**追加进同一条工具返回**，模型当轮就去修（不用你提醒）；长任务还有**上下文管理**（任务台账 + 按模型预算 + 大工具结果回收，长对话不丢"改过哪些文件/跑过什么测试"）
 - 🧪 **更多编码工具**：`run_tests`（pytest）/ `check_code`（静态检查）/ `apply_patch`（多文件补丁，写入失败回滚）/ `git_diff`·`git_log`·`git_status`（只读）+ `git_stage`·`git_commit`（git 写，**执行前强制弹确认卡、无 push**）/ `fetch_url`·`web_search`（联网查资料）
 - 🧭 **Plan / Act 双模式**：Plan 模式 AI 只调研给方案、不动手（只读工具白名单 + 强制提示双保护）
-- ↶ **Checkpoint / 撤销**：edit/write/append 写盘前自动 git stash 快照，顶栏一键撤销 AI 上一轮改动（路径级恢复）
+- ↶ **撤销**：edit/write/append 写盘前自动备份原始内容（file_history），顶栏一键撤销 AI 最近一次文件修改；文件之后又被改过则拒绝覆盖，不碰 Git 暂存区和 stash
 - 🔒 **隔离模式（Git worktree）**：顶栏一键把 AI 的改动关进独立 worktree，主项目零影响；满意点「恢复」把改动合并回主项目（AI 在隔离区里 commit 过的也算），冲突时保留 worktree 不污染主项目。需 git 项目
 - 🤖 **并行子 Agent**：任务能拆成 3 个以上【相互独立、改不同文件】的子任务时，`spawn_agents` 派生多个子 Agent，各自在独立 worktree 并行写代码，仅成功完成且未取消的子任务自动合并；失败或未验证时保留隔离区（有依赖 / 改同一文件的不并行，退回顺序执行）
 - 📄 **`.lingxirules` 项目级指令**：项目根放一个文件写项目约定，自动注入、优先级最高
@@ -85,10 +85,6 @@
 - ⚙️ **设置弹窗**：所有 API 密钥、模型、自定义模型等可视化编辑
 - ❌ **关闭确认**：X 按钮时弹"最小化到托盘 / 退出软件 / 取消"，可记住选择
 - 🎯 **高 DPI 锐利渲染**
-
-## 🎨 截图
-
-![灵犀桌面助手任务计划面板](assets/screenshots/plan-panel.png)
 
 ## 📋 支持的对话模型
 
@@ -222,7 +218,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 │   ├── mcp_client.py       # MCP 客户端（常驻 asyncio loop 连外部 server）
 │   ├── memory_store.py     # 长期记忆持久化（原子写 + RLock）
 │   ├── memory.py           # 对话历史持久化（RLock 串行化所有读写）
-│   ├── checkpoint.py       # git stash 快照 + 撤销
+│   ├── file_history.py     # 写前备份 + 撤销（预检、冲突拒绝）
 │   ├── projects.py         # 项目（工作区）管理
 │   ├── roles.py            # 角色卡加载 + get_system_prompt（拼角色/项目/记忆）
 │   ├── images.py           # 图片输入格式归一化（视觉/多模态）

@@ -63,7 +63,6 @@ roles/*.md
 
 # ─── 项目文档（规格 / 方案 / 临时，不进仓库）───
 # 给 AI agent 读的实现规格、修复方案、设计讨论等。
-# TODO.md 已 tracked，gitignore 不会让它被取消跟踪。
 docs/
 
 # 临时输出
