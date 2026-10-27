@@ -46,7 +46,7 @@ class HeaderMixin:
         toggle_btn.clicked.connect(self._toggle_sidebar)
         layout.addWidget(toggle_btn)
 
-        # 品牌字符 — 灵犀 (KaiTi 笔意，仅夜间主题显示)
+        # 品牌字符 — 灵犀（仅在主题 brand_visible 打开时显示）
         self.header_brand = QLabel("灵犀")
         self.header_brand.setObjectName("headerBrand")
         layout.addWidget(self.header_brand)

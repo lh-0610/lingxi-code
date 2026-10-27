@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from .helpers import strip_leading_emoji
+from .fonts import MONO_CSS, UI_CSS
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -51,9 +52,8 @@ _P = {
     "json_punct":    "#5a6172",
 }
 
-_SERIF = "'Noto Serif SC', 'Source Han Serif SC', 'STSong', serif"
-_SANS = "'Noto Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif"
-_MONO = "'JetBrains Mono', 'Cascadia Code', Consolas, monospace"
+_SANS = UI_CSS
+_MONO = MONO_CSS
 
 
 def _icon(svg: str, color: str, size: int = 16) -> QPixmap:
@@ -123,17 +123,17 @@ def highlight_json(text: str) -> str:
         else:
             out.append(_esc(t))
     body = "".join(out)
-    return (f'<pre style="margin:0; font-family:{_MONO}; font-size:13px; '
+    return (f'<pre style="margin:0; font-family:{_MONO}; font-size:12px; '
             f'line-height:1.7; white-space:pre-wrap; word-break:break-word;">{body}</pre>')
 
 
 class ModelTag(QLabel):
-    """模型名 tag（橙色衬线 700 19px）。"""
+    """模型名：正文上方一行小字，不再用大号橙色衬线标题。"""
     def __init__(self, name: str, parent=None):
         super().__init__(name, parent)
         self.setStyleSheet(
-            f"color:{_P['orange']}; font-family:{_SERIF}; font-weight:700; "
-            f"font-size:19px; background:transparent;"
+            f"color:{_P['muted']}; font-family:{_SANS}; font-size:12px; "
+            f"background:transparent;"
         )
 
 
@@ -145,7 +145,7 @@ class BodyText(QLabel):
         self.setTextFormat(Qt.RichText)
         self.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.setStyleSheet(
-            f"color:{_P['text2']}; font-family:{_SANS}; font-size:15.5px; background:transparent;"
+            f"color:{_P['text2']}; font-family:{_SANS}; font-size:14px; background:transparent;"
         )
         self.setText(text)
 
@@ -178,7 +178,7 @@ class ToolCallCard(QFrame):
         h.setSpacing(8)
         h.addWidget(_icon_label(icon_svg, icon_color, 15), 0, Qt.AlignVCenter)
         name_lbl = QLabel(name)
-        name_lbl.setStyleSheet(f"color:{_P['text3']}; font-size:13.5px; font-weight:600; background:transparent;")
+        name_lbl.setStyleSheet(f"color:{_P['text3']}; font-size:13px; font-weight:600; background:transparent;")
         h.addWidget(name_lbl, 0, Qt.AlignVCenter)
         tc = QLabel("tool call")
         tc.setStyleSheet(f"color:{_P['muted3']}; font-size:12px; background:transparent;")
@@ -219,7 +219,7 @@ class ChecklistCard(QFrame):
         v.setSpacing(0)
         cap = QLabel(caption_html)
         cap.setTextFormat(Qt.RichText)
-        cap.setStyleSheet(f"color:{_P['muted']}; font-size:13.5px; background:transparent;")
+        cap.setStyleSheet(f"color:{_P['muted']}; font-size:13px; background:transparent;")
         v.addWidget(cap)
         v.addSpacing(10)
         for r in rows:
@@ -265,7 +265,7 @@ class ThinkingChip(QWidget):
         self.btn.setStyleSheet(
             f"#thinkChip {{ border:1px solid {_P['chip_border']}; background:{_P['header_bg']}; "
             f"border-radius:8px; padding:5px 12px; color:{_P['indigo']}; "
-            f"font-size:13.5px; font-weight:600; text-align:left; }} "
+            f"font-size:13px; font-weight:600; text-align:left; }} "
             f"#thinkChip:hover {{ border-color:{_P['chip_hover']}; }}"
         )
         chip_wrap = QHBoxLayout()
@@ -328,11 +328,11 @@ class StepHeader(QWidget):
         badge.setAttribute(Qt.WA_StyledBackground, True)
         badge.setStyleSheet(
             f"background:{_P['indigo_soft']}; color:{_P['indigo']}; border-radius:7px; "
-            f"font-size:13px; font-weight:700;"
+            f"font-size:13px; font-weight:600;"
         )
         h.addWidget(badge, 0, Qt.AlignVCenter)
         lbl = QLabel(title)
-        lbl.setStyleSheet(f"color:{_P['text']}; font-size:16.5px; font-weight:700; background:transparent;")
+        lbl.setStyleSheet(f"color:{_P['text']}; font-size:16px; font-weight:600; background:transparent;")
         h.addWidget(lbl, 0, Qt.AlignVCenter)
         h.addStretch(1)
 
@@ -372,13 +372,13 @@ class UserTurn(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
         lab = QLabel("你")
-        lab.setStyleSheet(f"color:{_P['indigo']}; font-family:{_SANS}; font-size:16px; font-weight:700; background:transparent;")
+        lab.setStyleSheet(f"color:{_P['indigo']}; font-family:{_SANS}; font-size:13px; font-weight:600; background:transparent;")
         v.addWidget(lab)
         self._body = QLabel()
         self._body.setWordWrap(True)
         self._body.setTextFormat(Qt.RichText)
         self._body.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._body.setStyleSheet(f"color:{_P['text2']}; font-family:{_SANS}; font-size:15px; background:transparent;")
+        self._body.setStyleSheet(f"color:{_P['text2']}; font-family:{_SANS}; font-size:14px; background:transparent;")
         v.addWidget(self._body)
         self._text = ""
 
@@ -479,7 +479,7 @@ class AssistantTurn(QWidget):
         lbl.setWordWrap(True)
         lbl.setTextFormat(Qt.RichText)
         lbl.setStyleSheet(
-            f"color:{_P['muted']}; font-family:{_MONO}; font-size:13px; background:{_P['result_bg']}; "
+            f"color:{_P['muted']}; font-family:{_MONO}; font-size:12px; background:{_P['result_bg']}; "
             f"border:1px solid {_P['result_border']}; border-radius:10px; padding:10px 14px;"
         )
         lbl.setAttribute(Qt.WA_StyledBackground, True)
@@ -668,7 +668,7 @@ class MessageView(QScrollArea):
         cv.setSpacing(8)
         msg = QLabel(_esc(error_msg))
         msg.setWordWrap(True)
-        msg.setStyleSheet("color:#c0492f; font-size:13.5px; background:transparent;")
+        msg.setStyleSheet("color:#c0492f; font-size:13px; background:transparent;")
         cv.addWidget(msg)
         btn = QPushButton("↻ 重试")
         btn.setCursor(Qt.PointingHandCursor)

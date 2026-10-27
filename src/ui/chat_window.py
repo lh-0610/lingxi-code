@@ -20,6 +20,7 @@ from PySide6.QtGui import (
 from langchain_core.messages import HumanMessage
 
 from .. import agent
+from .fonts import BODY, ui_font
 from .. import state
 from ..content_blocks import block_text
 from ._base import BASE_DIR
@@ -725,7 +726,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             f"  border-radius: 18px;"
             f"  color: {self._t('scroll_btn_icon')};"
             f"  font-size: 16px;"
-            f"  font-weight: bold;"
+            f"  font-weight: 600;"
             f"}}"
             f"QPushButton:hover {{"
             f"  background: {self._t('scroll_btn_hover_bg')};"
@@ -832,8 +833,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.entry = DragDropTextEdit()
         self.entry.setObjectName("inputEdit")
         self.entry.setPlaceholderText("向灵犀提问…")
-        entry_font = QFont("Microsoft YaHei")
-        entry_font.setPixelSize(16)
+        entry_font = ui_font(BODY)
         entry_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         entry_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         self.entry.setFont(entry_font)
@@ -974,7 +974,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.project_btn.setStyleSheet(
             f"QPushButton#projectIndicatorBtn {{"
             f"  background: transparent; border: 1px solid transparent; border-radius: 8px;"
-            f"  color: {self._t('text_dim')}; font-size: 11px; padding: 3px 10px;"
+            f"  color: {self._t('text_dim')}; font-size: 12px; padding: 3px 10px;"
             f"  text-align: left;"
             f"}}"
             f"QPushButton#projectIndicatorBtn:hover {{"
@@ -1388,7 +1388,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             del_btn.setCursor(Qt.PointingHandCursor)
             del_btn.setStyleSheet(
                 f"QPushButton {{ background: {self._t('img_del_bg')}; color: {self._t('img_del_text')}; border: none; "
-                f"border-radius: 10px; font-size: 12px; font-weight: bold; }}"
+                f"border-radius: 10px; font-size: 12px; font-weight: 600; }}"
                 f"QPushButton:hover {{ background: {self._t('img_del_hover_bg')}; }}"
             )
             idx = i
@@ -1490,7 +1490,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         text_label = QLabel("拖拽文件到这里", overlay)
         text_label.setAlignment(Qt.AlignCenter)
         text_label.setStyleSheet(
-            f"font-size: 22px; font-weight: bold; color: {self._t('drag_text')}; "
+            f"font-size: 20px; font-weight: 600; color: {self._t('drag_text')}; "
             f"background: transparent; border: none; padding: 0; letter-spacing: 4px;"
         )
         sub_label = QLabel("支持图片和文本文件", overlay)
@@ -1748,7 +1748,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         toast.setStyleSheet(
             f"QLabel {{ background: {self._t('toast_bg')}; color: {self._t('toast_text')}; "
             f"padding: 8px 18px; border: 1px solid {self._t('toast_border')}; border-radius: 10px; "
-            f"font-size: 11px; letter-spacing: 1px; }}"
+            f"font-size: 12px; letter-spacing: 1px; }}"
         )
         toast.setAlignment(Qt.AlignCenter)
         toast.adjustSize()

@@ -59,7 +59,7 @@ class QueuePanel(QWidget):
         header_layout.setContentsMargins(2, 4, 2, 2)
         header_layout.setSpacing(8)
         self._title = QLabel("输入队列")
-        self._title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self._title.setStyleSheet("font-weight: 600; font-size: 12px;")
         header_layout.addWidget(self._title)
         self._state_label = QLabel("")
         self._state_label.setWordWrap(True)
@@ -132,7 +132,7 @@ class QueuePanel(QWidget):
         color = _STATE_COLORS.get(state, "#888888")
         chip.setStyleSheet(
             f"color: {color}; border: 1px solid {color}; border-radius: 6px;"
-            "padding: 0 6px; font-size: 11px;")
+            "padding: 0 6px; font-size: 12px;")
         chip.setFixedHeight(20)
         lay.addWidget(chip)
 
@@ -147,7 +147,7 @@ class QueuePanel(QWidget):
         if note:
             note_lbl = QLabel(input_queue.excerpt(note, 40))
             note_lbl.setToolTip(note)
-            note_lbl.setStyleSheet("color: #c07f00; font-size: 11px;")
+            note_lbl.setStyleSheet("color: #c07f00; font-size: 12px;")
             lay.addWidget(note_lbl)
 
         if state == input_queue.QUEUED:
@@ -171,7 +171,7 @@ class QueuePanel(QWidget):
             status = it.get("outcome_status") or ""
             mark = "✓" if status == "completed" else f"✗ {status}"
             done = QLabel(mark)
-            done.setStyleSheet("color: #888888; font-size: 11px;")
+            done.setStyleSheet("color: #888888; font-size: 12px;")
             lay.addWidget(done)
         return row
 
@@ -179,7 +179,7 @@ class QueuePanel(QWidget):
         btn = QPushButton(text)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedHeight(20)
-        btn.setStyleSheet("QPushButton { font-size: 11px; padding: 0 8px; }")
+        btn.setStyleSheet("QPushButton { font-size: 12px; padding: 0 8px; }")
         btn.clicked.connect(on_click)
         return btn
 

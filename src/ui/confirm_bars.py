@@ -23,8 +23,8 @@ import threading
 from .. import state as _state
 from .. import telegram_push
 from .. import config as _config  # 运行时读 _config.REMOTE_TELEGRAM_CONFIRM（设置里改完即时生效，无需重启）
+from .fonts import MONO_CSS, mono_font
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextBrowser, QVBoxLayout,
 )
@@ -146,8 +146,7 @@ class ConfirmBarsMixin:
         self.command_confirm_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.command_confirm_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.command_confirm_text.setOpenExternalLinks(False)
-        cmd_font = QFont("Consolas")
-        cmd_font.setPixelSize(12)
+        cmd_font = mono_font(12)
         self.command_confirm_text.setFont(cmd_font)
         v.addWidget(self.command_confirm_text)
 
@@ -244,7 +243,7 @@ class ConfirmBarsMixin:
             # 「需要确认」徽章
             f"QLabel#commandConfirmBadge {{"
             f"  background: {badge_bg}; color: {badge_fg}; border: 1px solid {badge_bd};"
-            f"  border-radius: 9px; padding: 1px 9px; font-size: 11px;"
+            f"  border-radius: 9px; padding: 1px 9px; font-size: 12px;"
             f"}}"
             # 描述
             f"QLabel#commandConfirmDesc {{"
@@ -256,14 +255,14 @@ class ConfirmBarsMixin:
             f"  color: {self._t('md_pre_text')};"
             f"  border: 1px solid {divider};"
             f"  border-radius: 8px; padding: 10px 14px;"
-            f"  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei UI';"
+            f"  font-family: {MONO_CSS};"
             f"  font-size: 13px;"
             f"  white-space: pre-wrap;"
             f"}}"
             # 工作目录
             f"QLabel#commandConfirmCwd {{"
-            f"  color: {text_dim}; font-size: 11px; background: transparent;"
-            f"  font-family: Consolas, 'Microsoft YaHei UI';"
+            f"  color: {text_dim}; font-size: 12px; background: transparent;"
+            f"  font-family: {MONO_CSS};"
             f"}}"
             # 主按钮(允许)：蓝填充
             f"QPushButton#commandConfirmAllowBtn {{"
@@ -289,7 +288,7 @@ class ConfirmBarsMixin:
             f"  border: 1px solid {divider};"
             f"  border-radius: 6px; padding: 6px 9px;"
             f"  color: {text}; font-size: 12px;"
-            f"  font-family: Consolas, 'Microsoft YaHei UI';"
+            f"  font-family: {MONO_CSS};"
             f"}}"
             f"QLineEdit#commandConfirmFeedback:focus {{ border-color: {accent}; }}"
         )
@@ -487,7 +486,7 @@ class ConfirmBarsMixin:
         if is_mcp or is_gitwrite:
             import html as _html
             body_html = (
-                '<pre style="font-family: Consolas, monospace; '
+                f'<pre style="font-family: {MONO_CSS}; '
                 'white-space: pre-wrap; word-wrap: break-word; '
                 'margin: 0; font-size: 12px; line-height: 1.45;">'
                 + _html.escape(command)
@@ -653,8 +652,7 @@ class ConfirmBarsMixin:
         self.edit_confirm_diff.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.edit_confirm_diff.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.edit_confirm_diff.setOpenExternalLinks(False)
-        diff_font = QFont("Consolas")
-        diff_font.setPixelSize(12)
+        diff_font = mono_font(12)
         self.edit_confirm_diff.setFont(diff_font)
         v.addWidget(self.edit_confirm_diff)
 
@@ -740,11 +738,11 @@ class ConfirmBarsMixin:
             f"}}"
             f"QLabel#editConfirmBadge {{"
             f"  background: {badge_bg}; color: {badge_fg}; border: 1px solid {badge_bd};"
-            f"  border-radius: 9px; padding: 1px 9px; font-size: 11px;"
+            f"  border-radius: 9px; padding: 1px 9px; font-size: 12px;"
             f"}}"
             f"QLabel#editConfirmPath {{"
             f"  color: {text_dim}; font-size: 12px;"
-            f"  font-family: Consolas, 'Microsoft YaHei UI';"
+            f"  font-family: {MONO_CSS};"
             f"  background: transparent; padding: 0;"
             f"}}"
             f"QTextBrowser#editConfirmDiff {{"
@@ -777,7 +775,7 @@ class ConfirmBarsMixin:
             f"  border: 1px solid {divider};"
             f"  border-radius: 6px; padding: 6px 9px;"
             f"  color: {text}; font-size: 12px;"
-            f"  font-family: Consolas, 'Microsoft YaHei UI';"
+            f"  font-family: {MONO_CSS};"
             f"}}"
             f"QLineEdit#editConfirmFeedback:focus {{ border-color: {accent}; }}"
         )
@@ -1130,7 +1128,7 @@ class ConfirmBarsMixin:
             else:
                 lines.append(esc(ln))
         return (
-            '<pre style="font-family:Consolas,monospace;font-size:12px;'
+            f'<pre style="font-family:{MONO_CSS};font-size:12px;'
             'margin:0;white-space:pre-wrap;word-wrap:break-word;">'
             + "\n".join(lines)
             + "</pre>"

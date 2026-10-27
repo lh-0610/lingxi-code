@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon
 from src.ui import ChatUI
+from src.ui.fonts import ui_font
 from src.floating import create_tray
 
 # 兼容 PyInstaller 打包：打包后资源位于 sys._MEIPASS
@@ -29,8 +30,7 @@ if __name__ == "__main__":
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    app_font = QFont("Microsoft YaHei")
-    app_font.setPixelSize(14)
+    app_font = ui_font(13)
     app_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     app.setFont(app_font)

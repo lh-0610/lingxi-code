@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import background, session
+from .fonts import mono_font
 from ._base import BASE_DIR
 
 
@@ -109,7 +110,7 @@ class _TaskDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
         font = QFont(option.font)
-        font.setPointSize(9)
+        font.setPixelSize(12)
         painter.setFont(font)
         available = max(20, option.rect.width() - 24)
         text = painter.fontMetrics().elidedText(text, Qt.ElideRight, available - 20)
@@ -241,7 +242,7 @@ class BackgroundPanel(QDialog):
         self.command_view.setReadOnly(True)
         self.command_view.setFixedHeight(46)
         self.command_view.setPlaceholderText("选中上方任务后，这里显示完整命令")
-        self.command_view.setFont(QFont("Consolas", 10))
+        self.command_view.setFont(mono_font(12))
         detail_layout.addWidget(self.command_view)
         self.location_label = QLabel()
         self.location_label.setObjectName("backgroundLocation")
@@ -286,8 +287,7 @@ class BackgroundPanel(QDialog):
         self.output.setReadOnly(True)
         self.output.setMinimumHeight(90)
         self.output.setLineWrapMode(QPlainTextEdit.NoWrap)
-        font = QFont("Consolas")
-        font.setPointSize(10)
+        font = mono_font(12)
         self.output.setFont(font)
         self.output.setPlaceholderText("任务的输出会显示在这里")
         self.output.verticalScrollBar().valueChanged.connect(self._output_scrolled)
@@ -323,11 +323,11 @@ class BackgroundPanel(QDialog):
             f"QDialog#backgroundPanel {{ background: {c('sidebar_bg')}; }}"
             f"QWidget {{ color: {c('text')}; font-size: 13px; }}"
             f"QLabel {{ background: transparent; }}"
-            f"QLabel#backgroundTitle {{ font-size: 24px; font-weight: 600; }}"
+            f"QLabel#backgroundTitle {{ font-size: 20px; font-weight: 600; }}"
             f"QLabel#backgroundSubtitle, QLabel#backgroundLocation {{ color: {c('text_dim')}; font-size: 12px; }}"
             f"QLabel#backgroundCount {{ color: {c('text_dim')}; font-size: 12px; }}"
-            f"QLabel#backgroundLive {{ color: {c('badge_run_text')}; font-size: 11px; }}"
-            f"QLabel#backgroundFootnote {{ color: {c('text_dim')}; font-size: 11px; }}"
+            f"QLabel#backgroundLive {{ color: {c('badge_run_text')}; font-size: 12px; }}"
+            f"QLabel#backgroundFootnote {{ color: {c('text_dim')}; font-size: 12px; }}"
             f"QLabel#backgroundListNote {{ color: {c('badge_warn_text')}; padding: 8px; }}"
             f"QLabel#backgroundStatus {{ font-weight: 600; }}"
             f"QTreeWidget#backgroundTree {{ border: 1px solid {c('input_border')}; border-radius: 10px; "
@@ -337,7 +337,7 @@ class BackgroundPanel(QDialog):
             f"QTreeWidget::item:hover {{ background: {c('history_hover_bg')}; }}"
             f"QTreeWidget::item:focus {{ border-bottom: 1px solid {c('history_active_border')}; }}"
             f"QHeaderView::section {{ background: {c('win_bg')}; color: {c('text_dim')}; "
-            f"border: none; border-bottom: 1px solid {c('input_border')}; padding: 10px 8px; font-size: 11px; }}"
+            f"border: none; border-bottom: 1px solid {c('input_border')}; padding: 10px 8px; font-size: 12px; }}"
             f"QFrame#backgroundDetail {{ background: {c('win_bg')}; border: 1px solid {c('input_border')}; border-radius: 10px; }}"
             f"QFrame#backgroundLog {{ background: {c('sidebar_bg')}; border: 1px solid {c('input_border')}; border-radius: 8px; }}"
             f"QLabel#backgroundLogTitle {{ font-size: 12px; font-weight: 600; color: {c('text_dim')}; }}"
@@ -360,7 +360,7 @@ class BackgroundPanel(QDialog):
             f"QComboBox::down-arrow {{ image: url({arrow}); width: 12px; height: 12px; }}"
             f"QComboBox QAbstractItemView {{ background: {c('win_bg')}; color: {c('text')}; "
             f"selection-background-color: {c('history_active_bg')}; }}"
-            f"QCheckBox {{ color: {c('text_dim')}; font-size: 11px; spacing: 6px; }}"
+            f"QCheckBox {{ color: {c('text_dim')}; font-size: 12px; spacing: 6px; }}"
             f"QSplitter::handle {{ background: transparent; height: 12px; }}"
             f"QScrollBar:vertical {{ background: transparent; width: 7px; margin: 2px; }}"
             f"QScrollBar:horizontal {{ background: transparent; height: 7px; margin: 2px; }}"
@@ -466,7 +466,7 @@ class BackgroundPanel(QDialog):
             badge_bg = {"badge_warn_text": "badge_warn_bg", "badge_done_text": "badge_done_bg",
                         "badge_run_text": "think_on_bg", "text_dim": "sidebar_bg"}[color]
             item.setData(1, Qt.UserRole + 1, (self._color(color), self._color(badge_bg)))
-            item.setFont(0, QFont("Consolas", 10))
+            item.setFont(0, mono_font(12))
             if bg_id == self._selected_id and not item.isSelected():
                 item.setSelected(True)
         self.tree.blockSignals(False)
@@ -541,7 +541,7 @@ class BackgroundPanel(QDialog):
         self.output_note.setStyleSheet(
             f"QPlainTextEdit {{ background: {c('badge_warn_bg') if warning else c('sidebar_bg')}; "
             f"color: {c('badge_warn_text') if warning else c('text_dim')}; "
-            f"border: none; border-radius: 5px; padding: 3px 6px; font-size: 11px; }}"
+            f"border: none; border-radius: 5px; padding: 3px 6px; font-size: 12px; }}"
         )
         self.output_note.setFixedHeight(min(85, max(35, 16 +
             (text.count("\n") + 1) * self.output_note.fontMetrics().lineSpacing())))

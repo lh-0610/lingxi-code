@@ -503,12 +503,12 @@ class GeneratingBadge(QWidget):
             _bd = (f"border:1px solid {border};"
                    if border not in ("transparent", "none", "") else "border:none;")
             self._label.setStyleSheet(
-                f"color:{text_color}; font-size:11px; font-weight:500; background:{bg}; "
+                f"color:{text_color}; font-size:12px; font-weight:500; background:{bg}; "
                 f"{_bd} border-radius:6px; padding:3px 7px;"
             )
         else:
             self._label.setStyleSheet(
-                f"color:{text_color}; font-size:11px; background:transparent; border:none;"
+                f"color:{text_color}; font-size:12px; background:transparent; border:none;"
             )
         lay.addWidget(self._label, 0, Qt.AlignVCenter)
         self._timer = QTimer(self)

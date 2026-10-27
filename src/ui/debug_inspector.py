@@ -8,13 +8,13 @@
 import json
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QPushButton, QSplitter, QTextBrowser, QVBoxLayout, QApplication,
 )
 
 from .. import debug_log
+from .fonts import MONO_CSS, UI_CSS, mono_font
 from ..limits import (
     DEBUG_MESSAGE_PREVIEW_CHARS,
     DEBUG_RESPONSE_PREVIEW_CHARS,
@@ -49,7 +49,7 @@ class DebugInspector(QDialog):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         tip = QLabel("内存中最近 50 次 LLM 调用 · 关 app 清空")
-        tip.setStyleSheet("color: #888; font-size: 11px;")
+        tip.setStyleSheet("color: #888; font-size: 12px;")
         top.addWidget(tip)
         top.addStretch()
         self.follow_check = QCheckBox("跟随最新")
@@ -81,8 +81,7 @@ class DebugInspector(QDialog):
         self.detail.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.detail.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.detail.setLineWrapMode(QTextBrowser.WidgetWidth)
-        font = QFont("Consolas")
-        font.setPixelSize(12)
+        font = mono_font(12)
         self.detail.setFont(font)
         split.addWidget(self.detail)
 
@@ -199,7 +198,7 @@ class DebugInspector(QDialog):
 
         def code_block(text, bg="#fafafa", fg="#444"):
             return (f'<pre style="background:{bg};color:{fg};padding:10px 12px;'
-                    f'margin:4px 0;font-family:Consolas;font-size:11px;'
+                    f'margin:4px 0;font-family:{MONO_CSS};font-size:12px;'
                     f'white-space:pre-wrap;word-wrap:break-word;">{text}</pre>')
 
         req = rec.get("request") or {}
@@ -227,7 +226,7 @@ class DebugInspector(QDialog):
         if err:
             err_block = (
                 f'<div style="background:#fff0ed;padding:10px 14px;border-radius:6px;'
-                f'margin:8px 0;color:#c0392b;font-family:Consolas;font-size:11px;'
+                f'margin:8px 0;color:#c0392b;font-family:{MONO_CSS};font-size:12px;'
                 f'white-space:pre-wrap;word-wrap:break-word;">'
                 f'<b>错误</b><br>{esc(err)}</div>'
             )
@@ -351,7 +350,7 @@ class DebugInspector(QDialog):
     def _apply_style(self):
         self.setStyleSheet(
             "QListWidget { background:#fafbfc; border:1px solid #e2e6ee; border-radius:6px;"
-            "  font-family:'Microsoft YaHei UI'; font-size:12px; }"
+            f"  font-family:{UI_CSS}; font-size:12px; }}"
             "QListWidget::item { padding:8px 10px; border-bottom:1px solid #f0f0f0; }"
             "QListWidget::item:selected { background:#e8ecff; color:#232b7a; }"
             "QTextBrowser { background:#ffffff; border:1px solid #e2e6ee; border-radius:6px;"

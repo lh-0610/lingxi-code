@@ -378,7 +378,7 @@ class SidebarMixin:
                 del_btn.setCursor(Qt.PointingHandCursor)
                 del_btn.setStyleSheet(
                     f"QPushButton#historyDeleteBtn {{ background: transparent; border: none; "
-                    f"color: {self._t('del_btn')}; font-size: 16px; font-weight: bold; "
+                    f"color: {self._t('del_btn')}; font-size: 16px; font-weight: 600; "
                     f"border-radius: 12px; padding: 0; }}"
                     f"QPushButton#historyDeleteBtn:hover {{ color: {self._t('del_btn_hover')}; "
                     f"background: {self._t('del_btn_hover_bg')}; }}"
@@ -401,7 +401,7 @@ class SidebarMixin:
                 f"QPushButton#loadMoreBtn {{ background: transparent;"
                 f" border: 1px dashed {self._t('sidebar_border')}; border-radius: 6px;"
                 f" padding: 4px 6px; margin: 2px 8px 0 8px;"
-                f" color: {self._t('history_label')}; font-size: 11px; }}"
+                f" color: {self._t('history_label')}; font-size: 12px; }}"
                 f"QPushButton#loadMoreBtn:hover {{ color: {self._t('new_chat_hover_text')};"
                 f" border-color: {self._t('new_chat_hover_text')}; }}"
             )
@@ -440,7 +440,7 @@ class SidebarMixin:
         lbl = QLabel(text)
         lbl.setStyleSheet(
             f"QLabel {{ background:{bg}; color:{fg}; border:1px solid {bd}; "
-            f"border-radius:9px; padding:1px 8px; font-size:10px; }}"
+            f"border-radius:9px; padding:1px 8px; font-size:12px; }}"
         )
         if kind == "warn":
             lbl.setToolTip("有待确认的命令/编辑，切到该会话处理")

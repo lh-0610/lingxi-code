@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from ._base import BASE_DIR, CONFIG_PATH
 from ..paths import APP_DIR as _APP_DIR
+from .fonts import MONO_CSS
 from ..limits import AGENT_MAX_ROUNDS_DEFAULT as _AGENT_MAX_ROUNDS_DEFAULT
 
 
@@ -1009,12 +1010,12 @@ class SettingsDialog(QDialog):
             f"QDialog {{ background: {bg}; color: {fg}; }}\n"
             f"#settingsBanner {{ background: {banner_bg}; color: {banner_fg};"
             f" border-bottom: 1px solid {banner_border}; padding: 9px 18px; font-size: 12px; }}\n"
-            f"#settingsSection {{ color: {muted}; font-size: 11px; font-weight: 700;"
+            f"#settingsSection {{ color: {muted}; font-size: 12px; font-weight: 600;"
             f" letter-spacing: 1px; padding: 6px 0 0 0; }}\n"
             f"#settingsLabel {{ color: {fg}; font-size: 13px; font-weight: 500; }}\n"
             f"#settingsInput {{ background: {input_bg}; border: 1px solid {border};"
             f" border-radius: 6px; padding: 6px 10px; color: {fg}; font-size: 13px;"
-            f" font-family: \"Consolas\", \"Microsoft YaHei UI\", monospace; }}\n"
+            f" font-family: {MONO_CSS}; }}\n"
             f"#settingsInput:focus {{ border-color: {accent}; background: {input_focus_bg}; }}\n"
             # QComboBox（如图片识别模型下拉）的箭头：去掉 Win11 系统默认那个突兀的，
             # 换成跟顶栏模型下拉一致的 chevron_down.svg
@@ -1026,7 +1027,7 @@ class SettingsDialog(QDialog):
             f" border: 1px solid {border}; selection-background-color: {accent};"
             f" selection-color: #ffffff; outline: none; }}\n"
             f"#settingsEye {{ background: {input_bg}; border: 1px solid {border};"
-            f" border-radius: 6px; color: {muted}; font-size: 11px; }}\n"
+            f" border-radius: 6px; color: {muted}; font-size: 12px; }}\n"
             f"#settingsEye:checked {{ color: {accent}; }}\n"
             f"#settingsEye:hover {{ border-color: {accent}; }}\n"
             f"#settingsCheck {{ color: {fg}; font-size: 13px; spacing: 8px; }}\n"
@@ -1050,13 +1051,13 @@ class SettingsDialog(QDialog):
             f" border-radius: 8px; }}\n"
             f"#providerCardTitle {{ color: {fg}; font-size: 13px; font-weight: 600;"
             f" background: transparent; padding: 0; }}\n"
-            f"#providerCardHint {{ color: {muted}; font-size: 11px;"
+            f"#providerCardHint {{ color: {muted}; font-size: 12px;"
             f" background: transparent; padding: 0; }}\n"
             f"#customModelAddBtn {{ background: transparent; border: 1.5px dashed {border};"
             f" border-radius: 8px; padding: 8px; color: {muted}; font-size: 13px; }}\n"
             f"#customModelAddBtn:hover {{ border-color: {accent}; color: {accent};"
             f" background: {input_bg}; }}\n"
-            f"#customModelTip {{ color: {muted}; font-size: 11px;"
+            f"#customModelTip {{ color: {muted}; font-size: 12px;"
             f" background: transparent; padding: 4px 2px; }}\n"
             f"QScrollArea {{ background: {bg}; border: none; }}\n"
             f"QScrollBar:vertical {{ width: 8px; background: transparent; }}\n"
@@ -1217,7 +1218,7 @@ class _CustomModelEditor(QDialog):
             f"#settingsLabel {{ color: {fg}; font-size: 13px; font-weight: 500; }}\n"
             f"#settingsInput {{ background: {input_bg}; border: 1px solid {border};"
             f" border-radius: 6px; padding: 6px 10px; color: {fg}; font-size: 13px;"
-            f" font-family: 'Consolas', 'Microsoft YaHei UI', monospace; }}\n"
+            f" font-family: {MONO_CSS}; }}\n"
             f"#settingsInput:focus {{ border-color: {accent}; background: {input_focus_bg}; }}\n"
             f"QComboBox {{ background: {input_bg}; border: 1px solid {border};"
             f" border-radius: 6px; padding: 6px 10px; color: {fg}; font-size: 13px; min-height: 20px; }}\n"

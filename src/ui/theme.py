@@ -7,6 +7,7 @@ import json
 import os
 
 from ._base import THEME_CONFIG_PATH
+from .fonts import UI_CSS
 
 
 THEMES = {
@@ -63,7 +64,6 @@ THEMES = {
         "brand_color":       "#5b6cf0",
         "brand_dot":         "#f0824a",
         "brand_letter_sp":   "2px",
-        "header_title_font": "Microsoft YaHei UI",
         "header_title_letter_sp": "0px",
         # Footer
         "footer":            "#aeb3c0",
@@ -287,7 +287,6 @@ THEMES = {
         "brand_color":       "#6fa090",
         "brand_dot":         "#b87a52",
         "brand_letter_sp":   "6px",
-        "header_title_font": "KaiTi",
         "header_title_letter_sp": "6px",
         # Footer
         "footer":            "#2f3a47",
@@ -500,7 +499,7 @@ QToolTip {{
     border: 1px solid {p['tooltip_border']};
     padding: 4px 10px;
     border-radius: 6px;
-    font-size: 11px;
+    font-size: 12px;
 }}
 """
 
@@ -510,7 +509,7 @@ def build_stylesheet(theme):
     return f"""
 QMainWindow, QDialog {{
     background-color: {p['win_bg']};
-    font-family: "Microsoft YaHei", "Microsoft YaHei UI", "Segoe UI";
+    font-family: {UI_CSS};
 }}
 
 /* 侧边栏 */
@@ -523,9 +522,9 @@ QMainWindow, QDialog {{
 }}
 #sidebarBrandTitle {{
     color: {p['text']};
-    font-family: "Noto Serif SC", "Source Han Serif SC", "Microsoft YaHei UI";
-    font-size: 19px;
-    font-weight: 700;
+    font-family: {UI_CSS};
+    font-size: 16px;
+    font-weight: 600;
     letter-spacing: 0px;
 }}
 #sidebarBrandSub {{
@@ -541,7 +540,7 @@ QMainWindow, QDialog {{
     border: 1px solid transparent;
     border-radius: 8px;
     color: {p['text_dim']};
-    font-size: 18px;
+    font-size: 16px;
     padding: 0;
 }}
 #sidebarSettingsBtn:hover {{
@@ -625,7 +624,7 @@ QMainWindow, QDialog {{
     border: none;
     color: {p['history_label']};
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
     text-align: left;
     padding: 8px 10px 4px 10px;
     letter-spacing: 0.5px;
@@ -638,7 +637,7 @@ QMainWindow, QDialog {{
     border: none;
     color: {p['new_chat_hover_text']};
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
     text-align: left;
     padding: 8px 10px 4px 10px;
     letter-spacing: 0.5px;
@@ -668,13 +667,13 @@ QMainWindow, QDialog {{
 }}
 #sidebar #historyEmptyHint {{
     color: {p['history_label']};
-    font-size: 11px;
+    font-size: 12px;
     padding: 2px 0 6px 22px;
 }}
 #historyLabel {{
     color: {p['history_label']};
-    font-size: 11px;
-    font-weight: 700;
+    font-size: 12px;
+    font-weight: 600;
     letter-spacing: {p['history_label_spacing']};
     padding: 18px 14px 8px 14px;
 }}
@@ -703,7 +702,7 @@ QPushButton[class="historyItemActive"] {{
     border: none;
     color: {p['history_active_text']};
     font-size: 14px;
-    font-weight: 700;
+    font-weight: 600;
     text-align: left;
     padding: 9px 0 9px 12px;
     border-radius: 9px;
@@ -729,7 +728,7 @@ QPushButton[class="historyItemDone"]:hover {{
     background-color: {p['chat_bg']};
     border: none;
     padding: 20px;
-    font-family: "Microsoft YaHei", "Microsoft YaHei UI", "Segoe UI";
+    font-family: {UI_CSS};
     font-size: 14px;
     color: {p['chat_text']};
 }}
@@ -741,15 +740,15 @@ QPushButton[class="historyItemDone"]:hover {{
 }}
 #emptyLogo {{
     color: {p['brand_color']};
-    font-family: "Noto Serif SC", "Source Han Serif SC", "KaiTi", "STKaiti", "Microsoft YaHei UI";
-    font-size: 56px;
-    font-weight: 700;
-    letter-spacing: 6px;
+    font-family: {UI_CSS};
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 2px;
 }}
 #emptyTitle {{
     color: {p['text']};
-    font-size: 34px;
-    font-weight: 700;
+    font-size: 20px;
+    font-weight: 600;
 }}
 #emptySubtitle {{
     color: {p['text_subtle']};
@@ -761,8 +760,8 @@ QPushButton[class="historyItemDone"]:hover {{
     border-radius: 13px;
     padding: 15px 22px;
     color: {p['text_dim']};
-    font-size: 15px;
-    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI";
+    font-size: 14px;
+    font-family: {UI_CSS};
     text-align: left;
 }}
 #emptySuggestion:hover {{
@@ -781,7 +780,7 @@ QPushButton[class="historyItemDone"]:hover {{
 #inputEdit {{
     background-color: transparent;
     border: none;
-    font-family: "Microsoft YaHei", "Microsoft YaHei UI", "Segoe UI";
+    font-family: {UI_CSS};
     font-size: 14px;
     padding: 8px 12px 50px 12px;
     color: {p['input_text']};
@@ -828,7 +827,7 @@ QPushButton[class="historyItemDone"]:hover {{
 #toggleBtn {{
     background: transparent;
     border: none;
-    font-size: 18px;
+    font-size: 16px;
     color: {p['toggle']};
     padding: 4px 8px;
     border-radius: 6px;
@@ -875,33 +874,33 @@ QPushButton[class="historyItemDone"]:hover {{
     font-weight: 600;
 }}
 #headerTitle {{
-    font-family: "{p['header_title_font']}", "Microsoft YaHei", "Microsoft YaHei UI";
-    font-size: 17px;
-    font-weight: bold;
+    font-family: {UI_CSS};
+    font-size: 16px;
+    font-weight: 600;
     color: {p['text']};
     letter-spacing: {p['header_title_letter_sp']};
     padding: 0 8px;
 }}
 #headerBrand {{
-    font-family: "KaiTi", "STKaiti", "Cambria", "Microsoft YaHei", "Microsoft YaHei UI";
-    font-size: 17px;
+    font-family: {UI_CSS};
+    font-size: 16px;
     color: {p['brand_color']};
     letter-spacing: {p['brand_letter_sp']};
     padding: 0 4px 0 12px;
 }}
 #headerBrandDot {{
     color: {p['brand_dot']};
-    font-size: 10px;
+    font-size: 12px;
     padding: 0 8px 0 0;
 }}
 #footerLabel {{
     color: {p['footer']};
-    font-size: 10px;
+    font-size: 12px;
     letter-spacing: {p['footer_letter_sp']};
 }}
 #tokenUsageLabel {{
     color: {p['footer']};
-    font-size: 10px;
+    font-size: 12px;
     letter-spacing: {p['footer_letter_sp']};
 }}
 
@@ -938,6 +937,6 @@ QToolTip {{
     border: 1px solid {p['tooltip_border']};
     padding: 4px 10px;
     border-radius: 6px;
-    font-size: 11px;
+    font-size: 12px;
 }}
 """

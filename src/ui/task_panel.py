@@ -319,7 +319,7 @@ class TaskPanel(QFrame):
         banner_lay.setSpacing(6)
         self.banner_text = QLabel(self.switch_banner)
         self.banner_text.setWordWrap(True)
-        self.banner_text.setStyleSheet("font-size: 11px; color: #854d0e; font-weight: 600;")
+        self.banner_text.setStyleSheet("font-size: 12px; color: #854d0e; font-weight: 600;")
         self.undo_btn = QPushButton("撤销任务切换", self.switch_banner)
         self.undo_btn.setCursor(Qt.PointingHandCursor)
         self.undo_btn.setStyleSheet(
@@ -329,7 +329,7 @@ class TaskPanel(QFrame):
             "  padding: 2px 8px;"
             "  background: #fef08a;"
             "  color: #713f12;"
-            "  font-size: 11px;"
+            "  font-size: 12px;"
             "  font-weight: 600;"
             "}"
             "QPushButton:hover { background: #fde047; }"
@@ -349,7 +349,7 @@ class TaskPanel(QFrame):
         sec1_head = QHBoxLayout()
         sec1_head.setContentsMargins(0, 0, 0, 0)
         self.sec1_title = QLabel("要求与固定限制", self.sec1_frame)
-        self.sec1_title.setStyleSheet("font-size: 12px; font-weight: 700;")
+        self.sec1_title.setStyleSheet("font-size: 12px; font-weight: 600;")
         self.edit_constraints_btn = QPushButton("编辑限制", self.sec1_frame)
         self.edit_constraints_btn.setCursor(Qt.PointingHandCursor)
         self.edit_constraints_btn.setStyleSheet(
@@ -359,7 +359,7 @@ class TaskPanel(QFrame):
             "  padding: 1px 7px;"
             "  background: transparent;"
             "  color: #475569;"
-            "  font-size: 11px;"
+            "  font-size: 12px;"
             "}"
             "QPushButton:hover { background: #f1f5f9; color: #1e293b; }"
         )
@@ -372,13 +372,13 @@ class TaskPanel(QFrame):
         self.requests_label = QLabel(self.sec1_frame)
         self.requests_label.setWordWrap(True)
         self.requests_label.setTextFormat(Qt.RichText)
-        self.requests_label.setStyleSheet("font-size: 11px; line-height: 1.35;")
+        self.requests_label.setStyleSheet("font-size: 12px; line-height: 1.35;")
         sec1_lay.addWidget(self.requests_label)
 
         self.constraints_label = QLabel(self.sec1_frame)
         self.constraints_label.setWordWrap(True)
         self.constraints_label.setTextFormat(Qt.RichText)
-        self.constraints_label.setStyleSheet("font-size: 11px; line-height: 1.35;")
+        self.constraints_label.setStyleSheet("font-size: 12px; line-height: 1.35;")
         sec1_lay.addWidget(self.constraints_label)
         self.content_layout.addWidget(self.sec1_frame)
 
@@ -390,14 +390,14 @@ class TaskPanel(QFrame):
         sec2_lay.setSpacing(6)
 
         self.sec2_title = QLabel("执行计划步骤", self.sec2_frame)
-        self.sec2_title.setStyleSheet("font-size: 12px; font-weight: 700;")
+        self.sec2_title.setStyleSheet("font-size: 12px; font-weight: 600;")
         sec2_lay.addWidget(self.sec2_title)
 
         self.plan_change_note = QLabel(self.sec2_frame)
         self.plan_change_note.setWordWrap(True)
         self.plan_change_note.setTextFormat(Qt.RichText)
         self.plan_change_note.setVisible(False)
-        self.plan_change_note.setStyleSheet("font-size: 11px; color: #0284c7; background: #e0f2fe; border-radius: 4px; padding: 4px 6px;")
+        self.plan_change_note.setStyleSheet("font-size: 12px; color: #0284c7; background: #e0f2fe; border-radius: 4px; padding: 4px 6px;")
         sec2_lay.addWidget(self.plan_change_note)
 
         self.plan_body = QLabel(self.sec2_frame)
@@ -415,13 +415,13 @@ class TaskPanel(QFrame):
         sec3_lay.setSpacing(4)
 
         self.sec3_title = QLabel("执行与验证状态", self.sec3_frame)
-        self.sec3_title.setStyleSheet("font-size: 12px; font-weight: 700;")
+        self.sec3_title.setStyleSheet("font-size: 12px; font-weight: 600;")
         sec3_lay.addWidget(self.sec3_title)
 
         self.verification_status_label = QLabel(self.sec3_frame)
         self.verification_status_label.setWordWrap(True)
         self.verification_status_label.setTextFormat(Qt.RichText)
-        self.verification_status_label.setStyleSheet("font-size: 11px; line-height: 1.35;")
+        self.verification_status_label.setStyleSheet("font-size: 12px; line-height: 1.35;")
         sec3_lay.addWidget(self.verification_status_label)
         self.content_layout.addWidget(self.sec3_frame)
 
@@ -452,11 +452,11 @@ class TaskPanel(QFrame):
             f"  border-radius: 6px;"
             f"}}"
         )
-        self.plan_title.setStyleSheet(f"background:transparent; font-size:14px; font-weight:700; color:{title_col};")
+        self.plan_title.setStyleSheet(f"background:transparent; font-size:14px; font-weight:600; color:{title_col};")
         self.plan_count.setStyleSheet(f"font-size:12px; color:{muted_col};")
-        self.sec1_title.setStyleSheet(f"font-size:12px; font-weight:700; color:{title_col};")
-        self.sec2_title.setStyleSheet(f"font-size:12px; font-weight:700; color:{title_col};")
-        self.sec3_title.setStyleSheet(f"font-size:12px; font-weight:700; color:{title_col};")
+        self.sec1_title.setStyleSheet(f"font-size:12px; font-weight:600; color:{title_col};")
+        self.sec2_title.setStyleSheet(f"font-size:12px; font-weight:600; color:{title_col};")
+        self.sec3_title.setStyleSheet(f"font-size:12px; font-weight:600; color:{title_col};")
 
         self.plan_progress.setStyleSheet(
             "QProgressBar {"
@@ -523,7 +523,7 @@ class TaskPanel(QFrame):
             txt = (it.get("text") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             status = it.get("status")
             if status == "done":
-                icon = '<span style="color:#10b981; font-weight:bold; font-size:13px;">✓</span>'
+                icon = '<span style="color:#10b981; font-weight:600; font-size:13px;">✓</span>'
                 label, label_color = "完成", "#10b981"
                 text_style = f"color:{muted_color};"
                 cell_bg = ""
@@ -541,7 +541,7 @@ class TaskPanel(QFrame):
                 '<tr>'
                 f'<td width="20" style="{cell_bg}padding:2px 0 3px 4px;vertical-align:top;">{icon}</td>'
                 f'<td style="{cell_bg}{text_style}padding:2px 6px 3px 2px;line-height:1.35;">'
-                f'<span style="color:{label_color};font-size:10px;">{label}</span>&nbsp;{txt}</td>'
+                f'<span style="color:{label_color};font-size:12px;">{label}</span>&nbsp;{txt}</td>'
                 '</tr>'
             )
         html_text = '<table cellspacing="0" cellpadding="0" width="100%">' + "".join(rows) + "</table>"

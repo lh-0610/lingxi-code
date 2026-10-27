@@ -11,6 +11,29 @@
 self._inline_svg_img / self._svg_icon /
 self._msg_buffers / self._code_blocks
 """
+import re
+
+from .fonts import MONO_CSS, UI_CSS
+
+# 代码块（``` / ~~~ 围栏）和行内代码。split 用捕获组，偶数下标是代码以外的文字。
+_CODE_SPAN = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", re.DOTALL)
+_BOLD = re.compile(r"\*\*([^*]+)\*\*")
+_BOLD_OPEN = "\x01B\x02"     # 控制字符做占位，不会和正常文本冲突
+_BOLD_CLOSE = "\x01E\x02"
+
+
+def _protect_literal_asterisks(md_text):
+    """正文里的单个 * 当字面量（动作描写不渲染成斜体），**加粗** 照常生效；
+    代码块和行内代码里的 * 原样不动。
+
+    以前对整段文本做替换，代码里的 `p, *rest = xs` 会显示成 `p, \\*rest = xs`。
+    """
+    parts = _CODE_SPAN.split(md_text)
+    for i in range(0, len(parts), 2):
+        seg = _BOLD.sub(lambda m: f"{_BOLD_OPEN}{m.group(1)}{_BOLD_CLOSE}", parts[i])
+        seg = seg.replace("*", r"\*")
+        parts[i] = seg.replace(_BOLD_OPEN, "**").replace(_BOLD_CLOSE, "**")
+    return "".join(parts)
 
 
 class MarkdownRenderMixin:
@@ -41,15 +64,7 @@ class MarkdownRenderMixin:
         # 空行没了，整篇会被当成一个块：表格后面的标题 / 列表会被表格扩展整行吞成单元格。
         # 段落间距交给下面的 <p style="margin:6px 0"> 处理即可。
 
-        # 保留 *xxx* 字面量（动作描写不渲染成斜体），但保留 **xxx** 加粗：
-        # 1) 先用占位符暂存 **...** 加粗（用控制字符避免与正常文本冲突）
-        _BOLD_OPEN = '\x01B\x02'
-        _BOLD_CLOSE = '\x01E\x02'
-        md_text = _re.sub(r'\*\*([^*]+)\*\*', lambda m: f'{_BOLD_OPEN}{m.group(1)}{_BOLD_CLOSE}', md_text)
-        # 2) 转义剩余单 * 为字面量
-        md_text = md_text.replace('*', r'\*')
-        # 3) 恢复加粗占位符
-        md_text = md_text.replace(_BOLD_OPEN, '**').replace(_BOLD_CLOSE, '**')
+        md_text = _protect_literal_asterisks(md_text)
 
         html = markdown.markdown(md_text, extensions=['tables', 'fenced_code', 'nl2br'])
 
@@ -62,10 +77,15 @@ class MarkdownRenderMixin:
         html = _re.sub(r'</?em[^>]*>', '', html)
         html = _re.sub(r'</?i[^>]*>', '', html)
         html = html.replace('<p>', '<p style="margin:6px 0;">')
+        # 代码块：markdown 输出的是 <pre><code class="language-python">，带 class 的标签下面按 '<code>'
+        # 精确替换匹配不到，Qt 就给它用默认的 Courier New（又细又宽，括号前后像多了空格）。
+        # 先把块里的 code 换成只带字体的样式；剩下不带属性的 <code> 才是行内代码。
+        html = _re.sub(r'<pre><code[^>]*>',
+                       f'<pre><code style="font-family:{MONO_CSS};font-size:13px;">', html)
         html = html.replace(
             '<code>',
             f'<code style="background:{self._t("md_code_bg")};color:{self._t("md_code_text")};'
-            f'padding:1px 6px;font-family:Consolas,\'Cascadia Code\';font-size:14px;border-radius:3px;">'
+            f'padding:1px 6px;font-family:{MONO_CSS};font-size:13px;border-radius:3px;">'
         )
         pre_border = self._t("md_pre_border_left")
         pre_border_css = (
@@ -74,7 +94,7 @@ class MarkdownRenderMixin:
         html = html.replace(
             '<pre>',
             f'<pre style="background:{self._t("md_pre_bg")};color:{self._t("md_pre_text")};'
-            f'padding:14px 16px;font-family:Consolas,\'Cascadia Code\';font-size:14px;'
+            f'padding:14px 16px;font-family:{MONO_CSS};font-size:13px;'
             f'white-space:pre-wrap;{pre_border_css}border-radius:6px;">'
         )
 
@@ -133,8 +153,8 @@ class MarkdownRenderMixin:
             )
 
         return (
-            f'<div style="color:{self._t("md_text")};font-size:15px;'
-            f'font-family:\'Microsoft YaHei\',\'Microsoft YaHei UI\',\'Segoe UI\';line-height:1.7;">'
+            f'<div style="color:{self._t("md_text")};font-size:14px;'
+            f'font-family:{UI_CSS};line-height:1.7;">'
             f'{html}</div>'
         )
 

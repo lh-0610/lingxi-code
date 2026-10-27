@@ -151,7 +151,7 @@ class ResultCard(QFrame):
             btn = QPushButton("展开全部")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(
-                f"border:none; background:transparent; color:{_P['indigo']}; font-size:11px;")
+                f"border:none; background:transparent; color:{_P['indigo']}; font-size:12px;")
             btn.clicked.connect(lambda: (box.setVisible(not box.isVisible()),
                                          btn.setText("收起" if box.isVisible() else "展开全部")))
             col.addWidget(btn, 0, Qt.AlignLeft)
