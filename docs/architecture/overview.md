@@ -106,13 +106,13 @@ build/, dist/            # PyInstaller 产物（已 .gitignore）
 
 | 模型名称 | 类型 | 模型 ID | 视觉 |
 |----------|------|---------|------|
-| MiMo V2.5 Pro / V2.5 / V2 Pro | mimo | mimo-v2.5-pro / 2.5 / 2-pro | ❌ |
-| MiMo V2 Omni（多模态） | mimo | mimo-v2-omni | ✅ |
-| Claude Code | claude-code | 本地 `claude` CLI | ❌ |
-| Qwen3.5 本地 | ollama | qwen3.5:latest | ❌ |
-| Qwen-Plus / Max / Turbo / Qwen3.5-Plus | cloud | qwen-* | ❌ |
-| Claude Sonnet 4 / Haiku 3.5 | anthropic | claude-sonnet-4-20250514 / claude-3-5-haiku-20241022 | ✅ |
-| DeepSeek V4 Flash / Pro | deepseek | deepseek-v4-flash / pro | ❌ |
-| ⚙ 用户自定义模型 | custom | config.json `custom_models`（OpenAI / Anthropic / Responses 协议自填） | 看配置 |
+| MiMo V2.5 Pro / V2.5 / V2 Pro | mimo | mimo-v2.5-pro / 2.5 / 2-pro | 否 |
+| MiMo V2 Omni（多模态） | mimo | mimo-v2-omni | 是 |
+| Claude Code | claude-code | 本地 `claude` CLI | 否 |
+| Qwen3.5 本地 | ollama | qwen3.5:latest | 否 |
+| Qwen-Plus / Max / Turbo / Qwen3.5-Plus | cloud | qwen-* | 否 |
+| Claude Sonnet 4 / Haiku 3.5 | anthropic | claude-sonnet-4-20250514 / claude-3-5-haiku-20241022 | 是 |
+| DeepSeek V4 Flash / Pro | deepseek | deepseek-v4-flash / pro | 否 |
+| 用户自定义模型 | custom | config.json `custom_models`（OpenAI / Anthropic / Responses 协议自填） | 看配置 |
 
 > **自定义模型**：`config.json` 的 `custom_models`（list），每项 `{name, model_id, api_key, base_url, protocol, supports_vision, supports_thinking}`。设置弹窗里可视化增删改。`models.py:_build_model_list()` 把它们以 `⚙` 前缀合进 `MODEL_LIST`，`_create_llm` 按 `protocol` 分发，支持 `openai` / `anthropic` / `responses` 三种兼容接口——**多数兼容端点的模型零代码改动就能加**，只有协议不兼容或需特殊 `extra_body` 的才要动 `models.py`。

@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from .helpers import strip_leading_emoji
+
 try:
     from PySide6.QtSvg import QSvgRenderer
 except Exception:  # QtSvg 理论上随 PySide6 自带；缺了降级成无图标
@@ -630,13 +632,13 @@ class MessageView(QScrollArea):
         elif tag == "tool_tag":
             # 拒绝/错误类(⚠️/⛔/🔒)是独立提示,不建工具卡;其余是真工具调用 → 建卡
             if any(w in text for w in ("⚠️", "⛔", "🔒", "未知工具")):
-                self._assistant().result_block(text.strip())
+                self._assistant().result_block(strip_leading_emoji(text.strip()))
             else:
                 self._assistant().tool_call(_parse_tool_tag(text))
         elif tag == "tool_detail":
             self._assistant().tool_detail(text.strip())   # 工具参数 → 填进当前工具卡 body
         elif tag == "tool_result":
-            self._assistant().result_block(text.strip())
+            self._assistant().result_block(strip_leading_emoji(text.strip()))
         elif tag == "ai_image":
             self.add_image(QPixmap(text.strip()))   # text = 图片本地路径
         elif tag == "reset_ai_reply":
@@ -664,7 +666,7 @@ class MessageView(QScrollArea):
         cv = QVBoxLayout(card)
         cv.setContentsMargins(14, 12, 14, 12)
         cv.setSpacing(8)
-        msg = QLabel("⚠️ " + _esc(error_msg))
+        msg = QLabel(_esc(error_msg))
         msg.setWordWrap(True)
         msg.setStyleSheet("color:#c0492f; font-size:13.5px; background:transparent;")
         cv.addWidget(msg)

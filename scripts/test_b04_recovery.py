@@ -509,7 +509,7 @@ class TestPrecheck:
     def test_configuration_problems_block(self, isolated_memory, repo, monkeypatch):
         from src import models
         monkeypatch.setattr(models, "get_model_config_issues",
-                            lambda index=None: ["某模型 需要先在 ⚙ 设置里填 api_key。"])
+                            lambda index=None: ["某模型 需要先在设置里填 api_key。"])
         sess = _code_session(repo)
         run_records.begin_run(sess)
         assert any("api_key" in b for b in recovery.precheck(sess).blocking)

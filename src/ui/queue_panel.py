@@ -102,7 +102,7 @@ class QueuePanel(QWidget):
         self.setVisible(True)
 
         if paused:
-            self._state_label.setText(f"⏸ 已暂停：{reason}" if reason else "⏸ 已暂停")
+            self._state_label.setText(f"已暂停：{reason}" if reason else "已暂停")
             self._resume_btn.setVisible(True)
         else:
             pending = sum(1 for it in items if it.get("state") in
@@ -138,14 +138,14 @@ class QueuePanel(QWidget):
 
         text = input_queue.excerpt(it.get("text"), QUEUE_EXCERPT_CHARS) or "（仅附件）"
         n_img = len(it.get("images") or [])
-        label = QLabel(text + (f"　📎{n_img}" if n_img else ""))
+        label = QLabel(text + (f"　图片 ×{n_img}" if n_img else ""))
         label.setToolTip(it.get("text") or "")
         label.setStyleSheet("font-size: 12px;")
         lay.addWidget(label, 1)
 
         note = it.get("hold_reason") or it.get("error") or ""
         if note:
-            note_lbl = QLabel(f"⚠ {input_queue.excerpt(note, 40)}")
+            note_lbl = QLabel(input_queue.excerpt(note, 40))
             note_lbl.setToolTip(note)
             note_lbl.setStyleSheet("color: #c07f00; font-size: 11px;")
             lay.addWidget(note_lbl)

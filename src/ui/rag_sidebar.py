@@ -39,8 +39,8 @@ class RagSidebarMixin:
         seg_lay = QHBoxLayout(self.uimode_seg)
         seg_lay.setContentsMargins(3, 3, 3, 3)
         seg_lay.setSpacing(3)
-        self.code_mode_btn = QPushButton("💻 编码")
-        self.kb_mode_btn = QPushButton("📚 知识库")
+        self.code_mode_btn = QPushButton("编码")
+        self.kb_mode_btn = QPushButton("知识库")
         for _b in (self.code_mode_btn, self.kb_mode_btn):
             _b.setCheckable(True)
             _b.setCursor(Qt.PointingHandCursor)
@@ -146,7 +146,7 @@ class RagSidebarMixin:
         active = _session.get_active()
         # 当前活动会话正在生成时禁止切工作区，恢复段控选中态到当前工作区
         if active.is_generating:
-            self._show_toast("⚠ 生成中不能切换编码/知识库工作区，请先停止")
+            self._show_toast("生成中不能切换编码/知识库工作区，请先停止")
             self._sync_rag_sidebar_from_session()
             return
         if getattr(active, "session_kind", "code") == kind:
@@ -168,7 +168,7 @@ class RagSidebarMixin:
             self._load_session(sid)                # 已存盘 → 走完整加载路径（含重绘）
         else:
             self._activate_session(self.create_session_for_kind(kind))
-        self._show_toast("📚 知识库工作区" if kind == "rag" else "💻 编码工作区")
+        self._show_toast("知识库工作区" if kind == "rag" else "编码工作区")
 
     def _remember_ws_active(self, sess):
         if sess is not None and getattr(sess, "key", None):
@@ -304,7 +304,7 @@ class RagSidebarMixin:
     def _kb_pick_dir(self):
         from .. import config
         if getattr(self, "_kb_reindexing", False):
-            self._show_toast("⚠ 索引重建中，暂不能切换目录")
+            self._show_toast("索引重建中，暂不能切换目录")
             return
         d = QFileDialog.getExistingDirectory(
             self, "选择知识库目录（放 .md 的文件夹）", config.RAG_KB_DIR or "")
@@ -380,7 +380,7 @@ class RagSidebarMixin:
             self.kb_dir_btn.setEnabled(True)
         if done and state_key == "ok":
             # 成功：统计进 toast，状态行用 index_status 重新校验后的真实状态
-            self._show_toast(f"✅ {text}")
+            self._show_toast(text)
             self._refresh_kb_status()
         else:
             self._set_kb_status(state_key, text)

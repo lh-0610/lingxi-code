@@ -229,7 +229,7 @@ class DebugInspector(QDialog):
                 f'<div style="background:#fff0ed;padding:10px 14px;border-radius:6px;'
                 f'margin:8px 0;color:#c0392b;font-family:Consolas;font-size:11px;'
                 f'white-space:pre-wrap;word-wrap:break-word;">'
-                f'<b>❌ 错误</b><br>{esc(err)}</div>'
+                f'<b>错误</b><br>{esc(err)}</div>'
             )
 
         # ── 请求：system prompt ──
@@ -239,7 +239,7 @@ class DebugInspector(QDialog):
             + ("..." if len(sys_prompt) > DEBUG_SYSTEM_PROMPT_PREVIEW_CHARS else "")
         )
         request_block = section_title(
-            f'📥 请求（{len(req.get("messages") or [])} 条 messages · '
+            f'请求（{len(req.get("messages") or [])} 条 messages · '
             f'{len(req.get("tools") or [])} 个工具）'
         )
         request_block += (
@@ -279,7 +279,7 @@ class DebugInspector(QDialog):
             tcs = m.get("tool_calls") or []
             tcs_view = ""
             if tcs:
-                tcs_view = "<br>🔧 " + ", ".join(
+                tcs_view = "<br>工具调用：" + ", ".join(
                     f"{esc(tc.get('name',''))}({esc(json.dumps(tc.get('args',{}), ensure_ascii=False))[:120]})"
                     for tc in tcs
                 )
@@ -304,7 +304,7 @@ class DebugInspector(QDialog):
             resp_text[:DEBUG_RESPONSE_PREVIEW_CHARS]
             + ("..." if len(resp_text) > DEBUG_RESPONSE_PREVIEW_CHARS else "")
         )
-        response_block = section_title('📤 响应')
+        response_block = section_title('响应')
         response_block += f'<p style="color:#666;margin:4px 0;">text（{len(resp_text)} 字）：</p>'
         response_block += code_block(resp_view or "<em>（空）</em>")
 
@@ -333,7 +333,7 @@ class DebugInspector(QDialog):
                 response_block += (
                     f'<div style="margin:3px 0;padding:5px 10px;background:#eef9f3;'
                     f'border-left:3px solid #16a085;">'
-                    f'🔧 <b>{esc(tc.get("name",""))}</b>'
+                    f'<b>{esc(tc.get("name",""))}</b>'
                     f'({esc(json.dumps(tc.get("args",{}), ensure_ascii=False))[:300]})'
                     f'</div>'
                 )

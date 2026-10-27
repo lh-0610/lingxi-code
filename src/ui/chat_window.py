@@ -29,7 +29,7 @@ from .widgets import (
     SignalBridge,
 )
 from .helpers import (
-    _make_button_icon, _make_upload_icon,
+    _make_button_icon, _make_upload_icon, strip_emoji,
 )
 from .prefs import _load_ui_prefs, _save_ui_prefs
 from .settings_dialog import SettingsDialog
@@ -44,27 +44,6 @@ from .run_admission import RunAdmissionMixin
 from .queue_dispatch import QueueDispatchMixin
 from .send import SendMixin
 from .run_results import RunResultMixin
-
-
-# 聊天区 HTML 文本里的彩色 emoji → icons/ 下的 SVG 文件（见 docs/emoji_inventory.md）。
-# 8 个概念复用现有 *_lucide.svg，其余用合并进来的 lucide 图标。✓/✗/⚙ 等单色字符符号
-# 按 README 决定保留为字体字形、不在此映射。SVG 走 currentColor，由 _inline_svg_img 按主题着色。
-_EMOJI_ICON = {
-    # 工具显示名（tools.py TOOL_DISPLAY_NAMES）
-    "📖": "book-open.svg", "✏️": "file-pen.svg", "📝": "file-plus.svg",
-    "🪄": "wand-sparkles.svg", "📂": "folder_open_lucide.svg", "⚡": "zap.svg",
-    "🔍": "search.svg", "🌐": "globe.svg", "🎨": "palette.svg",
-    "🧠": "brain_lucide.svg", "🗑️": "trash_lucide.svg", "📋": "clipboard-list.svg",
-    "⏹": "square-stop.svg", "🗺": "map.svg", "🔀": "git-compare.svg",
-    "📜": "scroll-text.svg", "🧪": "flask-conical.svg", "🔧": "wrench.svg",
-    "🔌": "plug.svg",
-    # 工具区还会出现的拦截/安全提示
-    "⚠️": "triangle-alert.svg", "⛔": "octagon-x.svg", "🔒": "lock.svg",
-    # 状态/过程（tool_result 等宽输出 + 错误/重试/图片识别）
-    "📁": "folder_lucide.svg", "📄": "file_text_lucide.svg", "⏱️": "timer.svg",
-    "✅": "circle-check.svg", "❌": "circle-x.svg", "🔎": "scan-search.svg",
-    "🔄": "refresh_cw_lucide.svg",
-}
 
 
 class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
@@ -273,7 +252,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if getattr(self, "_last_config_warning_key", None) == warning_key:
             return
         self._last_config_warning_key = warning_key
-        text = "\n⚠️ " + "\n".join(issues) + "\n"
+        text = "\n" + "\n".join(issues) + "\n"
         self.show_message(text, "tool_result")
         self._show_toast(issues[0], duration=5000)
 
@@ -439,7 +418,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                     rendered_any = True
                     if not _has_text:
                         self._append_html(f"{ai_name}\n", "ai_label")
-                    self._append_html(f"🔧 调用了工具: {', '.join(_tool_names)}\n\n", "tool_result")
+                    self._append_html(f"调用了工具: {', '.join(_tool_names)}\n\n", "tool_result")
         if not rendered_any:
             self._show_empty_state()
         self._redraw_result_card()
@@ -522,25 +501,6 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             f'<img src="data:image/svg+xml;base64,{data}" width="{size}" height="{size}" '
             f'alt="{alt}" style="vertical-align:middle;" />'
         )
-
-    def _emoji_to_svg_html(self, text, color, size=14):
-        """把 text 里 _EMOJI_ICON 已知的 emoji 替换成内联彩色 SVG <img>，
-        其余字符做 HTML 转义。返回可 insertHtml 的片段。最长 emoji 优先匹配
-        （含 FE0F 变体选择符的多码点 emoji 排前），避免被前缀截断。"""
-        import html as _html
-        keys = sorted(_EMOJI_ICON.keys(), key=len, reverse=True)
-        out = []
-        i = 0
-        while i < len(text):
-            for emo in keys:
-                if text.startswith(emo, i):
-                    out.append(self._inline_svg_img(_EMOJI_ICON[emo], color, size, alt=emo))
-                    i += len(emo)
-                    break
-            else:
-                out.append(_html.escape(text[i]))
-                i += 1
-        return "".join(out)
 
     def _build_chat_area(self, parent_layout):
         # 消息流改成真控件渲染（MessageView：QScrollArea + 每轮控件树），
@@ -989,9 +949,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if current:
             display = self._abbreviate_path(current, max_chars=60)
             if is_isolated:
-                self.project_btn.setText(f"🔒 当前项目 {display}")
+                self.project_btn.setText(f"当前项目 {display}")
                 self.project_btn.setToolTip(
-                    f"🔒 隔离模式 · worktree: {active.worktree}\n"
+                    f"隔离模式 · worktree: {active.worktree}\n"
                     f"项目：{current}\n（点击切换 / 添加 / 移除项目）"
                 )
             else:
@@ -1782,9 +1742,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 pass
 
         toast = QLabel(self)
-        # 已映射的 emoji（🧠/⚡ 等）换成内联 SVG；未映射的（🟡🟢🔴⚫ 状态点靠颜色表意）原样保留
-        toast.setTextFormat(Qt.RichText)
-        toast.setText(self._emoji_to_svg_html(text, self._t("toast_text"), size=13))
+        # 界面不显示 emoji：无论提示来自界面还是后端，一律去掉后按纯文本显示
+        toast.setTextFormat(Qt.PlainText)
+        toast.setText(strip_emoji(text))
         toast.setStyleSheet(
             f"QLabel {{ background: {self._t('toast_bg')}; color: {self._t('toast_text')}; "
             f"padding: 8px 18px; border: 1px solid {self._t('toast_border')}; border-radius: 10px; "
@@ -1956,13 +1916,13 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             elif outcome.body_written:
                 # 正文已落盘、只是索引没更新：撤销结果重开也在，不能说成"尚未写入磁盘"。
                 self.show_message(
-                    f"{msg}\n⚠️ 撤销结果已保存，但会话列表索引更新失败（{str(save_error)[:120]}），"
+                    f"{msg}\n撤销结果已保存，但会话列表索引更新失败（{str(save_error)[:120]}），"
                     "下次读取会话列表时会自动修复。", "error")
             else:
                 # 内存里已经撤销，但磁盘上还是切换后的状态。不说出来的话，重开会话会
                 # "莫名其妙"回到新任务，用户还以为撤销成功了。
                 self.show_message(
-                    f"{msg}\n⚠️ 但保存失败（{str(save_error)[:120]}），撤销结果尚未写入磁盘；"
+                    f"{msg}\n但保存失败（{str(save_error)[:120]}），撤销结果尚未写入磁盘；"
                     "下次保存成功前重开会话，会回到切换后的状态。", "error")
         else:
             self.show_message(f"撤销任务切换失败：{msg}", "error")
@@ -1976,7 +1936,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         _sess = _session.current_session()
         # 记进 render_log：后台会话报错时，切回去才看得到（否则报错静默消失、像没回复就停了）
         with _sess.render_lock:
-            _sess.render_log.append(("msg", f"\n⚠️ {error_msg}\n", "ai_msg"))
+            _sess.render_log.append(("msg", f"\n{error_msg}\n", "ai_msg"))
         if _sess is not _session.get_active():
             _sess.needs_redraw = True
             return

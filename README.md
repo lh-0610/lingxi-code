@@ -21,89 +21,89 @@
 
 > 仓库附一份角色卡模板（`roles/example.md`），照着填就能用，也可换成任意 SillyTavern 风格的 .md。
 
-## ✨ 功能一览
+## 功能一览
 
 ### 对话核心
-- 🤖 **多模型切换**：MiMo / Qwen / Claude / DeepSeek / 本地 Ollama / 本地 Claude Code CLI，**还可在设置里自填任意 OpenAI / Anthropic 兼容的自定义模型**
-- 🖼️ **多模态**：支持图片输入（自动切到视觉模型 / 多模态模型）
-- 🔧 **工具调用**：文件读写、命令执行、代码导航等。**run_command 执行前在输入框上方弹内联确认卡**（含命令预览 + 1/2/3 数字快捷键 + Esc 取消），危险命令（`rm -rf` / `format` / `sudo` / `drop table` 等）不给"记住"选项。**确认卡无超时**（睡一觉回来还在等你）；**拒绝时可附一句文字反馈**（如"换 async 写法"），AI 据此调整重做，留空则直接停止后续重试
-- 💬 **会话历史**：自动保存、侧边栏切换、智能生成标题
-- 🗂️ **多会话并发**：多个对话能**同时在后台跑**，切走不中断、切回自动重放本轮输出；每个会话的模型 / Plan-Act 模式 / 命令白名单各自独立互不干扰
-- 🧠 **思考过程显示**：折叠/展开模型的 reasoning 内容
-- 📊 **Token 用量统计**：实时显示每轮和会话累计用量
-- ⚡ **prompt caching + system prompt 拆分**：长指令按需注入，Anthropic/MiMo 走 `cache_control` 省 token
+- **多模型切换**：MiMo / Qwen / Claude / DeepSeek / 本地 Ollama / 本地 Claude Code CLI，**还可在设置里自填任意 OpenAI / Anthropic 兼容的自定义模型**
+- **多模态**：支持图片输入（自动切到视觉模型 / 多模态模型）
+- **工具调用**：文件读写、命令执行、代码导航等。**run_command 执行前在输入框上方弹内联确认卡**（含命令预览 + 1/2/3 数字快捷键 + Esc 取消），危险命令（`rm -rf` / `format` / `sudo` / `drop table` 等）不给"记住"选项。**确认卡无超时**（睡一觉回来还在等你）；**拒绝时可附一句文字反馈**（如"换 async 写法"），AI 据此调整重做，留空则直接停止后续重试
+- **会话历史**：自动保存、侧边栏切换、智能生成标题
+- **多会话并发**：多个对话能**同时在后台跑**，切走不中断、切回自动重放本轮输出；每个会话的模型 / Plan-Act 模式 / 命令白名单各自独立互不干扰
+- **思考过程显示**：折叠/展开模型的 reasoning 内容
+- **Token 用量统计**：实时显示每轮和会话累计用量
+- **prompt caching + system prompt 拆分**：长指令按需注入，Anthropic/MiMo 走 `cache_control` 省 token
 
 ### 编码能力
-- 🪄 **`edit_file` 智能容错替换**：改大文件局部，比全量覆盖安全省 token；**写盘前弹蓝色 diff 预览卡**让你审改动。**分层匹配 L1-L4**(精确 → 行尾空白 → 缩进重对齐 → difflib 模糊),模型缩进风格不一致、tab/空格混用都能自动修正;实在匹配不上时**返回最接近片段+行号让模型自纠重试**——弱模型也能稳定改文件
-- 🌐 **`search_files` 跨文件正则搜索**（ripgrep 风格，忽略噪声目录）+ `read_file` 行号分页
-- 📋 **任务计划面板**：≥3 步的任务，AI 先用 `update_plan` 列出完整步骤、之后用 `set_step_status` **按序号增量推进状态**（不重发整份、计划面板不漂移），**聊天区右上角浮层实时显示进度**（待办空心圆 / 进行中 loading / 完成勾选），长任务不漏步（对标 Codex / Claude Code）
-- ⚡ **并行工具调用**：同一轮里多个只读工具（读文件 / 搜索 / 导航）并行执行，多文件场景明显提速
-- 🧭 **LSP 代码导航**：`find_definition` 跳转定义、`find_references` 找全部引用，优先用语言服务器（pyright/pylsp，懂作用域/import/继承）→ 自动降级 jedi → 退回正则搜，比纯文本搜索准
-- ✅ **自我校验闭环**：`edit_file` / `write_file` 成功后自动跑 ruff（正确性）/ mypy（类型，抓臆造 API/参数错）/ 语法检查，把发现的问题**追加进同一条工具返回**，模型当轮就去修（不用你提醒）；长任务还有**上下文管理**（任务台账 + 按模型预算 + 大工具结果回收，长对话不丢"改过哪些文件/跑过什么测试"）
-- 🧪 **更多编码工具**：`run_tests`（pytest）/ `check_code`（静态检查）/ `apply_patch`（多文件补丁，写入失败回滚）/ `git_diff`·`git_log`·`git_status`（只读）+ `git_stage`·`git_commit`（git 写，**执行前强制弹确认卡、无 push**）/ `fetch_url`·`web_search`（联网查资料）
-- 🧭 **Plan / Act 双模式**：Plan 模式 AI 只调研给方案、不动手（只读工具白名单 + 强制提示双保护）
+- **`edit_file` 智能容错替换**：改大文件局部，比全量覆盖安全省 token；**写盘前弹蓝色 diff 预览卡**让你审改动。**分层匹配 L1-L4**(精确 → 行尾空白 → 缩进重对齐 → difflib 模糊),模型缩进风格不一致、tab/空格混用都能自动修正;实在匹配不上时**返回最接近片段+行号让模型自纠重试**——弱模型也能稳定改文件
+- **`search_files` 跨文件正则搜索**（ripgrep 风格，忽略噪声目录）+ `read_file` 行号分页
+- **任务计划面板**：≥3 步的任务，AI 先用 `update_plan` 列出完整步骤、之后用 `set_step_status` **按序号增量推进状态**（不重发整份、计划面板不漂移），**聊天区右上角浮层实时显示进度**（待办空心圆 / 进行中 loading / 完成勾选），长任务不漏步（对标 Codex / Claude Code）
+- **并行工具调用**：同一轮里多个只读工具（读文件 / 搜索 / 导航）并行执行，多文件场景明显提速
+- **LSP 代码导航**：`find_definition` 跳转定义、`find_references` 找全部引用，优先用语言服务器（pyright/pylsp，懂作用域/import/继承）→ 自动降级 jedi → 退回正则搜，比纯文本搜索准
+- **自我校验闭环**：`edit_file` / `write_file` 成功后自动跑 ruff（正确性）/ mypy（类型，抓臆造 API/参数错）/ 语法检查，把发现的问题**追加进同一条工具返回**，模型当轮就去修（不用你提醒）；长任务还有**上下文管理**（任务台账 + 按模型预算 + 大工具结果回收，长对话不丢"改过哪些文件/跑过什么测试"）
+- **更多编码工具**：`run_tests`（pytest）/ `check_code`（静态检查）/ `apply_patch`（多文件补丁，写入失败回滚）/ `git_diff`·`git_log`·`git_status`（只读）+ `git_stage`·`git_commit`（git 写，**执行前强制弹确认卡、无 push**）/ `fetch_url`·`web_search`（联网查资料）
+- **Plan / Act 双模式**：Plan 模式 AI 只调研给方案、不动手（只读工具白名单 + 强制提示双保护）
 - ↶ **撤销**：edit/write/append 写盘前自动备份原始内容（file_history），顶栏一键撤销 AI 最近一次文件修改；文件之后又被改过则拒绝覆盖，不碰 Git 暂存区和 stash
-- 🔒 **隔离模式（Git worktree）**：顶栏一键把 AI 的改动关进独立 worktree，主项目零影响；满意点「恢复」把改动合并回主项目（AI 在隔离区里 commit 过的也算），冲突时保留 worktree 不污染主项目。需 git 项目
-- 🤖 **并行子 Agent**：任务能拆成 3 个以上【相互独立、改不同文件】的子任务时，`spawn_agents` 派生多个子 Agent，各自在独立 worktree 并行写代码，仅成功完成且未取消的子任务自动合并；失败或未验证时保留隔离区（有依赖 / 改同一文件的不并行，退回顺序执行）
-- 📄 **`.lingxirules` 项目级指令**：项目根放一个文件写项目约定，自动注入、优先级最高
+- **隔离模式（Git worktree）**：顶栏一键把 AI 的改动关进独立 worktree，主项目零影响；满意点「恢复」把改动合并回主项目（AI 在隔离区里 commit 过的也算），冲突时保留 worktree 不污染主项目。需 git 项目
+- **并行子 Agent**：任务能拆成 3 个以上【相互独立、改不同文件】的子任务时，`spawn_agents` 派生多个子 Agent，各自在独立 worktree 并行写代码，仅成功完成且未取消的子任务自动合并；失败或未验证时保留隔离区（有依赖 / 改同一文件的不并行，退回顺序执行）
+- **`.lingxirules` 项目级指令**：项目根放一个文件写项目约定，自动注入、优先级最高
 
 ### MCP 客户端（可选）
-- 🔌 **连外部 MCP server**（filesystem / fetch / context7 文档 / memory 等），远程工具自动注入、跟内置工具一样被 AI 调用，**不改一行代码就能扩展能力**
+- **连外部 MCP server**（filesystem / fetch / context7 文档 / memory 等），远程工具自动注入、跟内置工具一样被 AI 调用，**不改一行代码就能扩展能力**
 - config.json 配 `mcp_servers`，支持 stdio / SSE / streamable_http；没装 `mcp` 包则静默跳过
 
 ### 长期记忆（跨会话）
-- 🧠 **角色"天生记得"你**：AI 用 `remember` 存下你的个人信息/偏好/项目约定，新对话自动注入 system prompt，开口就记得（`forget` 删除）
+- **角色"天生记得"你**：AI 用 `remember` 存下你的个人信息/偏好/项目约定，新对话自动注入 system prompt，开口就记得（`forget` 删除）
 - 原子写 + 损坏/瞬时错误区分，珍贵记忆抗崩溃
 
 ### 项目（工作区）
-- 📁 **多项目管理**：把不同的工作目录加为项目，会话按项目分组显示
-- 🔄 **启动自动恢复**：上次激活的项目下次打开继续在那
-- 📍 **输入框下方实时显示当前项目路径**，点击弹切换菜单
-- 🧭 **新对话沿用当前项目**：在 A 项目点+新对话 → 仍在 A；切到 B → 新对话归 B
-- 🛠️ **所有文件工具自动用项目根作为相对路径基准**（`read_file`、`run_command` 等）
-- 📄 **`.lingxirules` 项目级指令**：项目根放一个 `.lingxirules` 文件（纯文本 / md），里面写项目约定（"测试用 pytest"、"格式化用 black"、"提交信息用 conventional commits"），新对话时自动注入 system prompt 末尾，优先级**高于**默认指令
-- 🗑️ **移除项目时把它的会话批量改为"无项目"**，不会残留游离记录
+- **多项目管理**：把不同的工作目录加为项目，会话按项目分组显示
+- **启动自动恢复**：上次激活的项目下次打开继续在那
+- **输入框下方实时显示当前项目路径**，点击弹切换菜单
+- **新对话沿用当前项目**：在 A 项目点+新对话 → 仍在 A；切到 B → 新对话归 B
+- **所有文件工具自动用项目根作为相对路径基准**（`read_file`、`run_command` 等）
+- **`.lingxirules` 项目级指令**：项目根放一个 `.lingxirules` 文件（纯文本 / md），里面写项目约定（"测试用 pytest"、"格式化用 black"、"提交信息用 conventional commits"），新对话时自动注入 system prompt 末尾，优先级**高于**默认指令
+- **移除项目时把它的会话批量改为"无项目"**，不会残留游离记录
 
 ### 角色卡
-- 📜 **Markdown 系统提示词**：放进 `roles/` 即可加载
-- 🎭 内置一份角色卡模板（`roles/example.md`），照着结构填写即可
-- 🔁 启动时自动恢复上次激活的角色
+- **Markdown 系统提示词**：放进 `roles/` 即可加载
+- 内置一份角色卡模板（`roles/example.md`），照着结构填写即可
+- 启动时自动恢复上次激活的角色
 
 ### 系统托盘
-- 🪟 关闭主窗口只**隐藏到系统托盘**、后台常驻；托盘**双击**唤起对话，**右键菜单**（打开对话 / 退出）
-- 🗔 唤起时**保留最大化/全屏状态**（不会缩回默认尺寸）
+- 关闭主窗口只**隐藏到系统托盘**、后台常驻；托盘**双击**唤起对话，**右键菜单**（打开对话 / 退出）
+- 唤起时**保留最大化/全屏状态**（不会缩回默认尺寸）
 
 > 桌面宠物（GIF 立绘 / 动画）已移除——本应用专注代码助手，娱乐属性以后另开独立应用。
 
 ### 远程通知 / 手机遥控（Telegram，可选）
-- 📲 **PC → 手机推送**：任务完成 / 报错 / 等待确认时推到你的 Telegram（分级 + 节流去重），完整回复分段发回不截断
-- 🎮 **手机 → PC 遥控**：手机发消息让灵犀干活，三档安全分级（`chat_only` 纯对话 / `safe_readonly` 只读代码且敏感文件黑名单 / `unrestricted` 不设防），白名单 chat_id 锁死、回调按 `from.id` 校验
-- ✅ **手机审批操作**：run_command / edit_file / MCP 的确认同步推手机 inline 按钮（✅允许 / ❌拒绝 / 📝记住同类），人离开电脑也能远程批；PC 卡与手机按钮**先点先到**，杜绝双重执行
-- 🔒 配 `notify` / `remote_control`（含 `telegram_confirm`）开启；不配则整段静默跳过
+- **PC → 手机推送**：任务完成 / 报错 / 等待确认时推到你的 Telegram（分级 + 节流去重），完整回复分段发回不截断
+- **手机 → PC 遥控**：手机发消息让灵犀干活，三档安全分级（`chat_only` 纯对话 / `safe_readonly` 只读代码且敏感文件黑名单 / `unrestricted` 不设防），白名单 chat_id 锁死、回调按 `from.id` 校验
+- **手机审批操作**：run_command / edit_file / MCP 的确认同步推手机 inline 按钮（允许 / 拒绝 / 记住同类），人离开电脑也能远程批；PC 卡与手机按钮**先点先到**，杜绝双重执行
+- 配 `notify` / `remote_control`（含 `telegram_confirm`）开启；不配则整段静默跳过
 
 ### 系统级
-- ⚙️ **设置弹窗**：所有 API 密钥、模型、自定义模型等可视化编辑
-- ❌ **关闭确认**：X 按钮时弹"最小化到托盘 / 退出软件 / 取消"，可记住选择
-- 🎯 **高 DPI 锐利渲染**
+- **设置弹窗**：所有 API 密钥、模型、自定义模型等可视化编辑
+- **关闭确认**：X 按钮时弹"最小化到托盘 / 退出软件 / 取消"，可记住选择
+- **高 DPI 锐利渲染**
 
-## 📋 支持的对话模型
+## 支持的对话模型
 
 | 名称 | 类型 | 模型 ID | 支持图片 |
 |------|------|---------|---------|
-| MiMo V2.5 Pro | mimo | mimo-v2.5-pro | ❌ |
-| MiMo V2.5 | mimo | mimo-v2.5 | ✅ |
-| MiMo V2 Pro | mimo | mimo-v2-pro | ❌ |
-| MiMo V2 Omni | mimo | mimo-v2-omni | ✅ |
-| Claude Code | claude-code | claude (本地 CLI) | ❌ |
-| Qwen3.5 本地 | ollama | qwen3.5:latest | ❌ |
-| Qwen3.5-Plus 云端 | cloud | qwen3.5-plus | ❌ |
-| Qwen-Max / Plus / Turbo | cloud | qwen-* | ❌ |
-| Claude Sonnet 4 API | anthropic | claude-sonnet-4-20250514 | ✅ |
-| Claude Haiku 3.5 API | anthropic | claude-3-5-haiku-20241022 | ✅ |
-| DeepSeek V4 Flash / Pro | deepseek | deepseek-v4-* | ❌ |
-| ⚙ 自定义模型 | custom | config.json `custom_models` 自填（OpenAI/Anthropic 协议） | 看配置 |
+| MiMo V2.5 Pro | mimo | mimo-v2.5-pro | 否 |
+| MiMo V2.5 | mimo | mimo-v2.5 | 是 |
+| MiMo V2 Pro | mimo | mimo-v2-pro | 否 |
+| MiMo V2 Omni | mimo | mimo-v2-omni | 是 |
+| Claude Code | claude-code | claude (本地 CLI) | 否 |
+| Qwen3.5 本地 | ollama | qwen3.5:latest | 否 |
+| Qwen3.5-Plus 云端 | cloud | qwen3.5-plus | 否 |
+| Qwen-Max / Plus / Turbo | cloud | qwen-* | 否 |
+| Claude Sonnet 4 API | anthropic | claude-sonnet-4-20250514 | 是 |
+| Claude Haiku 3.5 API | anthropic | claude-3-5-haiku-20241022 | 是 |
+| DeepSeek V4 Flash / Pro | deepseek | deepseek-v4-* | 否 |
+| 自定义模型 | custom | config.json `custom_models` 自填（OpenAI/Anthropic 协议） | 看配置 |
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 安装 Python 依赖
 
@@ -123,8 +123,8 @@ pip install jedi python-lsp-server   # 或 pip install pyright（需 Node）
 
 ### 2. 填一个模型的 API Key
 
-**最省事的方式**：先直接启动（见第 5 步）。没填 key 时主界面会提示「👋 还没配置模型」并给一个
-**「⚙ 打开设置」按钮** → 在设置面板里填你手头某个模型的 key → 保存 → 点「立即重启」即可开始。
+**最省事的方式**：先直接启动（见第 5 步）。没填 key 时主界面会提示「还没有可用模型」并给一个
+**「打开设置」按钮** → 在设置面板里填你手头某个模型的 key → 保存 → 点「立即重启」即可开始。
 **不必填全**，只填你有的那一个就够用（没填的模型切过去才会提示，不影响别的）。
 
 > 嫌点界面麻烦也可以手动：`cp config.example.json config.json`，在 `config.json` 里填 key（密钥改动重启生效）。
@@ -184,7 +184,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 
 4. **重启灵犀**。日志（`%APPDATA%\灵犀\logs\` 或项目 `logs/`）里搜 `[MCP]`，看到这个就是连上了：
    ```
-   [MCP] ✅ filesystem: 已连接，N 个工具: [...]
+   [MCP] filesystem: 已连接，N 个工具: [...]
    [MCP] 共注册 N 个远程工具: [mcp_filesystem_xxx, ...]
    ```
 
@@ -194,14 +194,14 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| `[MCP] ❌ xxx: Connection closed` + 手动跑报 `Cannot find module 'ajv'` | npx 缓存损坏（npm 通病）。删 `%LOCALAPPDATA%\npm-cache\_npx` 后重试 |
-| `[MCP] ❌ xxx: 启动失败` | 先**手动**在终端跑那条 `npx ...` 命令看真实报错（路径不存在 / 缺 token / 没装 Node） |
+| `[MCP] xxx: Connection closed` + 手动跑报 `Cannot find module 'ajv'` | npx 缓存损坏（npm 通病）。删 `%LOCALAPPDATA%\npm-cache\_npx` 后重试 |
+| `[MCP] xxx: 启动失败` | 先**手动**在终端跑那条 `npx ...` 命令看真实报错（路径不存在 / 缺 token / 没装 Node） |
 | stdio server 路径无效 | filesystem 的目录参数必须是**真实存在**的路径 |
 | 想临时关掉 MCP | 设置里取消勾选「启用 MCP」（或 config.json 设 `"mcp_enabled": false`），重启 |
 
 > stdio server 第一次 `npx -y` 会联网下载包，慢一点正常；之后走缓存就快了。
 
-## 📁 文件结构
+## 文件结构
 
 ```
 .
@@ -263,7 +263,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 └── README.md               # 本文件
 ```
 
-## 🎮 使用说明
+## 使用说明
 
 ### 文本聊天
 
@@ -273,7 +273,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 
 ### 图片输入
 
-- 拖拽图片到聊天窗口 / 点击输入框左下角 📎 / Ctrl+V 粘贴截图
+- 拖拽图片到聊天窗口 / 点击输入框左下角的「+」 / Ctrl+V 粘贴截图
 - 应用会自动切到支持视觉的模型（如 MiMo V2 Omni / Claude）
 
 ### 系统托盘
@@ -289,7 +289,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 - 切换角色：主界面 → 角色按钮 → 选择 `roles/` 下的 .md
 - 自定义：把 SillyTavern 的 Character Card V2 json 的 `description / personality / mes_example` 整理成 .md 放进 `roles/`
 
-## 🛠️ 配置项详解（`config.json`）
+## 配置项详解（`config.json`）
 
 ```json
 {
@@ -319,7 +319,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 }
 ```
 
-## 🧰 内置工具
+## 内置工具
 
 | 工具 | 功能 |
 |------|------|
@@ -346,7 +346,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 
 > 另外接外部 MCP server 后，远程工具以 `mcp_{server}_{tool}` 形式自动加入（调用前弹确认卡）。
 
-## 📦 打包
+## 打包
 
 ```bash
 pyinstaller lingxi.spec
@@ -354,7 +354,7 @@ pyinstaller lingxi.spec
 
 产物在 `dist/灵犀Code/` 目录。
 
-## ⚠️ 已知约束
+## 已知约束
 
 - **Python 3.14** 环境：旧版 LangChain API（如 `ConversationBufferMemory`）不可用，主程序已绕开
 - `config.json` 含 API 密钥，**已加入 `.gitignore`**，不要提交
@@ -362,16 +362,16 @@ pyinstaller lingxi.spec
 - QTextBrowser 不支持 `<style>` 标签，Markdown HTML 必须使用内联样式
 - MiMo 模型通过 Anthropic 兼容接口调用
 
-## 📝 License
+## License
 
 仅供学习和个人使用。
 
-## 🙏 致谢
+## 致谢
 
 - [LangChain](https://github.com/langchain-ai/langchain)
 - [PySide6 / Qt for Python](https://wiki.qt.io/Qt_for_Python)
 
-## ✍️ 作者寄语
+## 作者寄语
 
 我本身是 Java 开发，对 Python 其实并不算熟。这个项目 99% 的代码，都是在 Claude Code 和 GPT 的帮助下写出来的。
 

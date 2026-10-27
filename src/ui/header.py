@@ -261,7 +261,7 @@ class HeaderMixin:
         pre = _fh.precheck(cand["checkpoint_id"], session_id=sid, workspace=root)
         if pre["status"] != _fh.ST_RESTORABLE:
             # 材料与记录原样保留；原因里说明是冲突还是不支持
-            self._show_toast(f"⚠ {pre['reason']}", 5000)
+            self._show_toast(pre['reason'], 5000)
             self._style_undo_btn()
             return
         if self._pending_run_for(sess) is not None:
@@ -339,28 +339,28 @@ class HeaderMixin:
             self._style_undo_btn()
         changed = bool(result.get("changed"))
         if result["status"] != "ok" and not changed:
-            self._show_toast(f"⚠ 撤销未执行：{result['reason']}", 5000)
+            self._show_toast(f"撤销未执行：{result['reason']}", 5000)
             return
         name = os.path.basename(result.get("path") or "文件")
         parts = []
         if result["status"] == "ok":
             parts.append(f"已撤销 {result['tool']} 对 {name} 的修改：{result['reason']}")
             if result.get("verified") is False:
-                parts.append("⚠️ 恢复后读回校验未完成，请人工核对文件内容")
+                parts.append("恢复后读回校验未完成，请人工核对文件内容")
             if not result.get("record_saved", False):
-                parts.append("⚠️ 撤销记录保存失败（下次启动无法确认它已撤销）")
+                parts.append("撤销记录保存失败（下次启动无法确认它已撤销）")
         else:
-            parts.append(f"⚠ 文件已按写前内容恢复，但恢复校验失败：{result['reason']}")
+            parts.append(f"文件已按写前内容恢复，但恢复校验失败：{result['reason']}")
         if changed:
             book = _fh.apply_undo_to_session(sess, result)
             if book["verification_noted"]:
                 parts.append("旧测试与 diff 结论已作废、重新要求验证")
             else:
-                parts.append(f"⚠️ 验证义务更新失败：{book['verification_error'][:120]}")
+                parts.append(f"验证义务更新失败：{book['verification_error'][:120]}")
             if book["saved"]:
                 parts.append("撤销结果已保存")
             elif book["saved"] is False:
-                parts.append(f"⚠️ 撤销结果保存失败：{book['save_error'][:120]}")
+                parts.append(f"撤销结果保存失败：{book['save_error'][:120]}")
         self._show_toast("；".join(parts), 6000)
 
     def _set_agent_mode(self, mode):
@@ -371,9 +371,9 @@ class HeaderMixin:
             self.act_btn.setChecked(mode == "act")
         # 提示用户切换效果（一闪即过的 toast）
         if mode == "plan":
-            self._show_toast("🧠 已切到计划模式：AI 只给方案不动手")
+            self._show_toast("已切到计划模式：AI 只给方案不动手")
         else:
-            self._show_toast("⚡ 已切到执行模式：AI 可直接执行工具")
+            self._show_toast("已切到执行模式：AI 可直接执行工具")
 
     def _sync_header_from_session(self):
         """切会话后把顶栏（模型下拉 / Plan-Act / 思考 / 隔离）同步到当前会话的状态。
@@ -453,7 +453,7 @@ class HeaderMixin:
                 self.role_btn.setText(f"角色：{display_name}")
                 self._style_role_btn(active=True)
                 self._refresh_header_compactness()
-                self._append_html(f"✅ 已加载角色卡: {display_name}\n\n", "tool_result")
+                self._append_html(f"已加载角色卡: {display_name}\n\n", "tool_result")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"读取角色卡失败: {e}")
 
@@ -520,7 +520,7 @@ class HeaderMixin:
             self._refresh_session_list()
             self.role_btn.setText("角色：默认助手")
             self._style_role_btn(active=False)
-            self._append_html("✅ 已恢复默认角色\n\n", "tool_result")
+            self._append_html("已恢复默认角色\n\n", "tool_result")
 
     # ══════════════════════════════════════
     # 按钮样式（顶栏 + 输入区）
@@ -646,7 +646,7 @@ class HeaderMixin:
         if not project_dir:
             return
         if active.is_generating:
-            self._show_toast("⚠ 生成中不能切换隔离模式")
+            self._show_toast("生成中不能切换隔离模式")
             return
 
         if active.worktree:
@@ -657,12 +657,12 @@ class HeaderMixin:
                 self._refresh_project_indicator()
                 self._show_toast("✓ 隔离区改动已恢复到主项目")
             else:
-                self._show_toast(f"⚠ {msg}", duration=7000)
+                self._show_toast(msg, duration=7000)
         else:
             # 启动隔离
             if _wt.has_uncommitted_changes(project_dir):
                 self._show_toast(
-                    "⚠ 主工作区有未提交改动，隔离区只会基于 HEAD，"
+                    "主工作区有未提交改动，隔离区只会基于 HEAD，"
                     "不会自动带入这些改动",
                     duration=7000,
                 )
@@ -671,9 +671,9 @@ class HeaderMixin:
             if wt_path:
                 self._style_isolation_btn(active=True)
                 self._refresh_project_indicator()
-                self._show_toast(f"🔒 隔离模式已开启，worktree: {wt_path}")
+                self._show_toast(f"隔离模式已开启，worktree: {wt_path}")
             else:
-                self._show_toast("⚠ 无法创建隔离环境（非 git 仓库？）", duration=5000)
+                self._show_toast("无法创建隔离环境（非 git 仓库？）", duration=5000)
 
     def _style_role_btn(self, active):
         color = self._t("role_active_text") if active else self._t("role_text")

@@ -93,7 +93,7 @@ class SettingsDialog(QDialog):
     """直接在 UI 里编辑 config.json。保存后写回文件，提示重启生效。
 
     布局：
-      [⚠ 重启提示 banner]
+      [重启提示 banner]
       ┌──────────────────────┐
       │ 滚动表单（按分类）    │
       │  - 大模型 API 密钥    │
@@ -121,7 +121,7 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        banner = QLabel("⚠ 修改密钥 / Base URL 后需重启应用才能生效")
+        banner = QLabel("修改密钥 / Base URL 后需重启应用才能生效")
         banner.setObjectName("settingsBanner")
         banner.setWordWrap(True)
         root.addWidget(banner)
@@ -494,7 +494,7 @@ class SettingsDialog(QDialog):
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
-        title = QLabel(f"⚙ {cm.get('name', cm.get('model_id', '?'))}")
+        title = QLabel(cm.get('name', cm.get('model_id', '?')))
         title.setObjectName("providerCardTitle")
         head.addWidget(title, 1)
 
@@ -700,7 +700,7 @@ class SettingsDialog(QDialog):
                        "sk-...", password=True)
         embed_hint = QLabel(
             "走 OpenAI 兼容的 /embeddings 接口；留空则复用「模型」页的通义千问端点 / Key。\n"
-            "⚠ 改 Embedding 模型 / 端点后，旧索引不再匹配 —— 需【重启】并在侧栏知识库卡片点「重建索引」。")
+            "改 Embedding 模型 / 端点后，旧索引不再匹配 —— 需【重启】并在侧栏知识库卡片点「重建索引」。")
         embed_hint.setObjectName("providerCardHint")
         embed_hint.setWordWrap(True)
         layout.addWidget(embed_hint)

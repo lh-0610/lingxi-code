@@ -237,7 +237,7 @@ class SendMixin:
             vision_idx = agent.get_vision_model_index()
             if vision_idx < 0:
                 self._append_html(
-                    "\n⚠️ 当前模型不支持图片。请先在「设置 → 图片识别模型」里选一个能看图的模型。\n",
+                    "\n当前模型不支持图片。请先在「设置 → 图片识别模型」里选一个能看图的模型。\n",
                     "tool_result",
                 )
                 return False
@@ -308,7 +308,7 @@ class SendMixin:
             except Exception:
                 pass
             self._append_html(
-                "\n⚠️ 消息发送失败（无法创建工作线程），没有发给模型；"
+                "\n消息发送失败（无法创建工作线程），没有发给模型；"
                 "输入已保留，可直接重发。\n", "tool_result")
             self._show_toast("发送失败：无法创建工作线程，消息未发送", 4000)
             return False
@@ -371,7 +371,7 @@ class SendMixin:
         sess.role_snapshot = _roles.capture_active_role()  # 冻结本轮人格（防生成途中被换卡）
         try:
             self.show_message(
-                f"\n🔎 使用「{vision_model_name}」识别图片，随后交给「{original_model_name}」继续处理\n",
+                f"\n使用「{vision_model_name}」识别图片，随后交给「{original_model_name}」继续处理\n",
                 "tool_result",
             )
             # 用户消息**先**落历史再识别：识别失败时消息也不能丢（历史必须如实
@@ -402,7 +402,7 @@ class SendMixin:
             preview = description
             if len(preview) > 1200:
                 preview = preview[:1200] + "\n... [识别结果较长，已折叠显示；完整内容会交给当前模型]"
-            self.show_message(f"✅ 图片识别完成（{detected_name}）\n{preview}\n", "tool_result")
+            self.show_message(f"图片识别完成（{detected_name}）\n{preview}\n", "tool_result")
 
             bridge_text = (
                 "[[LINGXI_INTERNAL_VISION_BRIDGE]]\n"

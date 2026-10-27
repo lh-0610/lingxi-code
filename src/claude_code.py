@@ -297,7 +297,7 @@ def claude_code_loop(ui) -> AgentResult:
             if not err:
                 err = f"Claude Code exited with code {proc.returncode}"
             logger.error(f"Claude Code 错误: {err}")
-            ui.show_message(f"\n⚠️ {err}\n", "ai_msg")
+            ui.show_message(f"\n{err}\n", "ai_msg")
             outcome = AgentResult("failed", err)
 
         clean_text = full_text.strip()
@@ -315,7 +315,7 @@ def claude_code_loop(ui) -> AgentResult:
     except FileNotFoundError:
         heartbeat_stop.set()
         ui.remove_thinking_indicator()
-        ui.show_message("\n⚠️ 未找到 claude 命令，请确认 Claude Code CLI 已安装\n", "ai_msg")
+        ui.show_message("\n未找到 claude 命令，请确认 Claude Code CLI 已安装\n", "ai_msg")
         logger.error("claude 命令未找到")
         return AgentResult("failed", "未找到 claude 命令。")
     except Exception as e:

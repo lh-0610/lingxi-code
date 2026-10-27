@@ -305,7 +305,7 @@ def _agent_loop_body(ui):
 
         # 本地模型需要检测 Ollama 服务
         if mtype == "ollama" and not check_ollama():
-            ui.show_message("\n⚠️ 无法连接 Ollama 服务，请先运行 ollama serve\n", "ai_msg")
+            ui.show_message("\n无法连接 Ollama 服务，请先运行 ollama serve\n", "ai_msg")
             from .config import OLLAMA_BASE_URL
             logger.error(f"Ollama 服务不可用: {OLLAMA_BASE_URL}")
             return AgentResult("failed", "无法连接 Ollama 服务。"), clean_text
@@ -389,7 +389,7 @@ def _run_claude_code(ui):
     # 提示词——放行等于变回完整编码 agent，静默绕过知识库约束。明确拦下。
     if getattr(state, "rag_mode", False):
         ui.show_message(
-            "\n⚠️ 知识库模式不支持 Claude Code 模型（它走本地 CLI、无法使用知识库检索）。"
+            "\n知识库模式不支持 Claude Code 模型（它走本地 CLI、无法使用知识库检索）。"
             "请在顶栏换一个 API 模型，或切回「编码」模式再用 Claude Code。\n",
             "ai_msg")
         return AgentResult("failed", "知识库模式不支持 Claude Code。")

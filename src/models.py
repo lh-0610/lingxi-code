@@ -126,7 +126,7 @@ def get_model_config_issues(model_index=None):
 
     def require_key(label, key):
         if _looks_like_placeholder(key):
-            issues.append(f"{name} 需要先在 ⚙ 设置里填 {label}。")
+            issues.append(f"{name} 需要先在设置里填 {label}。")
 
     if mtype == "cloud":
         require_key("qwen_api_key", CLOUD_API_KEY)

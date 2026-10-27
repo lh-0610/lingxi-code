@@ -681,7 +681,7 @@ class SidebarMixin:
         # session_kind="code" 却仍是 RAG 提示词的混合会话。先切回编码再切项目。
         from .. import session as _session
         if getattr(_session.get_active(), "session_kind", "code") == "rag":
-            self._show_toast("📚 知识库模式下不切换项目——请先在左侧切回「💻 编码」工作区")
+            self._show_toast("知识库模式下不切换项目——请先在左侧切回「编码」工作区")
             return
         from .. import projects as _projects
         menu = QMenu(self)

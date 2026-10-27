@@ -3,6 +3,8 @@
 这些都是 UI 模块内部的无状态 helper，与 ChatUI 解耦，可以被任何 ui/ 子模块复用。
 """
 
+import re
+
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import (
     QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygon,
@@ -102,3 +104,22 @@ def _escape(text):
             .replace(">", "&gt;")
             .replace("\n", "<br>")
             .replace(" ", "&nbsp;"))
+
+
+# 界面不显示 emoji（用户偏好）。✓ ✗ ✕ ☰ 这类单色文字符号不算，照常保留。
+# 后端文字里的状态 emoji（⚠️ ✅ ❌ …）同时也是发给模型的内容，不在源头删，只在显示时去掉。
+_EMOJI = ("(?![✓✗✕☰])[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF"
+          "\u23E9-\u23FA\u231A\u231B\uFE0F\u200D]")
+_EMOJI_RUN = re.compile(f"(?:{_EMOJI})+ ?")
+_LEADING_EMOJI = re.compile(f"(?m)^([ \\t]*)(?:{_EMOJI})+ ?")
+
+
+def strip_emoji(text):
+    """去掉文本里所有 emoji（连同紧跟的一个空格）。用于界面自己的短提示，如 toast。"""
+    return _EMOJI_RUN.sub("", text or "")
+
+
+def strip_leading_emoji(text):
+    """只去掉每行行首的 emoji 状态图标。用于显示后端/工具输出：
+    「⚠️ 保存失败」→「保存失败」，而行中间的内容（比如文件里本来就有的 emoji）原样显示。"""
+    return _LEADING_EMOJI.sub(r"\1", text or "")

@@ -225,7 +225,7 @@ class ResultCard(QFrame):
             return
         # 保存问题**单独一行**，与上面的运行结论互不冒充：这一轮该失败还是失败，
         # 存不上是另一件事。
-        col.addWidget(_label(_soft_wrap(f"⚠️ {note}"), color="#d64545", size=11))
+        col.addWidget(_label(_soft_wrap(note), color="#d64545", size=11))
 
     def _add_buttons(self, col):
         specs = []

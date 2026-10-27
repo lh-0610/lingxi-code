@@ -85,11 +85,11 @@ def _resolve_remote_confirm(cid: str, allow: bool, remember: bool = False) -> bo
     msg_id = entry.get("msg_id")
     if msg_id:
         if allow and remember:
-            label = "✅ 已记住同类并允许"
+            label = "已记住同类并允许"
         elif allow:
-            label = "✅ 已允许"
+            label = "已允许"
         else:
-            label = "❌ 已拒绝"
+            label = "已拒绝"
         telegram_push.edit_message_text(msg_id, label)
     return True
 
@@ -457,7 +457,7 @@ class ConfirmBarsMixin:
         _origin = result_holder.get("_session")
         if _origin is not None and _origin is not _session.get_active():
             _origin.pending_confirm = ("command", command, result_holder, done_event)
-            self._refresh_session_list()   # 侧栏给该会话标"⚠ 待确认"
+            self._refresh_session_list()   # 侧栏给该会话标「待确认」
             return
         if self._command_confirm_done_event is not None:
             # 旧请求被新的取代：先 deny 解阻塞旧 worker，再走新流程显示新卡
@@ -948,7 +948,7 @@ class ConfirmBarsMixin:
                     "result": result, "done": done, "msg_id": None,
                 }
             remote_msg_id = telegram_push.push_confirm(
-                f"⚠️ 执行命令？\n\n{command}\n\n请点击下方按钮 ⬇️",
+                f"执行命令？\n\n{command}\n\n请点击下方按钮",
                 remote_cid,
                 is_destructive=is_destructive,
             )
@@ -975,7 +975,7 @@ class ConfirmBarsMixin:
             # 仅当 PC 先点（远程消息还挂着按钮）时补一条结果文案；手机自己点的
             # 由 _resolve_remote_confirm 已改过消息，不再覆盖（避免错标"PC 端操作"）。
             if remote_msg_id and not result.get("by_remote"):
-                label = "✅ 已允许" if result.get("allow") else "❌ 已拒绝"
+                label = "已允许" if result.get("allow") else "已拒绝"
                 telegram_push.edit_message_text(remote_msg_id, f"{label}（PC 端操作）")
 
         return bool(result.get("allow", False)), result.get("feedback", "")
@@ -1012,7 +1012,7 @@ class ConfirmBarsMixin:
             if len(diff_text or "") > 800:
                 diff_preview += "\n…(已截断)"
             remote_msg_id = telegram_push.push_confirm(
-                f"📝 编辑文件确认\n\n{path}\n\n{diff_preview}\n\n请点击下方按钮 ⬇️",
+                f"编辑文件确认\n\n{path}\n\n{diff_preview}\n\n请点击下方按钮",
                 remote_cid,
             )
             if remote_msg_id:
@@ -1035,7 +1035,7 @@ class ConfirmBarsMixin:
                 _pending_remote_confirms.pop(remote_cid, None)
             # 同 confirm_command：手机自己点的不再覆盖文案（避免错标"PC 端操作"）
             if remote_msg_id and not result.get("by_remote"):
-                label = "✅ 已允许" if result.get("allow") else "❌ 已拒绝"
+                label = "已允许" if result.get("allow") else "已拒绝"
                 telegram_push.edit_message_text(remote_msg_id, f"{label}（PC 端操作）")
 
         return bool(result.get("allow", False)), result.get("feedback", "")
