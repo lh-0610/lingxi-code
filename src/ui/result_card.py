@@ -15,24 +15,24 @@ from .message_view import _P, _SANS, _MONO
 
 
 # 状态色调 → (左侧色条, 标题色)。用色条而不是整卡染色：结果卡常和失败输出挨着，
-# 整片色块会把消息流搞得很吵。
+# 整片色块会把消息流搞得很吵。存的是 _P 的键名，画卡时再按当前主题取色。
 _TONE = {
-    "ok":          (_P["indigo"], _P["text"]),
-    "warn":        (_P["orange"], _P["text"]),
-    "bad":         ("#d64545", _P["text"]),
-    "muted":       (_P["muted3"], _P["text2"]),
-    "interrupted": (_P["orange"], _P["text"]),
-    "running":     (_P["indigo"], _P["text2"]),
+    "ok":          ("indigo", "text"),
+    "warn":        ("orange", "text"),
+    "bad":         ("bad", "text"),
+    "muted":       ("muted3", "text2"),
+    "interrupted": ("orange", "text"),
+    "running":     ("indigo", "text2"),
 }
 
 _STATUS_COLOR = {
-    "passed": "#3a8a5f",
-    "failed": "#d64545",
-    "timeout": _P["orange"],
-    "not_run": _P["muted"],
-    "cancelled": _P["muted"],
-    "error": "#d64545",
-    "unknown": _P["muted"],
+    "passed": "ok",
+    "failed": "bad",
+    "timeout": "orange",
+    "not_run": "muted",
+    "cancelled": "muted",
+    "error": "bad",
+    "unknown": "muted",
 }
 
 
@@ -104,7 +104,8 @@ class ResultCard(QFrame):
         super().__init__(parent)
         self.view = dict(view or {})
         self.setObjectName("resultCard")
-        accent, title_color = _TONE.get(self.view.get("tone"), _TONE["muted"])
+        accent_key, title_key = _TONE.get(self.view.get("tone"), _TONE["muted"])
+        accent, title_color = _P[accent_key], _P[title_key]
         self.setStyleSheet(
             f"#resultCard {{ background:{_P['result_bg']}; border:1px solid {_P['card_border']};"
             f" border-left:3px solid {accent}; border-radius:10px; }}")
@@ -117,7 +118,7 @@ class ResultCard(QFrame):
 
         if self.view.get("display_source") == "restored":
             # 重绘出来的历史结果：说清它是上一次的，别让用户以为刚刚又跑了一轮。
-            col.addWidget(_label("（上次运行的结果）", color=_P["muted2"], size=11))
+            col.addWidget(_label("（上次运行的结果）", color=_P["muted2"], size=12))
 
         if self.view.get("reason"):
             col.addWidget(_label(_soft_wrap(self.view["reason"]),
@@ -143,7 +144,7 @@ class ResultCard(QFrame):
         col.addWidget(_label(_paths_text(shown), color=_P["text_sec"], size=12, mono=True))
         if self.view.get("files_folded"):
             rest = files[6:]
-            more = _label(f"…… 另有 {len(rest)} 个", color=_P["muted2"], size=11)
+            more = _label(f"…… 另有 {len(rest)} 个", color=_P["muted2"], size=12)
             col.addWidget(more)
             box = _label(_paths_text(rest), color=_P["text_sec"], size=12, mono=True)
             box.setVisible(False)
@@ -185,7 +186,7 @@ class ResultCard(QFrame):
                 suffix = ""
             state = row["label"] + suffix
             color = (_P["muted"] if (row.get("stale") or row.get("superseded"))
-                     else _STATUS_COLOR.get(row["status"], _P["muted"]))
+                     else _P[_STATUS_COLOR.get(row["status"], "muted")])
             h.addWidget(_label(state, color=color, size=12, bold=True, wrap=False,
                                shrink=False), 0)
             col.addLayout(h)
@@ -197,13 +198,13 @@ class ResultCard(QFrame):
                 # 最宽的东西，窄窗口下把卡片顶出可视区。完整输出在「查看验证输出」里。
                 one_line = detail.replace("\n", " ")
                 col.addWidget(_label(_elide_middle(one_line, 40), color=_P["muted2"],
-                                     size=11, mono=True, wrap=False))
+                                     size=12, mono=True, wrap=False))
         if self.view.get("has_stale"):
             col.addWidget(_label("标为已过期的检查在其之后又有文件改动，结论不再代表当前代码。",
-                                 color=_P["orange"], size=11))
+                                 color=_P["orange"], size=12))
         if self.view.get("has_superseded"):
             col.addWidget(_label("标为已被复查取代的，是同一项检查更早的一次结果，以最新一次为准。",
-                                 color=_P["muted2"], size=11))
+                                 color=_P["muted2"], size=12))
 
     def _add_pending(self, col):
         if not self.view.get("has_pending"):
@@ -225,7 +226,7 @@ class ResultCard(QFrame):
             return
         # 保存问题**单独一行**，与上面的运行结论互不冒充：这一轮该失败还是失败，
         # 存不上是另一件事。
-        col.addWidget(_label(_soft_wrap(note), color="#d64545", size=11))
+        col.addWidget(_label(_soft_wrap(note), color=_P["bad"], size=12))
 
     def _add_buttons(self, col):
         specs = []

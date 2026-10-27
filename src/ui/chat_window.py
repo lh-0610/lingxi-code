@@ -24,7 +24,7 @@ from .fonts import BODY, ui_font
 from .. import state
 from ..content_blocks import block_text
 from ._base import BASE_DIR
-from .theme import THEMES, build_stylesheet, load_saved_theme, save_theme_choice
+from .theme import THEMES, build_stylesheet, load_saved_theme, save_theme_choice, set_active_theme
 from .widgets import (
     CloseConfirmDialog, DragDropTextEdit, FileCompleter,
     SignalBridge,
@@ -57,6 +57,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.resize(1000, 700)
         self.setMinimumSize(600, 400)
         self.theme = load_saved_theme()
+        set_active_theme(self.theme)   # 消息流按需取色，构造控件之前就要知道当前主题
         self.setStyleSheet(build_stylesheet(self.theme))
         self._apply_tooltip_style()  # QToolTip 要设到 app 级才生效
 
@@ -127,11 +128,13 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         return THEMES[self.theme][key]
 
     def _toggle_theme(self):
-        """白天 ↔ 夜间。立即应用到主样式表与所有内联样式 chrome；
-        已渲染聊天历史保留旧色，下次重新载入会话时刷新。"""
+        """白天 ↔ 夜间。刷新全局样式和各处 chrome，再重绘消息流——
+        消息块是构造时取的色，不重绘的话已经显示的内容会停在旧主题。"""
         self.theme = "light" if self.theme == "dark" else "dark"
         save_theme_choice(self.theme)
         self._apply_theme()
+        self._redraw_chat()
+        self._refresh_queue_panel()
 
     # ── 设置弹窗 ──
 
@@ -188,6 +191,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     def _apply_theme(self):
         """重新生成全局 QSS，并刷新所有用 setStyleSheet 直接设置的 chrome。"""
+        set_active_theme(self.theme)
         self.setStyleSheet(build_stylesheet(self.theme))
         self._apply_tooltip_style()  # 切主题时 tooltip 也跟着刷
         # 主题按钮：文字显示当前主题（浅色 / 深色）
@@ -208,6 +212,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._background_panel.apply_theme()
         if hasattr(self, "chat_area"):
             self._style_chat_area()
+        if hasattr(self, "queue_panel"):
+            self.queue_panel.apply_theme()
         if hasattr(self, "empty_state"):
             self._refresh_empty_state_layout()
             self._position_empty_state()
@@ -704,13 +710,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._check_input_state()
 
     def _style_chat_area(self):
-        self.chat_area.setStyleSheet(
-            f"QTextBrowser {{"
-            f"  background: {self._t('chat_bg')}; border: none; color: {self._t('chat_text')};"
-            f"  padding: 28px 28px 18px 52px;"
-            f"  selection-background-color: {self._t('chat_sel_bg')};"
-            f"  selection-color: {self._t('chat_sel_text')};"
-            f"}}"
+        # 消息区是 MessageView（QScrollArea）。背景和滚动条要一次设好：setStyleSheet 会整体替换，
+        # 以前这里单独设一份 QTextBrowser 样式，把 MessageView 自己的背景冲掉了。
+        self.chat_area.apply_theme(
             f"QScrollBar:vertical {{ width: 6px; background: transparent; margin: 4px 2px 4px 0px; }}"
             f"QScrollBar::handle:vertical {{ background: {self._t('chat_scroll_handle')}; border-radius: 3px; min-height: 30px; }}"
             f"QScrollBar::handle:vertical:hover {{ background: {self._t('chat_scroll_handle_hover')}; }}"

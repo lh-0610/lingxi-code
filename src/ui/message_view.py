@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from .helpers import strip_leading_emoji
 from .fonts import MONO_CSS, UI_CSS
+from .theme import color as theme_color
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -23,34 +24,16 @@ except Exception:  # QtSvg 理论上随 PySide6 自带；缺了降级成无图�
     QSvgRenderer = None
 
 
-# ── 设计 token（浅色） ──
-_P = {
-    "indigo":        "#5b6cf0",
-    "indigo_soft":   "#eef0fe",
-    "orange":        "#ef7a45",
-    "text":          "#222838",
-    "text2":         "#2b3142",
-    "text3":         "#3a4150",
-    "text_sec":      "#5a6172",
-    "muted":         "#7a8092",
-    "muted2":        "#9aa0b0",
-    "muted3":        "#aeb3c0",
-    "card_bg":       "#ffffff",
-    "card_border":   "#ebecf1",
-    "header_bg":     "#f7f8fa",
-    "result_bg":     "#fafbfc",
-    "result_border": "#f0f0f3",
-    "chip_border":   "#e3e4ea",
-    "chip_hover":    "#c8cbf3",
-    "box_border":    "#cdd1dc",
-    "panel_accent":  "#c8cbf3",
-    "spin_track":    "#dfe2f0",
-    # JSON 高亮
-    "json_key":      "#9a6bd6",
-    "json_str":      "#3a8a5f",
-    "json_num":      "#c2783f",
-    "json_punct":    "#5a6172",
-}
+class _ThemePalette:
+    """消息流配色：_P["indigo"] 取的是当前主题的 mv_indigo（定义在 theme.THEMES）。
+
+    每次取都现查当前主题，所以控件要在构造 / 绘制时取色；切主题后由 ChatUI 重绘消息流。
+    """
+    def __getitem__(self, key):
+        return theme_color("mv_" + key)
+
+
+_P = _ThemePalette()
 
 _SANS = UI_CSS
 _MONO = MONO_CSS
@@ -517,9 +500,8 @@ class MessageView(QScrollArea):
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setStyleSheet("#messageView { background:#ffffff; border:none; }")
         self._content = QWidget()
-        self._content.setStyleSheet("background:#ffffff;")
+        self.apply_theme()
         self._col = QVBoxLayout(self._content)
         self._col.setContentsMargins(32, 32, 32, 28)
         self._col.setSpacing(0)
@@ -528,6 +510,14 @@ class MessageView(QScrollArea):
         self.setWidget(self._content)
         self._cur_user = None
         self._cur_assistant = None
+
+    def apply_theme(self, extra_qss=""):
+        """背景跟当前主题走。extra_qss 是宿主补充的滚动条等样式——setStyleSheet 会整体替换，
+        所以必须和背景一起设，分开设的话后设的会把背景冲掉（深色下聊天区一直是白底就是这个原因）。
+        已经画出来的消息块不会自己变色，切主题后由 ChatUI 重绘消息流。"""
+        bg = _P["view_bg"]
+        self.setStyleSheet(f"#messageView {{ background:{bg}; border:none; }}" + extra_qss)
+        self._content.setStyleSheet(f"background:{bg};")
 
     def clear(self):
         while self._col.count() > 1:   # 留最后的 stretch
@@ -597,7 +587,7 @@ class MessageView(QScrollArea):
             b.setIconSize(QSize(15, 15))
             b.setStyleSheet(
                 "#msgAction { border:none; background:transparent; border-radius:8px; } "
-                "#msgAction:hover { background:#f2f3f6; }")
+                f"#msgAction:hover {{ background:{_P['header_bg']}; }}")
             if cb is not None:
                 b.clicked.connect(lambda _checked=False, c=cb: c())
             h.addWidget(b, 0, Qt.AlignVCenter)
@@ -662,20 +652,21 @@ class MessageView(QScrollArea):
         card.setAttribute(Qt.WA_StyledBackground, True)
         card.setObjectName("retryCard")
         card.setStyleSheet(
-            "#retryCard { background:#fde7e3; border:1px solid #f3c4b6; border-radius:10px; }")
+            f"#retryCard {{ background:{_P['err_bg']}; border:1px solid {_P['err_border']}; "
+            "border-radius:10px; }")
         cv = QVBoxLayout(card)
         cv.setContentsMargins(14, 12, 14, 12)
         cv.setSpacing(8)
         msg = QLabel(_esc(error_msg))
         msg.setWordWrap(True)
-        msg.setStyleSheet("color:#c0492f; font-size:13px; background:transparent;")
+        msg.setStyleSheet(f"color:{_P['err_text']}; font-size:13px; background:transparent;")
         cv.addWidget(msg)
         btn = QPushButton("↻ 重试")
         btn.setCursor(Qt.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton { background:#ffffff; border:1px solid #f3c4b6; border-radius:8px; "
-            "padding:5px 16px; color:#c0492f; font-size:13px; } "
-            "QPushButton:hover { background:#fde7e3; }")
+            f"QPushButton {{ background:{_P['card_bg']}; border:1px solid {_P['err_border']}; "
+            f"border-radius:8px; padding:5px 16px; color:{_P['err_text']}; font-size:13px; }} "
+            f"QPushButton:hover {{ background:{_P['err_bg']}; }}")
         if on_retry is not None:
             btn.clicked.connect(lambda: on_retry())
         row = QHBoxLayout()

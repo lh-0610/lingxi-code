@@ -24,13 +24,13 @@ _STATE_LABELS = {
     input_queue.NEEDS_CHECK: "待核对",
 }
 
-_STATE_COLORS = {   # (bg, border, text) 的主题键后缀由 ChatUI 的取色函数决定
-    input_queue.QUEUED: "#5b6cf0",
-    input_queue.HELD: "#c07f00",
-    input_queue.DISPATCHING: "#888888",
-    input_queue.ADMITTED: "#2f9e44",
-    input_queue.DONE: "#888888",
-    input_queue.NEEDS_CHECK: "#d9480f",
+_STATE_COLORS = {   # 主题色键名；画行时经 ChatUI 的取色函数按当前主题取值
+    input_queue.QUEUED: "mv_indigo",
+    input_queue.HELD: "mv_orange",
+    input_queue.DISPATCHING: "mv_muted",
+    input_queue.ADMITTED: "mv_ok",
+    input_queue.DONE: "mv_muted",
+    input_queue.NEEDS_CHECK: "mv_bad",
 }
 
 
@@ -82,6 +82,20 @@ class QueuePanel(QWidget):
         self._rows_layout.setSpacing(4)
         self._scroll.setWidget(self._rows_host)
         outer.addWidget(self._scroll)
+        self.apply_theme()
+
+    def apply_theme(self):
+        """文字、按钮、滚动区背景跟主题走。不设的话用的是系统浅色调色板，深色下会是白底。
+        行内状态色在 _build_row 里按当前主题取，切主题后由 ChatUI 重画一次队列。"""
+        c = self._color
+        self.setStyleSheet(
+            f"QLabel {{ color: {c('text')}; }}"
+            f"QPushButton {{ color: {c('text')}; background: {c('mv_card_bg')};"
+            f" border: 1px solid {c('mv_chip_border')}; border-radius: 6px; }}"
+            f"QPushButton:hover {{ border-color: {c('mv_chip_hover')}; }}")
+        self._state_label.setStyleSheet(f"color: {c('text_dim')}; font-size: 12px;")
+        for w in (self._scroll.viewport(), self._rows_host):
+            w.setStyleSheet("background: transparent;")
 
     # ── 渲染 ──
 
@@ -129,7 +143,7 @@ class QueuePanel(QWidget):
 
         state = it.get("state") or input_queue.QUEUED
         chip = QLabel(_STATE_LABELS.get(state, state))
-        color = _STATE_COLORS.get(state, "#888888")
+        color = self._color(_STATE_COLORS.get(state, "mv_muted"))
         chip.setStyleSheet(
             f"color: {color}; border: 1px solid {color}; border-radius: 6px;"
             "padding: 0 6px; font-size: 12px;")
@@ -147,7 +161,7 @@ class QueuePanel(QWidget):
         if note:
             note_lbl = QLabel(input_queue.excerpt(note, 40))
             note_lbl.setToolTip(note)
-            note_lbl.setStyleSheet("color: #c07f00; font-size: 12px;")
+            note_lbl.setStyleSheet(f"color: {self._color('mv_orange')}; font-size: 12px;")
             lay.addWidget(note_lbl)
 
         if state == input_queue.QUEUED:
@@ -171,7 +185,7 @@ class QueuePanel(QWidget):
             status = it.get("outcome_status") or ""
             mark = "✓" if status == "completed" else f"✗ {status}"
             done = QLabel(mark)
-            done.setStyleSheet("color: #888888; font-size: 12px;")
+            done.setStyleSheet(f"color: {self._color('mv_muted')}; font-size: 12px;")
             lay.addWidget(done)
         return row
 
