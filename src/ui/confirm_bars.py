@@ -536,8 +536,6 @@ class ConfirmBarsMixin:
         self._cmd_confirm_cwd.setVisible(bool(cwd))
 
         self.command_confirm_bar.setVisible(True)
-        if hasattr(self, "_schedule_plan_panel_reflow"):
-            self._schedule_plan_panel_reflow()
         # 清空反馈输入框
         self.command_confirm_feedback.clear()
         # 注：手机确认推送由 confirm_command 的 push_confirm 接管（完整命令 + inline 按钮），
@@ -581,8 +579,6 @@ class ConfirmBarsMixin:
         self.command_confirm_bar.setVisible(False)
         self.command_confirm_text.clear()
         self._command_confirm_destructive = False
-        if hasattr(self, "_schedule_plan_panel_reflow"):
-            self._schedule_plan_panel_reflow()
 
     def _release_pending_confirm(self):
         """关窗 / 退出时唤醒任何挂在 confirm_command 上的 worker，避免无限挂起。
@@ -826,8 +822,6 @@ class ConfirmBarsMixin:
         # diff 渲染：加号绿色 / 减号红色 / 头部信息灰色
         self.edit_confirm_diff.setHtml(self._format_diff_html(diff_text))
         self.edit_confirm_bar.setVisible(True)
-        if hasattr(self, "_schedule_plan_panel_reflow"):
-            self._schedule_plan_panel_reflow()
         self.edit_confirm_bar.setFocus()
         # 清空反馈输入框
         self.edit_confirm_feedback.clear()
@@ -857,8 +851,6 @@ class ConfirmBarsMixin:
         self.edit_confirm_bar.setVisible(False)
         self.edit_confirm_diff.clear()
         self.edit_confirm_path.setText("")
-        if hasattr(self, "_schedule_plan_panel_reflow"):
-            self._schedule_plan_panel_reflow()
 
     def _release_pending_edit(self):
         """关窗 / 退出时唤醒挂着的 edit confirm 请求，避免 worker 无限挂起。"""

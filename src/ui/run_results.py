@@ -42,6 +42,9 @@ class RunResultMixin:
         if self._rendered_result_run_id == run_id and run_id:
             return      # 重复信号：同一轮只画一张卡
         self._render_result_card(snapshot)
+        # 这一轮的检查都落定了：任务面板的验证状态与证据跟着刷新
+        if hasattr(self, "_render_plan_panel"):
+            self._render_plan_panel()
 
     def _render_result_card(self, snapshot):
         from .. import result_view

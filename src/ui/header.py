@@ -144,6 +144,16 @@ class HeaderMixin:
         self.theme_btn.clicked.connect(self._toggle_theme)
         layout.addWidget(self.theme_btn)
 
+        # 任务面板开关：面板停靠在右侧，这里收起 / 展开（选择会被记住）
+        self.task_panel_btn = QPushButton("任务")
+        self.task_panel_btn.setCursor(Qt.PointingHandCursor)
+        self.task_panel_btn.setCheckable(True)
+        self.task_panel_btn.setToolTip("任务面板：要求、计划、验证状态与证据")
+        self._style_task_panel_btn()
+        self.task_panel_btn.toggled.connect(lambda _: self._style_task_panel_btn())
+        self.task_panel_btn.clicked.connect(lambda _=False: self._toggle_task_panel())
+        layout.addWidget(self.task_panel_btn)
+
         parent_layout.addWidget(header)
 
     # ── 顶栏响应式 ──
@@ -178,6 +188,8 @@ class HeaderMixin:
             else:
                 self.think_btn.setText("思考 开" if self.think_btn.isChecked() else "思考 关")
             self.think_btn.setToolTip("思考模式：让模型显式输出 reasoning 过程")
+        if hasattr(self, "task_panel_btn"):
+            self.task_panel_btn.setText("" if level == 2 else "任务")
         # 段控（计划|执行）始终显示两字短词，无需折叠
         # undo_btn
         if hasattr(self, "undo_btn"):
@@ -545,6 +557,20 @@ class HeaderMixin:
         self.think_btn.setIconSize(QSize(16, 16))
         self.think_btn.setStyleSheet(
             f"QPushButton {{ border-radius: 8px; padding: 9px 16px; font-size: 12px; }}"
+            f"QPushButton:checked {{ background: {self._t('think_on_bg')}; border: 1px solid {self._t('think_on_border')}; color: {self._t('think_on_text')}; }}"
+            f"QPushButton:!checked {{ background: {self._t('think_off_bg')}; border: 1px solid {self._t('think_off_border')}; color: {self._t('think_off_text')}; }}"
+            f"QPushButton:hover:checked {{ background: {self._t('think_on_hover')}; border-color: {self._t('think_on_hover_border')}; }}"
+            f"QPushButton:hover:!checked {{ border-color: {self._t('think_off_hover_border')}; color: {self._t('think_off_hover_text')}; }}"
+        )
+
+    def _style_task_panel_btn(self):
+        """和思考开关同一套开 / 关配色。"""
+        on = self.task_panel_btn.isChecked()
+        color = self._t("think_on_text") if on else self._t("think_off_text")
+        self.task_panel_btn.setIcon(self._svg_icon("clipboard-list.svg", color))
+        self.task_panel_btn.setIconSize(QSize(16, 16))
+        self.task_panel_btn.setStyleSheet(
+            f"QPushButton {{ border-radius: 8px; padding: 9px 14px; font-size: 12px; }}"
             f"QPushButton:checked {{ background: {self._t('think_on_bg')}; border: 1px solid {self._t('think_on_border')}; color: {self._t('think_on_text')}; }}"
             f"QPushButton:!checked {{ background: {self._t('think_off_bg')}; border: 1px solid {self._t('think_off_border')}; color: {self._t('think_off_text')}; }}"
             f"QPushButton:hover:checked {{ background: {self._t('think_on_hover')}; border-color: {self._t('think_on_hover_border')}; }}"

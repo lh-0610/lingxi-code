@@ -6,26 +6,27 @@
    - 展示用户设定的固定限制（pinned_constraints）
    - [编辑限制] 按钮呼出编辑框，带 1000 字符硬预算校验与生效提示
 2. 计划与进展（Plan & Progress）：
-   - 计划步骤状态图标、进度条与动态 spinner
+   - 计划步骤圆标（完成 / 进行中 / 待办）与进度条；进行中的圆环只在本轮运行时转动
    - 最近计划变动原因与摘要
    - 新任务切换可撤销横幅：已开始新任务（原因：……）[撤销任务切换]
 3. 执行与核对（Execution & Verification）：
    - 尚未解除的验证义务（verification_status 的缺口判定，与运行态注入同一结论）
+4. 验证证据：每项检查最后一次的结论（与结果卡共用 result_view.effective_rows 的归并），
+   过期的照实标出；再列本会话还在跑的后台命令。
 
-普通问答保持简单：无任务且无计划时面板隐藏。
+面板停靠在主窗口最右侧（不再是浮层）。普通问答保持简单：无任务且无计划时面板隐藏；
+用户可以在顶栏收起，窗口太窄时由 ChatUI 自动收起。
 """
 from __future__ import annotations
 
-import base64
 import html
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QTextDocument
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -39,11 +40,15 @@ from PySide6.QtWidgets import (
 
 from .. import memory
 from .. import task_state as _ts
+from .fonts import MONO_CSS
 
-_REQUEST_SOURCE_NOTES = {
-    "legacy_unknown": "<span style='color:#b45309;'>；来源未确认</span>",
-    "missing": "<span style='color:#b45309;'>；原文已不在历史中</span>",
+_REQUEST_SOURCE_NOTES = {   # 画的时候按当前主题上色
+    "legacy_unknown": "；来源未确认",
+    "missing": "；原文已不在历史中",
 }
+
+_EVIDENCE_MAX = 6   # 验证证据最多列几行，其余折成"另有 N 项"
+_EVIDENCE_COLORS = {"passed": "mv_ok", "failed": "mv_bad", "error": "mv_bad", "timeout": "mv_orange"}
 
 
 def _one_line(text: str, limit: int) -> str:
@@ -226,10 +231,56 @@ class EditConstraintsDialog(QDialog):
         self.char_count_label.setStyleSheet("font-size: 12px; color: #ef4444; font-weight: 600;")
 
 
-class TaskPanel(QFrame):
-    """三段式任务面板浮层控件。
+_STEP_NAMES = {"done": "完成", "in_progress": "进行中"}
 
-    与现有 `chat_window.py` 接口保持完全兼容（self.plan_panel / show_plan / adjustSize 等）。
+
+class _StepMarker(QWidget):
+    """计划步骤前的 14px 圆标：完成是实心圆加勾，进行中是带缺口的圆环，待办是空心圆。
+
+    自己画而不是塞进富文本：转动时只重绘这一个小控件，不用整段 HTML 每帧重排。
+    颜色在绘制时按当前主题取，切换深浅色后重绘即可。
+    """
+
+    SIZE = 14
+
+    def __init__(self, status: str, theme_lookup: Callable[[str], str], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.status = status
+        self._t = theme_lookup
+        self.angle = 0
+        name = _STEP_NAMES.get(status, "待办")
+        self.setAccessibleName(name)
+        self.setToolTip(name)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if self.status == "done":
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(self._t("mv_ok")))
+            p.drawEllipse(QRectF(0, 0, self.SIZE, self.SIZE))
+            pen = QPen(QColor(self._t("sidebar_bg")), 1.8)   # 勾用面板底色，深浅色下都看得清
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.drawPolyline([QPointF(4.4, 7.3), QPointF(6.2, 9.0), QPointF(9.6, 5.0)])
+        elif self.status == "in_progress":
+            pen = QPen(QColor(self._t("mv_indigo")), 2)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            # 缺口朝右（和设计稿一致），转动时整段弧顺时针走
+            p.drawArc(QRectF(1, 1, self.SIZE - 2, self.SIZE - 2), (45 - self.angle) * 16, 270 * 16)
+        else:
+            p.setPen(QPen(QColor(self._t("mv_muted")), 1.5))
+            p.drawEllipse(QRectF(1.25, 1.25, self.SIZE - 2.5, self.SIZE - 2.5))
+        p.end()
+
+
+class TaskPanel(QFrame):
+    """任务面板：停靠在主窗口最右侧，固定 360 宽、和窗口一样高，内容多了在面板里滚动。
+
+    与现有 `chat_window.py` 接口保持兼容（self.plan_panel / render_session 等）。
     """
 
     def __init__(self, parent: QWidget, theme_lookup: Callable[[str], str]):
@@ -238,19 +289,21 @@ class TaskPanel(QFrame):
         self.theme_lookup = theme_lookup
         self.setVisible(False)
         self.setFixedWidth(360)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
-
-        # 阴影效果
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(30)
-        shadow.setXOffset(0)
-        shadow.setYOffset(8)
-        shadow.setColor(QColor(40, 50, 90, 20))
-        self.setGraphicsEffect(shadow)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self._has_content = False   # 有任务或计划
+        self._collapsed = False     # 用户收起 / 窗口太窄
+        # 面板显示时每 2 秒刷新一次验证证据：工具跑完、后台命令的已运行时间都能跟上，
+        # 不必等下一次计划更新。只读内存里的记录，很便宜。
+        self._evidence_sess = None
+        self._evidence_timer = QTimer(self)
+        self._evidence_timer.setInterval(2000)
+        self._evidence_timer.timeout.connect(self._refresh_evidence)
 
         self._plan_items: list[dict] = []
+        self._plan_markers: list[_StepMarker] = []   # 进行中步骤的圆标，转动时逐个重绘
         self._plan_spinner_angle = 0
         self._plan_spinner_timer = QTimer(self)
+        self._plan_spinner_timer.setInterval(33)
         self._plan_spinner_timer.timeout.connect(self._tick_plan_spinner)
         self.on_undo_request: Callable[[], None] | None = None
 
@@ -265,7 +318,7 @@ class TaskPanel(QFrame):
 
     def _build_ui(self):
         root_lay = QVBoxLayout(self)
-        root_lay.setContentsMargins(16, 14, 16, 14)
+        root_lay.setContentsMargins(18, 16, 18, 16)
         root_lay.setSpacing(8)
 
         # ── 顶栏：标题 + 任务标识 + 总体进度 ──
@@ -276,8 +329,9 @@ class TaskPanel(QFrame):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(6)
 
-        self.plan_title_icon = QLabel(self.top_row)
+        self.plan_title_icon = QLabel(self.top_row)   # 旧属性，ChatUI 仍有别名；标题前不放图标
         self.plan_title_icon.setFixedSize(16, 16)
+        self.plan_title_icon.setVisible(False)
         self.plan_title = QLabel("任务目标与计划", self.top_row)
         self.plan_title.setTextFormat(Qt.RichText)
         self.plan_count = QLabel(self.top_row)
@@ -308,7 +362,7 @@ class TaskPanel(QFrame):
         self.content_widget.setStyleSheet("background:transparent;")
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 4, 0, 4)
-        self.content_layout.setSpacing(10)
+        self.content_layout.setSpacing(12)
 
         # 1. 任务切换可撤销横幅（新任务切换时展示）
         self.switch_banner = QFrame(self.content_widget)
@@ -319,21 +373,8 @@ class TaskPanel(QFrame):
         banner_lay.setSpacing(6)
         self.banner_text = QLabel(self.switch_banner)
         self.banner_text.setWordWrap(True)
-        self.banner_text.setStyleSheet("font-size: 12px; color: #854d0e; font-weight: 600;")
         self.undo_btn = QPushButton("撤销任务切换", self.switch_banner)
         self.undo_btn.setCursor(Qt.PointingHandCursor)
-        self.undo_btn.setStyleSheet(
-            "QPushButton {"
-            "  border: 1px solid #ca8a04;"
-            "  border-radius: 4px;"
-            "  padding: 2px 8px;"
-            "  background: #fef08a;"
-            "  color: #713f12;"
-            "  font-size: 12px;"
-            "  font-weight: 600;"
-            "}"
-            "QPushButton:hover { background: #fde047; }"
-        )
         self.undo_btn.clicked.connect(self._on_undo_click)
         banner_lay.addWidget(self.banner_text, 1)
         banner_lay.addWidget(self.undo_btn, 0)
@@ -343,7 +384,7 @@ class TaskPanel(QFrame):
         self.sec1_frame = QFrame(self.content_widget)
         self.sec1_frame.setObjectName("secFrame")
         sec1_lay = QVBoxLayout(self.sec1_frame)
-        sec1_lay.setContentsMargins(8, 8, 8, 8)
+        sec1_lay.setContentsMargins(0, 12, 0, 4)
         sec1_lay.setSpacing(6)
 
         sec1_head = QHBoxLayout()
@@ -352,17 +393,6 @@ class TaskPanel(QFrame):
         self.sec1_title.setStyleSheet("font-size: 12px; font-weight: 600;")
         self.edit_constraints_btn = QPushButton("编辑限制", self.sec1_frame)
         self.edit_constraints_btn.setCursor(Qt.PointingHandCursor)
-        self.edit_constraints_btn.setStyleSheet(
-            "QPushButton {"
-            "  border: 1px solid #94a3b8;"
-            "  border-radius: 4px;"
-            "  padding: 1px 7px;"
-            "  background: transparent;"
-            "  color: #475569;"
-            "  font-size: 12px;"
-            "}"
-            "QPushButton:hover { background: #f1f5f9; color: #1e293b; }"
-        )
         self.edit_constraints_btn.clicked.connect(self._on_edit_constraints)
         sec1_head.addWidget(self.sec1_title)
         sec1_head.addStretch(1)
@@ -386,32 +416,33 @@ class TaskPanel(QFrame):
         self.sec2_frame = QFrame(self.content_widget)
         self.sec2_frame.setObjectName("secFrame")
         sec2_lay = QVBoxLayout(self.sec2_frame)
-        sec2_lay.setContentsMargins(8, 8, 8, 8)
+        sec2_lay.setContentsMargins(0, 12, 0, 4)
         sec2_lay.setSpacing(6)
 
         self.sec2_title = QLabel("执行计划步骤", self.sec2_frame)
         self.sec2_title.setStyleSheet("font-size: 12px; font-weight: 600;")
         sec2_lay.addWidget(self.sec2_title)
 
+        # 步骤一行一个：左边圆标，右边文字（_render_plan_rows 重建）
+        self.plan_body = QWidget(self.sec2_frame)
+        self.plan_rows_lay = QVBoxLayout(self.plan_body)
+        self.plan_rows_lay.setContentsMargins(0, 2, 0, 2)
+        self.plan_rows_lay.setSpacing(8)
+        sec2_lay.addWidget(self.plan_body)
+
+        # 最近一次计划变动，排在步骤下面
         self.plan_change_note = QLabel(self.sec2_frame)
         self.plan_change_note.setWordWrap(True)
         self.plan_change_note.setTextFormat(Qt.RichText)
         self.plan_change_note.setVisible(False)
-        self.plan_change_note.setStyleSheet("font-size: 12px; color: #0284c7; background: #e0f2fe; border-radius: 4px; padding: 4px 6px;")
         sec2_lay.addWidget(self.plan_change_note)
-
-        self.plan_body = QLabel(self.sec2_frame)
-        self.plan_body.setTextFormat(Qt.RichText)
-        self.plan_body.setWordWrap(True)
-        self.plan_body.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        sec2_lay.addWidget(self.plan_body)
         self.content_layout.addWidget(self.sec2_frame)
 
         # 4. Section 3：执行与验证
         self.sec3_frame = QFrame(self.content_widget)
         self.sec3_frame.setObjectName("secFrame")
         sec3_lay = QVBoxLayout(self.sec3_frame)
-        sec3_lay.setContentsMargins(8, 8, 8, 8)
+        sec3_lay.setContentsMargins(0, 12, 0, 4)
         sec3_lay.setSpacing(4)
 
         self.sec3_title = QLabel("执行与验证状态", self.sec3_frame)
@@ -425,61 +456,91 @@ class TaskPanel(QFrame):
         sec3_lay.addWidget(self.verification_status_label)
         self.content_layout.addWidget(self.sec3_frame)
 
+        # 5. Section 4：验证证据
+        self.sec4_frame = QFrame(self.content_widget)
+        self.sec4_frame.setObjectName("secFrame")
+        sec4_lay = QVBoxLayout(self.sec4_frame)
+        sec4_lay.setContentsMargins(0, 12, 0, 4)
+        sec4_lay.setSpacing(6)
+        self.sec4_title = QLabel("验证证据", self.sec4_frame)
+        sec4_lay.addWidget(self.sec4_title)
+        self.evidence_label = QLabel(self.sec4_frame)
+        self.evidence_label.setWordWrap(True)
+        self.evidence_label.setTextFormat(Qt.RichText)
+        self.evidence_label.setStyleSheet("font-size: 12px;")
+        sec4_lay.addWidget(self.evidence_label)
+        self.content_layout.addWidget(self.sec4_frame)
+        self.content_layout.addStretch(1)
+
         self.plan_scroll.setWidget(self.content_widget)
-        root_lay.addWidget(self.plan_scroll)
+        root_lay.addWidget(self.plan_scroll, 1)
 
     def apply_theme(self):
-        """应用主题样式。"""
-        bg_col = self._t("scroll_btn_bg")
-        border_col = self._t("sidebar_border")
-        title_col = self._t("thinking")
-        muted_col = self._t("thinking_msg")
-
+        """停靠样式：和侧栏同底色、左边一条分隔线；分段之间只用一条细线隔开。"""
+        bg = self._t("sidebar_bg")
+        line = self._t("sidebar_border")
+        text = self._t("text")
+        dim = self._t("text_dim")
+        accent = self._t("mv_indigo")
+        chip = self._t("mv_chip_border")
         self.setStyleSheet(
-            f"QFrame#planPanel {{"
-            f"  background: {bg_col};"
-            f"  border: 1px solid {border_col};"
-            f"  border-radius: 14px;"
-            f"}}"
-            f"QFrame#secFrame {{"
-            f"  background: transparent;"
-            f"  border: 1px solid {border_col};"
-            f"  border-radius: 8px;"
-            f"}}"
-            f"QFrame#switchBanner {{"
-            f"  background: #fef9c3;"
-            f"  border: 1px solid #fde047;"
-            f"  border-radius: 6px;"
-            f"}}"
+            f"QFrame#planPanel {{ background: {bg}; border: none; border-left: 1px solid {line}; }}"
+            f"QFrame#secFrame {{ background: transparent; border: none; border-top: 1px solid {line}; }}"
+            f"QFrame#switchBanner {{ background: {self._t('mv_indigo_soft')}; border: none; border-radius: 8px; }}"
+            f"QLabel {{ color: {text}; background: transparent; }}"
+            f"QLabel#planStep {{ font-size: 13px; color: {text}; }}"
+            f"QLabel#planStepDone {{ font-size: 13px; color: {self._t('mv_text_sec')}; }}"
         )
-        self.plan_title.setStyleSheet(f"background:transparent; font-size:14px; font-weight:600; color:{title_col};")
-        self.plan_count.setStyleSheet(f"font-size:12px; color:{muted_col};")
-        self.sec1_title.setStyleSheet(f"font-size:12px; font-weight:600; color:{title_col};")
-        self.sec2_title.setStyleSheet(f"font-size:12px; font-weight:600; color:{title_col};")
-        self.sec3_title.setStyleSheet(f"font-size:12px; font-weight:600; color:{title_col};")
-
+        for marker in self.findChildren(_StepMarker):
+            marker.update()
+        self.plan_title.setStyleSheet(f"font-size:14px; font-weight:600; color:{text};")
+        self.plan_count.setStyleSheet(f"font-size:12px; color:{dim};")
+        for title in (self.sec1_title, self.sec2_title, self.sec3_title, self.sec4_title):
+            title.setStyleSheet(f"font-size:13px; font-weight:600; color:{text};")
+        btn_qss = (
+            f"QPushButton {{ border: 1px solid {chip}; border-radius: 8px; padding: 2px 10px;"
+            f" background: {self._t('mv_card_bg')}; color: {text}; font-size: 12px; }}"
+            f"QPushButton:hover {{ border-color: {self._t('mv_chip_hover')}; }}"
+        )
+        self.edit_constraints_btn.setStyleSheet(btn_qss)
+        self.undo_btn.setStyleSheet(btn_qss)
+        self.banner_text.setStyleSheet(f"font-size: 12px; color: {text};")
+        self.plan_change_note.setStyleSheet(
+            f"font-size: 12px; color: {dim}; background: {self._t('mv_header_bg')};"
+            " border-radius: 6px; padding: 4px 8px;")
         self.plan_progress.setStyleSheet(
-            "QProgressBar {"
-            f"  background: {border_col};"
-            "  border: none;"
-            "  border-radius: 2px;"
-            "}"
-            "QProgressBar::chunk {"
-            f"  background: {title_col};"
-            "  border-radius: 2px;"
-            "}"
+            f"QProgressBar {{ background: {chip}; border: none; border-radius: 2px; }}"
+            f"QProgressBar::chunk {{ background: {accent}; border-radius: 2px; }}"
         )
         self.plan_scroll.setStyleSheet(
             "QScrollArea { background:transparent; border:none; }"
-            "QScrollBar:vertical {"
-            "  background:transparent; width:5px; margin:2px 0 2px 0;"
-            "}"
-            "QScrollBar::handle:vertical {"
-            f"  background:{self._t('scroll_btn_border')};"
-            "  border-radius:2px; min-height:24px;"
-            "}"
+            "QScrollBar:vertical { background:transparent; width:5px; margin:2px 0 2px 0; }"
+            f"QScrollBar::handle:vertical {{ background:{chip}; border-radius:2px; min-height:24px; }}"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"
         )
+
+    def set_collapsed(self, collapsed: bool):
+        """用户收起或窗口太窄时不占位置；有内容且没收起才显示。"""
+        self._collapsed = bool(collapsed)
+        self.setVisible(self._has_content and not self._collapsed)
+
+    def has_content(self) -> bool:
+        return self._has_content
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._evidence_timer.start()
+        self._refresh_evidence()   # 收起期间可能跑完了检查、圆环也该接着转 / 停
+
+    def hideEvent(self, event):
+        self._evidence_timer.stop()
+        self.set_running(False)   # 看不见就不转，圆环回到缺口朝右
+        super().hideEvent(event)
+
+    def _refresh_evidence(self):
+        if self._evidence_sess is not None:
+            self._render_evidence(self._evidence_sess)
+            self._sync_spinner(self._evidence_sess)
 
     def _on_undo_click(self):
         if self.on_undo_request:
@@ -496,56 +557,54 @@ class TaskPanel(QFrame):
                 show(dlg.save_warning, "error")
 
     def _tick_plan_spinner(self):
-        self._plan_spinner_angle = (self._plan_spinner_angle + 30) % 360
-        if self._plan_items:
-            self._render_plan_rows(self._plan_items)
+        self._plan_spinner_angle = (self._plan_spinner_angle + 12) % 360
+        for marker in self._plan_markers:
+            marker.angle = self._plan_spinner_angle
+            marker.update()
 
-    def _plan_spinner_svg(self, color: str, size: int = 15) -> str:
-        svg = (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
-            f'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="3" '
-            f'stroke-linecap="round" stroke-linejoin="round">'
-            f'<g transform="rotate({self._plan_spinner_angle} 12 12)">'
-            f'<path d="M21 12a9 9 0 1 1-3.2-6.9"/></g></svg>'
-        )
-        data = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-        return (
-            f'<img src="data:image/svg+xml;base64,{data}" width="{size}" height="{size}" '
-            f'style="vertical-align:middle;" />'
-        )
+    def _sync_spinner(self, sess: Any):
+        self.set_running(bool(getattr(sess, "is_generating", False)))
+
+    def set_running(self, running: bool):
+        """有进行中的步骤、且这一轮确实在跑时才转；停下来就是一个静止的缺口圆环。"""
+        spinning = bool(self._plan_markers) and running
+        if spinning and not self._plan_spinner_timer.isActive():
+            self._plan_spinner_timer.start()
+        elif not spinning and self._plan_spinner_timer.isActive():
+            self._plan_spinner_timer.stop()
+            self._plan_spinner_angle = 0
+            for marker in self._plan_markers:
+                marker.angle = 0
+                marker.update()
 
     def _render_plan_rows(self, items: list[dict]):
-        title_color = self._t("thinking")
-        muted_color = self._t("thinking_msg")
-        hl_bg = self._t("thinking_bg")
-        rows = []
+        while self.plan_rows_lay.count():
+            w = self.plan_rows_lay.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        self._plan_markers = []
         for it in items:
-            txt = (it.get("text") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             status = it.get("status")
-            if status == "done":
-                icon = '<span style="color:#10b981; font-weight:600; font-size:13px;">✓</span>'
-                label, label_color = "完成", "#10b981"
-                text_style = f"color:{muted_color};"
-                cell_bg = ""
-            elif status == "in_progress":
-                icon = self._plan_spinner_svg(title_color, 14)
-                label, label_color = "进行中", title_color
-                text_style = f"color:{title_color};font-weight:600;"
-                cell_bg = f"background:{hl_bg};"
-            else:
-                icon = '<span style="color:#94a3b8; font-size:12px;">○</span>'
-                label, label_color = "待办", muted_color
-                text_style = ""
-                cell_bg = ""
-            rows.append(
-                '<tr>'
-                f'<td width="20" style="{cell_bg}padding:2px 0 3px 4px;vertical-align:top;">{icon}</td>'
-                f'<td style="{cell_bg}{text_style}padding:2px 6px 3px 2px;line-height:1.35;">'
-                f'<span style="color:{label_color};font-size:12px;">{label}</span>&nbsp;{txt}</td>'
-                '</tr>'
-            )
-        html_text = '<table cellspacing="0" cellpadding="0" width="100%">' + "".join(rows) + "</table>"
-        self.plan_body.setText(html_text)
+            row = QWidget(self.plan_body)
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(10)
+            # 第一行文字约 19px 高、圆标 14px：圆标下移 3px，对齐第一行的中线
+            marker_box = QVBoxLayout()
+            marker_box.setContentsMargins(0, 3, 0, 0)
+            marker = _StepMarker(status, self._t, row)
+            marker.angle = self._plan_spinner_angle
+            marker_box.addWidget(marker)
+            marker_box.addStretch(1)
+            lay.addLayout(marker_box)
+            label = QLabel(it.get("text") or "", row)
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(True)
+            label.setObjectName("planStepDone" if status == "done" else "planStep")   # 颜色见 apply_theme
+            lay.addWidget(label, 1)
+            self.plan_rows_lay.addWidget(row)
+            if status == "in_progress":
+                self._plan_markers.append(marker)
 
     def render_session(self, sess: Any):
         """核心渲染入口：由主线程调度渲染当前会话的任务面板。"""
@@ -557,8 +616,12 @@ class TaskPanel(QFrame):
         # 普通问答无任务且无计划：隐藏面板，不打扰用户
         if not task and not items:
             self._plan_spinner_timer.stop()
+            self._has_content = False
+            self._evidence_sess = None
             self.setVisible(False)
             return
+        muted = self._t("mv_muted")
+        warn = self._t("mv_orange")
 
         # ── 1. 顶栏总体进度 ──
         done = sum(1 for it in items if it.get("status") == "done")
@@ -590,35 +653,32 @@ class TaskPanel(QFrame):
             txt = html.escape(it.get("text", "")[:120])
             mid = html.escape(it.get("id", ""))
             # 来源如实标注：旧会话里说不清是谁写的，原文不在历史里的，都不能画得和用户原话一样
-            source_note = _REQUEST_SOURCE_NOTES.get(it.get("kind"), "")
+            note = _REQUEST_SOURCE_NOTES.get(it.get("kind"), "")
+            source_note = f"<span style='color:{warn};'>{note}</span>" if note else ""
             req_lines.append(
-                f"<b>{prefix}</b>（<span style='color:#64748b;'>{mid[:10]}</span>{source_note}）：{txt}")
+                f"<b>{prefix}</b>（<span style='color:{muted};'>{mid[:10]}</span>{source_note}）：{txt}")
 
         if not req_lines:
-            req_lines.append("<span style='color:#94a3b8;'>暂无关联的用户需求来源</span>")
+            req_lines.append(f"<span style='color:{muted};'>暂无关联的用户需求来源</span>")
         self.requests_label.setText("<br>".join(req_lines))
 
         constraints = (task.get("pinned_constraints") or []) if task else []
         if constraints:
             c_html = ["<b>固定限制</b>（严格遵守）："]
             for c in constraints:
-                c_html.append(f"• <span style='color:#2563eb;'>{html.escape(c)}</span>")
+                c_html.append(f"• {html.escape(c)}")
             self.constraints_label.setText("<br>".join(c_html))
         else:
-            self.constraints_label.setText("<span style='color:#94a3b8;'>暂无固定限制（点击上方编辑添加）</span>")
+            self.constraints_label.setText(f"<span style='color:{muted};'>暂无固定限制（点击上方编辑添加）</span>")
 
         # ── 4. Section 2：计划步骤与变动 ──
         if items:
             self.sec2_frame.setVisible(True)
             self._render_plan_rows(items)
-            if any(it.get("status") == "in_progress" for it in items):
-                if not self._plan_spinner_timer.isActive():
-                    self._plan_spinner_timer.start(80)
-            else:
-                self._plan_spinner_timer.stop()
         else:
             self.sec2_frame.setVisible(False)
-            self._plan_spinner_timer.stop()
+            self._render_plan_rows([])
+        self._sync_spinner(sess)
 
         reason = (task.get("last_plan_change_reason") or "") if task else ""
         summary = (task.get("last_plan_change_summary") or "") if task else ""
@@ -642,44 +702,80 @@ class TaskPanel(QFrame):
         v_status_lines = []
         if gaps:
             v_status_lines.append(
-                f"<span style='color:#ea580c; font-weight:600;'>待完成的验证（{len(gaps)} 项）：</span>")
+                f"<span style='color:{warn}; font-weight:600;'>待完成的验证（{len(gaps)} 项）：</span>")
             for g in gaps[:4]:
                 v_status_lines.append(
-                    f"• <span style='color:#c2410c;'>{html.escape(_one_line(g, 90))}</span>")
+                    f"• <span style='color:{warn};'>{html.escape(_one_line(g, 90))}</span>")
             if len(gaps) > 4:
                 v_status_lines.append(f"（另有 {len(gaps) - 4} 项）")
         elif st["state"] == "failed":
-            v_status_lines.append(f"<span style='color:#dc2626; font-weight:600;'>最近的检查有 {st['failed']} 项未通过</span>")
+            v_status_lines.append(
+                f"<span style='color:{self._t('mv_bad')}; font-weight:600;'>最近的检查有 {st['failed']} 项未通过</span>")
         elif st["state"] == "checked":
             v_status_lines.append(
-                f"<span style='color:#16a34a;'>已执行的检查通过（{st['passed']} 项）</span>"
-                "<span style='color:#94a3b8;'>；不代表所有要求都已满足</span>")
+                f"<span style='color:{self._t('mv_ok')};'>已执行的检查通过（{st['passed']} 项）</span>"
+                f"<span style='color:{muted};'>；不代表所有要求都已满足</span>")
         elif st["inconclusive"]:
             # 跑过但结论是未执行/已取消/结果未知：说成"尚未执行检查"就抹掉了跑过这件事
             v_status_lines.append(
-                f"<span style='color:#b45309;'>已尝试 {st['inconclusive']} 项检查，但没有得到通过结论"
+                f"<span style='color:{warn};'>已尝试 {st['inconclusive']} 项检查，但没有得到通过结论"
                 "（未执行、已取消或结果未知）</span>")
         else:
-            v_status_lines.append("<span style='color:#94a3b8;'>尚未执行检查，没有验证证据</span>")
+            v_status_lines.append(f"<span style='color:{muted};'>尚未执行检查，没有验证证据</span>")
         self.verification_status_label.setText("<br>".join(v_status_lines))
 
-        self.layout().invalidate()
-        self.layout().activate()
-        self.setVisible(True)
-        self.raise_()
-        self._fit_height()
+        # ── 6. Section 4：验证证据 ──
+        self._evidence_sess = sess
+        self._render_evidence(sess)
 
-    def _fit_height(self):
-        """自适应高度，最大不超过聊天区高度的 70% 或 460px。"""
-        doc = QTextDocument()
-        doc.setDefaultFont(self.font())
-        doc.setTextWidth(self.width() - 36)
+        self._has_content = True
+        self.setVisible(not self._collapsed)
 
-        # 估算内容高度并给滚动区设置合适的高度
-        parent_h = self.parentWidget().height() if self.parentWidget() else 600
-        max_h = min(480, max(120, parent_h - 120))
+    def _render_evidence(self, sess: Any):
+        """每项检查只列最后一次的结论——和结果卡共用 result_view.effective_rows 的归并，
+        两边对同一项检查不会说出不同的话；过期的照实标出。再列本会话还在跑的后台命令。
+        没有记录就说没有，不编一条"通过"。"""
+        from .. import background, result_view, run_records
+        try:
+            _rows, latest = result_view.effective_rows(
+                {"evidence": run_records.collect_evidence(getattr(sess, "verification", None))})
+        except Exception:
+            latest = []
+        try:
+            sid = getattr(sess, "current_session_id", None)
+            running = [s for s in background.list_snapshots()
+                       if sid and s.get("running") and s.get("session_id") == sid]
+        except Exception:
+            running = []
 
-        content_h = self.content_widget.sizeHint().height()
-        scroll_target = min(content_h + 10, max_h - 60)
-        self.plan_scroll.setFixedHeight(scroll_target)
-        self.setFixedHeight(scroll_target + 60)
+        rows = []
+        for snap in running:
+            mins, secs = divmod(int(snap.get("elapsed_s") or 0), 60)
+            rows.append((snap.get("command") or "", f"运行中 {mins} 分 {secs:02d} 秒", self._t("mv_indigo")))
+        for row in reversed(latest):   # 最近的在上
+            name = row.get("command") or " ".join(
+                x for x in (row.get("checker"), row.get("path")) if x) or "检查"
+            if row.get("stale"):
+                rows.append((name, f"{row.get('label') or ''}（已过期）", self._t("mv_muted")))
+            else:
+                key = _EVIDENCE_COLORS.get(row.get("status"), "mv_muted")
+                rows.append((name, row.get("label") or "", self._t(key)))
+
+        if not rows:
+            self.evidence_label.setText(
+                f"<span style='color:{self._t('mv_muted')};'>还没有检查记录</span>")
+            return
+        dim = self._t("text_dim")
+        cells = []
+        for name, label, color in rows[:_EVIDENCE_MAX]:
+            cells.append(
+                "<tr>"
+                f"<td style=\"font-family:{MONO_CSS}; color:{dim}; padding:2px 10px 2px 0;\">"
+                f"{html.escape(_one_line(name, 40))}</td>"
+                f"<td align=\"right\" style=\"color:{color}; padding:2px 0;\">{html.escape(label)}</td>"
+                "</tr>")
+        more = ""
+        if len(rows) > _EVIDENCE_MAX:
+            more = f"<div style='color:{self._t('mv_muted')};'>另有 {len(rows) - _EVIDENCE_MAX} 项</div>"
+        self.evidence_label.setText(
+            '<table cellspacing="0" cellpadding="0" width="100%">' + "".join(cells) + "</table>" + more)

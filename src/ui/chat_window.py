@@ -135,6 +135,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._apply_theme()
         self._redraw_chat()
         self._refresh_queue_panel()
+        self._render_plan_panel()   # 面板里的状态行和证据也是按旧主题取的色
 
     # ── 设置弹窗 ──
 
@@ -221,6 +222,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._style_model_combo()
         if hasattr(self, "think_btn"):
             self._style_think_btn()
+        if hasattr(self, "task_panel_btn"):
+            self._style_task_panel_btn()
         # 段控（计划|执行）样式走全局 QSS，setStyleSheet 重建即生效，无需单独刷
         if hasattr(self, "undo_btn"):
             self._style_undo_btn()
@@ -282,11 +285,15 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
         self._build_header(right_layout)
         self._build_chat_area(right_layout)
-        self._build_plan_panel(right_layout)
         self._build_input_area(right_layout)
         self._build_footer(right_layout)
 
         main_layout.addWidget(right, 1)
+
+        # 任务面板停靠在最右侧；没有任务时隐藏，不占位置
+        self._build_plan_panel()
+        main_layout.addWidget(self.plan_panel)
+        self._apply_task_panel_collapse()
 
     # ── 侧边栏 ──
 
@@ -535,10 +542,17 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         sb.valueChanged.connect(self._on_scroll_changed)
         sb.rangeChanged.connect(self._on_scroll_changed)
 
-    def _build_plan_panel(self, parent_layout=None):
-        # 浮层：挂主窗口、定位到 chat_area 右上角（三段式任务目标与计划面板 B05）
+    # 窗口比这窄时自动收起任务面板，给对话让位置
+    _TASK_PANEL_MIN_WINDOW = 1100
+
+    def _build_plan_panel(self):
+        # 停靠在主窗口最右侧的一栏（B05 三段式 + 验证证据），由 _build_ui 放进主布局
         from .task_panel import TaskPanel
-        self.plan_panel = TaskPanel(self, theme_lookup=self._t)
+        self.plan_panel = TaskPanel(None, theme_lookup=self._t)
+        self._task_panel_user_collapsed = bool(_load_ui_prefs().get("task_panel_collapsed", False))
+        self._task_panel_force_open = False
+        # 面板出现 / 消失会改变对话栏宽度：输入框宽度和顶栏折叠档位要跟着重算
+        self.plan_panel.installEventFilter(self)
         self.plan_panel.on_undo_request = self._on_undo_task_switch
         # 兼容旧属性别名
         self.plan_title_icon = self.plan_panel.plan_title_icon
@@ -554,28 +568,28 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if hasattr(self, "plan_panel"):
             self.plan_panel.apply_theme()
 
-    def _position_plan_panel(self):
-        """将计划浮层定位到 chat_area 右上角。"""
-        if not hasattr(self, "plan_panel") or not self.plan_panel.isVisible():
-            return
-        panel = self.plan_panel
-        pos = self.chat_area.mapTo(self, self.chat_area.rect().topRight())
-        scrollbar_width = self.chat_area.verticalScrollBar().width()
-        right_clearance = scrollbar_width + 28
-        panel.move(pos.x() - panel.width() - right_clearance, pos.y() + 16)
+    def _task_panel_collapsed(self):
+        """用户收起，或窗口太窄且用户没有在窄窗口下手动打开过。"""
+        narrow = (self.width() < self._TASK_PANEL_MIN_WINDOW
+                  and not getattr(self, "_task_panel_force_open", False))
+        return getattr(self, "_task_panel_user_collapsed", False) or narrow
 
-    def _schedule_plan_panel_reflow(self):
-        """父布局高度变化后分阶段重算；Qt 的布局恢复不是同步完成的。"""
-        if not hasattr(self, "plan_panel") or not self.plan_panel.isVisible():
-            return
-        for delay in (0, 30, 120):
-            QTimer.singleShot(delay, self, self._position_plan_panel)
-
-    def _plan_panel_target_height(self):
-        """按当前浮层计算高度。"""
+    def _apply_task_panel_collapse(self):
         if hasattr(self, "plan_panel"):
-            return self.plan_panel.height()
-        return 200
+            self.plan_panel.set_collapsed(self._task_panel_collapsed())
+        btn = getattr(self, "task_panel_btn", None)
+        if btn is not None:
+            btn.setChecked(not self._task_panel_collapsed())
+
+    def _toggle_task_panel(self):
+        """顶栏开关。选择写进界面偏好；窄窗口下手动打开的，本次保持打开。"""
+        opening = self._task_panel_collapsed()
+        self._task_panel_user_collapsed = not opening
+        self._task_panel_force_open = opening and self.width() < self._TASK_PANEL_MIN_WINDOW
+        prefs = _load_ui_prefs()
+        prefs["task_panel_collapsed"] = self._task_panel_user_collapsed
+        _save_ui_prefs(prefs)
+        self._apply_task_panel_collapse()
 
     def _build_empty_state(self):
         self.empty_state = QWidget(self.chat_area.viewport())
@@ -1046,6 +1060,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             elif event.type() == event.Type.Leave:
                 self.img_btn.setIcon(self._img_btn_icon)
                 return False
+
+        if (hasattr(self, 'plan_panel') and obj is self.plan_panel
+                and event.type() in (event.Type.Show, event.Type.Hide)):
+            for delay in (0, 30):
+                QTimer.singleShot(delay, self, self._refresh_responsive_layout)
+            return False
         """Enter 发送，Shift+Enter 换行，Ctrl+V 粘贴图片"""
         if not hasattr(self, 'entry'):
             return super().eventFilter(obj, event)
@@ -1298,6 +1318,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 强制刷新样式
         self.send_btn.style().unpolish(self.send_btn)
         self.send_btn.style().polish(self.send_btn)
+        # 发送键跟着当前会话的运行状态走；任务面板里进行中的圆环同步转 / 停
+        if hasattr(self, "plan_panel"):
+            self.plan_panel.set_running(state == "stop")
 
     def _toggle_sidebar(self):
         self._sidebar_visible = not self._sidebar_visible
@@ -1310,8 +1333,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._position_empty_state()
         if hasattr(self, 'scroll_bottom_btn'):
             self._position_scroll_btn()
-        if hasattr(self, 'plan_panel') and self.plan_panel.isVisible():
-            self._position_plan_panel()
+        self._apply_task_panel_collapse()
         self._refresh_header_compactness()
 
 
@@ -1839,8 +1861,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self.plan_panel.setVisible(False)
             return
         self.plan_panel.render_session(sess)
-        if self.plan_panel.isVisible():
-            self._position_plan_panel()
+        self._apply_task_panel_collapse()
 
     def _on_undo_task_switch(self):
         """用户点击【撤销任务切换】。"""
@@ -1912,7 +1933,6 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 logger.error(f"撤销任务切换后保存失败（正文已写入={outcome.body_written}）: {save_error}")
             if hasattr(self, "plan_panel"):
                 self.plan_panel.render_session(sess)
-                self._position_plan_panel()
             if save_error is None:
                 self.show_message(msg, "system")
             elif outcome.body_written:
