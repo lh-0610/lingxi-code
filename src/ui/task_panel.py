@@ -14,15 +14,15 @@
 4. 验证证据：每项检查最后一次的结论（与结果卡共用 result_view.effective_rows 的归并），
    过期的照实标出；再列本会话还在跑的后台命令。
 
-面板停靠在主窗口最右侧（不再是浮层）。普通问答保持简单：无任务且无计划时面板隐藏；
-用户可以在顶栏收起，窗口太窄时由 ChatUI 自动收起。
+面板像 Claude / Codex 的侧栏一样由用户开关：顶栏按钮打开 / 收起，没有任务时显示空状态说明，
+不会因为普通问答自己消失。左边缘可以拖宽。窗口放不下时 ChatUI 把它改成盖在对话区上的浮层。
 """
 from __future__ import annotations
 
 import html
 from typing import Any, Callable
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog,
@@ -265,20 +265,32 @@ class _StepMarker(QWidget):
 
 
 class TaskPanel(QFrame):
-    """任务面板：停靠在主窗口最右侧，固定 360 宽、和窗口一样高，内容多了在面板里滚动。
+    """任务面板：主窗口最右侧的一栏，和窗口一样高，内容多了在面板里滚动。
+    显示与否由 ChatUI 决定（set_collapsed）；宽度可拖左边缘调整（width_changed 通知保存）。
 
     与现有 `chat_window.py` 接口保持兼容（self.plan_panel / render_session 等）。
     """
+
+    MIN_WIDTH = 300
+    MAX_WIDTH = 560
+    DEFAULT_WIDTH = 360
+    _GRIP = 6                        # 左边缘这么宽的一条可以拖动改宽度
+
+    width_changed = Signal(int)      # 拖完松手时发，ChatUI 记进界面偏好
 
     def __init__(self, parent: QWidget, theme_lookup: Callable[[str], str]):
         super().__init__(parent)
         self.setObjectName("planPanel")
         self.theme_lookup = theme_lookup
         self.setVisible(False)
-        self.setFixedWidth(360)
+        self.setFixedWidth(self.DEFAULT_WIDTH)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.setMouseTracking(True)      # 鼠标移到左边缘时换成左右拖动的光标
+        self._drag_from = None           # 拖宽时：(按下时的全局 x, 按下时的宽度)
+        self.max_width_fn: Callable[[], int] | None = None   # ChatUI 给：当前窗口下最多能拖多宽
+        self._overlay = False
         self._has_content = False   # 有任务或计划
-        self._collapsed = False     # 用户收起 / 窗口太窄
+        self._collapsed = False     # 用户收起 / 窗口放不下
         # 面板显示时每 2 秒刷新一次验证证据：工具跑完、后台命令的已运行时间都能跟上，
         # 不必等下一次计划更新。只读内存里的记录，很便宜。
         self._evidence_sess = None
@@ -296,6 +308,7 @@ class TaskPanel(QFrame):
 
         self._build_ui()
         self.apply_theme()
+        self._show_empty(True)        # 还没渲染过会话：先是空状态，不是一排空白标签
 
     def _t(self, key: str) -> str:
         try:
@@ -350,6 +363,28 @@ class TaskPanel(QFrame):
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 4, 0, 4)
         self.content_layout.setSpacing(12)
+
+        # 0. 空状态：还没有任务时面板也在，说明这里会出现什么；固定限制可以先加上
+        self.empty_box = QWidget(self.content_widget)
+        empty_lay = QVBoxLayout(self.empty_box)
+        empty_lay.setContentsMargins(0, 18, 0, 0)
+        empty_lay.setSpacing(8)
+        self.empty_title = QLabel("还没有任务", self.empty_box)
+        self.empty_title.setObjectName("emptyTitle")
+        self.empty_text = QLabel(
+            "开始一件需要几步才能做完的事，这里会列出你的要求、执行计划、验证状态和证据。"
+            "普通问答不会出现在这里。", self.empty_box)
+        self.empty_text.setObjectName("emptyText")
+        self.empty_text.setWordWrap(True)
+        self.empty_btn = QPushButton("添加固定限制", self.empty_box)
+        self.empty_btn.setCursor(Qt.PointingHandCursor)
+        self.empty_btn.setToolTip("先写下必须遵守的限制（如必须兼容 Windows），之后的任务都会照着做")
+        self.empty_btn.clicked.connect(self._on_edit_constraints)
+        empty_lay.addWidget(self.empty_title)
+        empty_lay.addWidget(self.empty_text)
+        empty_lay.addWidget(self.empty_btn, 0, Qt.AlignLeft)
+        self.empty_box.setVisible(False)
+        self.content_layout.addWidget(self.empty_box)
 
         # 1. 任务切换可撤销横幅（新任务切换时展示）
         self.switch_banner = QFrame(self.content_widget)
@@ -470,8 +505,12 @@ class TaskPanel(QFrame):
         dim = self._t("text_dim")
         accent = self._t("mv_indigo")
         chip = self._t("mv_chip_border")
+        # 浮层（窗口放不下时盖在对话区上）：左边一条更明显的分隔线，和对话区分开
+        edge = f"2px solid {self._t('mv_chip_border')}" if self._overlay else f"1px solid {line}"
         self.setStyleSheet(
-            f"QFrame#planPanel {{ background: {bg}; border: none; border-left: 1px solid {line}; }}"
+            f"QFrame#planPanel {{ background: {bg}; border: none; border-left: {edge}; }}"
+            f"QLabel#emptyTitle {{ font-size: 14px; font-weight: 600; color: {text}; }}"
+            f"QLabel#emptyText {{ font-size: 13px; color: {self._t('mv_text_sec')}; }}"
             f"QFrame#secFrame {{ background: transparent; border: none; border-top: 1px solid {line}; }}"
             f"QFrame#switchBanner {{ background: {self._t('mv_indigo_soft')}; border: none; border-radius: 8px; }}"
             f"QLabel {{ color: {text}; background: transparent; }}"
@@ -491,6 +530,7 @@ class TaskPanel(QFrame):
         )
         self.edit_constraints_btn.setStyleSheet(btn_qss)
         self.undo_btn.setStyleSheet(btn_qss)
+        self.empty_btn.setStyleSheet(btn_qss + "QPushButton { padding: 4px 12px; }")
         self.banner_text.setStyleSheet(f"font-size: 12px; color: {text};")
         self.plan_change_note.setStyleSheet(
             f"font-size: 12px; color: {dim}; background: {self._t('mv_header_bg')};"
@@ -507,9 +547,56 @@ class TaskPanel(QFrame):
         )
 
     def set_collapsed(self, collapsed: bool):
-        """用户收起或窗口太窄时不占位置；有内容且没收起才显示。"""
+        """显示 / 收起由 ChatUI 决定（用户的开关、窗口放不放得下）；有没有任务都显示，
+        没任务时是空状态。"""
         self._collapsed = bool(collapsed)
-        self.setVisible(self._has_content and not self._collapsed)
+        self.setVisible(not self._collapsed)
+
+    def set_overlay(self, overlay: bool):
+        """窗口放不下时 ChatUI 把面板改成盖在对话区上的浮层，样式上和停靠时略有区分。"""
+        if overlay != self._overlay:
+            self._overlay = overlay
+            self.apply_theme()
+
+    # —— 拖左边缘改宽度 ——
+    def _max_width(self) -> int:
+        limit = self.MAX_WIDTH
+        if self.max_width_fn is not None:
+            try:
+                limit = min(limit, int(self.max_width_fn()))
+            except Exception:
+                pass
+        return max(self.MIN_WIDTH, limit)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and event.position().x() <= self._GRIP:
+            self._drag_from = (event.globalPosition().x(), self.width())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_from is not None:
+            start_x, start_w = self._drag_from
+            width = int(start_w + (start_x - event.globalPosition().x()))   # 往左拖变宽
+            self.setFixedWidth(max(self.MIN_WIDTH, min(self._max_width(), width)))
+            event.accept()
+            return
+        self.setCursor(Qt.SizeHorCursor if event.position().x() <= self._GRIP else Qt.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_from is not None:
+            self._drag_from = None
+            self.width_changed.emit(self.width())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        if self._drag_from is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     def has_content(self) -> bool:
         return self._has_content
@@ -600,13 +687,14 @@ class TaskPanel(QFrame):
         items = list(getattr(sess, "current_plan", None) or [])
         self._plan_items = items
 
-        # 普通问答无任务且无计划：隐藏面板，不打扰用户
+        # 普通问答无任务且无计划：面板照常在（由用户开关），显示空状态说明
         if not task and not items:
             self._plan_spinner_timer.stop()
             self._has_content = False
             self._evidence_sess = None
-            self.setVisible(False)
+            self._show_empty(True)
             return
+        self._show_empty(False)
         muted = self._t("mv_muted")
         warn = self._t("mv_orange")
 
@@ -716,7 +804,17 @@ class TaskPanel(QFrame):
         self._render_evidence(sess)
 
         self._has_content = True
-        self.setVisible(not self._collapsed)
+
+    def _show_empty(self, empty: bool):
+        """空状态和三段内容二选一；计划段是否显示由 render_session 按有没有计划再定。"""
+        self.empty_box.setVisible(empty)
+        for w in (self.sec1_frame, self.sec3_frame, self.sec4_frame):
+            w.setVisible(not empty)
+        if empty:
+            self.sec2_frame.setVisible(False)
+            self.switch_banner.setVisible(False)
+            self.plan_count.setText("")
+            self.plan_progress.setVisible(False)
 
     def _render_evidence(self, sess: Any):
         """每项检查只列最后一次的结论——和结果卡共用 result_view.effective_rows 的归并，

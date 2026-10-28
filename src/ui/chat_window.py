@@ -289,9 +289,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
         main_layout.addWidget(right, 1)
 
-        # 任务面板停靠在最右侧；没有任务时隐藏，不占位置
+        # 任务面板在最右侧，像 Claude / Codex 的侧栏一样由顶栏按钮开关；
+        # 窗口放不下时改成盖在对话区上的浮层（见 _apply_task_panel_collapse）
+        self._main_layout = main_layout
         self._build_plan_panel()
         main_layout.addWidget(self.plan_panel)
+        self._task_panel_docked = True
         self._apply_task_panel_collapse()
 
     # ── 侧边栏 ──
@@ -584,16 +587,25 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         mode = getattr(_session.get_active(), "agent_mode", "act")
         return {"mode": "计划模式" if mode == "plan" else "执行模式"}
 
-    # 窗口比这窄时自动收起任务面板，给对话和顶栏让位置（面板 360 + 侧栏 248，顶栏至少还剩约 590）
-    _TASK_PANEL_MIN_WINDOW = 1200
+    # 面板停靠后，对话栏（含顶栏）至少要留这么宽，否则改成浮层——顶栏最窄一档约 590
+    _TASK_PANEL_MIN_CHAT = 592
 
     def _build_plan_panel(self):
-        # 停靠在主窗口最右侧的一栏（B05 三段式 + 验证证据），由 _build_ui 放进主布局
+        # 最右侧的一栏（B05 三段式 + 验证证据），由 _build_ui 放进主布局
         from .task_panel import TaskPanel
         self.plan_panel = TaskPanel(None, theme_lookup=self._t)
-        self._task_panel_user_collapsed = bool(_load_ui_prefs().get("task_panel_collapsed", False))
-        self._task_panel_force_open = False
-        # 面板出现 / 消失会改变对话栏宽度：输入框宽度和顶栏折叠档位要跟着重算
+        prefs = _load_ui_prefs()
+        # 用户的开关：默认打开，选择记在界面偏好里（沿用 task_panel_collapsed 这个键）
+        self._task_panel_open = not bool(prefs.get("task_panel_collapsed", False))
+        self._task_panel_overlay_open = False     # 窗口放不下时临时打开的浮层，不改偏好
+        try:
+            width = int(prefs.get("task_panel_width", TaskPanel.DEFAULT_WIDTH))
+        except (TypeError, ValueError):
+            width = TaskPanel.DEFAULT_WIDTH
+        self.plan_panel.setFixedWidth(max(TaskPanel.MIN_WIDTH, min(TaskPanel.MAX_WIDTH, width)))
+        self.plan_panel.max_width_fn = self._task_panel_max_width
+        self.plan_panel.width_changed.connect(self._on_task_panel_width_changed)
+        # 面板出现 / 消失 / 变宽会改变对话栏宽度：输入框宽度和顶栏折叠档位要跟着重算
         self.plan_panel.installEventFilter(self)
         self.plan_panel.on_undo_request = self._on_undo_task_switch
         # 兼容旧属性别名
@@ -610,28 +622,81 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if hasattr(self, "plan_panel"):
             self.plan_panel.apply_theme()
 
+    def _sidebar_shown_width(self):
+        side = getattr(self, "sidebar", None)
+        return side.width() if side is not None and getattr(self, "_sidebar_visible", True) else 0
+
+    def _task_panel_narrow(self):
+        """停靠进来的话，对话栏剩下的宽度不够：这时面板只能以浮层打开。"""
+        rest = self.width() - self._sidebar_shown_width() - self.plan_panel.width()
+        return rest < self._TASK_PANEL_MIN_CHAT
+
+    def _task_panel_max_width(self):
+        """拖宽的上限：停靠时不能把对话栏挤到放不下顶栏；浮层时只要不超出窗口。"""
+        if getattr(self, "_task_panel_docked", True):
+            return self.width() - self._sidebar_shown_width() - self._TASK_PANEL_MIN_CHAT
+        return self.width() - 120
+
     def _task_panel_collapsed(self):
-        """用户收起，或窗口太窄且用户没有在窄窗口下手动打开过。"""
-        narrow = (self.width() < self._TASK_PANEL_MIN_WINDOW
-                  and not getattr(self, "_task_panel_force_open", False))
-        return getattr(self, "_task_panel_user_collapsed", False) or narrow
+        narrow = self._task_panel_narrow()
+        return not (self._task_panel_overlay_open if narrow else self._task_panel_open)
 
     def _apply_task_panel_collapse(self):
-        if hasattr(self, "plan_panel"):
-            self.plan_panel.set_collapsed(self._task_panel_collapsed())
+        """按用户的开关和窗口宽度摆放面板：放得下就停靠在右边，放不下就收起，
+        这时点按钮以浮层打开（盖在对话区上，不挤压它）。"""
+        if not hasattr(self, "plan_panel"):
+            return
+        narrow = self._task_panel_narrow()
+        self._dock_task_panel(not narrow)
+        collapsed = self._task_panel_collapsed()
+        self.plan_panel.set_collapsed(collapsed)
+        if narrow and not collapsed:
+            self._position_task_panel_overlay()
         btn = getattr(self, "task_panel_btn", None)
         if btn is not None:
-            btn.setChecked(not self._task_panel_collapsed())
+            btn.setChecked(not collapsed)
+
+    def _dock_task_panel(self, dock):
+        if dock == getattr(self, "_task_panel_docked", True):
+            return
+        panel = self.plan_panel
+        if dock:
+            self._task_panel_overlay_open = False      # 回到停靠：浮层那次临时打开作废，按用户偏好来
+            panel.set_overlay(False)
+            self._main_layout.addWidget(panel)
+        else:
+            self._main_layout.removeWidget(panel)      # 仍是中心控件的子控件，按坐标摆成浮层
+            panel.set_overlay(True)
+        self._task_panel_docked = dock
+
+    def _position_task_panel_overlay(self):
+        """浮层贴在窗口最右边、从顶栏下面开始，盖在对话区上面——顶栏（包括开关它的按钮）一直能点。"""
+        host = self.plan_panel.parentWidget()
+        if host is None:
+            return
+        header = self.model_combo.parentWidget() if hasattr(self, "model_combo") else None
+        top = header.mapTo(host, QPoint(0, header.height())).y() if header is not None else 0
+        width = min(self.plan_panel.width(), max(self.plan_panel.MIN_WIDTH, host.width() - 120))
+        self.plan_panel.setFixedWidth(width)
+        self.plan_panel.setGeometry(host.width() - width, top, width, host.height() - top)
+        self.plan_panel.raise_()
 
     def _toggle_task_panel(self):
-        """顶栏开关。选择写进界面偏好；窄窗口下手动打开的，本次保持打开。"""
-        opening = self._task_panel_collapsed()
-        self._task_panel_user_collapsed = not opening
-        self._task_panel_force_open = opening and self.width() < self._TASK_PANEL_MIN_WINDOW
-        prefs = _load_ui_prefs()
-        prefs["task_panel_collapsed"] = self._task_panel_user_collapsed
-        _save_ui_prefs(prefs)
+        """顶栏开关。放得下时切换停靠的面板并记住选择；放不下时只开关这一次的浮层。"""
+        if self._task_panel_narrow():
+            self._task_panel_overlay_open = not self._task_panel_overlay_open
+        else:
+            self._task_panel_open = not self._task_panel_open
+            prefs = _load_ui_prefs()
+            prefs["task_panel_collapsed"] = not self._task_panel_open
+            _save_ui_prefs(prefs)
         self._apply_task_panel_collapse()
+
+    def _on_task_panel_width_changed(self, width):
+        prefs = _load_ui_prefs()
+        prefs["task_panel_width"] = int(width)
+        _save_ui_prefs(prefs)
+        self._refresh_responsive_layout()
 
     def _build_empty_state(self):
         self.empty_state = QWidget(self.chat_area.viewport())
@@ -1127,7 +1192,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 return False
 
         if (hasattr(self, 'plan_panel') and obj is self.plan_panel
-                and event.type() in (event.Type.Show, event.Type.Hide)):
+                and event.type() in (event.Type.Show, event.Type.Hide, event.Type.Resize)):
             for delay in (0, 30):
                 QTimer.singleShot(delay, self, self._refresh_responsive_layout)
             return False
@@ -1774,6 +1839,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if self._search_widget is not None and self._search_widget.isVisible():
                 self._close_search()
                 return
+            if getattr(self, "_task_panel_overlay_open", False) and not getattr(self, "_task_panel_docked", True):
+                self._task_panel_overlay_open = False     # 浮层打开时，Esc 收起它
+                self._apply_task_panel_collapse()
+                return
         # ---- #7 Ctrl+F ----
         if event.key() == Qt.Key_F and event.modifiers() & Qt.ControlModifier:
             self._toggle_search()
@@ -1950,7 +2019,6 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if not hasattr(self, "plan_panel"):
             return
         if not sess:
-            self.plan_panel.setVisible(False)
             return
         self.plan_panel.render_session(sess)
         self._apply_task_panel_collapse()

@@ -422,23 +422,24 @@ def test_task_panel_and_dialog_ui(clean_session, monkeypatch):
 
     panel = TaskPanel(None, theme_lookup=theme_fn)
 
-    # 1. 普通问答无任务无计划：隐藏
+    # 1. 普通问答无任务无计划：面板在（显示与否由用户开关决定），内容是空状态说明
     panel.render_session(sess)
-    assert panel.isVisible() is False
+    assert not panel.empty_box.isHidden() and panel.sec1_frame.isHidden()
+    assert "还没有任务" in panel.empty_title.text()
 
-    # 2. 建立任务后：正常显示三段式
+    # 2. 建立任务后：空状态让位给三段式
     tools.update_plan.func("[x] 第一步\n[~] 第二步\n[ ] 第三步")
     sess.current_task["pinned_constraints"] = ["必须兼容 Windows"]
     panel.render_session(sess)
-    assert panel.isVisible() is True
+    assert panel.empty_box.isHidden() and not panel.sec1_frame.isHidden()
     assert "1/3 完成" in panel.plan_count.text()
     assert "必须兼容 Windows" in panel.constraints_label.text()
-    assert panel.switch_banner.isVisible() is False
+    assert panel.switch_banner.isHidden()      # 面板本身是否显示由 ChatUI 决定，这里看横幅自己的显隐
 
     # 3. 切换新任务：显示可撤销横幅
     tools.update_plan.func("[ ] 新任务步骤", explanation="换做另外一件事", new_task=True)
     panel.render_session(sess)
-    assert panel.switch_banner.isVisible() is True
+    assert not panel.switch_banner.isHidden()
     assert "换做另外一件事" in panel.banner_text.text()
 
     # 4. 点击撤销按钮触发回调

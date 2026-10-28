@@ -207,7 +207,7 @@ class HeaderMixin:
 
     # 顶栏宽度（像素）到这以下就收一档：先把撤销 / 隔离 / 思考的文字收起只留图标，再收角色名。
     # 按各档实际要的宽度定（含按钮间距和左右边距），收完最窄一档约 590px——
-    # 任务面板只在窗口 ≥ 1200 时出现（chat_window._TASK_PANEL_MIN_WINDOW），顶栏不会比这更窄。
+    # 任务面板停靠时对话栏至少留 592（chat_window._TASK_PANEL_MIN_CHAT），顶栏不会比这更窄。
     _HEADER_FULL_WIDTH = 800
     _HEADER_COMPACT_WIDTH = 690
     # 模型框各档的总宽（QSS 的 min-width 只管文字区，左右内边距另算 38px）
