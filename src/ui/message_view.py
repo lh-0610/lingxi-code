@@ -246,9 +246,9 @@ class _Round(QWidget):
         self._nodes.append((widget, kind, info))
         self.update()
 
-    def collapse_process(self):
+    def collapse_process(self, *, need_answer=False):
         for turn in self.assistant_turns:
-            turn.collapse_process()
+            turn.collapse_process(need_answer=need_answer)
 
     def event(self, e):
         handled = super().event(e)
@@ -1008,15 +1008,38 @@ class AssistantTurn(QWidget):
         self.clear_waiting()
         self.end_tool()
 
-    def collapse_process(self):
-        """把思考、工具和步骤分段收成一行摘要（正文、提示和结果卡照常显示）。"""
+    def _answer_blocks(self, blocks):
+        """最后一段回复（最终回答）和它下面那排复制 / 重新生成按钮。"""
+        bodies = [i for i, b in enumerate(blocks) if isinstance(b.inner, BodyText)]
+        if not bodies:
+            return []
+        i = bodies[-1]
+        answer = [blocks[i]]
+        if i + 1 < len(blocks) and blocks[i + 1].inner.objectName() == "msgActions":
+            answer.append(blocks[i + 1])
+        return answer
+
+    def collapse_process(self, *, need_answer=False):
+        """把思考、工具、步骤分段和中间的过渡回复收成一行摘要，只露最后一段回复（最终回答）；
+        提示和结果卡照常显示。
+
+        need_answer：最后一块是回答才收——运行结束时用；停在工具上或报了错的那一轮先不收，
+        要看得到停在了哪。"""
         if self._summary is not None:
             return
-        blocks = [b for b in self._process if not _deleted(b)]
-        tools = sum(isinstance(b.inner, ToolCallCard) for b in blocks)
-        thinks = sum(isinstance(b.inner, ThinkingChip) for b in blocks)
+        layout = [self._v.itemAt(i).widget() for i in range(self._v.count())]
+        layout = [b for b in layout if isinstance(b, _Block) and not _deleted(b)]
+        answer = self._answer_blocks(layout)
+        if need_answer and (not layout or layout[-1] not in answer):
+            return
+        process = [b for b in self._process if not _deleted(b)]
+        tools = sum(isinstance(b.inner, ToolCallCard) for b in process)
+        thinks = sum(isinstance(b.inner, ThinkingChip) for b in process)
         if not tools and not thinks:
             return
+        between = [b for b in layout if b not in answer and b not in process
+                   and (isinstance(b.inner, BodyText) or b.inner.objectName() == "msgActions")]
+        blocks = sorted(process + between, key=self._v.indexOf)
         parts = []
         if tools:
             parts.append(f"调用了 {tools} 次工具")
@@ -1285,10 +1308,18 @@ class MessageView(QScrollArea):
         return self._cur_assistant
 
     def end_run(self):
-        """这一轮运行结束（停止、失败也算）：回复的用时定格，开着的块收尾。"""
+        """这一轮运行结束（停止、失败也算）：回复的用时定格，开着的块收尾；
+        有了最终回答就把过程连同中间回复收起来。"""
         if self._cur_round is not None:
             for turn in self._cur_round.assistant_turns:
                 turn.finish()
+        self.collapse_answered()
+
+    def collapse_answered(self):
+        """最后一轮已经以回答收尾：过程和中间的过渡回复收进「展开过程」，只留最终回答。
+        运行结束、重绘历史后各调一次（前面的轮次在下一轮开始时就收了）。"""
+        if self._cur_round is not None:
+            self._cur_round.collapse_process(need_answer=True)
 
     def on_plan(self, items):
         """任务计划变了：当前步骤换了就在这一轮里插一个步骤分段，已有分段更新状态。"""
@@ -1313,6 +1344,7 @@ class MessageView(QScrollArea):
         a = self._assistant()
         a.end_body()
         row = QWidget()
+        row.setObjectName("msgActions")   # 收起过程时跟着它上面那段回复一起收
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(4)

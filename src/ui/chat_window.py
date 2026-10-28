@@ -377,6 +377,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self.chat_area.replaying = False
         if not rendered_any:
             self._show_empty_state()
+        else:
+            from .. import session as _session
+            if not _session.get_active().is_generating:
+                # 和实时一致：已经以回答收尾的最后一轮也收起过程（还在生成的接着重放，不收）
+                self.chat_area.collapse_answered()
         self._redraw_result_card()
         # 计划面板的刷新已统一到 _reset_render_state（新建/切换/切项目三路共用漏斗），
         # 且 _load_session 调 _redraw_chat 前必先调 _reset_render_state，这里无需重复渲染。

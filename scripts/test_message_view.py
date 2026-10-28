@@ -290,6 +290,64 @@ class TestFind:
         mv.close()
 
 
+class TestFoldAfterAnswer:
+    """一轮以回答收尾：中间的过渡回复连同工具卡收进「展开过程」，只露最终回答（像 Claude / Codex）。"""
+
+    def _round(self, mv):
+        from PySide6.QtWidgets import QWidget
+        _round_with_reply(mv)
+        mv.handle("我去替你看看最新的消息。", "ai_msg")
+        mv.add_message_actions(on_copy=lambda: None)
+        _tool(mv, "📖 读取文件", "src/login.py", "def login(): ...\n")
+        return [w for w in mv.findChildren(QWidget) if w.objectName() == "msgActions"][0]
+
+    def test_finished_round_shows_only_the_final_answer(self, qt_app):
+        from src.ui.message_view import BodyText, ToolCallCard, _ProcessSummary
+        mv = _view()
+        actions = self._round(mv)
+        mv.handle("查到了：决赛在 11 月。", "ai_msg")
+        mv.end_run()
+        mv.show()
+        _pump(qt_app)
+        bodies = mv.findChildren(BodyText)
+        interim = next(b for b in bodies if "替你看看" in b.text())
+        final = next(b for b in bodies if "决赛" in b.text())
+        card = mv.findChildren(ToolCallCard)[0]
+        assert final.isVisibleTo(mv)
+        assert not interim.isVisibleTo(mv) and not actions.isVisibleTo(mv) and not card.isVisibleTo(mv)
+        summary = mv.findChildren(_ProcessSummary)[0]
+        summary.btn.click()
+        _pump(qt_app)
+        assert interim.isVisibleTo(mv) and card.isVisibleTo(mv), "展开过程能看到中间回复"
+        mv.close()
+
+    def test_run_stopped_on_a_tool_stays_open(self, qt_app):
+        from src.ui.message_view import BodyText, ToolCallCard, _ProcessSummary
+        mv = _view()
+        self._round(mv)
+        mv.end_run()
+        mv.show()
+        _pump(qt_app)
+        assert not mv.findChildren(_ProcessSummary), "停在工具上：先不收，看得到停在了哪"
+        assert mv.findChildren(ToolCallCard)[0].isVisibleTo(mv)
+        assert mv.findChildren(BodyText)[0].isVisibleTo(mv)
+        mv.close()
+
+    def test_next_round_folds_the_interim_reply_too(self, qt_app):
+        from src.ui.message_view import BodyText
+        mv = _view()
+        self._round(mv)
+        mv.handle("改好了。", "ai_msg")
+        mv.handle("你\n", "user_label")
+        mv.handle("再跑一下测试\n", "user_msg")
+        mv.show()
+        _pump(qt_app)
+        bodies = mv.findChildren(BodyText)
+        assert not next(b for b in bodies if "替你看看" in b.text()).isVisibleTo(mv)
+        assert next(b for b in bodies if "改好了" in b.text()).isVisibleTo(mv)
+        mv.close()
+
+
 class TestUserBubble:
     """用户说的话放在浅靛蓝气泡里，和 AI 的正文分得开；气泡宽度贴合文字。"""
 
