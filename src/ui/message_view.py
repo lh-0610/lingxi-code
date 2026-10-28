@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .helpers import strip_leading_emoji
-from .fonts import MONO_CSS, UI_CSS, mono_font
+from .fonts import BODY, MONO_CSS, UI_CSS, mono_font, ui_font
 from .theme import color as theme_color
 
 try:
@@ -805,6 +805,8 @@ class _ProcessSummary(QWidget):
 class UserTurn(QWidget):
     """用户的一句话：线上一个空心圆，右边是浅靛蓝底的气泡（宽度贴合文字，不再另加"你"标签）。
     只放原文时和 AI 的正文、过程说明长得一样，一轮里分不出哪句是用户说的。"""
+    _LINE_HEIGHT = 1.6
+
     def __init__(self, parent=None):
         super().__init__(parent)
         row = QHBoxLayout(self)
@@ -816,7 +818,12 @@ class UserTurn(QWidget):
         self.bubble.setStyleSheet(
             f"#userBubble {{ background:{_P['indigo_soft']}; border-radius:10px; }}")
         v = QVBoxLayout(self.bubble)
-        v.setContentsMargins(14, 8, 14, 8)   # 线上的空心圆对的是正文第一行（add_node 锚在 body 上）
+        # 行高放大多出来的那截，Qt 加在每一行下面，最后一行也一样：照常上下各留 8 的话，
+        # 底下比顶上多白一截，文字看着偏上。把这截从底部挪到顶部，文字上下就对称了。
+        # （线上的空心圆对的是正文第一行，add_node 锚在 body 上，不受影响。）
+        extra = round((self._LINE_HEIGHT - 1) * QFontMetricsF(ui_font(BODY)).height())
+        bottom = max(0, 8 - extra)
+        v.setContentsMargins(14, bottom + extra, 14, bottom)
         v.setSpacing(0)
         self.body = _FitLabel()
         self.body.setWordWrap(True)
@@ -835,7 +842,8 @@ class UserTurn(QWidget):
     def set_html(self, html):
         # 发送时文本末尾带着换行（旧分隔约定）：去掉，不然用户消息下面空出两行
         html = re.sub(r"^(?:\s*<br\s*/?>)+|(?:<br\s*/?>\s*)+$", "", (html or "").strip())
-        self.body.setText(f'<p style="margin:0; line-height:160%;">{html}</p>')
+        self.body.setText(
+            f'<p style="margin:0; line-height:{round(self._LINE_HEIGHT * 100)}%;">{html}</p>')
 
 
 class _Block(QWidget):

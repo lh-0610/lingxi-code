@@ -378,6 +378,26 @@ class TestUserBubble:
         img = turn.bubble.grab().toImage()
         assert img.pixelColor(4, turn.bubble.height() // 2).name() == _P["indigo_soft"]
 
+    @pytest.mark.parametrize("text", ["10/29 04:00是北京时间嘛", "第一行\n第二行比较长一点"])
+    def test_text_sits_in_the_middle(self, qt_app, text):
+        """行高放大多出来的那截 Qt 加在最后一行下面：不挪的话底下比顶上多白一截，文字偏上。
+        替代字体的行距和真实字体不同，量不出用户看到的样子，所以加载 Windows 系统字体来量。"""
+        from pathlib import Path
+        from PySide6.QtGui import QColor, QFontDatabase
+        from src.ui.message_view import _P
+        fonts = [Path("C:/Windows/Fonts") / n for n in ("SegUIVar.ttf", "segoeui.ttf", "msyh.ttc")]
+        if not all(f.exists() for f in fonts):
+            pytest.skip("需要 Windows 系统字体才能量真实的留白")
+        for f in fonts:
+            QFontDatabase.addApplicationFont(str(f))
+        mv, turn = self._bubble(qt_app, text)
+        img = turn.bubble.grab().toImage()
+        bg = QColor(_P["indigo_soft"]).getRgb()[:3]
+        ink = [y for y in range(img.height()) for x in range(img.width())
+               if sum(abs(a - b) for a, b in zip(img.pixelColor(x, y).getRgb()[:3], bg)) > 120]
+        top, bottom = min(ink), img.height() - 1 - max(ink)
+        assert abs(top - bottom) <= 2, f"文字上方留白 {top}px、下方 {bottom}px"
+
 
 class TestJumpToStep:
     def test_jumps_into_a_folded_round_and_highlights(self, qt_app):
