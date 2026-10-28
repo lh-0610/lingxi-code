@@ -185,8 +185,8 @@ class SettingsDialog(QDialog):
                 ("responses_api_key",  "API Key",  "sk-...（留空复用 DeepSeek key）", True),
                 ("responses_base_url", "Base URL", "https://api.deepseek.com",       False),
             ],
-            hint="OpenAI Responses 协议（DeepSeek V4-Flash 等挂在 /responses 端点）。"
-                 "目前仅支持 deepseek-v4-flash；思考链规整、支持语义化工具调用。"
+            hint="OpenAI Responses 协议（DeepSeek 等挂在 /responses 端点）。"
+                 "思考链规整、支持语义化工具调用。"
                  "挂其它支持 /responses 的网关就改 Base URL。",
             models_key="responses_models",
         )

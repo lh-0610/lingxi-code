@@ -40,9 +40,9 @@ QWEN_CLOUD_MODELS = _config.get("qwen_cloud_models", ["qwen3.5-plus", "qwen-max"
 OLLAMA_MODELS     = _config.get("ollama_models", ["qwen3.5:latest"])
 ANTHROPIC_MODELS  = _config.get("anthropic_models", ["claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"])
 GEMINI_MODELS     = _config.get("gemini_models", [])
-DEEPSEEK_MODELS   = _config.get("deepseek_models", ["deepseek-v4-flash", "deepseek-v4-pro"])
-# Responses API 模型列表（走 output_version="responses/v1"；DeepSeek 目前仅 v4-flash 支持）
-RESPONSES_MODELS  = _config.get("responses_models", ["deepseek-v4-flash"])
+DEEPSEEK_MODELS   = _config.get("deepseek_models", ["deepseek-flash", "deepseek-v4-pro"])
+# Responses API 模型列表（走 output_version="responses/v1"）
+RESPONSES_MODELS  = _config.get("responses_models", ["deepseek-flash"])
 CLAUDE_CODE_MODEL = _config.get("claude_code_model", "")
 # Claude Code 模式 Act 时是否给 CLI 带 --dangerously-skip-permissions（绕过 claude 全部
 # 权限检查、全自动）。**默认 False，更安全**：此时 Act 走 --permission-mode acceptEdits

@@ -7,8 +7,8 @@
 import pytest
 
 from src.llm_errors import (
-    AUTH, CONTEXT_OVERFLOW, RATE_LIMIT, TRANSIENT, UNKNOWN,
-    ContextOverflowError, classify, retry_after_seconds, retry_plan,
+    AUTH, CLIENT_ERROR, CONTEXT_OVERFLOW, RATE_LIMIT, TRANSIENT, UNKNOWN,
+    ContextOverflowError, classify, describe, retry_after_seconds, retry_plan,
 )
 
 
@@ -145,3 +145,89 @@ class TestRetryPlan:
     def test_last_attempt_stops(self):
         should, _, reason = retry_plan(_Err("timeout", status=503), 2, 3)
         assert should is False and "3" in reason
+
+
+# DeepSeek 2026-10 的真实返回（模型名写错）
+_DEEPSEEK_BAD_MODEL = (
+    "Error code: 400 - The supported API model names are deepseek-flash, deepseek-v4-pro, "
+    "but you passed deepseek-v4.1-flash. (request_id: 783a25d2-532f-41fd-8696-f2c290e34ee2)")
+
+
+class TestClientError:
+    """服务商明确拒绝的请求（其余 4xx）：不细分原因、不认具体模型名，原话交给用户。"""
+
+    @pytest.mark.parametrize("msg,status", [
+        (_DEEPSEEK_BAD_MODEL, 400),
+        ("The model `gpt-9` does not exist or you do not have access to it.", 404),
+        ("404 page not found", 404),
+        ("Unprocessable Entity", 422),
+    ])
+    def test_other_4xx(self, msg, status):
+        assert classify(_Err(msg, status=status)) == CLIENT_ERROR
+
+    def test_specific_4xx_meanings_still_win(self):
+        assert classify(_Err("Input is too long for requested model", status=400)) == CONTEXT_OVERFLOW
+        assert classify(_Err("boom", status=429)) == RATE_LIMIT
+        assert classify(_Err("boom", status=401)) == AUTH
+
+    def test_without_status_stays_unknown(self):
+        """拿不到状态码就不知道是不是服务商拒绝的，照旧退避重试。"""
+        assert classify(_Err(_DEEPSEEK_BAD_MODEL)) == UNKNOWN
+
+    def test_never_retries(self):
+        """服务商已经说了不行，等几秒也不会变：原来当 unknown 白重试三次。"""
+        should, _, reason = retry_plan(_Err(_DEEPSEEK_BAD_MODEL, status=400), 0, 3)
+        assert should is False and "400" in reason
+
+    def test_stream_gives_up_on_first_attempt(self, monkeypatch):
+        from src import streaming
+
+        class _LLM:
+            calls = 0
+
+            def stream(self, messages):
+                _LLM.calls += 1
+                raise _Err(_DEEPSEEK_BAD_MODEL, status=400)
+                yield
+
+        slept = []
+        monkeypatch.setattr(streaming.time, "sleep", lambda s: slept.append(s))
+        with pytest.raises(_Err):
+            list(streaming._stream_chunks_with_retry(_LLM(), []))
+        assert _LLM.calls == 1 and slept == []
+
+
+class TestDescribe:
+    """给用户看的中文白话：按状态码说，不把一大串英文原文甩给用户。"""
+
+    @pytest.mark.parametrize("status,words", [
+        (529, "爆满"), (503, "暂时不可用"), (402, "余额不足"), (429, "限流"),
+        (401, "key"), (404, "Base URL"),
+    ])
+    def test_common_status_codes(self, status, words):
+        text = describe(_Err("some long english error body", status=status))
+        assert words in text and f"（{status}）" in text and "english" not in text
+
+    def test_bad_model_name_points_to_settings(self):
+        text = describe(_Err(_DEEPSEEK_BAD_MODEL, status=400))
+        assert "模型名" in text and "设置" in text and "supported" not in text
+
+    def test_overflow_reported_as_too_long_not_as_400(self):
+        text = describe(_Err("maximum context length exceeded", status=400))
+        assert "上下文" in text and "400" not in text
+
+    def test_unlisted_codes_fall_back_by_range(self):
+        assert describe(_Err("x", status=418)) == "服务商拒绝了这个请求（418）"
+        assert describe(_Err("x", status=599)) == "服务商出错（599）"
+
+    def test_no_status_guessed_from_wording(self):
+        assert "爆满" in describe(_Err("Overloaded"))
+        assert "连不上" in describe(_Err("Read timed out"))
+
+    def test_unrecognized_returns_none(self):
+        assert describe(_Err("something entirely unexpected")) is None
+
+    def test_retry_notice_uses_plain_words(self):
+        """重试中的提示也说白话：529 不再显示成"模型请求失败"。"""
+        should, _, reason = retry_plan(_Err("overloaded_error", status=529), 0, 3)
+        assert should is True and "爆满" in reason

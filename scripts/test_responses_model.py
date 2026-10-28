@@ -37,7 +37,7 @@ def _find_responses_index():
 def test_create_llm_responses_output_version(monkeypatch):
     """responses 分支应创建 ChatOpenAI 且 output_version='responses/v1'。"""
     idx = _find_responses_index()
-    assert idx >= 0, "需要 config 里有 responses_models 条目（默认 deepseek-v4-flash）"
+    assert idx >= 0, "需要 config 里有 responses_models 条目（默认 deepseek-flash）"
     monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
     monkeypatch.setattr(models, "RESPONSES_BASE_URL", "https://api.deepseek.com")
     llm = _create_llm(model_index=idx, reasoning=True)

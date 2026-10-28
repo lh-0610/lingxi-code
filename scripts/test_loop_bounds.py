@@ -189,6 +189,42 @@ class TestOverflowRecovery:
         assert sess.overflow_squeeze <= _agent._MAX_OVERFLOW_RETRIES
 
 
+class TestRejectedRequest:
+    def test_retry_card_speaks_plain_chinese(self, agent_env, monkeypatch):
+        """服务商拒绝（4xx）：重试卡片说中文白话、指到哪里改；原来是截断的一串英文。"""
+        _agent, sess = agent_env
+        provider_says = ("Error code: 400 - The supported API model names are deepseek-flash, "
+                         "deepseek-v4-pro, but you passed deepseek-v4.1-flash. (request_id: abc)")
+
+        class _BadRequest(Exception):
+            status_code = 400
+
+        def _rejected(ui):
+            raise _BadRequest(provider_says)
+        monkeypatch.setattr(_agent, "_stream_with_tools", _rejected)
+
+        ui = _UI()
+        assert _agent.agent_loop(ui).status == "failed"
+        assert len(ui.retries) == 1
+        card = ui.retries[0]
+        assert "模型名" in card and "设置" in card and "日志" in card
+        assert "supported" not in card, "英文原文只进日志"
+
+    def test_cloud_connection_error_is_not_blamed_on_ollama(self, agent_env, monkeypatch):
+        """用的不是 Ollama 时，连不上就说连不上服务商，不能说"无法连接 Ollama 服务"。"""
+        _agent, sess = agent_env
+
+        class APIConnectionError(Exception):
+            pass
+
+        def _offline(ui):
+            raise APIConnectionError("Connection error.")
+        monkeypatch.setattr(_agent, "_stream_with_tools", _offline)
+        ui = _UI()
+        _agent.agent_loop(ui)
+        assert "连不上服务商" in ui.retries[0] and "Ollama" not in ui.retries[0]
+
+
 class TestBudgetSqueeze:
     def test_squeeze_shrinks_budget(self, monkeypatch):
         from src.streaming import _current_history_budget

@@ -25,6 +25,7 @@ RATE_LIMIT = "rate_limit"            # 限流，按 Retry-After 或退避后重�
 CONTEXT_OVERFLOW = "context_overflow"  # 上下文超窗，压缩后才有意义重试
 AUTH = "auth"                        # 鉴权/权限，重试无意义
 TRANSIENT = "transient"              # 瞬时网络/服务端错误，退避重试
+CLIENT_ERROR = "client_error"        # 其余 4xx：服务商明确拒绝了这个请求（模型名、参数……），重试无意义
 UNKNOWN = "unknown"                  # 认不出来，按原行为退避重试
 
 
@@ -69,7 +70,7 @@ def _status_of(exc) -> int | None:
 
 
 def classify(exc) -> str:
-    """把一个模型请求异常归类。返回上面五个常量之一。"""
+    """把一个模型请求异常归类。返回上面六个常量之一。"""
     if isinstance(exc, ContextOverflowError):
         return CONTEXT_OVERFLOW
     name = type(exc).__name__.lower()
@@ -82,7 +83,7 @@ def classify(exc) -> str:
         return RATE_LIMIT
     if status in (401, 403):
         return AUTH
-    if status in (408, 500, 502, 503, 504):
+    if status in (408, 500, 502, 503, 504, 529):   # 529：服务商过载（Anthropic 等）
         return TRANSIENT
 
     # ② 异常类名（各家 SDK 都爱用这几个名字）
@@ -103,6 +104,11 @@ def classify(exc) -> str:
         return AUTH
     if any(p in text for p in _TRANSIENT_PATTERNS):
         return TRANSIENT
+
+    # ④ 剩下的 4xx：服务商明确拒绝了这个请求（模型名不对、参数不对……）。不细分是哪种，
+    #    原话交给用户——服务商自己的说明比这里猜的准，加了新模型也不用跟着改。
+    if status is not None and 400 <= status < 500:
+        return CLIENT_ERROR
     return UNKNOWN
 
 
@@ -148,6 +154,8 @@ def retry_plan(exc, attempt: int, max_attempts: int) -> tuple[bool, float, str]:
     if kind == CONTEXT_OVERFLOW:
         # 不在这里退避重试：交给上层压缩后再发（原样重试必然再溢出）。
         return False, 0.0, "对话超出模型上下文窗口。"
+    if kind == CLIENT_ERROR:
+        return False, 0.0, f"{describe(exc)}，重试不会有帮助。"
     if last:
         return False, 0.0, f"重试 {max_attempts} 次仍失败。"
 
@@ -156,4 +164,56 @@ def retry_plan(exc, attempt: int, max_attempts: int) -> tuple[bool, float, str]:
         if delay is None:
             delay = float(2 ** attempt)
         return True, min(delay, MAX_RETRY_DELAY_S), "触发服务端限流"
-    return True, float(2 ** attempt), "模型请求失败"
+    return True, float(2 ** attempt), describe(exc) or "模型请求失败"
+
+
+# 给用户看的中文白话：重试提示和最终报错卡片用这些，服务商的英文原文只进日志。
+# 按状态码说，不认具体模型名——服务商加了新模型也不用跟着改。
+_STATUS_TEXT = {
+    400: "服务商说请求有误（400），常见原因是模型名写错，可到 设置 → 模型 里核对",
+    401: "API key 无效（401），请到 设置 → 模型 里检查 key",
+    402: "服务商账户余额不足（402），请到服务商后台充值",
+    403: "这个 key 没有权限（403），可能用不了这个模型或接口",
+    404: "服务商找不到这个接口或模型（404），请核对 Base URL 和模型名",
+    408: "请求超时（408）",
+    413: "这次发送的内容太大（413）",
+    422: "服务商说请求格式不对（422）",
+    429: "请求太频繁，被服务商限流了（429）",
+    500: "服务商内部出错（500）",
+    502: "服务商的网关出错（502）",
+    503: "服务商暂时不可用（503）",
+    504: "服务商响应超时（504）",
+    529: "服务商繁忙，暂时爆满了（529）",
+}
+# 没有状态码时按措辞猜（先命中先用）
+_TRANSIENT_TEXT = (
+    ("overloaded", "服务商繁忙，暂时爆满了"),
+    ("service unavailable", "服务商暂时不可用"),
+    ("bad gateway", "服务商的网关出错"),
+    ("internal server error", "服务商内部出错"),
+)
+
+
+def describe(exc) -> str | None:
+    """把一次模型请求失败说成一句中文白话；说不准就返回 None，由调用方照旧处理。"""
+    kind = classify(exc)
+    if kind == CONTEXT_OVERFLOW:
+        return "对话太长，超出了模型的上下文窗口"   # 很多服务商把超窗报成 400，按 400 说会说错
+    status = _status_of(exc)
+    if status in _STATUS_TEXT:
+        return _STATUS_TEXT[status]
+    if status is not None and 400 <= status < 500:
+        return f"服务商拒绝了这个请求（{status}）"
+    if status is not None and status >= 500:
+        return f"服务商出错（{status}）"
+    if kind == RATE_LIMIT:
+        return "请求太频繁，被服务商限流了"
+    if kind == AUTH:
+        return "API key 无效或没有权限，请到 设置 → 模型 里检查 key"
+    if kind == TRANSIENT:
+        text = f"{exc}".lower()
+        for pattern, plain in _TRANSIENT_TEXT:
+            if pattern in text:
+                return plain
+        return "连不上服务商（网络超时或连接被断开）"
+    return None

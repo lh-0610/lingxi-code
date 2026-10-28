@@ -659,12 +659,20 @@ def _report_loop_error(ui, e):
         _notify("error", "Agent 异常", str(e)[:300], "agent_error")
     except Exception:
         pass
-    # 简化错误信息显示
+    # 简化错误信息显示：说中文白话，英文原文只进上面的日志
     err_msg = str(e)
-    if "XML syntax error" in err_msg or "ResponseError" in err_msg:
+    from .llm_errors import describe
+    try:
+        is_ollama = MODEL_LIST[state.current_model_index][1] == "ollama"
+    except Exception:
+        is_ollama = False
+    plain = describe(e)
+    if is_ollama and ("XML syntax error" in err_msg or "ResponseError" in err_msg):
         display_err = "Ollama 模型输出格式异常"
-    elif "Connection" in err_msg or "refused" in err_msg:
+    elif is_ollama and ("Connection" in err_msg or "refused" in err_msg):
         display_err = "无法连接 Ollama 服务"
+    elif plain:
+        display_err = f"{plain}。英文原文记在日志里。"
     else:
         display_err = err_msg[:100]
     ui.show_retry(display_err)
