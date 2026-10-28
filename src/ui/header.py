@@ -33,17 +33,20 @@ class HeaderMixin:
     # ── 顶栏构造 ──
 
     def _build_header(self, parent_layout):
+        """顶栏（设计稿 A5）：左边侧栏开关 + 模型；右边一排不带边框的图标按钮——
+        撤销、隔离、计划 | 执行、思考、角色、搜索、深浅色、任务面板。
+        样式在 theme.py 的 #header 段，按钮只设 class / on 属性和按状态现画的图标。"""
         header = QWidget()
         header.setObjectName("header")
-        header.setFixedHeight(72)   # design_handoff：72px 顶栏,更宽松
+        header.setFixedHeight(56)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(20, 0, 24, 0)
-        layout.setSpacing(8)  # 缩紧按钮间距，留点喘息空间给窄窗口
+        layout.setContentsMargins(12, 0, 14, 0)
+        layout.setSpacing(6)
 
-        toggle_btn = QPushButton("☰")
+        toggle_btn = self._header_button("", "icon", "收起 / 展开侧栏")
         toggle_btn.setObjectName("toggleBtn")
-        toggle_btn.setCursor(Qt.PointingHandCursor)
         toggle_btn.clicked.connect(self._toggle_sidebar)
+        self.sidebar_toggle_btn = toggle_btn
         layout.addWidget(toggle_btn)
 
         # 品牌字符 — 灵犀（仅在主题 brand_visible 打开时显示）
@@ -78,17 +81,13 @@ class HeaderMixin:
         layout.addStretch()
 
         # 撤销按钮：用 file_history 的写前备份复原 AI 最近一次文件修改。无可撤销记录时按钮禁用
-        self.undo_btn = QPushButton("↶ 撤销")
-        self.undo_btn.setCursor(Qt.PointingHandCursor)
-        self.undo_btn.setToolTip("撤销 AI 最近一次有完整记录的文件修改（恢复写前内容）\n仅当前会话与当前工作区")
+        self.undo_btn = self._header_button("撤销", "ghost")
         self.undo_btn.clicked.connect(self._on_undo_click)
         self._style_undo_btn()
         layout.addWidget(self.undo_btn)
 
         # 隔离模式按钮（Git worktree 保护主目录）
-        self.isolation_btn = QPushButton("隔离")
-        self.isolation_btn.setCursor(Qt.PointingHandCursor)
-        self.isolation_btn.setToolTip("隔离模式：AI 在独立 worktree 目录操作，不影响主项目\n需项目已启用版本控制")
+        self.isolation_btn = self._header_button("隔离", "ghost")
         self.isolation_btn.clicked.connect(self._toggle_isolation)
         self._style_isolation_btn(active=False)
         self.isolation_btn.setVisible(False)  # 无项目时隐藏
@@ -98,12 +97,12 @@ class HeaderMixin:
         # 两个 checkable 按钮装进 #modeSeg 容器，选中态由 QSS :checked 驱动（见 theme.py）。
         self.mode_seg = QWidget()
         self.mode_seg.setObjectName("modeSeg")
-        # 关键:纯 QWidget 在 QHBoxLayout 里竖向默认 Preferred 会被拉伸填满 56px 顶栏高,
+        # 关键:纯 QWidget 在 QHBoxLayout 里竖向默认 Preferred 会被拉伸填满顶栏高,
         # 变成一个高灰块（QPushButton 竖向 Fixed 不会）。设 Fixed + 居中 → 收成和兄弟钮齐平的小药丸。
         self.mode_seg.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         _seg_lay = QHBoxLayout(self.mode_seg)
-        _seg_lay.setContentsMargins(3, 3, 3, 3)
-        _seg_lay.setSpacing(3)
+        _seg_lay.setContentsMargins(2, 2, 2, 2)
+        _seg_lay.setSpacing(2)
         self.plan_btn = QPushButton("计划")
         self.act_btn = QPushButton("执行")
         for _b in (self.plan_btn, self.act_btn):
@@ -120,111 +119,141 @@ class HeaderMixin:
         # 注：「编码/知识库」模式入口和知识库管理控件在左侧栏（rag_sidebar.py），顶栏不放
 
         # 思考模式开关
-        self.think_btn = QPushButton("思考")
-        self.think_btn.setCursor(Qt.PointingHandCursor)
+        self.think_btn = self._header_button("思考", "ghost", "思考模式：让模型显式输出推理过程")
         self.think_btn.setCheckable(True)
         self.think_btn.setChecked(True)
-        self._style_think_btn()
         self.think_btn.toggled.connect(lambda _: self._style_think_btn())
         self.think_btn.clicked.connect(self._toggle_thinking)
+        self._style_think_btn()
         layout.addWidget(self.think_btn)
 
         # 角色卡按钮
-        self.role_btn = QPushButton("角色卡")
-        self.role_btn.setCursor(Qt.PointingHandCursor)
+        self.role_btn = self._header_button("默认助手", "ghost")
         self._style_role_btn(active=False)
         self.role_btn.clicked.connect(self._load_role_card)
         layout.addWidget(self.role_btn)
 
-        # 主题切换按钮（文字显示当前主题：浅色 / 深色）
-        self.theme_btn = QPushButton("浅色" if self.theme == "light" else "深色")
+        # 对话内搜索（Ctrl+F）
+        self.search_btn = self._header_button("", "icon", "在对话中搜索（Ctrl+F）")
+        self.search_btn.clicked.connect(lambda _=False: self._toggle_search())
+        layout.addWidget(self.search_btn)
+
+        # 深浅色切换：图标是"切过去会变成什么"——浅色下显示月亮
+        self.theme_btn = self._header_button("", "icon")
         self.theme_btn.setObjectName("themeBtn")
-        self.theme_btn.setCursor(Qt.PointingHandCursor)
-        self.theme_btn.setToolTip("切到夜间模式" if self.theme == "light" else "切到白天模式")
         self.theme_btn.clicked.connect(self._toggle_theme)
         layout.addWidget(self.theme_btn)
 
         # 任务面板开关：面板停靠在右侧，这里收起 / 展开（选择会被记住）
-        self.task_panel_btn = QPushButton("任务")
-        self.task_panel_btn.setCursor(Qt.PointingHandCursor)
+        self.task_panel_btn = self._header_button("", "icon", "任务面板：要求、计划、验证状态与证据")
         self.task_panel_btn.setCheckable(True)
-        self.task_panel_btn.setToolTip("任务面板：要求、计划、验证状态与证据")
-        self._style_task_panel_btn()
         self.task_panel_btn.toggled.connect(lambda _: self._style_task_panel_btn())
         self.task_panel_btn.clicked.connect(lambda _=False: self._toggle_task_panel())
+        self._style_task_panel_btn()
         layout.addWidget(self.task_panel_btn)
 
         parent_layout.addWidget(header)
+        self._refresh_header_icons()
+
+    def _header_button(self, text, kind, tip=""):
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setProperty("class", kind)
+        btn.setIconSize(QSize(16, 16))
+        if tip:
+            btn.setToolTip(tip)
+            btn.setAccessibleName(tip.split("：")[0].split("（")[0])
+        return btn
+
+    @staticmethod
+    def _set_on(btn, on):
+        """非 checkable 的"开着"状态（隔离中、已加载角色卡）：给 QSS 的 [on="true"] 用。"""
+        if btn.property("on") != ("true" if on else "false"):
+            btn.setProperty("on", "true" if on else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def _header_icon_color(self, btn):
+        if not btn.isEnabled():
+            return self._t("mv_muted3")
+        if btn.isChecked() or btn.property("on") == "true":
+            return self._t("mv_indigo")
+        return self._t("mv_text_sec")
+
+    def _refresh_header_icons(self):
+        """顶栏图标按当前主题和各按钮状态重画（图标是单色 pixmap，跟不了 QSS 的文字色）。"""
+        specs = (
+            ("sidebar_toggle_btn", "panel-left.svg"),
+            ("undo_btn", "undo-2.svg"),
+            ("think_btn", "lightbulb.svg"),
+            ("role_btn", "user.svg"),
+            ("search_btn", "search.svg"),
+            ("theme_btn", "moon.svg" if self.theme == "light" else "sun.svg"),
+            ("task_panel_btn", "panel-right.svg"),
+        )
+        for attr, icon in specs:
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setIcon(self._svg_icon(icon, self._header_icon_color(btn)))
+        if hasattr(self, "theme_btn"):
+            self.theme_btn.setToolTip("切到深色" if self.theme == "light" else "切到浅色")
+            self.theme_btn.setAccessibleName(self.theme_btn.toolTip())
+        if hasattr(self, "isolation_btn"):
+            on = self.isolation_btn.property("on") == "true"
+            self.isolation_btn.setIcon(self._svg_icon(
+                "unlock.svg" if on else "lock.svg", self._header_icon_color(self.isolation_btn)))
 
     # ── 顶栏响应式 ──
 
-    def _refresh_header_compactness(self):
-        """窗口窄到一定宽度时，把顶栏按钮压成"图标 + 短文字" / "纯图标"两档，避免互相重叠。
+    # 顶栏宽度（像素）到这以下就收一档：先把撤销 / 隔离 / 思考的文字收起只留图标，再收角色名。
+    # 按各档实际要的宽度定（含按钮间距和左右边距），收完最窄一档约 590px——
+    # 任务面板只在窗口 ≥ 1200 时出现（chat_window._TASK_PANEL_MIN_WINDOW），顶栏不会比这更窄。
+    _HEADER_FULL_WIDTH = 800
+    _HEADER_COMPACT_WIDTH = 690
+    # 模型框各档的总宽（QSS 的 min-width 只管文字区，左右内边距另算 38px）
+    _MODEL_COMBO_WIDTHS = ((180, 260), (150, 210), (120, 170))
+    _MODEL_COMBO_PADDING = 38
 
-        阈值：
-          - >= 1100 px：正常模式，全文字
-          - 900 ~ 1100：紧凑模式，关键按钮（角色卡 / 思考 / Act / 撤销）只显示图标 + 短词
-          - < 900     ：超紧凑，纯图标
-        """
-        # 用【顶栏自己的宽度】而非窗口宽度判折叠:顶栏在侧栏右侧,侧栏开着时它的可用宽度
-        # = 窗口 − 侧栏(~280px)。原来按 self.width()(整窗)算,侧栏一开顶栏区域明明很窄、
-        # 却仍判成"宽"不折叠 → 按钮在窄区域里挤成一团/被挡。header.width() 反映真实可用宽。
+    def _refresh_header_compactness(self):
+        """顶栏变窄时先收文字、留图标，按钮之间不会互相压住。
+
+        用【顶栏自己的宽度】判断，不用整窗宽度：侧栏和任务面板开着时，顶栏的可用宽度
+        比窗口窄得多，按整窗算会判成"宽"而不折叠，按钮挤成一团。"""
         w = self.width()
         _hdr = self.model_combo.parentWidget() if hasattr(self, "model_combo") else None
         if _hdr is not None and _hdr.width() > 0:
             w = _hdr.width()
-        # 阈值偏大些,让按钮在挤之前就先折叠(模型框 + 撤销/隔离/Act/思考/角色卡 一排)。
-        if w >= 1080:
-            level = 0   # 正常
-        elif w >= 860:
-            level = 1   # 紧凑
+        if w >= self._HEADER_FULL_WIDTH:
+            level = 0   # 图标 + 文字
+        elif w >= self._HEADER_COMPACT_WIDTH:
+            level = 1   # 撤销 / 隔离 / 思考只留图标
         else:
-            level = 2   # 超紧凑
+            level = 2   # 角色名也收起
 
-        # think_btn —— 带开/关状态词；超紧凑只留图标
         if hasattr(self, "think_btn"):
-            if level == 2:
-                self.think_btn.setText("")
-            else:
-                self.think_btn.setText("思考 开" if self.think_btn.isChecked() else "思考 关")
-            self.think_btn.setToolTip("思考模式：让模型显式输出 reasoning 过程")
-        if hasattr(self, "task_panel_btn"):
-            self.task_panel_btn.setText("" if level == 2 else "任务")
-        # 段控（计划|执行）始终显示两字短词，无需折叠
-        # undo_btn
+            self.think_btn.setText("" if level else "思考")
+            state_word = "开" if self.think_btn.isChecked() else "关"
+            self.think_btn.setToolTip(f"思考模式（{state_word}）：让模型显式输出推理过程")
         if hasattr(self, "undo_btn"):
-            if level == 0:
-                self.undo_btn.setText("↶ 撤销")
-            elif level == 1:
-                self.undo_btn.setText("↶")
-            else:
-                self.undo_btn.setText("↶")
-        # isolation_btn
-        if hasattr(self, "isolation_btn") and self.isolation_btn.isVisible():
-            from .. import session as _sess
-            active = _sess.get_active()
-            if active.worktree:
-                self.isolation_btn.setText("" if level == 2 else "恢复")
-            else:
-                self.isolation_btn.setText("" if level == 2 else "隔离")
-        # role_btn：显示「角色：<名>」，无角色时「角色：默认助手」
+            self.undo_btn.setText("" if level else "撤销")
+        if hasattr(self, "isolation_btn"):
+            active = self.isolation_btn.property("on") == "true"
+            self.isolation_btn.setText("" if level else ("恢复" if active else "隔离"))
         if hasattr(self, "role_btn"):
-            name = agent.get_current_role_name()
-            if level >= 1 and name and len(name) > 4:
-                self.role_btn.setText(f"角色：{name[:4]}")
-                self.role_btn.setToolTip(f"当前角色：{name}")
-            else:
-                self.role_btn.setText(f"角色：{name}" if name else "角色：默认助手")
-                self.role_btn.setToolTip("")
+            name = agent.get_current_role_name() or "默认助手"
+            limit = 8 if level == 0 else 4
+            short = name if len(name) <= limit else name[:limit] + "…"
+            self.role_btn.setText("" if level == 2 else short)
+            self.role_btn.setToolTip(f"角色卡：{name}（点击加载或清除）")
         # model_combo 宽度按档位约束。关键是 setMaximumWidth 硬上限:QComboBox 的 sizeHint
         # 取【下拉列表里最长的模型名】,会把框撑到 ~350px(哪怕当前选中的是短名),挤占右侧
         # 按钮。设硬上限后超长当前项用省略号显示,框不再当空间黑洞。
         if hasattr(self, "model_combo"):
-            min_w = 280 if level == 0 else (180 if level == 1 else 130)
-            max_w = 300 if level == 0 else (220 if level == 1 else 180)
+            self._header_level = level
+            min_w, max_w = self._MODEL_COMBO_WIDTHS[level]
             ss = self.model_combo.styleSheet()
             import re as _re
-            ss = _re.sub(r"min-width:\s*\d+px;", f"min-width: {min_w}px;", ss)
+            ss = _re.sub(r"min-width:\s*\d+px;", f"min-width: {min_w - self._MODEL_COMBO_PADDING}px;", ss)
             self.model_combo.setStyleSheet(ss)
             self.model_combo.setMaximumWidth(max_w)
 
@@ -429,10 +458,8 @@ class HeaderMixin:
         """启动时恢复角色卡按钮状态"""
         name = agent.get_current_role_name()
         if name:
-            self.role_btn.setText(f"角色：{name}")
             self._style_role_btn(active=True)
         else:
-            self.role_btn.setText("角色：默认助手")
             self._style_role_btn(active=False)
         # 让窗口窄的时候角色名也跟着截断
         if hasattr(self, "model_combo"):  # 主 UI 已构造完
@@ -462,7 +489,6 @@ class HeaderMixin:
 
                 # 更新按钮样式
                 display_name = agent.get_current_role_name() or role_name
-                self.role_btn.setText(f"角色：{display_name}")
                 self._style_role_btn(active=True)
                 self._refresh_header_compactness()
                 self._append_html(f"已加载角色卡: {display_name}\n\n", "tool_result")
@@ -530,7 +556,6 @@ class HeaderMixin:
             agent.reset_history()
             self.chat_area.clear()
             self._refresh_session_list()
-            self.role_btn.setText("角色：默认助手")
             self._style_role_btn(active=False)
             self._append_html("已恢复默认角色\n\n", "tool_result")
 
@@ -540,42 +565,32 @@ class HeaderMixin:
 
     def _style_model_combo(self):
         arrow_path = os.path.join(BASE_DIR, "icons", "chevron_down.svg").replace("\\", "/")
+        # 设计稿 A5：30px 高的小卡片（白底细边），名字后面一个小箭头
         self.model_combo.setStyleSheet(
-            f"QComboBox {{ background: {self._t('combo_bg')}; border: 1px solid {self._t('combo_border')}; border-radius: 8px; "
-            f"padding: 10px 38px 10px 14px; font-size: 13px; color: {self._t('combo_text')}; min-width: 280px; }}"
-            f"QComboBox:hover {{ border-color: {self._t('combo_hover_border')}; color: {self._t('combo_hover_text')}; }}"
-            f"QComboBox::drop-down {{ border: none; width: 34px; subcontrol-origin: padding; subcontrol-position: top right; }}"
-            f"QComboBox::down-arrow {{ image: url({arrow_path}); width: 16px; height: 16px; margin-right: 10px; }}"
+            f"QComboBox {{ background: {self._t('mv_card_bg')}; border: 1px solid {self._t('mv_chip_border')}; "
+            f"border-radius: 8px; padding: 0 28px 0 10px; min-height: 28px; max-height: 28px; "
+            f"font-size: 13px; color: {self._t('mv_text')}; "
+            f"min-width: {self._MODEL_COMBO_WIDTHS[getattr(self, '_header_level', 0)][0] - self._MODEL_COMBO_PADDING}px; }}"
+            f"QComboBox:hover {{ border-color: {self._t('mv_chip_hover')}; }}"
+            f"QComboBox::drop-down {{ border: none; width: 24px; subcontrol-origin: padding; subcontrol-position: center right; }}"
+            f"QComboBox::down-arrow {{ image: url({arrow_path}); width: 14px; height: 14px; margin-right: 8px; }}"
             f"QComboBox QAbstractItemView {{ background: {self._t('combo_view_bg')}; border: 1px solid {self._t('combo_view_border')}; "
             f"color: {self._t('combo_view_text')}; selection-background-color: {self._t('combo_view_sel_bg')}; "
             f"selection-color: {self._t('combo_view_sel_text')}; padding: 4px; outline: 0; }}"
         )
 
     def _style_think_btn(self):
-        color = self._t("think_on_text") if self.think_btn.isChecked() else self._t("think_off_text")
-        self.think_btn.setIcon(self._svg_icon("brain_lucide.svg", color))
-        self.think_btn.setIconSize(QSize(16, 16))
-        self.think_btn.setStyleSheet(
-            f"QPushButton {{ border-radius: 8px; padding: 9px 16px; font-size: 12px; }}"
-            f"QPushButton:checked {{ background: {self._t('think_on_bg')}; border: 1px solid {self._t('think_on_border')}; color: {self._t('think_on_text')}; }}"
-            f"QPushButton:!checked {{ background: {self._t('think_off_bg')}; border: 1px solid {self._t('think_off_border')}; color: {self._t('think_off_text')}; }}"
-            f"QPushButton:hover:checked {{ background: {self._t('think_on_hover')}; border-color: {self._t('think_on_hover_border')}; }}"
-            f"QPushButton:hover:!checked {{ border-color: {self._t('think_off_hover_border')}; color: {self._t('think_off_hover_text')}; }}"
-        )
+        """开 / 关的底色由 QSS :checked 管；这里只重画图标颜色、刷新提示里的开关状态。"""
+        self.think_btn.setIcon(self._svg_icon("lightbulb.svg", self._header_icon_color(self.think_btn)))
+        state_word = "开" if self.think_btn.isChecked() else "关"
+        self.think_btn.setToolTip(f"思考模式（{state_word}）：让模型显式输出推理过程")
 
     def _style_task_panel_btn(self):
-        """和思考开关同一套开 / 关配色。"""
-        on = self.task_panel_btn.isChecked()
-        color = self._t("think_on_text") if on else self._t("think_off_text")
-        self.task_panel_btn.setIcon(self._svg_icon("clipboard-list.svg", color))
-        self.task_panel_btn.setIconSize(QSize(16, 16))
-        self.task_panel_btn.setStyleSheet(
-            f"QPushButton {{ border-radius: 8px; padding: 9px 14px; font-size: 12px; }}"
-            f"QPushButton:checked {{ background: {self._t('think_on_bg')}; border: 1px solid {self._t('think_on_border')}; color: {self._t('think_on_text')}; }}"
-            f"QPushButton:!checked {{ background: {self._t('think_off_bg')}; border: 1px solid {self._t('think_off_border')}; color: {self._t('think_off_text')}; }}"
-            f"QPushButton:hover:checked {{ background: {self._t('think_on_hover')}; border-color: {self._t('think_on_hover_border')}; }}"
-            f"QPushButton:hover:!checked {{ border-color: {self._t('think_off_hover_border')}; color: {self._t('think_off_hover_text')}; }}"
-        )
+        self.task_panel_btn.setIcon(
+            self._svg_icon("panel-right.svg", self._header_icon_color(self.task_panel_btn)))
+        shown = self.task_panel_btn.isChecked()
+        self.task_panel_btn.setToolTip(
+            ("收起任务面板" if shown else "展开任务面板") + "：要求、计划、验证状态与证据")
 
     def _style_undo_btn(self):
         """撤销按钮配色：当前会话 + 当前实际工作区有可撤销记录时高亮，否则灰禁。
@@ -593,16 +608,9 @@ class HeaderMixin:
             logger.warning(f"查询可撤销记录失败: {e}")
         has_cp = cand is not None
         self.undo_btn.setEnabled(has_cp)
+        # 能撤时是正常的次要色，不能撤时灰掉（QSS :disabled）；图标跟着现画
+        self.undo_btn.setIcon(self._svg_icon("undo-2.svg", self._header_icon_color(self.undo_btn)))
         if has_cp:
-            self.undo_btn.setStyleSheet(
-                f"QPushButton {{ background: {self._t('think_off_bg')};"
-                f"  border: 1px solid {self._t('think_off_border')};"
-                f"  border-radius: 8px; padding: 9px 14px; font-size: 12px;"
-                f"  color: {self._t('warn')}; font-weight: 600;"
-                f"}}"
-                f"QPushButton:hover {{ background: {self._t('history_hover_bg')};"
-                f"  border-color: {self._t('warn')}; }}"
-            )
             info = cand or {}
             tool = info.get("tool", "")
             path = info.get("path", "")
@@ -612,13 +620,6 @@ class HeaderMixin:
                 "执行前会再次核对现场；文件在写入后又被改过时会拒绝"
             )
         else:
-            self.undo_btn.setStyleSheet(
-                f"QPushButton {{ background: transparent;"
-                f"  border: 1px solid {self._t('input_border')};"
-                f"  border-radius: 8px; padding: 9px 14px; font-size: 12px;"
-                f"  color: {self._t('text_subtle')};"
-                f"}}"
-            )
             self.undo_btn.setToolTip("还没有可撤销的 AI 改动")
 
     def _style_isolation_btn(self, active: bool):
@@ -627,36 +628,17 @@ class HeaderMixin:
         只设图标 / 颜色 / tooltip，**不设文字**——文字（含窄屏折叠成纯图标）由
         _refresh_header_compactness 统一管理，否则两边抢着 setText、窄屏不折叠会重叠。
         """
+        self._set_on(self.isolation_btn, active)   # 隔离中：QSS [on="true"] 浅主题色底
+        self.isolation_btn.setIcon(self._svg_icon(
+            "unlock.svg" if active else "lock.svg", self._header_icon_color(self.isolation_btn)))
         if active:
-            self.isolation_btn.setIcon(self._svg_icon("unlock.svg", self._t("ai_label")))
-            self.isolation_btn.setIconSize(QSize(16, 16))
             self.isolation_btn.setToolTip(
                 "隔离模式已开启：AI 在独立 worktree 目录操作\n"
                 "点击「恢复」：把隔离区改动应用回主项目 + 清理 worktree"
             )
-            self.isolation_btn.setStyleSheet(
-                f"QPushButton {{ background: {self._t('ai_label')}22;"
-                f"  border: 1px solid {self._t('ai_label')};"
-                f"  border-radius: 8px; padding: 9px 14px; font-size: 12px;"
-                f"  color: {self._t('ai_label')}; font-weight: 600;"
-                f"}}"
-                f"QPushButton:hover {{ background: {self._t('ai_label')}33;"
-                f"  border-color: {self._t('ai_label')}; }}"
-            )
         else:
-            self.isolation_btn.setIcon(self._svg_icon("lock.svg", self._t("text")))
-            self.isolation_btn.setIconSize(QSize(16, 16))
             self.isolation_btn.setToolTip(
                 "隔离模式：AI 在独立 worktree 目录操作，不影响主项目\n需项目已启用版本控制"
-            )
-            self.isolation_btn.setStyleSheet(
-                f"QPushButton {{ background: {self._t('think_off_bg')};"
-                f"  border: 1px solid {self._t('think_off_border')};"
-                f"  border-radius: 8px; padding: 9px 14px; font-size: 12px;"
-                f"  color: {self._t('text')};"
-                f"}}"
-                f"QPushButton:hover {{ background: {self._t('history_hover_bg')};"
-                f"  border-color: {self._t('ai_label')}; }}"
             )
         # 文字按当前窗口宽度刷新（UI 已构造完才调，避免构造期半成品）
         if hasattr(self, "model_combo"):
@@ -702,21 +684,11 @@ class HeaderMixin:
                 self._show_toast("无法创建隔离环境（非 git 仓库？）", duration=5000)
 
     def _style_role_btn(self, active):
-        color = self._t("role_active_text") if active else self._t("role_text")
-        self.role_btn.setIcon(self._svg_icon("id_card_lucide.svg", color))
-        self.role_btn.setIconSize(QSize(16, 16))
-        if active:
-            self.role_btn.setStyleSheet(
-                f"QPushButton {{ background: {self._t('role_active_bg')}; border: 1px solid {self._t('role_active_border')}; border-radius: 8px; "
-                f"padding: 9px 16px; font-size: 12px; color: {self._t('role_active_text')}; font-weight: {self._t('role_active_weight')}; }}"
-                f"QPushButton:hover {{ background: {self._t('role_active_hover_bg')}; border-color: {self._t('role_active_hover_border')}; color: {self._t('role_active_hover_text')}; }}"
-            )
-        else:
-            self.role_btn.setStyleSheet(
-                f"QPushButton {{ background: {self._t('role_bg')}; border: 1px solid {self._t('role_border')}; border-radius: 8px; "
-                f"padding: 9px 16px; font-size: 12px; color: {self._t('role_text')}; }}"
-                f"QPushButton:hover {{ background: {self._t('role_hover_bg')}; border-color: {self._t('role_hover_border')}; color: {self._t('role_hover_text')}; }}"
-            )
+        """加载了角色卡时按钮"开着"（浅主题色底），默认助手时是普通的次要色。"""
+        self._set_on(self.role_btn, active)
+        self.role_btn.setIcon(self._svg_icon("user.svg", self._header_icon_color(self.role_btn)))
+        if hasattr(self, "model_combo"):
+            self._refresh_header_compactness()   # 按钮上的角色名由它按顶栏宽度写
 
     def _style_settings_btn(self):
         color = self._t('text_dim')

@@ -904,53 +904,69 @@ QPushButton[class="historyItemDone"]:hover {{
     background-color: {p['header_bg']};
     border-bottom: 1px solid {p['header_border']};
 }}
-#toggleBtn {{
+/* 顶栏按钮（设计稿 A5）：不带边框的"幽灵"按钮，图标 + 短词；开着的（思考、任务面板、
+   隔离中）用浅主题色底。图标是按状态现画的单色 pixmap，见 header.py _refresh_header_icons */
+#header QPushButton[class="ghost"] {{
     background: transparent;
     border: none;
-    font-size: 16px;
-    color: {p['toggle']};
-    padding: 4px 8px;
     border-radius: 6px;
+    padding: 0 8px;
+    min-height: 30px;
+    max-height: 30px;
+    font-size: 13px;
+    color: {p['mv_text_sec']};
 }}
-#toggleBtn:hover {{
-    color: {p['toggle_hover']};
-    background: {p['toggle_hover_bg']};
+#header QPushButton[class="ghost"]:hover {{
+    background: {p['mv_header_bg']};
+    color: {p['mv_text']};
 }}
-#themeBtn {{
-    background: {p['role_bg']};
-    border: 1px solid {p['role_border']};
-    border-radius: 8px;
-    font-size: 12px;
-    color: {p['role_text']};
-    padding: 9px 16px;
+#header QPushButton[class="ghost"]:checked,
+#header QPushButton[class="ghost"][on="true"] {{
+    background: {p['mv_indigo_soft']};
+    color: {p['mv_indigo']};
 }}
-#themeBtn:hover {{
-    background: {p['role_hover_bg']};
-    border-color: {p['role_hover_border']};
-    color: {p['role_hover_text']};
+#header QPushButton[class="ghost"]:disabled {{
+    color: {p['mv_muted3']};
+}}
+#header QPushButton[class="icon"] {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0;
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
+}}
+#header QPushButton[class="icon"]:hover {{
+    background: {p['mv_header_bg']};
+}}
+#header QPushButton[class="icon"]:checked {{
+    background: {p['mv_indigo_soft']};
 }}
 
-/* 计划|执行 段控（pill 容器 + 选中态高亮） */
+/* 计划|执行 段控：浅灰底的一条，选中的那段是白底主题色字 */
 #modeSeg {{
-    background: {p['seg_bg']};
-    border: 1px solid {p['seg_border']};
-    border-radius: 9px;
+    background: {p['mv_header_bg']};
+    border: none;
+    border-radius: 8px;
 }}
 #modeSeg QPushButton[class="segBtn"] {{
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    padding: 8px 15px;
-    font-size: 12px;
-    color: {p['seg_idle_text']};
+    border: none;
+    border-radius: 6px;
+    padding: 0 10px;
+    min-height: 26px;
+    max-height: 26px;
+    font-size: 13px;
+    color: {p['mv_text_sec']};
 }}
 #modeSeg QPushButton[class="segBtn"]:hover {{
-    color: {p['seg_hover_text']};
+    color: {p['mv_text']};
 }}
 #modeSeg QPushButton[class="segBtn"]:checked {{
-    background: {p['seg_active_bg']};
-    border: 1px solid {p['seg_active_border']};
-    color: {p['seg_active_text']};
+    background: {p['mv_card_bg']};
+    color: {p['mv_indigo']};
     font-weight: 600;
 }}
 #headerTitle {{

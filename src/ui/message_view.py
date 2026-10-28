@@ -968,6 +968,29 @@ def _hold_scroll(widget):
         w.hold_position()
 
 
+def _label_plain_text(lbl) -> str:
+    """标签显示出来的纯文字（富文本标签按 Qt 自己的排版取，位置和 setSelection 对得上）。"""
+    if lbl.textFormat() == Qt.PlainText:
+        return lbl.text()
+    from PySide6.QtGui import QTextDocument
+    doc = QTextDocument()
+    doc.setHtml(lbl.text())
+    return doc.toPlainText()
+
+
+def _reveal(widget):
+    """搜索命中在收起的地方时，把挡着它的那几层依次打开。"""
+    w = widget.parentWidget()
+    while w is not None and not isinstance(w, MessageView):
+        if isinstance(w, ThinkingChip) and not w._open:
+            w._toggle()
+        elif isinstance(w, ToolCallCard) and not w.is_open():
+            w.toggle()
+        elif isinstance(w, AssistantTurn) and w._summary is not None and not w._summary._open:
+            w._summary._toggle()
+        w = w.parentWidget()
+
+
 def _deleted(w) -> bool:
     try:
         w.objectName()
@@ -1027,6 +1050,60 @@ class MessageView(QScrollArea):
     def hold_position(self):
         """用户点了展开 / 收起：停在原处，不因为内容变高被拽到底部。"""
         self._follow = False
+
+    # —— 对话内搜索（Ctrl+F）——
+    def find_text(self, text, backward=False):
+        """在消息流里找文字（不分大小写）：选中下一处（或上一处）并滚过去，到头绕回。
+
+        搜的是能选中的文字：用户消息、回复正文、程序提示、思考内容、工具参数。
+        命中在收起的过程 / 卡片 / 思考块里时先把它展开。返回 (第几处, 共几处)，没找到是 (0, 0)。"""
+        needle = (text or "").strip().lower()
+        hits = []
+        if needle:
+            for lbl in self._content.findChildren(QLabel):
+                if not lbl.textInteractionFlags() & Qt.TextSelectableByMouse:
+                    continue
+                plain = _label_plain_text(lbl).lower()
+                start = plain.find(needle)
+                while start >= 0:
+                    hits.append((lbl, start, len(plain)))
+                    start = plain.find(needle, start + len(needle))
+        self._clear_find_selection()
+        if not hits:
+            self._find_state = (needle, -1)
+            return 0, 0
+        last_needle, idx = getattr(self, "_find_state", ("", -1))
+        if last_needle != needle:
+            idx = len(hits) if backward else -1
+        idx = (idx + (-1 if backward else 1)) % len(hits)
+        self._find_state = (needle, idx)
+        lbl, pos, total = hits[idx]
+        _reveal(lbl)
+        lbl.setSelection(pos, len(needle))
+        self._find_label = lbl
+        self.hold_position()
+        # 展开后的新高度要等布局排完才准，下一轮事件循环再滚
+        QTimer.singleShot(0, self, lambda: self._scroll_to_hit(lbl, pos, total))
+        return idx + 1, len(hits)
+
+    def clear_find(self):
+        self._clear_find_selection()
+        self._find_state = ("", -1)
+
+    def _clear_find_selection(self):
+        lbl = getattr(self, "_find_label", None)
+        self._find_label = None
+        if lbl is not None and not _deleted(lbl):
+            lbl.setSelection(0, 0)
+
+    def _scroll_to_hit(self, lbl, pos, total):
+        """命中大致在标签里的哪一段就滚到哪：长回复里，滚到标签顶上会看不见命中。"""
+        if _deleted(lbl):
+            return
+        y = lbl.mapTo(self._content, QPoint(0, 0)).y()
+        y += int(lbl.height() * (pos / max(1, total)))
+        sb = self.verticalScrollBar()
+        sb.setValue(max(0, y - self.viewport().height() // 3))
 
     def apply_theme(self, extra_qss=""):
         """背景跟当前主题走。extra_qss 是宿主补充的滚动条等样式——setStyleSheet 会整体替换，

@@ -195,10 +195,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         set_active_theme(self.theme)
         self.setStyleSheet(build_stylesheet(self.theme))
         self._apply_tooltip_style()  # 切主题时 tooltip 也跟着刷
-        # 主题按钮：文字显示当前主题（浅色 / 深色）
+        # 顶栏图标是按主题色现画的单色图（深浅色按钮还要换成月亮 / 太阳）
         if hasattr(self, "theme_btn"):
-            self.theme_btn.setText("浅色" if self.theme == "light" else "深色")
-            self.theme_btn.setToolTip("切到夜间模式" if self.theme == "light" else "切到白天模式")
+            self._refresh_header_icons()
         # 品牌字符在白天主题里隐藏，夜间显示
         if hasattr(self, "header_brand"):
             visible = self._t("brand_visible") == "true"
@@ -584,8 +583,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         mode = getattr(_session.get_active(), "agent_mode", "act")
         return {"mode": "计划模式" if mode == "plan" else "执行模式"}
 
-    # 窗口比这窄时自动收起任务面板，给对话让位置
-    _TASK_PANEL_MIN_WINDOW = 1100
+    # 窗口比这窄时自动收起任务面板，给对话和顶栏让位置（面板 360 + 侧栏 248，顶栏至少还剩约 590）
+    _TASK_PANEL_MIN_WINDOW = 1200
 
     def _build_plan_panel(self):
         # 停靠在主窗口最右侧的一栏（B05 三段式 + 验证证据），由 _build_ui 放进主布局

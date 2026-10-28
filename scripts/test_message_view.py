@@ -218,6 +218,42 @@ class TestFollowBottom:
         mv.close()
 
 
+class TestFind:
+    def test_counts_wraps_and_selects(self, qt_app):
+        from PySide6.QtWidgets import QLabel
+        mv = _view()
+        _round_with_reply(mv)
+        mv.handle("登录失败是因为 token 过期。再看一下 Token 刷新。", "ai_msg")
+        mv.show()
+        _pump(qt_app)
+        assert mv.find_text("token") == (1, 2), "不分大小写"
+        assert mv.find_text("token") == (2, 2)
+        assert mv.find_text("token") == (1, 2), "到头绕回第一处"
+        assert mv.find_text("token", backward=True) == (2, 2)
+        selected = [lbl.selectedText() for lbl in mv.findChildren(QLabel) if lbl.hasSelectedText()]
+        assert selected == ["Token"]
+        assert mv.find_text("不存在的词") == (0, 0)
+        assert not any(lbl.hasSelectedText() for lbl in mv.findChildren(QLabel)), "没找到时清掉旧选中"
+        mv.close()
+
+    def test_opens_a_folded_round_to_reach_the_hit(self, qt_app):
+        from src.ui.message_view import ToolCallCard
+        mv = _view()
+        _round_with_reply(mv)
+        _tool(mv, "🔍 跨文件搜索", '{\n  "pattern": "refresh_token",\n  "path": "src"\n}', "src/auth.py:12\n")
+        mv.handle("找到了。", "ai_msg")
+        mv.handle("你\n", "user_label")                  # 新一轮：上一轮的工具卡收起来
+        mv.handle("下一个问题\n", "user_msg")
+        mv.show()
+        _pump(qt_app)
+        card = mv.findChildren(ToolCallCard)[0]
+        assert not card.isVisibleTo(mv)
+        assert mv.find_text("refresh_token") == (1, 1)
+        _pump(qt_app)
+        assert card.isVisibleTo(mv) and card.is_open(), "命中在收起的过程和卡片里：都要打开"
+        mv.close()
+
+
 class TestPlanSteps:
     def test_a_segment_per_step_change_and_status_follows_the_plan(self, qt_app):
         from src.ui.message_view import StepHeader
