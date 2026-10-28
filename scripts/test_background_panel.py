@@ -350,6 +350,7 @@ def test_output_incomplete_distinct_from_no_output(panel):
 
 
 def test_reading_scrollback_does_not_jump_to_end(panel, qapp):
+    from PySide6.QtWidgets import QAbstractSlider
     bg_id = register()
     with bg._LOCK:
         bg._append_output_locked(bg._tasks[bg_id], "\n".join(f"line {i}" for i in range(200)))
@@ -357,14 +358,60 @@ def test_reading_scrollback_does_not_jump_to_end(panel, qapp):
     qapp.processEvents()
     bar = panel.output.verticalScrollBar()
     assert bar.maximum() > 10
-    bar.setValue(10)
+    assert bar.value() == bar.maximum(), "跟随时选中就在最新一行"
+    bar.setSliderPosition(10)
+    bar.triggerAction(QAbstractSlider.SliderMove)   # 用户拖动滚动条（程序改位置不算用户在看旧输出）
     assert not panel.follow_box.isChecked()
     with bg._LOCK:
         bg._append_output_locked(bg._tasks[bg_id], "\nnext-line")
     panel.refresh()
     assert bar.value() == 10
-    panel.follow_box.setChecked(True)
-    assert bar.value() == bar.maximum()
+    bar.setSliderPosition(bar.maximum())
+    bar.triggerAction(QAbstractSlider.SliderMove)
+    assert panel.follow_box.isChecked(), "翻回底部就恢复跟随"
+
+
+def test_follow_stays_at_the_end_after_stop(panel, qapp):
+    """停止后详情里多出一行回执、输出框变矮：跟随时仍要停在最新一行。
+    原来滚动位置会跳回开头，看到的是旧输出。"""
+    proc = Proc()
+    bg_id = register(proc)
+    select(panel, bg_id)
+    for i in range(12):
+        with bg._LOCK:
+            bg._append_output_locked(bg._tasks[bg_id], f"dev server alive {i}\n")
+        panel.refresh()
+        qapp.processEvents()
+    bar = panel.output.verticalScrollBar()
+    assert bar.maximum() > 0 and bar.value() == bar.maximum()
+    # 文字也要真的滚过去：只动滚动条、文字停在开头的话，看到的仍是旧输出
+    assert panel.output.firstVisibleBlock().blockNumber() == bar.value()
+    with bg._LOCK:
+        bg._tasks[bg_id].stop_requested = True
+    proc.code = 1
+    panel._feedback[bg_id] = "已确认主进程退出。"
+    panel.refresh()
+    for _ in range(10):
+        qapp.processEvents()
+    assert panel.follow_box.isChecked()
+    assert bar.value() == bar.maximum(), "停止后还停在最新一行"
+    assert panel.output.firstVisibleBlock().blockNumber() == bar.value()
+
+
+def test_source_shows_session_title_and_exited_task_does_not_offer_retry(panel, qapp):
+    a = session.get_active()
+    a.current_session_id, a.current_session_title = "20261028_173054_014446", "跑一下构建"
+    bg_id = register(Proc(0), sess=a)
+    select(panel, bg_id)
+    panel.refresh()
+    row = panel.tree.topLevelItem(0)
+    assert "跑一下构建" in row.text(2) and "20261028" not in row.text(2)
+    assert "20261028_173054_014446" in panel.metadata.toPlainText(), "id 留在任务信息里方便排查"
+    with bg._LOCK:
+        bg._tasks[bg_id].stop_requested = True
+    panel.refresh()
+    assert bg.get_snapshot(bg_id)["running"] is False
+    assert panel.stop_btn.text() == "停止此任务" and not panel.stop_btn.isEnabled()
 
 
 def test_evicted_selection_never_controls_another_record(panel, monkeypatch):

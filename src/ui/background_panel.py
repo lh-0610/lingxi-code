@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QStyledItemDelegate, QStyleOptionViewItem, QStyle, QLayout,
 )
 
+from langchain_core.messages import HumanMessage
+
 from .. import background, session
 from .fonts import mono_font
 from ._base import BASE_DIR
@@ -60,8 +62,28 @@ def output_notes(snap):
     return "\n".join(notes)
 
 
+def _session_title(snap):
+    """发起命令的会话现在叫什么（和侧栏一致：有标题用标题，没有就用第一句用户消息）；
+    会话已关掉、重置或装载了别的对话时返回空串。
+
+    按 owner_id 找而不是 session_key：新会话第一次存盘会把 key 从 _new_N 换成正式 id，
+    owner_id 存盘不变，重置 / 装载另一个对话时才换——正好不会把旧命令标成新对话。"""
+    owner = snap.get("owner_id")
+    sess = next((s for s in session.live_sessions() if s.background_owner_id == owner), None)
+    if sess is None:
+        return ""
+    if sess.current_session_title:
+        return sess.current_session_title
+    for msg in list(sess.chat_history or []):
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str):
+            return " ".join(msg.content.split())[:30]
+    return ""
+
+
 def _source(snap):
-    return ("子 Agent · " if snap.get("is_subagent") else "会话 · ") + snap["session_id"]
+    # 显示会话标题而不是持久化 id：用户认不出 20261028_173054_… 是哪个对话
+    kind = "子 Agent" if snap.get("is_subagent") else "会话"
+    return f"{kind} · {_session_title(snap) or snap['session_id']}"
 
 
 class _StopEvents(QObject):
@@ -290,7 +312,11 @@ class BackgroundPanel(QDialog):
         font = mono_font(12)
         self.output.setFont(font)
         self.output.setPlaceholderText("任务的输出会显示在这里")
-        self.output.verticalScrollBar().valueChanged.connect(self._output_scrolled)
+        # 只把用户自己的滚动（滚轮、拖动、点滚动条）当成"在看旧输出"：输出框被挤矮、
+        # 文本重排时滚动条也会离开底部，按位置判断会把跟随误关掉。
+        bar = self.output.verticalScrollBar()
+        bar.actionTriggered.connect(self._output_scrolled)
+        bar.rangeChanged.connect(self._output_range_changed)
         log_layout.addWidget(self.output, 1)
         detail_layout.addWidget(log_frame, 1)
         self.splitter.addWidget(detail)
@@ -508,15 +534,16 @@ class BackgroundPanel(QDialog):
         self.location_label.setToolTip(location)
         self.location_label.setText(self.location_label.fontMetrics().elidedText(
             location, Qt.ElideMiddle, max(100, self.width() - 84)))
-        meta = (f"命令：{snap['command']}\n来源：{_source(snap)}\n"
+        meta = (f"命令：{snap['command']}\n来源：{_source(snap)}（会话 id：{snap['session_id']}）\n"
                 f"项目：{snap.get('project') or '无项目'}\n工作目录：{snap.get('cwd') or '未知'}\n"
                 f"开始：{snap['started_iso']}   后台 id：{bg_id}\n"
                 f"运行 id：{snap.get('run_id') or '未记录'}   任务 id：{snap.get('task_id') or '未建立'}")
         if self.metadata.toPlainText() != meta:
             self.metadata.setPlainText(meta)
         busy = bg_id in self._busy or snap.get("stop_in_progress")
-        self.stop_btn.setText("停止中…" if busy else
-                              ("重试停止" if snap.get("stop_requested") else "停止此任务"))
+        # 停过但没停下来才叫"重试停止"；已经退出了按钮只是置灰，不再提示重试
+        retry = snap.get("stop_requested") and snap["running"] is not False
+        self.stop_btn.setText("停止中…" if busy else ("重试停止" if retry else "停止此任务"))
         self.stop_btn.setEnabled(snap["running"] is not False and not busy and not self._refresh_error)
         warning = any(snap.get(key) for key in
                       ("output_truncated", "read_error", "process_error", "stop_error", "tree_error"))
@@ -526,11 +553,11 @@ class BackgroundPanel(QDialog):
         if changed_id or self.output.toPlainText() != text:
             bar = self.output.verticalScrollBar()
             old_value = bar.value()
-            bar.blockSignals(True)
+            # 不再 blockSignals：那样 QPlainTextEdit 自己也收不到位置变化，滚动条到了底、
+            # 文字却还停在开头。程序改位置不会误关跟随（跟随只看用户的滚动动作）。
             self.output.setPlainText(text)  # 原样纯文本，不把工具输出当作 HTML。
             bar.setValue(bar.maximum() if self.follow_box.isChecked() else
                          (0 if changed_id else old_value))
-            bar.blockSignals(False)
         self._output_id = bg_id
 
     def _set_output_note(self, text, *, warning=False):
@@ -553,9 +580,16 @@ class BackgroundPanel(QDialog):
             bar.setValue(bar.maximum())
 
     @Slot(int)
-    def _output_scrolled(self, value):
-        if value < self.output.verticalScrollBar().maximum() - 4:
-            self.follow_box.setChecked(False)
+    def _output_scrolled(self, _action):
+        # actionTriggered 在滚动生效前发出，新位置看 sliderPosition；翻回底部就恢复跟随
+        bar = self.output.verticalScrollBar()
+        self.follow_box.setChecked(bar.sliderPosition() >= bar.maximum() - 4)
+
+    @Slot(int, int)
+    def _output_range_changed(self, _minimum, maximum):
+        # 新输出、输出框变矮、文本延迟排版都会改范围：跟随时一律贴到底
+        if self.follow_box.isChecked():
+            self.output.verticalScrollBar().setValue(maximum)
 
     @Slot()
     def _stop_selected(self):
