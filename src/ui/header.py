@@ -748,10 +748,10 @@ class HeaderMixin:
             self._img_btn_icon = _make_upload_icon(color)
             self._img_btn_icon_hover = _make_upload_icon(hover_color)
         self.img_btn.setIcon(self._img_btn_icon)
-        self.img_btn.setIconSize(QSize(20, 20))
+        self.img_btn.setIconSize(QSize(18, 18))
         self.img_btn.setStyleSheet(
-            "QPushButton { background: transparent; border: none; padding: 4px; border-radius: 4px; }"
-            "QPushButton:hover { background: rgba(0,0,0,0.06); }"
+            "QPushButton { background: transparent; border: none; padding: 0; border-radius: 6px; }"
+            f"QPushButton:hover {{ background: {self._t('mv_header_bg')}; }}"
         )
 
     # 语音输入/朗读按钮样式（_style_mic_btn / _style_tts_btn）已随语音模块移除。

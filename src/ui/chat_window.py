@@ -9,13 +9,13 @@ import base64
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel,
+    QPushButton, QLabel, QFrame,
     QSizePolicy, QFileDialog, QMenu, QDialog,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QPoint
+from PySide6.QtCore import Qt, QSize, QTimer, QPoint, QUrl
 from PySide6.QtGui import (
     QFont, QIcon, QTextCursor, QColor, QTextCharFormat, QPixmap, QImage,
-    QPainter, QAction,
+    QPainter,
 )
 from langchain_core.messages import HumanMessage
 
@@ -835,15 +835,6 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.queue_panel.resume_requested.connect(self._on_queue_resume_requested)
         wrapper_layout.addWidget(self.queue_panel)
 
-        # 图片预览区
-        self.image_preview_area = QWidget()
-        self.image_preview_area.setVisible(False)
-        self.image_preview_layout = QHBoxLayout(self.image_preview_area)
-        self.image_preview_layout.setContentsMargins(8, 4, 8, 0)
-        self.image_preview_layout.setSpacing(6)
-        self.image_preview_layout.addStretch()
-        wrapper_layout.addWidget(self.image_preview_area)
-
         # 命令确认条（默认隐藏；AI 想 run_command 时由 _on_confirm_request 显示）
         self._build_command_confirm_bar()
         wrapper_layout.addWidget(self.command_confirm_bar, 0, Qt.AlignHCenter)
@@ -852,48 +843,55 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._build_edit_confirm_bar()
         wrapper_layout.addWidget(self.edit_confirm_bar, 0, Qt.AlignHCenter)
 
-        # 圆角容器（+ 投影,对齐 design_handoff composer 卡）
+        # 输入框外框（设计稿 A5）：上面一排待发送的图片 chip，中间输入，底下一行 + 和发送
         container = QWidget()
         container.setObjectName("inputContainer")
         self.input_container = container
-        from PySide6.QtWidgets import QGraphicsDropShadowEffect
-        _sh = QGraphicsDropShadowEffect(self)
-        _sh.setBlurRadius(20)
-        _sh.setXOffset(0)
-        _sh.setYOffset(4)
-        _sh.setColor(QColor(40, 50, 90, 16))
-        container.setGraphicsEffect(_sh)
         container.setFixedWidth(920)
-        container.setMinimumHeight(104)
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        container_layout = QHBoxLayout(container)
-        container_layout.setContentsMargins(10, 6, 10, 6)
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(12, 10, 10, 8)
         container_layout.setSpacing(6)
 
-        # 输入框（左侧留 padding 给加号按钮）
+        # 待发送的图片：一排小 chip（缩略图 + 名字 + 移除），悬停看大图
+        self.image_preview_area = QWidget()
+        self.image_preview_area.setVisible(False)
+        self.image_preview_layout = QHBoxLayout(self.image_preview_area)
+        self.image_preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.image_preview_layout.setSpacing(6)
+        self.image_preview_layout.addStretch()
+        container_layout.addWidget(self.image_preview_area)
+
         self.entry = DragDropTextEdit()
         self.entry.setObjectName("inputEdit")
-        self.entry.setPlaceholderText("向灵犀提问…")
+        self.entry.setPlaceholderText("向灵犀提问…  Enter 发送，Shift+Enter 换行，@ 引用文件，可拖入或粘贴图片")
         entry_font = ui_font(BODY)
         entry_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         entry_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         self.entry.setFont(entry_font)
-        self.entry.setMaximumHeight(132)
-        self.entry.setMinimumHeight(82)
-        self.entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.entry.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 高度由 _on_input_change 按内容定（setFixedHeight）：QTextEdit 默认的 sizeHint 很高，
+        # 交给布局的话空输入框也会撑到最大
+        self.entry.setFixedHeight(self._ENTRY_MIN_H)
+        self.entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.entry.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.entry.textChanged.connect(self._on_input_change)
-        container_layout.addWidget(self.entry, 1)
+        container_layout.addWidget(self.entry)
 
-        # "+" 按钮（悬浮在输入框左下角）——点击弹菜单：上传图片 / 导入项目
-        # 之所以变量名仍叫 img_btn 是为了不动 eventFilter 里的几处兼容代码
-        self.img_btn = QPushButton(self.entry)
+        # 底下一行：左边 +（上传图片 / 导入项目），右边发送 / 停止
+        self._composer_bottom = QHBoxLayout()
+        self._composer_bottom.setContentsMargins(0, 0, 0, 0)
+        self._composer_bottom.setSpacing(4)
+        # 变量名仍叫 img_btn：eventFilter 里的悬停换图标按这个名字找
+        self.img_btn = QPushButton()
         self.img_btn.setToolTip("上传图片 / 导入项目")
+        self.img_btn.setAccessibleName("上传图片或导入项目")
         self.img_btn.setCursor(Qt.PointingHandCursor)
-        self.img_btn.setFixedSize(28, 28)
+        self.img_btn.setFixedSize(32, 32)
         self._style_img_btn()
         self.img_btn.clicked.connect(self._show_plus_menu)
-        self.img_btn.move(4, 40)
+        self._composer_bottom.addWidget(self.img_btn)
+        self._composer_bottom.addStretch(1)
+        container_layout.addLayout(self._composer_bottom)
 
         # img_btn 创建完成后再装事件过滤器，避免 eventFilter 提前触发时引用未定义属性
         self.entry.installEventFilter(self)
@@ -916,15 +914,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.send_btn.setIconSize(QSize(16, 16))
         self.send_btn.setObjectName("sendBtn")
         self.send_btn.setCursor(Qt.PointingHandCursor)
+        self.send_btn.setAccessibleName("发送")
         self.send_btn.clicked.connect(self._on_send_click)
-        # 底部留 8px 间距
-        btn_wrapper = QWidget()
-        btn_wrapper_layout = QVBoxLayout(btn_wrapper)
-        btn_wrapper_layout.setContentsMargins(0, 0, 8, 6)
-        btn_wrapper_layout.setSpacing(0)
-        btn_wrapper_layout.addStretch()
-        btn_wrapper_layout.addWidget(self.send_btn)
-        container_layout.addWidget(btn_wrapper, 0, Qt.AlignBottom)
+        self._composer_bottom.addWidget(self.send_btn)
         # 初始化样式
         self._update_btn_state("disabled")
 
@@ -932,20 +924,35 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         parent_layout.addWidget(wrapper)
         QTimer.singleShot(0, self, self._resize_input_container)
 
+    # 输入框高度：至少两行，最多约七行，再多就在框里滚动
+    _ENTRY_MIN_H = 48
+    _ENTRY_MAX_H = 160
+
     def _resize_input_container(self):
+        """输入框（连同上面的队列、确认条和下面的底栏）和消息栏对齐：同一条居中的栏，
+        左边让出线槽，跟消息正文的左边齐。"""
         if not hasattr(self, "input_container") or not hasattr(self, "chat_area"):
             return
-        viewport_width = self.chat_area.viewport().width()
-        if viewport_width < 520:
-            side_margin = 16
-        elif viewport_width < 760:
-            side_margin = 28
+        from .message_view import COLUMN_MAX, GUTTER
+        vp = self.chat_area.viewport()
+        viewport_width = vp.width()
+        side = max(24, (viewport_width - COLUMN_MAX) // 2)        # 与 MessageView.resizeEvent 同一算法
+        col_left = side + (GUTTER if viewport_width >= 520 else 0)
+        # 消息正文的左右边换算到输入区自己的坐标：视口比输入区窄（滚动条等），按视口宽度
+        # 直接当边距会让队列和输入框对不齐
+        wrapper = getattr(self, "input_wrapper", None)
+        if wrapper is not None:
+            # mapTo 只能映射到祖先控件：两边都换算到主窗口坐标再相减
+            origin = wrapper.mapTo(self, QPoint(0, 0)).x()
+            left = vp.mapTo(self, QPoint(col_left, 0)).x() - origin
+            right = wrapper.width() - (vp.mapTo(self, QPoint(viewport_width - side, 0)).x() - origin)
+            width = max(260, wrapper.width() - left - right)
         else:
-            side_margin = 48
+            left, right, width = col_left, side, max(260, viewport_width - col_left - side)
         if hasattr(self, "input_wrapper_layout"):
-            self.input_wrapper_layout.setContentsMargins(side_margin, 8, side_margin, 12)
-        available = max(260, viewport_width - side_margin * 2)
-        width = max(260, min(980, available))
+            self.input_wrapper_layout.setContentsMargins(left, 8, right, 6)
+        if hasattr(self, "footer_layout"):
+            self.footer_layout.setContentsMargins(left, 0, right, 6)
         self.input_container.setFixedWidth(width)
         if hasattr(self, "command_confirm_bar"):
             self.command_confirm_bar.setFixedWidth(width)
@@ -1038,10 +1045,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """底栏状态条：左=当前项目（可点切换），右=Token 占用。"""
         from PySide6.QtWidgets import QHBoxLayout, QWidget as _W
         footer_widget = _W()
-        footer_widget.setFixedHeight(30)
+        footer_widget.setFixedHeight(28)
         footer_layout = QHBoxLayout(footer_widget)
-        footer_layout.setContentsMargins(18, 0, 18, 2)
+        footer_layout.setContentsMargins(18, 0, 18, 6)   # 左右由 _resize_input_container 对齐消息栏
         footer_layout.setSpacing(0)
+        self.footer_layout = footer_layout
 
         # 左：当前项目按钮（点击弹项目切换菜单，与侧栏菜单一致）。
         # 用 QPushButton 是因为它天然支持 hover / cursor / clicked，比 QLabel 干净。
@@ -1159,9 +1167,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if not _session.get_active().is_generating:
                 self._update_btn_state("enabled" if has_input else "disabled")
 
-        # 自动调整高度（不低于 80）
-        doc_height = self.entry.document().size().height() + 16
-        self.entry.setMinimumHeight(int(min(max(doc_height, 80), 150)))
+        # 自动调整高度：两行起，最多 _ENTRY_MAX_H，再多在框里滚动
+        doc_height = self.entry.document().size().height() + 4
+        self.entry.setFixedHeight(int(min(max(doc_height, self._ENTRY_MIN_H), self._ENTRY_MAX_H)))
 
         # @文件补全触发
         self._check_at_mention()
@@ -1235,29 +1243,42 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         out.sort(key=lambda t: (not t[1], t[0].lower()))  # 文件夹优先，再按名
         return out
 
+    _COMPLETER_WIDTH = 320
+
     def _position_completer(self):
-        """把补全浮窗定位到输入框【上方】，宽度/左右与输入框外框对齐。
-        基准用 input_container（带圆角的可见外框），不能用 entry——entry 是框内的
-        文本控件、比外框窄。浮窗是主窗口子控件，用相对主窗口的本地坐标 move + raise_。"""
-        anchor = getattr(self, "input_container", self.entry)
-        self._file_completer.setFixedWidth(anchor.width())  # 与输入框外框等宽
-        ph = self._file_completer.height()
-        top_left = anchor.mapTo(self, anchor.rect().topLeft())
-        self._file_completer.move(top_left.x(), top_left.y() - ph - 4)
+        """补全浮窗跟着 @ 走（设计稿状态 3b）：横向左边对齐 @，靠近右边时往左收、右边和
+        输入框对齐；纵向始终贴在输入框外框的上沿——@ 在第二行时也不盖住第一行。
+        浮窗是主窗口子控件，用相对主窗口的本地坐标 move + raise_。"""
+        frame = getattr(self, "input_container", self.entry)
+        width = min(self._COMPLETER_WIDTH, frame.width())
+        self._file_completer.setFixedWidth(width)
+        top_left = frame.mapTo(self, QPoint(0, 0))
+        x = top_left.x()
+        mention = self._get_active_mention()
+        if mention is not None:
+            cur = QTextCursor(self.entry.document())
+            cur.setPosition(mention[0])
+            rect = self.entry.cursorRect(cur)               # @ 在输入框视口里的位置
+            x = self.entry.viewport().mapTo(self, rect.topLeft()).x() - 12
+        x = max(top_left.x(), min(x, top_left.x() + frame.width() - width))
+        y = top_left.y() - self._file_completer.height() - 6
+        self._file_completer.move(x, max(0, y))
         self._file_completer.raise_()
 
     def _apply_completer_theme(self):
         """按当前主题给文件补全器涂色：外框 + hover 走 QSS，文字/选中色交给 delegate
         （delegate 自绘文字，所以颜色不能只靠 QSS 的 item color）。"""
-        frame_bg = self._t("input_bg")
-        frame_border = self._t("input_border")
-        hover_bg = self._t("history_hover_bg")
-        text_color = self._t("input_text")
-        sel_bg = self._t("history_active_bg")
-        icon_color = self._t("brand_color")
+        frame_bg = self._t("mv_card_bg")
+        frame_border = self._t("mv_chip_border")
+        hover_bg = self._t("mv_header_bg")
+        text_color = self._t("mv_text")
+        sel_bg = self._t("mv_indigo_soft")
+        icon_color = self._t("mv_text_sec")
         self._file_completer.setStyleSheet(
             f"FileCompleter {{ background: {frame_bg}; border: 1px solid {frame_border}; "
-            f"border-radius: 12px; padding: 4px; }}")
+            f"border-radius: 10px; padding: 4px; }}"
+            f"QLabel#completerHint {{ color: {self._t('mv_text_sec')}; font-size: 12px; background: transparent; "
+            f"border-top: 1px solid {self._t('mv_card_border')}; padding: 6px 10px 2px 10px; }}")
         self._file_completer.list_widget.setStyleSheet(
             "QListWidget { background: transparent; border: none; outline: none; }"
             "QListWidget::item { border-radius: 6px; }"
@@ -1266,9 +1287,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if dlg is not None and hasattr(dlg, "text_color"):
             dlg.text_color = text_color
             dlg.sel_bg = sel_bg
-            dlg.highlight_color = self._t("brand_color")
+            dlg.highlight_color = self._t("mv_indigo")
             dlg.folder_icon = self._svg_icon("folder_lucide.svg", icon_color).pixmap(16, 16)
-            dlg.file_icon = self._svg_icon("file_text_lucide.svg", text_color).pixmap(16, 16)
+            dlg.file_icon = self._svg_icon("file_text_lucide.svg", icon_color).pixmap(16, 16)
 
     def _on_file_completer_selected(self, relative_path: str):
         """补全浮窗选中文件 → 替换输入框中的 @partial 为 @相对路径。"""
@@ -1378,22 +1399,24 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from .. import session as _session
         if _session.get_active().is_generating:
             return
+        from .widgets import DescribedMenuItem
         menu = QMenu(self)
-
-        a_img = QAction("上传图片", menu)
-        a_img.setIcon(self._svg_icon("image_lucide.svg", self._t("menu_text")))
-        a_img.triggered.connect(self._pick_image)
-        menu.addAction(a_img)
-
-        a_proj = QAction("导入项目", menu)
-        a_proj.setIcon(self._svg_icon("folder_open_lucide.svg", self._t("menu_text")))
-        a_proj.triggered.connect(self._add_project)
-        menu.addAction(a_proj)
-
-        # 菜单弹在按钮上方（避免遮挡输入框）
-        anchor = self.img_btn.mapToGlobal(self.img_btn.rect().topLeft())
-        size_hint = menu.sizeHint()
-        menu.exec(anchor - QPoint(0, size_hint.height()))
+        menu.setObjectName("plusMenu")
+        items = (
+            ("image_lucide.svg", "上传图片", "PNG、JPG 都行，也可以直接 Ctrl+V 粘贴", self._pick_image),
+            ("folder_open_lucide.svg", "导入项目", "把一个文件夹加为项目，会话按项目分组", self._add_project),
+        )
+        for icon, title, desc, slot in items:
+            DescribedMenuItem.add_to(menu, self._svg_icon(icon, self._t("mv_text_sec")), title, desc, slot,
+                                     text=self._t("mv_text"), sub=self._t("mv_text_sec"),
+                                     hover=self._t("mv_header_bg"))
+        menu.setStyleSheet(
+            f"QMenu#plusMenu {{ background: {self._t('mv_card_bg')}; border: 1px solid {self._t('mv_chip_border')}; "
+            f"border-radius: 10px; padding: 4px; }}")
+        # 菜单从按钮正上方弹出，左边和按钮对齐，不挡输入框
+        anchor = self.img_btn.mapToGlobal(QPoint(0, 0))
+        menu.exec(anchor - QPoint(0, menu.sizeHint().height() + 6))
+        menu.deleteLater()   # 每次点 + 都新建一个菜单，用完删掉，不留在窗口上
 
     def _add_pending_image(self, path):
         try:
@@ -1413,38 +1436,42 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if item.widget():
                 item.widget().deleteLater()
 
+        from .message_view import _icon, _svg
+        close_svg = _svg('<path d="M4 4l8 8M12 4l-8 8"/>')
         for i, (path, _b64) in enumerate(self._pending_images):
-            thumb = QWidget()
-            thumb_layout = QVBoxLayout(thumb)
-            thumb_layout.setContentsMargins(0, 0, 0, 0)
-            thumb_layout.setSpacing(2)
-
-            # 缩略图
-            lbl = QLabel()
-            pix = QPixmap(path).scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            lbl.setPixmap(pix)
-            lbl.setFixedSize(64, 64)
-            lbl.setStyleSheet(
-                f"border: 1px solid {self._t('img_thumb_border')}; border-radius: 8px; padding: 2px; "
-                f"background: {self._t('img_thumb_bg')};"
-            )
-            lbl.setAlignment(Qt.AlignCenter)
-            thumb_layout.addWidget(lbl)
-
-            # 删除按钮
-            del_btn = QPushButton("×")
-            del_btn.setFixedSize(20, 20)
+            chip = QFrame()
+            chip.setObjectName("attachChip")
+            chip.setStyleSheet(
+                f"#attachChip {{ background: {self._t('mv_header_bg')}; border: 1px solid {self._t('mv_card_border')}; "
+                f"border-radius: 6px; }}"
+                f"QLabel {{ background: transparent; color: {self._t('mv_text3')}; font-size: 12px; }}"
+                f"QPushButton {{ background: transparent; border: none; border-radius: 4px; }}"
+                f"QPushButton:hover {{ background: {self._t('mv_chip_border')}; }}")
+            row = QHBoxLayout(chip)
+            row.setContentsMargins(4, 2, 2, 2)
+            row.setSpacing(6)
+            thumb = QLabel()
+            thumb.setFixedSize(18, 18)
+            pix = QPixmap(path)
+            if not pix.isNull():
+                thumb.setPixmap(pix.scaled(18, 18, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                                .copy(0, 0, 18, 18))
+            row.addWidget(thumb)
+            name = os.path.basename(path) or f"图片 {i + 1}"
+            label = QLabel(name if len(name) <= 24 else name[:21] + "…")
+            row.addWidget(label)
+            del_btn = QPushButton()
+            del_btn.setFixedSize(18, 18)
             del_btn.setCursor(Qt.PointingHandCursor)
-            del_btn.setStyleSheet(
-                f"QPushButton {{ background: {self._t('img_del_bg')}; color: {self._t('img_del_text')}; border: none; "
-                f"border-radius: 10px; font-size: 12px; font-weight: 600; }}"
-                f"QPushButton:hover {{ background: {self._t('img_del_hover_bg')}; }}"
-            )
-            idx = i
-            del_btn.clicked.connect(lambda checked=False, ii=idx: self._remove_pending_image(ii))
-            thumb_layout.addWidget(del_btn, 0, Qt.AlignCenter)
-
-            self.image_preview_layout.insertWidget(self.image_preview_layout.count() - 1, thumb)
+            del_btn.setToolTip("移除这张图片")
+            del_btn.setAccessibleName("移除这张图片")
+            del_btn.setIcon(QIcon(_icon(close_svg, self._t("mv_text_sec"), 10)))
+            del_btn.setIconSize(QSize(10, 10))
+            del_btn.clicked.connect(lambda checked=False, ii=i: self._remove_pending_image(ii))
+            row.addWidget(del_btn)
+            # 悬停看大图（tooltip 支持富文本里的本地图片）
+            chip.setToolTip(f"<img src='{QUrl.fromLocalFile(path).toString()}' width='240'><br>{path}")
+            self.image_preview_layout.insertWidget(self.image_preview_layout.count() - 1, chip)
 
         self.image_preview_area.setVisible(len(self._pending_images) > 0)
 
@@ -1801,9 +1828,16 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         )
         toast.setAlignment(Qt.AlignCenter)
         toast.adjustSize()
-        x = (self.width() - toast.width()) // 2
-        y = self.height() - 80
-        toast.move(x, y)
+        # 浮在输入框上方、对着对话栏居中；不压在输入框和发送按钮上
+        frame = getattr(self, "input_container", None)
+        if frame is not None and frame.isVisible():
+            top_left = frame.mapTo(self, QPoint(0, 0))
+            x = top_left.x() + (frame.width() - toast.width()) // 2
+            y = top_left.y() - toast.height() - 12
+        else:
+            x = (self.width() - toast.width()) // 2
+            y = self.height() - 80
+        toast.move(max(8, x), max(8, y))
         toast.show()
         toast.raise_()
         self._toast_label = toast

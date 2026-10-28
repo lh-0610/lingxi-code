@@ -20,7 +20,7 @@ THEMES = {
         "header_border":     "#f0f0f3",
         "chat_bg":           "#ffffff",
         "input_bg":          "#ffffff",
-        "input_border":      "#e6e7ec",
+        "input_border":      "#dadde6",
         "input_text":        "#222838",
         "input_sel_bg":      "#eef0fe",
         "input_sel_text":    "#222838",
@@ -854,15 +854,14 @@ QPushButton[class="historyItemDone"]:hover {{
 #inputContainer {{
     background-color: {p['input_bg']};
     border: 1px solid {p['input_border']};
-    border-radius: 18px;
-    padding: 6px;
+    border-radius: 14px;
 }}
 #inputEdit {{
     background-color: transparent;
     border: none;
     font-family: {UI_CSS};
     font-size: 14px;
-    padding: 8px 12px 50px 12px;
+    padding: 0 2px;
     color: {p['input_text']};
     selection-background-color: {p['input_sel_bg']};
     selection-color: {p['input_sel_text']};
@@ -871,11 +870,11 @@ QPushButton[class="historyItemDone"]:hover {{
 /* 发送按钮 */
 #sendBtn {{
     border: none;
-    border-radius: 15px;
-    min-width: 30px;
-    max-width: 30px;
-    min-height: 30px;
-    max-height: 30px;
+    border-radius: 9px;
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
     font-size: 16px;
     padding: 0px;
 }}
@@ -891,12 +890,12 @@ QPushButton[class="historyItemDone"]:hover {{
     background-color: {p['send_active_hover']};
 }}
 #sendBtn[state="stop"] {{
-    background-color: {p['send_stop_bg']};
+    background-color: {p['send_active_bg']};
     color: {p['send_text']};
     font-size: 16px;
 }}
 #sendBtn[state="stop"]:hover {{
-    background-color: {p['send_stop_hover']};
+    background-color: {p['send_active_hover']};
 }}
 
 /* 顶栏 */

@@ -38,7 +38,7 @@ def _build_image_content_block(ext, b64):
 
 
 def _make_button_icon(arrow=True):
-    """程序化绘制发送上箭头/停止(暂停)图标，白色，透明背景"""
+    """程序化绘制发送（上箭头）/ 停止（圆角方块）图标，白色，透明背景"""
     size = 30
     px = QPixmap(size, size)
     px.fill(Qt.transparent)
@@ -52,9 +52,8 @@ def _make_button_icon(arrow=True):
         p.drawPolygon(tri)
         p.drawRect(12, 14, 6, 12)
     else:
-        # 暂停：两个竖
-        p.drawRoundedRect(6, 5, 6, 20, 2, 2)
-        p.drawRoundedRect(18, 5, 6, 20, 2, 2)
+        # 停止：圆角方块（按下就结束这一轮，不是可以继续的暂停）
+        p.drawRoundedRect(8, 8, 14, 14, 3, 3)
     p.end()
     return QIcon(px)
 

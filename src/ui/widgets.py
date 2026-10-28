@@ -10,7 +10,7 @@ import os
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize, QRectF
 from PySide6.QtGui import QIcon, QPainter, QFont, QFontMetrics, QColor, QPalette
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton, QTextBrowser,
+    QCheckBox, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QTextBrowser,
     QTextEdit, QVBoxLayout, QWidget, QStyle, QStyledItemDelegate,
 )
 
@@ -152,7 +152,9 @@ class _FileItemDelegate(QStyledItemDelegate):
         painter.setFont(font)
         fm = QFontMetrics(font)
 
-        mx, my = 12, 8                           # 与 QSS padding 协调
+        mx = 12
+        # 单行（逐层浏览时只有名字）在行内竖直居中；带目录的两行从顶上排
+        my = 8 if dirname else max(0, (option.rect.height() - fm.height()) // 2)
         x0 = option.rect.x() + mx
         y_base = option.rect.y() + my + fm.ascent()
 
@@ -213,7 +215,75 @@ class _FileItemDelegate(QStyledItemDelegate):
         has_dirname = bool(os.path.dirname(path_str))
         fm = QFontMetrics(option.font)
         h = 8 + fm.height() + (fm.height() - 2 if has_dirname else 0) + 8
-        return QSize(-1, max(h, 52))
+        return QSize(-1, max(h, 52 if has_dirname else 32))
+
+
+class DescribedMenuItem(QWidget):
+    """菜单里带一行说明的项：图标 + 标题 + 灰色说明（设计稿里 + 菜单的样子）。
+    点一下、或键盘移过来按 Enter / 空格就触发；QMenu 本身的 QAction 画不了两行字。"""
+
+    def __init__(self, icon, title, desc, *, text, sub, hover, parent=None):
+        super().__init__(parent)
+        self.setObjectName("describedItem")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAccessibleName(title)
+        self.setStyleSheet(
+            "#describedItem { background: transparent; border-radius: 8px; }"
+            f"#describedItem:hover, #describedItem:focus {{ background: {hover}; }}"
+            f"QLabel#itemTitle {{ color: {text}; font-size: 13px; background: transparent; }}"
+            f"QLabel#itemDesc {{ color: {sub}; font-size: 12px; background: transparent; }}")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 8, 16, 8)
+        row.setSpacing(10)
+        ic = QLabel()
+        ic.setFixedSize(16, 16)
+        ic.setPixmap(icon.pixmap(16, 16))
+        ic.setStyleSheet("background: transparent;")
+        row.addWidget(ic, 0, Qt.AlignTop)
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+        t = QLabel(title)
+        t.setObjectName("itemTitle")
+        d = QLabel(desc)
+        d.setObjectName("itemDesc")
+        col.addWidget(t)
+        col.addWidget(d)
+        row.addLayout(col, 1)
+        self.action = None
+
+    @staticmethod
+    def add_to(menu, icon, title, desc, slot, **colors):
+        from PySide6.QtWidgets import QWidgetAction
+        act = QWidgetAction(menu)
+        item = DescribedMenuItem(icon, title, desc, **colors)
+        item.action = act
+        act.setDefaultWidget(item)
+        act.triggered.connect(lambda _=False: slot())
+        menu.addAction(act)
+        return act
+
+    def _fire(self):
+        menu = self.action.parent() if self.action is not None else None
+        if isinstance(menu, QMenu):
+            menu.close()          # 先收起菜单，再执行（选图片会弹文件对话框）
+        if self.action is not None:
+            self.action.trigger()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self._fire()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self._fire()
+            return
+        super().keyPressEvent(event)
 
 
 class FileCompleter(QWidget):
@@ -245,6 +315,11 @@ class FileCompleter(QWidget):
         self.list_widget.setItemDelegate(_FileItemDelegate(self.list_widget))
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.list_widget)
+
+        # 底部一行操作提示
+        self.hint = QLabel("上下键选择，Enter 插入，Esc 关闭")
+        self.hint.setObjectName("completerHint")
+        layout.addWidget(self.hint)
 
         self._all_items = []   # 兼容旧字段（逐层浏览已不用）
         self._colorized = False
@@ -342,12 +417,10 @@ class FileCompleter(QWidget):
             self.hide()
 
     def _adjust_size(self):
-        """根据当前项目数动态调整浮窗高度。"""
-        count = self.list_widget.count()
-        row_h = 52  # 与 _FileItemDelegate.sizeHint 一致
-        h = min(count * row_h, 350) + 8
+        """按当前各行的实际高度（delegate 的 sizeHint）定浮窗高度，最多约十行，再多在列表里滚。"""
+        rows = sum(self.list_widget.sizeHintForRow(i) for i in range(self.list_widget.count()))
+        h = min(rows, 340) + 10 + self.hint.sizeHint().height()
         self.setFixedHeight(h)
-        self.setFixedWidth(max(380, self.width()))
 
     # ── 键盘导航 ──
     def navigate_up(self):

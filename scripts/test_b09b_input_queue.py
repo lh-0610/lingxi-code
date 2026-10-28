@@ -1629,7 +1629,7 @@ class TestQueuePanelGUI:
         panel_text = "\n".join(w.text() for w in ui.queue_panel.findChildren(
             __import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel))
         assert "面板甲" in panel_text and "面板乙" in panel_text
-        assert "待处理" in panel_text
+        assert "排队 2 条" in panel_text, "头上一行说清楚排了几条"
 
         # 删除"面板乙"：按行 objectName 定位到乙所在行的删除按钮
         from PySide6.QtWidgets import QPushButton, QWidget
