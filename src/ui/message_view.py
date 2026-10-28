@@ -10,11 +10,12 @@
 
 配色全部取当前主题的 mv_* token（_P）；已经画出来的块不会自己变色，切主题后由 ChatUI 重绘。
 """
+import math
 import re
 import time
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
     QVBoxLayout, QWidget,
@@ -539,10 +540,21 @@ class ToolCallCard(QFrame):
         self._out.setFont(mono_font(12))
         self._out.setMaximumBlockCount(self._OUT_MAX_BLOCKS)
         self._out.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._out.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # 放得下时不出滚动条，见 _fit_output
         self._out.setStyleSheet(
             f"QPlainTextEdit {{ background:{_P['result_bg']}; color:{_P['text_sec']}; "
-            f"border:1px solid {_P['result_border']}; border-radius:8px; padding:4px 6px; }}")
+            f"border:1px solid {_P['result_border']}; border-radius:8px; padding:4px 6px; }}"
+            # 超过 _OUT_MAX_LINES 才有滚动条：细条、没有上下箭头，和消息流的滚动条一个样子
+            "QScrollBar:vertical { background:transparent; width:6px; margin:2px 0; }"
+            f"QScrollBar::handle:vertical {{ background:{_P['chip_border']}; border-radius:3px; min-height:20px; }}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }")
         self._out.setVisible(False)
+        # 自动换行后的行数变了就重新定高：内容追加时文档会通知；展开后有了真实宽度、
+        # 窗口变宽变窄时它不一定通知，所以输出框显示出来和宽度变化时也重算一次
+        self._out.document().documentLayout().documentSizeChanged.connect(lambda _size: self._fit_output())
+        self._out.installEventFilter(self)
+        self._fitted_width = -1
         bl.addWidget(self._out)
         self._body.setVisible(False)
         v.addWidget(self._body)
@@ -595,9 +607,39 @@ class ToolCallCard(QFrame):
         self._open = not self._open
         self._sync()
 
+    def eventFilter(self, obj, event):
+        if obj is self._out and (event.type() == QEvent.Show or (
+                event.type() == QEvent.Resize and self._out.width() != self._fitted_width)):
+            # 等这一轮布局排完（换行按新宽度算好）再量；收起时算的行数不作数，显示出来总要重量
+            QTimer.singleShot(0, self, self._fit_output)
+        return super().eventFilter(obj, event)
+
     def _fit_output(self):
-        lines = min(self._out.document().blockCount(), self._OUT_MAX_LINES)
-        self._out.setFixedHeight(lines * self._out.fontMetrics().lineSpacing() + 18)
+        """输出框按【自动换行后】的行数定高，最多 _OUT_MAX_LINES 行；超过才出滚动条。
+
+        QPlainTextEdit 的文档高度单位就是行（含换行折出来的行）。旧算法按段落数 × 行高 + 18：
+        18 正好等于边框、内边距和文档边距之和，一点余量都没有，只有一行时也会溢出一两个像素，
+        冒出一根矮到只剩两个箭头的滚动条；长行折行后更是直接被截。"""
+        self._fitted_width = self._out.width()
+        doc = self._out.document()
+        lines = max(1, int(round(doc.size().height())))
+        shown = min(lines, self._OUT_MAX_LINES)
+        # 行高按小数算：高 DPI 下实际行高常是 14.3 这样的值，按整数乘十几行会差出几个像素，
+        # 最后一行露不全
+        line_h = QFontMetricsF(self._out.font()).lineSpacing()
+        chrome = doc.documentMargin() * 2 + 8 + 2 + 4         # 文档边距 + 上下内边距 + 边框 + 余量
+        self._out.setFixedHeight(math.ceil(shown * line_h + chrome))
+        self._out.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded if lines > self._OUT_MAX_LINES else Qt.ScrollBarAlwaysOff)
+        if lines <= self._OUT_MAX_LINES:
+            QTimer.singleShot(0, self, self._grow_if_cut)
+
+    def _grow_if_cut(self):
+        """核对一次：本该全部露出来却还有行在框外（滚动范围不为 0），就把差的几行补上。"""
+        hidden = self._out.verticalScrollBar().maximum()
+        if hidden > 0 and self._out.isVisible():
+            line_h = QFontMetricsF(self._out.font()).lineSpacing()
+            self._out.setFixedHeight(self._out.height() + math.ceil(hidden * line_h))
 
     def _sync(self):
         has_out = self._out_lines > 0

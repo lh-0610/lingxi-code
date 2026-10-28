@@ -81,6 +81,42 @@ class TestToolCards:
         assert card._out.isVisibleTo(card) and not card._tail.isVisibleTo(card)
         mv.close()
 
+    def _expanded_card(self, qt_app, width, *outputs):
+        from src.ui.message_view import ToolCallCard
+        mv = _view(width)
+        _round_with_reply(mv)
+        _tool(mv, "✏️ 写入文件", "/tmp/qs/q.py", *outputs)
+        mv.show()
+        _pump(qt_app)
+        card = mv.findChildren(ToolCallCard)[0]
+        card.toggle()
+        _pump(qt_app, 6)
+        return mv, card
+
+    def test_one_line_output_has_no_scrollbar(self, qt_app):
+        """一行输出：框正好放下，不能冒出一根只剩两个箭头的滚动条（用户截图里的样子）。"""
+        mv, card = self._expanded_card(
+            qt_app, 760, "未写入：目标路径经符号链接/junction 解析后超出当前工作区，拒绝写入\n")
+        bar = card._out.verticalScrollBar()
+        assert not bar.isVisible()
+        assert bar.maximum() == 0, "内容没有被截"
+        mv.close()
+
+    def test_wrapped_long_line_is_not_cut(self, qt_app):
+        mv, card = self._expanded_card(qt_app, 420, "很长的一行输出，" * 40 + "\n")
+        bar = card._out.verticalScrollBar()
+        assert card._out.document().size().height() > 1, "窄窗口下这一行会折成多行"
+        assert not bar.isVisible() and bar.maximum() == 0, "折行后的每一行都要露出来"
+        mv.close()
+
+    def test_long_output_scrolls_inside_a_capped_box(self, qt_app):
+        from src.ui.message_view import ToolCallCard
+        mv, card = self._expanded_card(qt_app, 760, *[f"line {i}\n" for i in range(40)])
+        line_h = card._out.fontMetrics().lineSpacing()
+        assert card._out.height() < (ToolCallCard._OUT_MAX_LINES + 2) * line_h, "最多露出约 16 行"
+        assert card._out.verticalScrollBar().maximum() > 0, "其余的在框里滚动"
+        mv.close()
+
     def test_one_line_summary_of_json_args(self):
         from src.ui.message_view import _one_line
         assert _one_line('{\n  "path": "src/ui/fonts.py",\n  "fix": false\n}') == "src/ui/fonts.py"
