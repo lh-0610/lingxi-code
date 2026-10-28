@@ -99,6 +99,48 @@ def _build_model_list():
 MODEL_LIST = _build_model_list()
 
 
+# ── 上次实际调用的模型（下次打开默认选它）──
+# 记 类型 + model_id + 名字，不记序号：config 里的模型列表一改，序号就对不上了。
+# 单独一个文件，不并进 ui_prefs.json：这里由 worker 线程写，和界面线程写偏好不抢同一个文件。
+
+def _last_model_path():
+    from .paths import memory_dir
+    return os.path.join(memory_dir(), "last_model.json")
+
+
+def remember_last_model(index):
+    """记下这一轮实际用的模型。写失败不影响运行，只是下次打开还按默认模型。"""
+    import json
+    try:
+        name, mtype, model_id, _ = MODEL_LIST[index]
+        path = _last_model_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"name": name, "type": mtype, "model_id": model_id}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def last_model_index():
+    """上次实际调用的模型在当前列表里的序号；没记过、读不了、或已经从列表里删掉时返回 None。
+    名字改了但类型和 model_id 没变的，仍算同一个模型。"""
+    import json
+    try:
+        with open(_last_model_path(), encoding="utf-8") as f:
+            last = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(last, dict):
+        return None
+    key = (last.get("type"), last.get("model_id"))
+    same_key = [i for i, (_, mtype, mid, _) in enumerate(MODEL_LIST) if (mtype, mid) == key]
+    exact = [i for i in same_key if MODEL_LIST[i][0] == last.get("name")]
+    found = exact or same_key
+    return found[0] if found else None
+
+
 def _lookup_custom_model(model_id: str):
     """按 model_id 在 CUSTOM_MODELS 里找回完整配置。找不到返回 None。"""
     for cm in CUSTOM_MODELS or []:

@@ -126,11 +126,16 @@ def set_reasoning(enabled):
 # ══════════════════════════════════════
 
 # 1. 默认模型 + LLM
-#    启动默认模型由 config 的 default_model_id 决定（默认 mimo-v2.5-pro）。
+#    打开时先选上次实际调用的模型（models.last_model_index）；没记过或它已从列表里删掉，
+#    再按 config 的 default_model_id（默认 mimo-v2.5-pro）。
 #    按 model_id 匹配而非写死 index——BUILTIN 顺序随 config 变，写死 index 不稳。
-#    找不到该 model_id（如用户删了它）时退回列表第一个。
+#    都找不到时退回列表第一个。
 def _resolve_default_model_index():
     from .config import DEFAULT_MODEL_ID
+    from .models import last_model_index
+    last = last_model_index()
+    if last is not None:
+        return last
     if DEFAULT_MODEL_ID:
         for i, (_, _, mid, _) in enumerate(MODEL_LIST):
             if mid == DEFAULT_MODEL_ID:
@@ -199,6 +204,10 @@ def agent_loop(ui, *, resume=None) -> AgentResult:
     if not recovery.before_run(sess, ui=ui, resume=resume):
         return AgentResult("failed", "恢复检查未通过，没有启动新的一轮。")
     run = run_records.begin_run(sess, ui=ui)
+    if not getattr(sess, "is_subagent", False):
+        # 真开跑了才记：下次打开默认选这次用的模型（子 Agent 用的模型不算用户的选择）
+        from .models import remember_last_model
+        remember_last_model(sess.current_model_index)
     result = AgentResult("failed", "Agent 未正常完成。")
     clean_text = ""
     try:

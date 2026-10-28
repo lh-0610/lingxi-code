@@ -209,7 +209,7 @@ class SettingsDialog(QDialog):
                        "例如：claude-sonnet-4-20250514")
 
         self._add_section(m, "默认模型")
-        self._add_text(m, "default_model_id", "启动默认模型 ID", "mimo-v2.5-pro",
+        self._add_text(m, "default_model_id", "默认模型 ID（打开时先选上次用的模型，没有才用它）", "mimo-v2.5-pro",
                        default="mimo-v2.5-pro")
 
         self._add_section(m, "图片识别模型")
