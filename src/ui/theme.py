@@ -591,6 +591,49 @@ QToolTip {{
 """
 
 
+def build_app_qss(theme):
+    """设到 QApplication 上的 QSS：tooltip + 全局滚动条。
+
+    滚动条放在 app 级，是为了让所有地方（主窗口、各对话框、下拉列表和补全这类弹出层）
+    都是同一种细的圆角条、没有上下箭头；没单独设过样式的控件以前用的是系统默认的箭头滚动条。
+    个别控件自己设了更窄的版本，控件级样式优先，不受影响。"""
+    p = THEMES[theme]
+    return build_tooltip_qss(theme) + f"""
+QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
+    margin: 2px 1px;
+}}
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 8px;
+    margin: 1px 2px;
+}}
+QScrollBar::handle:vertical {{
+    background: {p['scrollbar_handle']};
+    border-radius: 3px;
+    min-height: 24px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {p['scrollbar_handle']};
+    border-radius: 3px;
+    min-width: 24px;
+}}
+QScrollBar::handle:hover {{
+    background: {p['scrollbar_handle_hover']};
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{
+    width: 0;
+    height: 0;
+    border: none;
+    background: none;
+}}
+QScrollBar::add-page, QScrollBar::sub-page {{
+    background: transparent;
+}}
+"""
+
+
 def build_stylesheet(theme):
     p = THEMES[theme]
     return f"""

@@ -159,7 +159,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from PySide6.QtWidgets import QApplication, QToolTip
         from PySide6.QtGui import QColor, QPalette
         from PySide6.QtCore import QTimer
-        from .theme import build_tooltip_qss
+        from .theme import build_app_qss
 
         app = QApplication.instance()
         if app is None:
@@ -169,8 +169,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         fg = QColor(self._t("tooltip_text"))
 
         def _apply():
-            # 1. QSS
-            app.setStyleSheet(build_tooltip_qss(self.theme))
+            # 1. QSS（tooltip + 全局滚动条：细圆角条、没有上下箭头）
+            app.setStyleSheet(build_app_qss(self.theme))
             # 2. App palette（覆盖整个 app 的 ToolTipBase/Text 角色色板）
             app_palette = app.palette()
             app_palette.setColor(QPalette.ToolTipBase, bg)
