@@ -240,6 +240,86 @@ def _git_available() -> bool:
     return _shutil.which("git") is not None
 
 
+# ── 给界面用的只读查询（任务面板"改动的文件"）──
+# 不走 git_diff 工具：那个工具会把 diff 记成"已审阅"，那是模型自己的验证义务，
+# 用户在界面上点开看一眼不能替模型解除它。这里只读、不碰验证状态。
+
+def _norm_rel(path: str) -> str:
+    path = path.replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _git_text(cwd: str, args: list[str], timeout: float = 5) -> str | None:
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception:
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def diff_numstat(cwd: str, rel_paths: list[str]) -> dict | None:
+    """这些文件相对上次提交的增删行数：{相对路径: (增, 删, 是否新文件)}。
+
+    工作区对比 HEAD（暂存过的也算进去）；二进制文件的行数是 None；git 还没跟踪的新文件
+    按现有行数算"增"。不是 git 仓库或 git 不可用时返回 None——说不出就不说。"""
+    if not rel_paths or not _git_available() or not cwd or not _is_inside_git_repo(cwd):
+        return None
+    wanted = {_norm_rel(p): p for p in rel_paths}
+    base = ["diff", "--numstat", "--relative", "HEAD", "--"]
+    out = _git_text(cwd, base + list(rel_paths))
+    if out is None:     # 还没有任何提交（没有 HEAD）：退回工作区对比暂存区
+        out = _git_text(cwd, ["diff", "--numstat", "--relative", "--"] + list(rel_paths)) or ""
+    result = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        added, removed, path = parts
+        key = wanted.get(_norm_rel(path))
+        if key is not None:
+            result[key] = (int(added) if added.isdigit() else None,
+                           int(removed) if removed.isdigit() else None, False)
+    untracked = _git_text(cwd, ["ls-files", "--others", "--exclude-standard", "--"] + list(rel_paths)) or ""
+    for path in untracked.splitlines():
+        key = wanted.get(_norm_rel(path))
+        if key is None:
+            continue
+        try:
+            with open(os.path.join(cwd, path), "r", encoding="utf-8", errors="replace") as f:
+                lines = sum(1 for _ in f)
+        except OSError:
+            lines = None
+        result[key] = (lines, 0 if lines is not None else None, True)
+    return result
+
+
+def file_diff_text(cwd: str, rel_path: str, max_chars: int = 20000) -> str:
+    """一个文件此刻相对上次提交的差异（只读，不记"已审阅"）。新文件给出当前内容。"""
+    if not _git_available():
+        return "git 未安装或不在 PATH 中，无法查看差异。"
+    if not cwd or not _is_inside_git_repo(cwd):
+        return "当前项目不是 git 仓库，没有可对比的旧版本。"
+    text = _git_text(cwd, ["diff", "--relative", "HEAD", "--", rel_path], timeout=10)
+    if text is None:
+        text = _git_text(cwd, ["diff", "--relative", "--", rel_path], timeout=10) or ""
+    if not text.strip():
+        untracked = _git_text(cwd, ["ls-files", "--others", "--exclude-standard", "--", rel_path]) or ""
+        if untracked.strip():
+            try:
+                with open(os.path.join(cwd, rel_path), "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(max_chars)
+            except OSError as e:
+                return f"新文件（git 还没跟踪），读取失败：{e}"
+            return "新文件（git 还没跟踪），没有旧版本可对比。当前内容：\n\n" + content
+        return "这个文件和上次提交相比没有差异（可能改了又改回去，或改动已经提交）。"
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n... [差异太长，只显示前 {max_chars} 字符]"
+    return text
+
+
 def build_git_write_confirmation(name: str, args: dict | None = None) -> str:
     """构造 Git 写操作确认文案；只读，不改变索引或工作区。"""
     args = args or {}

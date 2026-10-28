@@ -605,6 +605,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.plan_panel.setFixedWidth(max(TaskPanel.MIN_WIDTH, min(TaskPanel.MAX_WIDTH, width)))
         self.plan_panel.max_width_fn = self._task_panel_max_width
         self.plan_panel.width_changed.connect(self._on_task_panel_width_changed)
+        self.plan_panel.step_clicked.connect(self._on_task_panel_step_clicked)
+        self.plan_panel.file_clicked.connect(self._on_task_panel_file_clicked)
+        self.plan_panel.files_provider = self._task_panel_files
         # 面板出现 / 消失 / 变宽会改变对话栏宽度：输入框宽度和顶栏折叠档位要跟着重算
         self.plan_panel.installEventFilter(self)
         self.plan_panel.on_undo_request = self._on_undo_task_switch
@@ -691,6 +694,68 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             prefs["task_panel_collapsed"] = not self._task_panel_open
             _save_ui_prefs(prefs)
         self._apply_task_panel_collapse()
+
+    def _on_task_panel_step_clicked(self, n, title):
+        """点面板里的第 n 步：消息流滚到那一步的分段（收起的那一轮会展开）。"""
+        if self.chat_area.scroll_to_step(n, title):
+            if not getattr(self, "_task_panel_docked", True) and self._task_panel_overlay_open:
+                self._task_panel_overlay_open = False      # 浮层会挡住消息流：跳过去就收起
+                self._apply_task_panel_collapse()
+            return
+        from .. import session as _session
+        plan = list(getattr(_session.get_active(), "current_plan", None) or [])
+        status = plan[n - 1].get("status") if 0 < n <= len(plan) else None
+        if status == "pending":
+            self._show_toast(f"第 {n} 步还没开始", 2500)
+        else:
+            self._show_toast("对话里没有这一步的分段（可能是在之前的会话里做的）", 3500)
+
+    def _task_panel_files(self, sess):
+        """面板"改动的文件"：这一轮写过的文件，加上此刻相对上次提交的增删行数。
+        行数要跑 git，按（工作区, 文件列表, 改动次数）缓存——只在又写了文件时重算，
+        面板每 2 秒的刷新不会每次都起 git 进程。"""
+        v = getattr(sess, "verification", None) or {}
+        files = list(v.get("dirty_files") or [])
+        if not files:
+            return []
+        work = self._undo_workspace_for(sess)
+        key = (work, tuple(files), int(v.get("change_revision", 0) or 0))
+        cache = getattr(self, "_panel_files_cache", None)
+        if cache is None or cache[0] != key:
+            from ..tools_git import diff_numstat
+            stats = diff_numstat(work, files) or {}
+            rows = [(f, *stats.get(f, (None, None, False))) for f in files]
+            self._panel_files_cache = (key, rows)
+        return self._panel_files_cache[1]
+
+    def _on_task_panel_file_clicked(self, rel_path):
+        """点改动的文件：看它此刻相对上次提交的差异（只读，不替模型记"已审阅"）。"""
+        from .. import session as _session
+        from ..tools_git import file_diff_text
+        work = self._undo_workspace_for(_session.get_active())
+        text = file_diff_text(work, rel_path)
+        is_diff = text.startswith("diff --git")
+        self._show_diff_dialog(
+            f"改动：{rel_path}",
+            f"{rel_path} 此刻相对上次提交的差异（当前状态，不是哪一轮保存下来的历史）：",
+            text, is_diff)
+
+    def _show_diff_dialog(self, title, intro, text, is_diff):
+        from PySide6.QtWidgets import QDialog, QTextBrowser
+        from .fonts import MONO_CSS
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(820, 560)
+        lay = QVBoxLayout(dlg)
+        note = QLabel(intro)
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        view = QTextBrowser()
+        import html as _html
+        body = self._format_diff_html(text) if is_diff else _html.escape(text).replace("\n", "<br>")
+        view.setHtml(f'<div style="font-family:{MONO_CSS}; font-size:12px; white-space:pre-wrap;">{body}</div>')
+        lay.addWidget(view, 1)
+        dlg.exec()
 
     def _on_task_panel_width_changed(self, width):
         prefs = _load_ui_prefs()

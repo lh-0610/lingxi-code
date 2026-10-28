@@ -725,6 +725,17 @@ class StepHeader(QWidget):
         if parent is not None:
             parent.update()
 
+    @property
+    def title(self) -> str:
+        return self._title.text()
+
+    def flash(self, ms: int = 1400):
+        """从任务面板点过来时短暂高亮，看得出落在了哪儿。"""
+        self.setObjectName("stepHeader")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"#stepHeader {{ background:{_P['indigo_soft']}; border-radius:6px; }}")
+        QTimer.singleShot(ms, self, lambda: self.setStyleSheet(""))
+
 
 class WaitingIndicator(QWidget):
     """等待模型响应：转圈 + 「等待响应 N 秒」（自走秒表）。"""
@@ -1092,6 +1103,29 @@ class MessageView(QScrollArea):
     def hold_position(self):
         """用户点了展开 / 收起：停在原处，不因为内容变高被拽到底部。"""
         self._follow = False
+
+    # —— 从任务面板定位到某一步 ——
+    def scroll_to_step(self, n: int, title: str = "") -> bool:
+        """滚到第 n 步的步骤分段（同一步出现过多次取最近的那次；步骤名对得上的优先），
+        所在的那一轮收起了就先展开，落点短暂高亮。消息流里没有这一步的分段时返回 False。"""
+        headers = [h for h in self._content.findChildren(StepHeader) if h.n == n]
+        if title:
+            headers = [h for h in headers if h.title == title] or headers
+        if not headers:
+            return False
+        header = headers[-1]
+        _reveal(header)
+        self.hold_position()
+        header.flash()
+        # 展开后的高度要等布局排完才准，下一轮事件循环再滚
+        QTimer.singleShot(0, self, lambda: self._scroll_to_widget(header))
+        return True
+
+    def _scroll_to_widget(self, w, margin: int = 24):
+        if _deleted(w):
+            return
+        y = w.mapTo(self._content, QPoint(0, 0)).y()
+        self.verticalScrollBar().setValue(max(0, y - margin))
 
     # —— 对话内搜索（Ctrl+F）——
     def find_text(self, text, backward=False):

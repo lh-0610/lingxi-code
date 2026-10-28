@@ -123,3 +123,105 @@ def test_drag_left_edge_to_resize_with_a_limit(ui, qapp):
     assert panel.width() <= panel.MAX_WIDTH
     assert ui.width() - ui._sidebar_shown_width() - panel.width() >= ui._TASK_PANEL_MIN_CHAT, \
         "停靠时不能把对话栏挤到放不下顶栏"
+
+
+# ── 点步骤定位、改动的文件 ──────────────────────────────────
+
+def test_clicking_a_plan_step_reports_its_number(ui, qapp):
+    from PySide6.QtWidgets import QWidget
+    from src import tools
+    tools.update_plan.func("[x] 读懂登录\n[~] 修复\n[ ] 补测试")
+    ui._render_plan_panel()
+    _pump(qapp)
+    got = []
+    ui.plan_panel.step_clicked.connect(lambda n, t: got.append((n, t)))
+    rows = [w for w in ui.plan_panel.findChildren(QWidget) if w.objectName() == "planRow"]
+    assert len(rows) == 3
+    QTest.mouseClick(rows[1], Qt.LeftButton)
+    assert got == [(2, "修复")]
+
+
+def test_clickable_rows_show_hand_cursor_and_hover_color(ui, qapp):
+    """可点的行：小手光标、移上去有底色。面板里不带选择器的样式表会盖掉悬停规则，这里盯住。"""
+    from PySide6.QtWidgets import QWidget
+    from src import tools
+    tools.update_plan.func("[x] 读懂登录\n[~] 修复\n[ ] 补测试")
+    ui._render_plan_panel()
+    _pump(qapp)
+    row = [w for w in ui.plan_panel.findChildren(QWidget) if w.objectName() == "planRow"][1]
+    assert row.cursor().shape() == Qt.PointingHandCursor
+    hover = ui.plan_panel._t("mv_indigo_soft")
+
+    def sample():
+        return row.grab().toImage().pixelColor(row.width() - 6, row.height() // 2).name()
+
+    assert sample() != hover
+    row.setAttribute(Qt.WA_UnderMouse, True)   # offscreen 没有真实的鼠标移入事件
+    row.update()
+    _pump(qapp)
+    assert sample() == hover
+
+
+def test_step_without_a_segment_explains_why(ui, monkeypatch):
+    from src import tools
+    toasts = []
+    monkeypatch.setattr(ui, "_show_toast", lambda text, *a, **k: toasts.append(text))
+    tools.update_plan.func("[x] 读懂登录\n[~] 修复\n[ ] 补测试")
+    ui._on_task_panel_step_clicked(3, "补测试")
+    ui._on_task_panel_step_clicked(1, "读懂登录")
+    assert toasts[0] == "第 3 步还没开始"
+    assert "没有这一步的分段" in toasts[1], "做过的步骤在这次对话里没有分段时如实说"
+
+
+@pytest.fixture()
+def git_project(tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("git"):
+        pytest.skip("git 未安装")
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    for args in (["init"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
+    (repo / "app.py").write_text("a = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
+    return repo
+
+
+def test_changed_files_list_counts_and_opens_the_diff(ui, qapp, git_project, monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    from src import session
+    (git_project / "app.py").write_text("a = 2\nb = 3\n", encoding="utf-8")
+    (git_project / "new.py").write_text("x = 1\n", encoding="utf-8")
+    sess = session.get_active()
+    sess.project = str(git_project)
+    sess.verification["dirty_files"] = ["app.py", "new.py"]
+    sess.verification["change_revision"] = 7
+
+    rows = ui._task_panel_files(sess)
+    assert rows == [("app.py", 2, 1, False), ("new.py", 1, 0, True)]
+
+    ui._render_plan_panel()
+    _pump(qapp)
+    panel = ui.plan_panel
+    assert panel.files_frame.isVisible(), "没列计划、直接改了文件也看得到"
+    file_rows = [w for w in panel.findChildren(QWidget) if w.objectName() == "fileRow"]
+    assert len(file_rows) == 2
+
+    opened = []
+    monkeypatch.setattr(ui, "_show_diff_dialog", lambda title, intro, text, is_diff: opened.append((title, is_diff)))
+    QTest.mouseClick(file_rows[0], Qt.LeftButton)
+    assert opened == [("改动：app.py", True)]
+    assert sess.verification.get("diff_reviewed") is not True, "看一眼不替模型记已审阅"
+
+
+def test_long_changed_file_lists_fold(ui, qapp):
+    from PySide6.QtWidgets import QWidget
+    panel = ui.plan_panel
+    panel.files_provider = lambda _s: [(f"src/f{i}.py", 1, 0, False) for i in range(11)]
+    from src import session
+    panel.render_session(session.get_active())
+    _pump(qapp)
+    assert len([w for w in panel.findChildren(QWidget) if w.objectName() == "fileRow"]) == panel._FILES_MAX
+    assert panel.files_more.text().startswith("另有 3 个文件")

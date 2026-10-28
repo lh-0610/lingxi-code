@@ -496,3 +496,51 @@ class TestPathSafety:
         """paths 参数类型错误。"""
         result = git_stage.func("not_a_list")  # type: ignore
         assert "必须是字符串列表" in result
+
+
+# ── 任务面板"改动的文件"用的只读查询 ─────────────────────────
+
+class TestPanelDiffHelpers:
+    """diff_numstat / file_diff_text：只读、不记"已审阅"，说不出的不硬说。"""
+
+    def test_counts_modified_and_new_files(self, git_repo):
+        from src.tools_git import diff_numstat
+        (git_repo / "README.md").write_text("init\nsecond line\n", encoding="utf-8")
+        (git_repo / "new.py").write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+        stats = diff_numstat(str(git_repo), ["README.md", "new.py", "untouched.py"])
+        assert stats["README.md"][2] is False and stats["README.md"][0] >= 1
+        assert stats["new.py"] == (3, 0, True), "git 还没跟踪的新文件：按现有行数算增"
+        assert "untouched.py" not in stats, "没有差异的不编数字"
+
+    def test_dotfile_paths_are_not_mangled(self, git_repo):
+        from src.tools_git import diff_numstat
+        (git_repo / ".editorconfig").write_text("root = true\n", encoding="utf-8")
+        assert diff_numstat(str(git_repo), [".editorconfig"]) == {".editorconfig": (1, 0, True)}
+
+    def test_not_a_repo_says_nothing(self, tmp_path):
+        from src.tools_git import diff_numstat, file_diff_text
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert diff_numstat(str(plain), ["a.py"]) is None
+        assert "不是 git 仓库" in file_diff_text(str(plain), "a.py")
+
+    def test_file_diff_text_cases(self, git_repo):
+        from src.tools_git import file_diff_text
+        (git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+        assert file_diff_text(str(git_repo), "README.md").startswith("diff --git")
+        (git_repo / "new.py").write_text("print(1)\n", encoding="utf-8")
+        assert file_diff_text(str(git_repo), "new.py").startswith("新文件")
+        subprocess.run(["git", "checkout", "--", "README.md"], cwd=str(git_repo), check=True,
+                       capture_output=True)
+        assert "没有差异" in file_diff_text(str(git_repo), "README.md")
+
+    def test_viewing_does_not_mark_the_diff_reviewed(self, git_repo):
+        """用户在界面上看一眼，不能替模型解除"审阅 diff"的验证义务。"""
+        from src import session as _session
+        from src.tools_git import diff_numstat, file_diff_text
+        v = _session.get_active().verification
+        v["diff_reviewed"] = False
+        (git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+        diff_numstat(str(git_repo), ["README.md"])
+        file_diff_text(str(git_repo), "README.md")
+        assert v["diff_reviewed"] is False

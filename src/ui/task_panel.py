@@ -277,6 +277,10 @@ class TaskPanel(QFrame):
     _GRIP = 6                        # 左边缘这么宽的一条可以拖动改宽度
 
     width_changed = Signal(int)      # 拖完松手时发，ChatUI 记进界面偏好
+    step_clicked = Signal(int, str)  # 点了计划里的第 n 步（步号, 步骤名）：ChatUI 在消息流里定位
+    file_clicked = Signal(str)       # 点了改动文件（相对路径）：ChatUI 打开它的差异
+
+    _FILES_MAX = 8                   # 改动文件最多列几个，其余折成"另有 N 个"
 
     def __init__(self, parent: QWidget, theme_lookup: Callable[[str], str]):
         super().__init__(parent)
@@ -305,6 +309,8 @@ class TaskPanel(QFrame):
         self._plan_spinner_timer.setInterval(33)
         self._plan_spinner_timer.timeout.connect(self._tick_plan_spinner)
         self.on_undo_request: Callable[[], None] | None = None
+        # ChatUI 给：取会话改动的文件和增删行数 [(相对路径, 增, 删, 是否新文件)]（面板只画不查 git）
+        self.files_provider: Callable[[Any], list] | None = None
 
         self._build_ui()
         self.apply_theme()
@@ -323,7 +329,9 @@ class TaskPanel(QFrame):
 
         # ── 顶栏：标题 + 任务标识 + 总体进度 ──
         self.top_row = QWidget(self)
-        self.top_row.setStyleSheet("background:transparent;")
+        # 样式表都带选择器：不带选择器的规则会盖住面板给子控件写的规则（比如行的悬停底色）
+        self.top_row.setObjectName("panelTopRow")
+        self.top_row.setStyleSheet("#panelTopRow { background: transparent; }")
         self.top_row.setFixedHeight(24)
         top_layout = QHBoxLayout(self.top_row)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -356,10 +364,11 @@ class TaskPanel(QFrame):
         self.plan_scroll.setWidgetResizable(True)
         self.plan_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.plan_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.plan_scroll.viewport().setStyleSheet("background:transparent;")
+        self.plan_scroll.viewport().setStyleSheet("#qt_scrollarea_viewport { background: transparent; }")
 
         self.content_widget = QWidget()
-        self.content_widget.setStyleSheet("background:transparent;")
+        self.content_widget.setObjectName("panelContent")
+        self.content_widget.setStyleSheet("#panelContent { background: transparent; }")
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 4, 0, 4)
         self.content_layout.setSpacing(12)
@@ -460,6 +469,33 @@ class TaskPanel(QFrame):
         sec2_lay.addWidget(self.plan_change_note)
         self.content_layout.addWidget(self.sec2_frame)
 
+        # 3.5 改动的文件：这一轮写过的文件和增删行数，点开看差异
+        self.files_frame = QFrame(self.content_widget)
+        self.files_frame.setObjectName("secFrame")
+        files_lay = QVBoxLayout(self.files_frame)
+        files_lay.setContentsMargins(0, 12, 0, 4)
+        files_lay.setSpacing(4)
+        files_head = QHBoxLayout()
+        files_head.setContentsMargins(0, 0, 0, 0)
+        self.files_title = QLabel("改动的文件", self.files_frame)
+        self.files_title.setToolTip("这一轮写过的文件；上一轮还没验证完的也会带过来。行数是此刻相对上次提交的差异")
+        self.files_count = QLabel(self.files_frame)
+        self.files_count.setObjectName("filesCount")
+        files_head.addWidget(self.files_title)
+        files_head.addStretch(1)
+        files_head.addWidget(self.files_count)
+        files_lay.addLayout(files_head)
+        self.files_body = QWidget(self.files_frame)
+        self.files_rows_lay = QVBoxLayout(self.files_body)
+        self.files_rows_lay.setContentsMargins(0, 2, 0, 0)
+        self.files_rows_lay.setSpacing(0)
+        files_lay.addWidget(self.files_body)
+        self.files_more = QLabel(self.files_frame)
+        self.files_more.setObjectName("filesMore")
+        files_lay.addWidget(self.files_more)
+        self.files_frame.setVisible(False)
+        self.content_layout.addWidget(self.files_frame)
+
         # 4. Section 3：执行与验证
         self.sec3_frame = QFrame(self.content_widget)
         self.sec3_frame.setObjectName("secFrame")
@@ -511,6 +547,11 @@ class TaskPanel(QFrame):
             f"QFrame#planPanel {{ background: {bg}; border: none; border-left: {edge}; }}"
             f"QLabel#emptyTitle {{ font-size: 14px; font-weight: 600; color: {text}; }}"
             f"QLabel#emptyText {{ font-size: 13px; color: {self._t('mv_text_sec')}; }}"
+            f"QWidget#planRow, QWidget#fileRow {{ background: transparent; border-radius: 6px; }}"
+            # 悬停底色用浅主题色：面板底色和 mv_header_bg 是同一个灰，用它悬停看不出变化
+            f"QWidget#planRow:hover, QWidget#fileRow:hover {{ background: {self._t('mv_indigo_soft')}; }}"
+            f"QLabel#fileName {{ font-family: {MONO_CSS}; font-size: 12px; color: {text}; }}"
+            f"QLabel#filesCount, QLabel#filesMore {{ font-size: 12px; color: {self._t('mv_text_sec')}; }}"
             f"QFrame#secFrame {{ background: transparent; border: none; border-top: 1px solid {line}; }}"
             f"QFrame#switchBanner {{ background: {self._t('mv_indigo_soft')}; border: none; border-radius: 8px; }}"
             f"QLabel {{ color: {text}; background: transparent; }}"
@@ -521,7 +562,7 @@ class TaskPanel(QFrame):
             marker.update()
         self.plan_title.setStyleSheet(f"font-size:14px; font-weight:600; color:{text};")
         self.plan_count.setStyleSheet(f"font-size:12px; color:{dim};")
-        for title in (self.sec1_title, self.sec2_title, self.sec3_title, self.sec4_title):
+        for title in (self.sec1_title, self.sec2_title, self.files_title, self.sec3_title, self.sec4_title):
             title.setStyleSheet(f"font-size:13px; font-weight:600; color:{text};")
         btn_qss = (
             f"QPushButton {{ border: 1px solid {chip}; border-radius: 8px; padding: 2px 10px;"
@@ -613,8 +654,64 @@ class TaskPanel(QFrame):
 
     def _refresh_evidence(self):
         if self._evidence_sess is not None:
-            self._render_evidence(self._evidence_sess)
+            if self._has_content:
+                self._render_evidence(self._evidence_sess)
+            self._render_files(self._evidence_sess)
             self._sync_spinner(self._evidence_sess)
+
+    def _render_files(self, sess: Any):
+        """改动的文件：名字（太长从中间省略）+ 增删行数；点了在 ChatUI 里看差异。
+        行数由 files_provider 给（它按改动次数缓存 git 结果），说不出就不写。"""
+        rows = []
+        if self.files_provider is not None and sess is not None:
+            try:
+                rows = list(self.files_provider(sess) or [])
+            except Exception:
+                rows = []
+        self.files_frame.setVisible(bool(rows))
+        theme = self._t("mv_ok")
+        if (rows, theme) == getattr(self, "_files_drawn", None):
+            return          # 每 2 秒刷新一次：内容没变就不重建（重建会让悬停的那一行闪一下）
+        self._files_drawn = (rows, theme)
+        while self.files_rows_lay.count():
+            w = self.files_rows_lay.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)      # 立即摘下：deleteLater 要等下一轮事件循环，期间旧行还挂着
+                w.deleteLater()
+        if not rows:
+            return
+        self.files_count.setText(f"{len(rows)} 个")
+        ok, bad, muted = self._t("mv_ok"), self._t("mv_bad"), self._t("mv_muted")
+        for path, added, removed, is_new in rows[:self._FILES_MAX]:
+            row = QWidget(self.files_body)
+            row.setObjectName("fileRow")
+            row.setAttribute(Qt.WA_StyledBackground, True)
+            row.setAttribute(Qt.WA_Hover, True)
+            row.setCursor(Qt.PointingHandCursor)
+            row.setToolTip(f"{path}\n点开看此刻相对上次提交的差异")
+            row.mousePressEvent = lambda _e, p=path: self.file_clicked.emit(p)
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(4, 3, 4, 3)
+            lay.setSpacing(10)
+            name = QLabel(row)
+            name.setObjectName("fileName")
+            name.setText(name.fontMetrics().elidedText(path, Qt.ElideMiddle, 230))
+            lay.addWidget(name, 1)
+            parts = []
+            if is_new:
+                parts.append(f"<span style='color:{muted};'>新文件</span>")
+            if added is not None:
+                parts.append(f"<span style='color:{ok};'>+{added}</span>")
+            if removed is not None and not is_new:
+                parts.append(f"<span style='color:{bad};'>−{removed}</span>")
+            stat = QLabel("&nbsp;".join(parts), row)
+            stat.setTextFormat(Qt.RichText)
+            stat.setStyleSheet(f"font-family: {MONO_CSS}; font-size: 12px; background: transparent;")
+            lay.addWidget(stat, 0)
+            self.files_rows_lay.addWidget(row)
+        extra = len(rows) - self._FILES_MAX
+        self.files_more.setText(f"另有 {extra} 个文件，见结果卡的「查看改动」" if extra > 0 else "")
+        self.files_more.setVisible(extra > 0)
 
     def _on_undo_click(self):
         if self.on_undo_request:
@@ -655,13 +752,22 @@ class TaskPanel(QFrame):
         while self.plan_rows_lay.count():
             w = self.plan_rows_lay.takeAt(0).widget()
             if w is not None:
+                w.setParent(None)      # 立即摘下：deleteLater 要等下一轮事件循环，期间旧行还挂着
                 w.deleteLater()
         self._plan_markers = []
-        for it in items:
+        for n, it in enumerate(items, start=1):
             status = it.get("status")
             row = QWidget(self.plan_body)
+            # 点一下在对话里找到这一步（消息流里的步骤分段）
+            row.setObjectName("planRow")
+            row.setAttribute(Qt.WA_StyledBackground, True)
+            row.setAttribute(Qt.WA_Hover, True)
+            row.setCursor(Qt.PointingHandCursor)
+            row.setToolTip("在对话里找到这一步" if status != "pending" else "这一步还没开始")
+            text = it.get("text") or ""
+            row.mousePressEvent = lambda _e, n=n, t=text: self.step_clicked.emit(n, t)
             lay = QHBoxLayout(row)
-            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setContentsMargins(2, 2, 4, 2)
             lay.setSpacing(10)
             # 第一行文字约 19px 高、圆标 14px：圆标下移 3px，对齐第一行的中线
             marker_box = QVBoxLayout()
@@ -691,8 +797,9 @@ class TaskPanel(QFrame):
         if not task and not items:
             self._plan_spinner_timer.stop()
             self._has_content = False
-            self._evidence_sess = None
+            self._evidence_sess = sess
             self._show_empty(True)
+            self._render_files(sess)
             return
         self._show_empty(False)
         muted = self._t("mv_muted")
@@ -802,6 +909,7 @@ class TaskPanel(QFrame):
         # ── 6. Section 4：验证证据 ──
         self._evidence_sess = sess
         self._render_evidence(sess)
+        self._render_files(sess)
 
         self._has_content = True
 
@@ -812,6 +920,7 @@ class TaskPanel(QFrame):
             w.setVisible(not empty)
         if empty:
             self.sec2_frame.setVisible(False)
+            self.files_frame.setVisible(False)   # 有改动时 _render_files 再打开
             self.switch_banner.setVisible(False)
             self.plan_count.setText("")
             self.plan_progress.setVisible(False)

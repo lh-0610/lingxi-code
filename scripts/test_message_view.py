@@ -290,6 +290,40 @@ class TestFind:
         mv.close()
 
 
+class TestJumpToStep:
+    def test_jumps_into_a_folded_round_and_highlights(self, qt_app):
+        from src.ui.message_view import StepHeader
+        mv = _view(600)
+        mv.resize(600, 320)
+        _round_with_reply(mv)
+        mv.on_plan([{"text": "读懂登录", "status": "in_progress"}, {"text": "修复", "status": "pending"}])
+        _tool(mv, "📖 读取文件", "src/login.py", "def login(): ...\n")
+        mv.handle("一段很长的回复，会换好几行。" * 40, "ai_msg")
+        mv.handle("你\n", "user_label")                  # 新一轮：上一轮的步骤分段收起来
+        mv.handle("继续\n", "user_msg")
+        mv.handle("m\n", "ai_label")
+        mv.handle("后面的回复。" * 80, "ai_msg")
+        mv.show()
+        _pump(qt_app, 8)
+        header = mv.findChildren(StepHeader)[0]
+        assert not header.isVisibleTo(mv)
+
+        assert mv.scroll_to_step(1, "读懂登录") is True
+        _pump(qt_app, 8)
+        assert header.isVisibleTo(mv), "收起的那一轮要先展开"
+        sb = mv.verticalScrollBar()
+        top = header.mapTo(mv.widget(), header.rect().topLeft()).y()
+        assert sb.value() <= top < sb.value() + mv.viewport().height(), "滚到这一步看得见的位置"
+        assert "stepHeader" in header.styleSheet(), "落点短暂高亮"
+        mv.close()
+
+    def test_unknown_step_is_reported(self, qt_app):
+        mv = _view()
+        _round_with_reply(mv)
+        assert mv.scroll_to_step(3) is False, "消息流里没有这一步：交给调用方提示，不乱滚"
+        mv.close()
+
+
 class TestPlanSteps:
     def test_a_segment_per_step_change_and_status_follows_the_plan(self, qt_app):
         from src.ui.message_view import StepHeader
