@@ -811,26 +811,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._position_scroll_btn()
 
     def _scroll_to_bottom(self):
-        """滚动到聊天区底部。
-
-        只操作滚动条，不移动 QTextBrowser 文本光标。移动光标会让正文里
-        获得焦点的 Copy 链接被框选，并可能把视口拉回该链接位置。
-        """
-        def force_bottom(final=False):
-            sb = self.chat_area.verticalScrollBar()
-            self.chat_area.clearFocus()
-            self.scroll_bottom_btn.setFocus()
-            sb.setValue(sb.maximum())
-            sb.setSliderPosition(sb.maximum())
-            sb.triggerAction(sb.SliderAction.SliderToMaximum)
-            if final and sb.value() >= sb.maximum() - 30:
-                self.scroll_bottom_btn.hide()
-            elif hasattr(self, "scroll_bottom_btn"):
-                self._position_scroll_btn()
-                self.scroll_bottom_btn.raise_()
-
-        for delay in (0, 16, 50, 120, 250, 400, 700):
-            QTimer.singleShot(delay, self, lambda final=(delay == 700): force_bottom(final))
+        """滚动到聊天区底部并恢复贴底跟随：之后内容还在排版、变高，消息流自己跟到底
+        （MessageView 跟着滚动范围走），不用再隔几百毫秒补滚几次。"""
+        self.chat_area.scroll_to_end()
+        self._on_scroll_changed()
 
 
     # ── 输入区 ──

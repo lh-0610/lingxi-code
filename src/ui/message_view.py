@@ -459,6 +459,7 @@ class ThinkingChip(QWidget):
         self._refresh_label()
 
     def _toggle(self):
+        _hold_scroll(self)
         self._open = not self._open
         self.panel.setVisible(self._open)
         self._refresh_label()
@@ -590,6 +591,7 @@ class ToolCallCard(QFrame):
         return self._open
 
     def toggle(self):
+        _hold_scroll(self)
         self._open = not self._open
         self._sync()
 
@@ -727,6 +729,7 @@ class _ProcessSummary(QWidget):
         h.addStretch(1)
 
     def _toggle(self):
+        _hold_scroll(self)
         self._open = not self._open
         self.btn.setText("收起过程" if self._open else "展开过程")
         self._on_toggle(self._open)
@@ -956,6 +959,15 @@ class AssistantTurn(QWidget):
         show(False)
 
 
+def _hold_scroll(widget):
+    """用户点了展开 / 收起：所在消息流停在原处（见 MessageView.hold_position）。"""
+    w = widget.parentWidget()
+    while w is not None and not isinstance(w, MessageView):
+        w = w.parentWidget()
+    if w is not None:
+        w.hold_position()
+
+
 def _deleted(w) -> bool:
     try:
         w.objectName()
@@ -990,6 +1002,31 @@ class MessageView(QScrollArea):
         self.replaying = False
         # ChatUI 提供：当前会话的模式等（{"mode": "执行模式"}），新回复的那行小字用
         self.meta_provider = None
+        # 贴底跟随：停在底部时，内容变高（流式追加、换行排版、结果卡）就跟着滚到新的底部。
+        # 跟着滚动范围走，不靠追加后定时滚一次——标签和卡片的高度要再排几轮版才定下来，
+        # 定时滚动会停在半路，之后"在不在底部"的判断也就一直是否，再也跟不上。
+        self._follow = True
+        sb = self.verticalScrollBar()
+        sb.valueChanged.connect(self._on_scroll_value)
+        sb.rangeChanged.connect(self._on_scroll_range)
+
+    def _on_scroll_value(self, value):
+        """滚动位置变了：停在底部附近就继续跟随，往上翻了就不跟。"""
+        self._follow = value >= self.verticalScrollBar().maximum() - 40
+
+    def _on_scroll_range(self, _lo, hi):
+        if self._follow:
+            self.verticalScrollBar().setValue(hi)
+
+    def scroll_to_end(self):
+        """滚到底并恢复贴底跟随（发消息、打开会话、点"回到底部"）。"""
+        self._follow = True
+        sb = self.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def hold_position(self):
+        """用户点了展开 / 收起：停在原处，不因为内容变高被拽到底部。"""
+        self._follow = False
 
     def apply_theme(self, extra_qss=""):
         """背景跟当前主题走。extra_qss 是宿主补充的滚动条等样式——setStyleSheet 会整体替换，
@@ -1080,7 +1117,6 @@ class MessageView(QScrollArea):
         r = self._cur_round
         if r is None or not items:
             return
-        stick = self._at_bottom()
         statuses = {i + 1: it.get("status") for i, it in enumerate(items)}
         for turn in r.assistant_turns:
             turn.update_steps(statuses)
@@ -1090,18 +1126,12 @@ class MessageView(QScrollArea):
             if key != r.current_step:
                 r.current_step = key
                 self._assistant().step(cur, key[1], "in_progress")
-        if stick:
-            QTimer.singleShot(0, self, self._scroll_to_bottom)
 
     def finalize_markdown(self, html):
-        stick = self._at_bottom()
         self._assistant().finalize_markdown(html)
-        if stick:
-            QTimer.singleShot(0, self, self._scroll_to_bottom)
 
     def add_message_actions(self, on_copy=None, on_regen=None):
         """回复末尾的操作按钮:复制 / 重新生成(幽灵图标按钮)。"""
-        stick = self._at_bottom()
         a = self._assistant()
         a.end_body()
         row = QWidget()
@@ -1128,14 +1158,11 @@ class MessageView(QScrollArea):
             h.addWidget(b, 0, Qt.AlignVCenter)
         h.addStretch(1)
         a._add(row, top_gap=6)
-        if stick:
-            QTimer.singleShot(0, self, self._scroll_to_bottom)
 
     def handle(self, text, tag):
         """tag→控件分发。镜像 chat_window._append_html 的 tag 协议。"""
-        # 贴底跟随:仅当用户当前就在底部附近(或这是用户刚发的消息)才滚到底,否则不动——
-        # 生成过程中允许用户向上翻历史而不被流式追加拽回底部(复刻旧 _scroll_guard 行为)。
-        stick = self._at_bottom() or tag in ("user_label", "user_msg")
+        # 滚动由贴底跟随负责（_on_scroll_range）：用户停在底部就跟到底，往上翻了就不动。
+        # 用户刚发的消息例外——总是滚到底并恢复跟随。
         if tag == "user_label":
             self.add_user_turn()
         elif tag == "user_msg":
@@ -1173,8 +1200,8 @@ class MessageView(QScrollArea):
                 self._cur_assistant.end_tool()   # 之后到的输出不再算进这张卡
         elif tag == "spacer":
             pass   # 间距由布局给
-        if stick:
-            QTimer.singleShot(0, self, self._scroll_to_bottom)
+        if tag in ("user_label", "user_msg") and not self.replaying:
+            self.scroll_to_end()
 
     def remove_waiting(self):
         if self._cur_assistant is not None:
@@ -1254,7 +1281,6 @@ class MessageView(QScrollArea):
         """
         if card is None:
             return None
-        stick = self._at_bottom()
         # **直接加卡，不再套一层只为留白的 QWidget**：那种壳不向上传递 heightForWidth，
         # 卡片被算矮、底部按钮被整条切掉（实测差 300px 以上）。轮次 _Round 本身是带
         # 纵向布局的容器，和 AssistantTurn 装正文一样，高度能正确传上去。
@@ -1266,20 +1292,7 @@ class MessageView(QScrollArea):
             self._add_turn(card, top_gap=16)
         # 结果卡后面的内容（继续任务的说明等）另起一段，不追加到卡片**之前**的那段回复里。
         self._cur_assistant = None
-        if stick:
-            QTimer.singleShot(0, self, self._scroll_to_bottom)
         return card
-
-    def _at_bottom(self, slack=40):
-        """用户当前是否贴在底部附近(slack px 容差)——决定要不要继续跟随滚动。
-        必须在【追加内容之前】调用:插入控件后 maximum 要等下一轮布局才更新,
-        此刻读到的还是追加前的位置,正好反映"追加前用户在不在底"。"""
-        sb = self.verticalScrollBar()
-        return sb.value() >= sb.maximum() - slack
-
-    def _scroll_to_bottom(self):
-        sb = self.verticalScrollBar()
-        sb.setValue(sb.maximum())
 
 
 def replay_plan_change(plan, name, args, result):

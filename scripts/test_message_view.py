@@ -151,6 +151,73 @@ class TestRounds:
             mv.close()
 
 
+class TestFollowBottom:
+    """停在底部时内容变高要跟到底（标签、结果卡要再排几轮版才定高，一次性定时滚动会停在半路）；
+    用户往上翻了就不动；点展开 / 收起不能把视图拽走。"""
+
+    def _long_rounds(self, mv, n):
+        for i in range(n):
+            mv.handle("你\n", "user_label")
+            mv.handle(f"第 {i} 个问题\n", "user_msg")
+            mv.handle("deepseek-v4-flash\n", "ai_label")
+            mv.handle("一段很长的回复，会换好几行。" * 30, "ai_msg")
+
+    def _shown(self, qt_app):
+        mv = _view(600)
+        mv.resize(600, 320)
+        mv.show()
+        _pump(qt_app)
+        return mv
+
+    def test_follows_to_the_very_bottom_as_content_grows(self, qt_app):
+        mv = self._shown(qt_app)
+        self._long_rounds(mv, 3)
+        _pump(qt_app, 8)
+        sb = mv.verticalScrollBar()
+        assert sb.maximum() > 0 and sb.value() == sb.maximum()
+        mv.handle("再补一段。" * 60, "ai_msg")
+        mv.add_message_actions(on_copy=lambda: None)
+        _pump(qt_app, 8)
+        assert sb.value() == sb.maximum(), "一轮里后来的块（换行正文、按钮）也要跟到底"
+        mv.close()
+
+    def test_scrolling_up_stops_following_and_back_down_resumes(self, qt_app):
+        mv = self._shown(qt_app)
+        self._long_rounds(mv, 3)
+        _pump(qt_app, 8)
+        sb = mv.verticalScrollBar()
+        sb.setValue(0)                         # 用户往上翻
+        mv.handle("流式追加的内容。" * 60, "ai_msg")
+        _pump(qt_app, 8)
+        assert sb.value() == 0, "往上翻着看历史时，不能被流式追加拽回底部"
+
+        sb.setValue(sb.maximum())              # 用户自己滚回底部
+        mv.handle("又来一段。" * 60, "ai_msg")
+        _pump(qt_app, 8)
+        assert sb.value() == sb.maximum()
+
+        sb.setValue(0)
+        mv.scroll_to_end()                     # 发消息 / 点"回到底部"
+        mv.handle("后续内容。" * 60, "ai_msg")
+        _pump(qt_app, 8)
+        assert sb.value() == sb.maximum()
+        mv.close()
+
+    def test_expanding_a_card_keeps_the_view_still(self, qt_app):
+        from src.ui.message_view import ToolCallCard
+        mv = self._shown(qt_app)
+        self._long_rounds(mv, 2)
+        _tool(mv, "⚡ 执行命令", "pytest -q", *[f"line {i}\n" for i in range(12)])
+        _pump(qt_app, 8)
+        sb = mv.verticalScrollBar()
+        before, old_max = sb.value(), sb.maximum()
+        assert before == old_max
+        mv.findChildren(ToolCallCard)[0].toggle()
+        _pump(qt_app, 8)
+        assert sb.maximum() > old_max and sb.value() == before, "展开卡片时视图停在原处"
+        mv.close()
+
+
 class TestPlanSteps:
     def test_a_segment_per_step_change_and_status_follows_the_plan(self, qt_app):
         from src.ui.message_view import StepHeader
