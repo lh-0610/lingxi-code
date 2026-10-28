@@ -172,6 +172,31 @@ def _row_delete_button(row):
     return None
 
 
+def test_running_row_shows_a_spinner_not_a_text_pill(ui, isolated_memory, tmp_path):
+    """生成中的会话：右边只有转圈（用时在悬停提示里），标题占满剩余宽度。
+    原来的「生成中 MM:SS」药丸在窄侧栏里会挡住标题、自己也被截断。"""
+    from src.ui.widgets import GeneratingBadge
+    registered = _register_project(tmp_path, "proj-run")
+    ids = _make_sessions(2, project=registered, tag="run")
+    _session.get(ids[-1]).is_generating = True
+    ui.resize(1180, 800)
+    ui.show()
+    ui._refresh_session_list()
+    QApplication.processEvents()
+
+    row = next(r for r in _group(ui, "proj-run")["rows"]
+               if r.property("rowstate") == "generating")
+    badges = row.findChildren(GeneratingBadge)
+    assert len(badges) == 1
+    badge = badges[0]
+    assert row.isVisible() and badge._label.isHidden(), "不再显示文字药丸"
+    assert badge.toolTip().startswith("生成中")
+    assert _row_delete_button(row) is None, "正在跑的会话不给删除"
+    title = _row_title_button(row)
+    assert title.geometry().right() < badge.geometry().left()
+    assert badge.geometry().right() <= row.width(), "转圈不被截掉"
+
+
 def test_group_shows_30_then_load_more(ui, isolated_memory, tmp_path):
     """每组初始 30 条 + 「加载更多」；点两次后全部可见、按钮消失。"""
     registered = _register_project(tmp_path, "proj-a")

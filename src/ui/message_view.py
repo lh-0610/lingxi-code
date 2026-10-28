@@ -15,7 +15,9 @@ import re
 import time
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import (
+    QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QTextCursor, QTextDocument,
+)
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
     QVBoxLayout, QWidget,
@@ -191,6 +193,18 @@ class _ElidedLabel(QLabel):
     def _apply(self):
         width = max(0, self.width() - 2)
         super().setText(self.fontMetrics().elidedText(self._full, Qt.ElideRight, width))
+
+
+class _FitLabel(QLabel):
+    """自动换行的富文本，但宽度先按"不换行要多宽"来要：短话不被提前折行，长话撑到可用宽度再折。
+    QLabel 自带的换行宽度是它自己估的"好看"宽度，气泡里一长句会被折成二十来字一行。"""
+    def sizeHint(self):
+        doc = QTextDocument()
+        doc.setDefaultFont(self.font())
+        doc.setDocumentMargin(0)
+        doc.setHtml(self.text())
+        width = math.ceil(doc.idealWidth()) + 2
+        return QSize(width, self.heightForWidth(width))
 
 
 class _FlatButton(QPushButton):
@@ -789,18 +803,29 @@ class _ProcessSummary(QWidget):
 
 
 class UserTurn(QWidget):
-    """用户的一句话：线上一个空心圆，右边是原文（不再另加"你"标签）。"""
+    """用户的一句话：线上一个空心圆，右边是浅靛蓝底的气泡（宽度贴合文字，不再另加"你"标签）。
+    只放原文时和 AI 的正文、过程说明长得一样，一轮里分不出哪句是用户说的。"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        self.bubble = QFrame()
+        self.bubble.setObjectName("userBubble")
+        self.bubble.setAttribute(Qt.WA_StyledBackground, True)
+        self.bubble.setStyleSheet(
+            f"#userBubble {{ background:{_P['indigo_soft']}; border-radius:10px; }}")
+        v = QVBoxLayout(self.bubble)
+        v.setContentsMargins(14, 8, 14, 8)   # 线上的空心圆对的是正文第一行（add_node 锚在 body 上）
         v.setSpacing(0)
-        self.body = QLabel()
+        self.body = _FitLabel()
         self.body.setWordWrap(True)
         self.body.setTextFormat(Qt.RichText)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.body.setStyleSheet(f"color:{_P['text']}; font-family:{_SANS}; font-size:14px; background:transparent;")
         v.addWidget(self.body)
+        row.addWidget(self.bubble, 0)
+        row.addStretch(1)
         self._text = ""
 
     def append(self, text):

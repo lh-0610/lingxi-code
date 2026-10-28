@@ -290,6 +290,37 @@ class TestFind:
         mv.close()
 
 
+class TestUserBubble:
+    """用户说的话放在浅靛蓝气泡里，和 AI 的正文分得开；气泡宽度贴合文字。"""
+
+    def _bubble(self, qt_app, text, width=760):
+        from src.ui.message_view import UserTurn
+        mv = _view(width)
+        mv.handle("你\n", "user_label")
+        mv.handle(text + "\n\n", "user_msg")
+        mv.show()
+        _pump(qt_app, 6)
+        turn = mv.findChildren(UserTurn)[-1]
+        return mv, turn
+
+    def test_short_message_stays_on_one_line(self, qt_app):
+        mv, turn = self._bubble(qt_app, "查一下lol s16的赛程")
+        line = turn.body.fontMetrics().lineSpacing()
+        assert turn.bubble.width() < turn.width() / 2, "短话的气泡只有文字那么宽"
+        assert turn.body.height() < line * 2, "短话不被提前折行"
+
+    def test_long_message_uses_the_available_width(self, qt_app):
+        mv, turn = self._bubble(qt_app, "再帮我按队伍整理一下，每支队伍的比赛时间单独列出来，" * 4)
+        assert turn.bubble.width() > turn.width() * 0.9, "长句撑满可用宽度再折行，不是折成窄条"
+        assert turn.bubble.geometry().right() <= turn.width()
+
+    def test_bubble_has_its_own_background(self, qt_app):
+        from src.ui.message_view import _P
+        mv, turn = self._bubble(qt_app, "修一下登录")
+        img = turn.bubble.grab().toImage()
+        assert img.pixelColor(4, turn.bubble.height() // 2).name() == _P["indigo_soft"]
+
+
 class TestJumpToStep:
     def test_jumps_into_a_folded_round_and_highlights(self, qt_app):
         from src.ui.message_view import StepHeader

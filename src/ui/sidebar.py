@@ -344,27 +344,20 @@ class SidebarMixin:
             btn.clicked.connect(lambda checked=False, s=sid: self._load_session(s))
 
             if is_gen:
-                # 生成中（设计稿）：标题(贴合内容、强制靛蓝激活色)→闪烁光标│→弹簧→
-                # 「生成中 MM:SS」白色药丸（无 spinner、无删除，避免误删正在跑的会话）。
+                # 生成中：标题（靛蓝加粗）占满剩余宽度 → 右边一个转圈，占删除按钮的位置
+                # （不给删除，避免误删正在跑的会话）。用时放进转圈的悬停提示：原来的
+                # 「生成中 MM:SS」药丸在窄侧栏里会把标题挤掉、自己也被截断。
                 btn.setProperty("class", "historyItemActive")  # 后台跑的会话标题也上靛蓝加粗
-                btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-                row_layout.addWidget(btn, 0)
+                row_layout.addWidget(btn, 1)
                 _seen_gen.add(sid)
                 start_ts = self._gen_started.get(sid)
                 if start_ts is None:
                     start_ts = _time.monotonic()
                     self._gen_started[sid] = start_ts
-                from .widgets import BlinkingCursor, GeneratingBadge
-                row_layout.addWidget(
-                    BlinkingCursor(color=self._t("history_active_text")), 0, Qt.AlignVCenter)
-                row_layout.addStretch(1)
-                row_layout.addWidget(
-                    GeneratingBadge(
-                        start_ts, text_color=self._t("badge_run_text"), show_spinner=False,
-                        bg=self._t("badge_run_bg"), border=self._t("badge_run_border"),
-                    ),
-                    0, Qt.AlignVCenter,
-                )
+                from .widgets import GeneratingBadge
+                badge = GeneratingBadge(start_ts, spin_color=self._t("badge_run_text"), compact=True)
+                badge.setObjectName("historyRunSpinner")
+                row_layout.addWidget(badge, 0, Qt.AlignVCenter)
             else:
                 row_layout.addWidget(btn, 1)
                 if is_pending:

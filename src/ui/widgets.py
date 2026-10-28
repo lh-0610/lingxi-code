@@ -556,15 +556,20 @@ class LoadingSpinner(QWidget):
 class GeneratingBadge(QWidget):
     """侧栏会话"生成中"徽章：转圈 + 自走秒表「生成中 MM:SS」。
 
+    compact=True 只留转圈，秒表放进悬停提示——侧栏窄时文字药丸会把标题挤掉。
     自带 QTimer 每秒刷新文字；控件随会话行重建被 deleteLater 时，timer 一并回收。
     start_ts 用 time.monotonic()（不受系统时钟回拨影响）。"""
 
     def __init__(self, start_ts, spin_color="#3b82f6", text_color="#3b82f6",
-                 show_spinner=True, bg="transparent", border="transparent", parent=None):
+                 show_spinner=True, bg="transparent", border="transparent", compact=False,
+                 parent=None):
         super().__init__(parent)
         self._start_ts = start_ts
+        if compact:
+            show_spinner = True
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        # 紧凑时 4+14+4=22，和会话行的删除按钮同宽，转圈落在同一列
+        lay.setContentsMargins(*((4, 0, 4, 0) if compact else (0, 0, 0, 0)))
         lay.setSpacing(5)
         if show_spinner:
             self._spin = LoadingSpinner(size=14, color=spin_color)
@@ -584,6 +589,7 @@ class GeneratingBadge(QWidget):
                 f"color:{text_color}; font-size:12px; background:transparent; border:none;"
             )
         lay.addWidget(self._label, 0, Qt.AlignVCenter)
+        self._label.setVisible(not compact)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
@@ -593,32 +599,9 @@ class GeneratingBadge(QWidget):
         import time
         elapsed = max(0, int(time.monotonic() - self._start_ts))
         mm, ss = divmod(elapsed, 60)
-        self._label.setText(f"生成中 {mm:02d}:{ss:02d}")
-
-
-class BlinkingCursor(QWidget):
-    """会话行"生成中"标题后的闪烁竖条（step-end blink），呼应设计稿里的文本光标。
-
-    自带 QTimer 定时翻转可见性；随会话行重建被 deleteLater 时 timer 一并回收。"""
-
-    def __init__(self, color="#4a59e0", width=2, height=15, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(width, height)
-        self._color = QColor(color)
-        self._on = True
-        self._timer = QTimer(self)   # parent=self → 控件回收时 timer 一并回收
-        self._timer.timeout.connect(self._blink)
-        self._timer.start(530)
-
-    def _blink(self):
-        self._on = not self._on
-        self.update()
-
-    def paintEvent(self, event):
-        if not self._on:
-            return
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), self._color)
+        text = f"生成中 {mm:02d}:{ss:02d}"
+        self._label.setText(text)
+        self.setToolTip(text)
 
 
 class CloseConfirmDialog(QDialog):
