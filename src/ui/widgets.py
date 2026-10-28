@@ -650,8 +650,8 @@ class CloseConfirmDialog(QDialog):
         text_col.addWidget(title)
 
         desc = QLabel(
-            "最小化后，灵犀会继续在系统托盘后台运行（双击托盘图标可再唤起）。"
-            "退出软件将完全关闭灵犀。"
+            "最小化到托盘后，后台的对话和命令会继续运行，双击托盘图标可以再打开。"
+            "退出软件会完全关闭灵犀。"
         )
         desc.setObjectName("closeDescription")
         desc.setWordWrap(True)
@@ -681,7 +681,8 @@ class CloseConfirmDialog(QDialog):
         cancel_btn.setObjectName("closeSecondaryButton")
         cancel_btn.clicked.connect(self.reject)
 
-        for btn in (hide_btn, quit_btn, cancel_btn):
+        # 设计稿的顺序：取消、退出软件，最右边是默认的"最小化到托盘"
+        for btn in (cancel_btn, quit_btn, hide_btn):
             btn.setCursor(Qt.PointingHandCursor)
             btn.setMinimumSize(92, 32)
             buttons.addWidget(btn)
@@ -698,37 +699,25 @@ class CloseConfirmDialog(QDialog):
         self.accept()
 
     def _apply_style(self):
-        is_dark = bool(self.parent() and getattr(self.parent(), "theme", "light") == "dark")
-        bg = "#11151b" if is_dark else "#f7f9fc"
-        fg = "#eef2f7" if is_dark else "#111827"
-        muted = "#b9c2cf" if is_dark else "#262b33"
-        border = "#2b3440" if is_dark else "#d8e0ec"
-        button_bg = "#171c23" if is_dark else "#ffffff"
-        button_hover = "#202733" if is_dark else "#f4f7fb"
-        accent = "#1687d9"
-        accent_hover = "#0d74c2"
+        from .theme import color as c   # 配色跟当前主题（设计稿状态 5）
+        accent = c("mv_indigo")
+        border = c("mv_chip_border")
         check_icon = os.path.join(BASE_DIR, "icons", "check_white.svg").replace("\\", "/")
 
         self.setStyleSheet(
-            f"CloseConfirmDialog {{ background: {bg}; color: {fg}; }}\n"
-            f"#closeTitle {{ color: {fg}; font-size: 16px; font-weight: 600;"
-            f" line-height: 1.35; }}\n"
-            f"#closeDescription {{ color: {muted}; font-size: 13px;"
-            f" line-height: 1.35; }}\n"
-            f"#closeRemember {{ color: {fg}; font-size: 13px; spacing: 8px; }}\n"
+            f"CloseConfirmDialog {{ background: {c('mv_view_bg')}; color: {c('mv_text')}; }}\n"
+            f"#closeTitle {{ color: {c('mv_text')}; font-size: 16px; font-weight: 600; }}\n"
+            f"#closeDescription {{ color: {c('mv_text_sec')}; font-size: 13px; }}\n"
+            f"#closeRemember {{ color: {c('mv_text')}; font-size: 13px; spacing: 8px; }}\n"
             f"#closeRemember::indicator {{ width: 16px; height: 16px;"
-            f" border-radius: 4px; border: 1px solid {border}; background: {button_bg}; }}\n"
+            f" border-radius: 4px; border: 1px solid {border}; background: {c('mv_card_bg')}; }}\n"
             f"#closeRemember::indicator:hover {{ border-color: {accent}; }}\n"
             f"#closeRemember::indicator:checked {{ background: {accent}; border-color: {accent};"
             f" image: url(\"{check_icon}\"); }}\n"
-            f"#closeRemember::indicator:checked:hover {{ background: {accent_hover};"
-            f" border-color: {accent_hover}; }}\n"
-            f"#closePrimaryButton, #closeSecondaryButton {{ border-radius: 6px;"
-            f" padding: 5px 10px; font-size: 13px; background: {button_bg};"
-            f" color: {fg}; border: 1px solid {border}; }}\n"
-            f"#closePrimaryButton {{ color: {accent}; border-color: {accent}; }}\n"
-            f"#closePrimaryButton:hover {{ background: rgba(22, 135, 217, 0.10);"
-            f" border-color: {accent_hover}; color: {accent_hover}; }}\n"
-            f"#closeSecondaryButton:hover {{ background: {button_hover};"
-            f" border-color: {accent}; }}\n"
+            f"#closePrimaryButton, #closeSecondaryButton {{ border-radius: 8px;"
+            f" padding: 5px 12px; font-size: 13px; background: {c('mv_card_bg')};"
+            f" color: {c('mv_text3')}; border: 1px solid {border}; }}\n"
+            f"#closeSecondaryButton:hover {{ border-color: {c('mv_chip_hover')}; }}\n"
+            f"#closePrimaryButton {{ background: {accent}; border-color: {accent};"
+            f" color: {c('mv_view_bg')}; font-weight: 600; }}\n"
         )

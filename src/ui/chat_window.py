@@ -494,6 +494,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             w = getattr(self, attr, None)
             if w is not None:
                 w.setVisible(not no_key)
+        self._refresh_empty_suggestion_set()
         self._position_empty_state()
         self.empty_state.show()
         self.empty_state.raise_()
@@ -641,9 +642,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        logo = QLabel("灵犀<span style='color:#f0824a;'>.</span>")
+        logo = QLabel("灵")          # 和侧栏一样的圆形字标
         logo.setObjectName("emptyLogo")
-        logo.setTextFormat(Qt.RichText)
+        logo.setFixedSize(48, 48)
         logo.setAlignment(Qt.AlignCenter)
 
         title = QLabel("今天想聊点什么？")
@@ -656,7 +657,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         subtitle.setAlignment(Qt.AlignCenter)
         self._empty_subtitle = subtitle
 
-        layout.addWidget(logo)
+        layout.addWidget(logo, 0, Qt.AlignHCenter)
+        layout.addSpacing(6)
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
@@ -675,51 +677,81 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         ob_btn.setIconSize(QSize(16, 16))
         ob_btn.setCursor(Qt.PointingHandCursor)
         ob_btn.clicked.connect(self._open_settings_menu)
-        ob_note = QLabel("配置一个 API Key 后重启应用即可开始")
+        ob_note = QLabel("配置一个 API Key 后重启应用即可开始。\n只填你手头有的那一个就够用。")
         ob_note.setObjectName("emptySubtitle")
         ob_note.setAlignment(Qt.AlignCenter)
         ob_layout.addWidget(ob_hint)
-        ob_layout.addWidget(ob_btn, 0, Qt.AlignHCenter)
         ob_layout.addWidget(ob_note)
+        ob_layout.addWidget(ob_btn, 0, Qt.AlignHCenter)
         layout.addWidget(self._empty_onboarding, 0, Qt.AlignHCenter)
         self._empty_onboarding.hide()
         self._empty_onboarding_btn = ob_btn
 
-        # 建议按钮（chips）：副标题下方水平排一行，引导用户点选
+        # 建议（两列小卡片）：打开了项目就给和这个项目相关的，没有项目给通用的。点一下填进输入框
+        from PySide6.QtWidgets import QGridLayout
         suggestions = QWidget()
         suggestions.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        sug_layout = QHBoxLayout(suggestions)
-        sug_layout.setContentsMargins(0, 20, 0, 0)
-        sug_layout.setSpacing(12)
-        sug_layout.setAlignment(Qt.AlignHCenter)
-        self._empty_suggestions_layout = sug_layout
+        sug_v = QVBoxLayout(suggestions)
+        sug_v.setContentsMargins(0, 20, 0, 0)
+        sug_v.setSpacing(0)
         self._empty_suggestion_buttons = []
-        for icon_file, text, compact_text in [
-            ("sparkles_lucide.svg", "帮我生成一张插画", "生成插画"),
-            ("file_text_lucide.svg", "总结一下这篇文档", "总结文档"),
-            ("code_lucide.svg", "解释这段代码的逻辑", "解释代码"),
-        ]:
-            btn = QPushButton(text)
-            btn.setIcon(self._svg_icon(icon_file, self._t("text_dim")))
-            btn.setIconSize(QSize(16, 16))
-            btn.setObjectName("emptySuggestion")
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumWidth(0)
-            btn.clicked.connect(lambda checked=False, t=text: self._use_suggestion(t))
-            sug_layout.addWidget(btn)
-            self._empty_suggestion_buttons.append((btn, icon_file, text, compact_text))
+        self._empty_suggestion_sets = {}
+        self._empty_suggestion_grids = []
+        for kind, items in (("project", self._PROJECT_SUGGESTIONS), ("general", self._GENERAL_SUGGESTIONS)):
+            box = QWidget()
+            grid = QGridLayout(box)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(10)
+            for i, (icon_file, text, compact_text) in enumerate(items):
+                btn = QPushButton(text)
+                btn.setIcon(self._svg_icon(icon_file, self._t("mv_text_sec")))
+                btn.setIconSize(QSize(16, 16))
+                btn.setObjectName("emptySuggestion")
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setMinimumWidth(0)
+                btn.clicked.connect(lambda checked=False, t=text: self._use_suggestion(t))
+                grid.addWidget(btn, i // 2, i % 2)
+                self._empty_suggestion_buttons.append((btn, icon_file, text, compact_text))
+            sug_v.addWidget(box, 0, Qt.AlignHCenter)
+            self._empty_suggestion_sets[kind] = box
+            self._empty_suggestion_grids.append(grid)
         layout.addWidget(suggestions, 0, Qt.AlignHCenter)
         self._empty_suggestions = suggestions
 
         self.empty_state.hide()
+
+    # 空状态的建议：(图标, 完整文字, 窄窗口时的短文字)
+    _PROJECT_SUGGESTIONS = (
+        ("folder_open_lucide.svg", "讲讲这个项目的结构", "项目结构"),
+        ("scan-search.svg", "找出最近改动里可能的问题", "检查改动"),
+        ("flask-conical.svg", "跑一遍测试，看看哪里失败", "跑测试"),
+        ("file-pen.svg", "给 README 补一段安装说明", "补 README"),
+    )
+    _GENERAL_SUGGESTIONS = (
+        ("code_lucide.svg", "解释这段代码的逻辑", "解释代码"),
+        ("file_text_lucide.svg", "总结一下这篇文档", "总结文档"),
+        ("sparkles_lucide.svg", "帮我生成一张插画", "生成插画"),
+        ("wand-sparkles.svg", "帮我写一个小脚本", "写脚本"),
+    )
+
+    def _refresh_empty_suggestion_set(self):
+        """打开了项目就显示和项目相关的建议，没有项目显示通用的。"""
+        sets = getattr(self, "_empty_suggestion_sets", None)
+        if not sets:
+            return
+        from .. import session as _session
+        has_project = bool(_session.current_project())
+        sets["project"].setVisible(has_project)
+        sets["general"].setVisible(not has_project)
 
     def _refresh_empty_state_layout(self, viewport_width=None):
         """刷新空状态的图标色与窄屏文案，避免首屏 chip 在小窗口里挤出视口。"""
         if viewport_width is None and hasattr(self, "chat_area"):
             viewport_width = self.chat_area.viewport().width()
         compact = bool(viewport_width and viewport_width < 620)
-        if hasattr(self, "_empty_suggestions_layout"):
-            self._empty_suggestions_layout.setSpacing(8 if compact else 12)
+        for grid in getattr(self, "_empty_suggestion_grids", []):
+            grid.setHorizontalSpacing(8 if compact else 10)
 
         btn = getattr(self, "_empty_onboarding_btn", None)
         if btn is not None:
@@ -729,10 +761,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         for item in getattr(self, "_empty_suggestion_buttons", []):
             btn, icon_file, full_text, compact_text = item
             btn.setText(compact_text if compact else full_text)
-            btn.setIcon(self._svg_icon(icon_file, self._t("text_dim")))
+            btn.setIcon(self._svg_icon(icon_file, self._t("mv_text_sec")))
             btn.setIconSize(QSize(15 if compact else 16, 15 if compact else 16))
             btn.setMinimumHeight(36 if compact else 40)
-            btn.setMaximumWidth(116 if compact else 240)
+            btn.setFixedWidth(140 if compact else 240)
 
     def _position_empty_state(self):
         if not hasattr(self, "empty_state"):
@@ -1304,7 +1336,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 替换为 "@相对路径 "，并给引用上强调色 + 加粗（视觉标识这是文件引用）；
         # 随后的空格用默认格式插入，避免用户接着打字时文字继续带色
         ref_fmt = QTextCharFormat()
-        ref_fmt.setForeground(QColor("#3b82f6"))
+        ref_fmt.setForeground(QColor(self._t("mv_indigo")))
         ref_fmt.setFontWeight(700)
         self.entry.blockSignals(True)
         cursor.insertText(f"@{relative_path}", ref_fmt)
@@ -1567,13 +1599,13 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         text_label.setAlignment(Qt.AlignCenter)
         text_label.setStyleSheet(
             f"font-size: 20px; font-weight: 600; color: {self._t('drag_text')}; "
-            f"background: transparent; border: none; padding: 0; letter-spacing: 4px;"
+            f"background: transparent; border: none; padding: 0;"
         )
         sub_label = QLabel("支持图片和文本文件", overlay)
         sub_label.setAlignment(Qt.AlignCenter)
         sub_label.setStyleSheet(
-            f"font-size: 12px; color: {self._t('drag_subtext')}; background: transparent; "
-            f"border: none; padding: 0; letter-spacing: 1px;"
+            f"font-size: 13px; color: {self._t('drag_subtext')}; background: transparent; "
+            f"border: none; padding: 0;"
         )
         layout.addWidget(icon_label)
         layout.addWidget(text_label)
@@ -1824,7 +1856,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         toast.setStyleSheet(
             f"QLabel {{ background: {self._t('toast_bg')}; color: {self._t('toast_text')}; "
             f"padding: 8px 18px; border: 1px solid {self._t('toast_border')}; border-radius: 10px; "
-            f"font-size: 12px; letter-spacing: 1px; }}"
+            f"font-size: 12px; }}"
         )
         toast.setAlignment(Qt.AlignCenter)
         toast.adjustSize()

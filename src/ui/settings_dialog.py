@@ -17,8 +17,24 @@ from PySide6.QtWidgets import (
 from ._base import BASE_DIR, CONFIG_PATH
 from ..paths import APP_DIR as _APP_DIR
 from .fonts import MONO_CSS
+from .theme import color as theme_color
 from ..limits import AGENT_MAX_ROUNDS_DEFAULT as _AGENT_MAX_ROUNDS_DEFAULT
 
+
+
+def _settings_palette() -> dict:
+    """设置相关对话框的配色：全部取当前主题的 token，深浅色跟主窗口一致。"""
+    return {
+        "bg": theme_color("mv_view_bg"),
+        "fg": theme_color("mv_text"),
+        "muted": theme_color("mv_text_sec"),
+        "border": theme_color("mv_chip_border"),
+        "accent": theme_color("mv_indigo"),
+        "accent_hover": theme_color("mv_indigo"),
+        "on_accent": theme_color("mv_view_bg"),
+        "input_bg": theme_color("mv_header_bg"),
+        "input_focus_bg": theme_color("mv_card_bg"),
+    }
 
 class _NoScrollComboBox(QComboBox):
     """禁止鼠标滚轮改变选择：忽略 wheel 事件并交给父级（让设置页继续滚动），
@@ -321,9 +337,8 @@ class SettingsDialog(QDialog):
         if not os.path.exists(svg_path):
             return QIcon()
 
-        is_dark = bool(self._parent_window and getattr(self._parent_window, "theme", "light") == "dark")
-        normal = "#9ca3af" if is_dark else "#4b5563"
-        active = "#60a5fa" if is_dark else "#3b82f6"
+        normal = theme_color("mv_text_sec")
+        active = theme_color("mv_indigo")
 
         from PySide6.QtSvg import QSvgRenderer
 
@@ -350,7 +365,9 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.viewport().setObjectName("settingsViewport")   # 背景跟主题（见 _apply_dialog_style）
         page = QWidget()
+        page.setObjectName("settingsPage")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(28, 20, 28, 20)
         layout.setSpacing(18)
@@ -990,19 +1007,15 @@ class SettingsDialog(QDialog):
     # ── 样式 ──
 
     def _apply_dialog_style(self):
-        is_dark = bool(self._parent_window and getattr(self._parent_window, "theme", "light") == "dark")
-        bg = "#0f1318" if is_dark else "#ffffff"
-        fg = "#e6eaf2" if is_dark else "#1f2329"
-        muted = "#7a8794" if is_dark else "#6b7280"
-        border = "#1f2937" if is_dark else "#e5e7eb"
-        accent = "#3b82f6"
-        accent_hover = "#2563eb"
-        banner_bg = "#332615" if is_dark else "#fff7ed"
-        banner_fg = "#fbbf24" if is_dark else "#9a3412"
-        banner_border = "#653e15" if is_dark else "#fed7aa"
-        input_bg = "#171b22" if is_dark else "#fafbfc"
-        input_focus_bg = "#1a1f27" if is_dark else "#ffffff"
-        bottom_bg = "#0c1015" if is_dark else "#f9fafb"
+        # 配色取当前主题（和主窗口同一套 token）；重启提示用"需要你处理"的琥珀色
+        p = _settings_palette()
+        bg, fg, muted, border = p["bg"], p["fg"], p["muted"], p["border"]
+        accent, accent_hover, on_accent = p["accent"], p["accent_hover"], p["on_accent"]
+        banner_bg = theme_color("mv_gate_bg")
+        banner_fg = theme_color("mv_gate_text")
+        banner_border = theme_color("mv_gate_border")
+        input_bg, input_focus_bg = p["input_bg"], p["input_focus_bg"]
+        bottom_bg = theme_color("mv_header_bg")
         check_icon = os.path.join(BASE_DIR, "icons", "check_white.svg").replace("\\", "/")
         arrow_icon = os.path.join(BASE_DIR, "icons", "chevron_down.svg").replace("\\", "/")
 
@@ -1025,7 +1038,7 @@ class SettingsDialog(QDialog):
             f" width: 14px; height: 14px; margin-right: 8px; }}\n"
             f"QComboBox QAbstractItemView {{ background: {input_focus_bg}; color: {fg};"
             f" border: 1px solid {border}; selection-background-color: {accent};"
-            f" selection-color: #ffffff; outline: none; }}\n"
+            f" selection-color: {on_accent}; outline: none; }}\n"
             f"#settingsEye {{ background: {input_bg}; border: 1px solid {border};"
             f" border-radius: 6px; color: {muted}; font-size: 12px; }}\n"
             f"#settingsEye:checked {{ color: {accent}; }}\n"
@@ -1043,9 +1056,9 @@ class SettingsDialog(QDialog):
             f" border-radius: 6px; padding: 7px 14px; color: {fg}; font-size: 13px; }}\n"
             f"#settingsBottom QPushButton:hover {{ background: {input_bg};"
             f" border-color: {accent}; color: {accent}; }}\n"
-            f"#settingsSaveBtn {{ background: {accent}; border-color: {accent}; color: #ffffff; }}\n"
+            f"#settingsSaveBtn {{ background: {accent}; border-color: {accent}; color: {on_accent}; }}\n"
             f"#settingsSaveBtn:hover {{ background: {accent_hover}; border-color: {accent_hover};"
-            f" color: #ffffff; }}\n"
+            f" color: {on_accent}; }}\n"
             # ── provider 卡片 + 自定义模型卡片样式 ──
             f"#providerCard {{ background: {input_bg}; border: 1px solid {border};"
             f" border-radius: 8px; }}\n"
@@ -1060,6 +1073,7 @@ class SettingsDialog(QDialog):
             f"#customModelTip {{ color: {muted}; font-size: 12px;"
             f" background: transparent; padding: 4px 2px; }}\n"
             f"QScrollArea {{ background: {bg}; border: none; }}\n"
+            f"#settingsViewport, #settingsPage {{ background: {bg}; }}\n"
             f"QScrollBar:vertical {{ width: 8px; background: transparent; }}\n"
             f"QScrollBar::handle:vertical {{ background: {border};"
             f" border-radius: 4px; min-height: 32px; }}\n"
@@ -1202,17 +1216,11 @@ class _CustomModelEditor(QDialog):
         self.accept()
 
     def _apply_style(self):
-        # 复用父对话框（SettingsDialog）的配色变量
-        pw = self._parent_window
-        is_dark = bool(pw and getattr(pw, "_parent_window", None)
-                       and getattr(pw._parent_window, "theme", "light") == "dark")
-        bg = "#0f1318" if is_dark else "#ffffff"
-        fg = "#e6eaf2" if is_dark else "#1f2329"
-        border = "#1f2937" if is_dark else "#e5e7eb"
-        accent = "#3b82f6"
-        accent_hover = "#2563eb"
-        input_bg = "#171b22" if is_dark else "#fafbfc"
-        input_focus_bg = "#1a1f27" if is_dark else "#ffffff"
+        # 和设置对话框同一套配色
+        p = _settings_palette()
+        bg, fg, border = p["bg"], p["fg"], p["border"]
+        accent, accent_hover, on_accent = p["accent"], p["accent_hover"], p["on_accent"]
+        input_bg, input_focus_bg = p["input_bg"], p["input_focus_bg"]
         self.setStyleSheet(
             f"QDialog {{ background: {bg}; color: {fg}; }}\n"
             f"#settingsLabel {{ color: {fg}; font-size: 13px; font-weight: 500; }}\n"
@@ -1227,6 +1235,6 @@ class _CustomModelEditor(QDialog):
             f"QPushButton {{ background: transparent; border: 1px solid {border};"
             f" border-radius: 6px; padding: 7px 16px; color: {fg}; font-size: 13px; }}\n"
             f"QPushButton:hover {{ background: {input_bg}; border-color: {accent}; color: {accent}; }}\n"
-            f"#settingsSaveBtn {{ background: {accent}; border-color: {accent}; color: #ffffff; }}\n"
+            f"#settingsSaveBtn {{ background: {accent}; border-color: {accent}; color: {on_accent}; }}\n"
             f"#settingsSaveBtn:hover {{ background: {accent_hover}; border-color: {accent_hover}; }}\n"
         )

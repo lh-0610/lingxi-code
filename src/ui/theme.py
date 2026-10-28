@@ -264,6 +264,10 @@ THEMES = {
         "mv_err_text": "#a93226",
         "mv_bad": "#c0392b",
         "mv_ok": "#2e7d4a",
+        # 需要你处理的东西（确认条、暂停横幅、设置里的重启提示）：琥珀色一套
+        "mv_gate_bg": "#fff8ec",
+        "mv_gate_border": "#eed9b5",
+        "mv_gate_text": "#8a4b00",
     },
     "dark": {
         # 主表面
@@ -518,6 +522,9 @@ THEMES = {
         "mv_err_text": "#f09a8d",
         "mv_bad": "#e06c5c",
         "mv_ok": "#7cc79a",
+        "mv_gate_bg": "#2a2318",
+        "mv_gate_border": "#5a4626",
+        "mv_gate_text": "#f0c178",
     },
 }
 
@@ -819,35 +826,36 @@ QPushButton[class="historyItemDone"]:hover {{
     background: transparent;
 }}
 #emptyLogo {{
-    color: {p['brand_color']};
+    background: {p['mv_indigo_soft']};
+    color: {p['mv_indigo']};
+    border-radius: 24px;
     font-family: {UI_CSS};
     font-size: 20px;
     font-weight: 600;
-    letter-spacing: 2px;
 }}
 #emptyTitle {{
-    color: {p['text']};
+    color: {p['mv_text']};
     font-size: 20px;
     font-weight: 600;
 }}
 #emptySubtitle {{
-    color: {p['text_subtle']};
-    font-size: 16px;
+    color: {p['mv_text_sec']};
+    font-size: 14px;
 }}
 #emptySuggestion {{
-    background: {p['input_bg']};
-    border: 1px solid {p['input_border']};
-    border-radius: 13px;
-    padding: 15px 22px;
-    color: {p['text_dim']};
-    font-size: 14px;
+    background: {p['mv_card_bg']};
+    border: 1px solid {p['mv_chip_border']};
+    border-radius: 10px;
+    padding: 10px 14px;
+    color: {p['mv_text3']};
+    font-size: 13px;
     font-family: {UI_CSS};
     text-align: left;
 }}
 #emptySuggestion:hover {{
-    background: {p['input_bg']};
-    border-color: {p['brand_color']};
-    color: {p['text']};
+    background: {p['mv_card_bg']};
+    border-color: {p['mv_chip_hover']};
+    color: {p['mv_text']};
 }}
 
 /* 输入区容器 */

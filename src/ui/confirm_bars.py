@@ -816,7 +816,7 @@ class ConfirmBarsMixin:
         import html as _html_mod
         self.edit_confirm_path.setTextFormat(Qt.RichText)
         self.edit_confirm_path.setText(
-            self._inline_svg_img("file-pen.svg", "#3b82f6", 14, "编辑")
+            self._inline_svg_img("file-pen.svg", self._t("mv_indigo"), 14, "编辑")
             + " " + _html_mod.escape(path)
         )
         # diff 渲染：加号绿色 / 减号红色 / 头部信息灰色
@@ -1102,19 +1102,21 @@ class ConfirmBarsMixin:
     @staticmethod
     def _format_diff_html(diff_text: str) -> str:
         """把 unified diff 文本转成带颜色的 HTML。"""
+        from .theme import color as _c   # 静态方法：直接按当前主题取色
         def esc(s):
             return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
         lines = []
         for ln in (diff_text or "").splitlines():
             color = None
+            # 颜色取当前主题（深色下用亮一些的绿 / 红）
             if ln.startswith("+") and not ln.startswith("+++"):
-                color = "#27ae60"  # 绿：新增
+                color = _c("mv_ok")        # 新增
             elif ln.startswith("-") and not ln.startswith("---"):
-                color = "#c0392b"  # 红：删除
+                color = _c("mv_bad")       # 删除
             elif ln.startswith("@@"):
-                color = "#5b66d6"  # 蓝紫：hunk 头
+                color = _c("mv_indigo")    # hunk 头
             elif ln.startswith("---") or ln.startswith("+++"):
-                color = "#888"     # 灰：文件头
+                color = _c("mv_muted")     # 文件头
             if color:
                 lines.append(f'<span style="color:{color};">{esc(ln)}</span>')
             else:

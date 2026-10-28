@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from .. import debug_log
 from .fonts import MONO_CSS, UI_CSS, mono_font
+from .theme import color as theme_color
 from ..limits import (
     DEBUG_MESSAGE_PREVIEW_CHARS,
     DEBUG_RESPONSE_PREVIEW_CHARS,
@@ -188,15 +189,20 @@ class DebugInspector(QDialog):
         注意：QTextBrowser 用 QTextDocument，**不支持** HTML5 `<details>` / `<summary>`，
         所以全部内容平铺展开，靠 styled `<div>` 块分区。如果某一块太长就接受滚动。
         """
+        c = theme_color      # 配色跟当前主题（深色下不能是一片白）
+        sec, muted = c("mv_text_sec"), c("mv_muted")
+
         def esc(s):
             return (str(s).replace("&", "&amp;").replace("<", "&lt;")
                     .replace(">", "&gt;").replace("\n", "<br>"))
 
         def section_title(title):
-            return (f'<p style="background:#eef1ff;color:#3842b8;padding:6px 12px;'
+            return (f'<p style="background:{c("mv_indigo_soft")};color:{c("mv_indigo")};padding:6px 12px;'
                     f'margin:14px 0 4px 0;border-radius:5px;font-weight:600;">{title}</p>')
 
-        def code_block(text, bg="#fafafa", fg="#444"):
+        def code_block(text, bg=None, fg=None):
+            bg = bg or c("mv_result_bg")
+            fg = fg or sec
             return (f'<pre style="background:{bg};color:{fg};padding:10px 12px;'
                     f'margin:4px 0;font-family:{MONO_CSS};font-size:12px;'
                     f'white-space:pre-wrap;word-wrap:break-word;">{text}</pre>')
@@ -207,14 +213,14 @@ class DebugInspector(QDialog):
         err = rec.get("error")
 
         # ── 概要 ──
-        status = ('<span style="color:#c0392b;">✗ 失败</span>' if err
-                  else '<span style="color:#27ae60;">✓ 成功</span>')
+        status = (f'<span style="color:{c("mv_bad")};">✗ 失败</span>' if err
+                  else f'<span style="color:{c("mv_ok")};">✓ 成功</span>')
         summary = (
-            f'<div style="background:#f3f4f6;padding:12px 16px;border-radius:8px;">'
+            f'<div style="background:{c("mv_header_bg")};padding:12px 16px;border-radius:8px;">'
             f'<b>状态</b>：{status}<br>'
             f'<b>模型</b>：{esc(rec.get("model",""))} '
-            f'<span style="color:#888;">({esc(rec.get("provider",""))})</span><br>'
-            f'<b>端点</b>：<code style="color:#444;">{esc(rec.get("endpoint","") or "（未识别）")}</code><br>'
+            f'<span style="color:{muted};">({esc(rec.get("provider",""))})</span><br>'
+            f'<b>端点</b>：<code style="color:{sec};">{esc(rec.get("endpoint","") or "（未识别）")}</code><br>'
             f'<b>耗时</b>：{rec.get("elapsed_ms",0)} ms<br>'
             f'<b>Usage</b>：input {usage.get("input",0)} · output {usage.get("output",0)} · '
             f'总 {usage.get("total",0)}'
@@ -225,8 +231,8 @@ class DebugInspector(QDialog):
         err_block = ""
         if err:
             err_block = (
-                f'<div style="background:#fff0ed;padding:10px 14px;border-radius:6px;'
-                f'margin:8px 0;color:#c0392b;font-family:{MONO_CSS};font-size:12px;'
+                f'<div style="background:{c("mv_err_bg")};padding:10px 14px;border-radius:6px;'
+                f'margin:8px 0;color:{c("mv_err_text")};font-family:{MONO_CSS};font-size:12px;'
                 f'white-space:pre-wrap;word-wrap:break-word;">'
                 f'<b>错误</b><br>{esc(err)}</div>'
             )
@@ -242,17 +248,17 @@ class DebugInspector(QDialog):
             f'{len(req.get("tools") or [])} 个工具）'
         )
         request_block += (
-            f'<p style="color:#666;margin:4px 0;">'
+            f'<p style="color:{sec};margin:4px 0;">'
             f'system prompt（前 {DEBUG_SYSTEM_PROMPT_PREVIEW_CHARS} 字）：</p>'
         )
         request_block += code_block(sys_view or "<em>（空）</em>")
 
         # ── 请求：messages ──
-        request_block += '<p style="color:#666;margin:8px 0 4px 0;">messages：</p>'
+        request_block += f'<p style="color:{sec};margin:8px 0 4px 0;">messages：</p>'
         for i, m in enumerate(req.get("messages") or []):
             role = m.get("role", "?")
-            color = {"user": "#1e6fff", "assistant": "#d87755",
-                     "system": "#7f8c8d", "tool": "#16a085"}.get(role, "#333")
+            color = c({"user": "mv_indigo", "assistant": "mv_orange",
+                       "system": "mv_muted", "tool": "mv_ok"}.get(role, "mv_text"))
             content = m.get("content", "")
             if isinstance(content, list):
                 parts = []
@@ -284,7 +290,7 @@ class DebugInspector(QDialog):
                 )
             request_block += (
                 f'<div style="margin:4px 0;padding:6px 10px;border-left:3px solid {color};'
-                f'background:#fafbfc;">'
+                f'background:{c("mv_result_bg")};">'
                 f'<b style="color:{color};">[{i}] {role}</b><br>{content_view}{tcs_view}'
                 f'</div>'
             )
@@ -292,9 +298,9 @@ class DebugInspector(QDialog):
         # ── 请求：tools ──
         tools_list = req.get("tools") or []
         request_block += (
-            f'<p style="color:#666;margin:8px 0 4px 0;">'
+            f'<p style="color:{sec};margin:8px 0 4px 0;">'
             f'tools enabled ({len(tools_list)})：'
-            f'<span style="color:#888;">{esc(", ".join(tools_list))}</span></p>'
+            f'<span style="color:{muted};">{esc(", ".join(tools_list))}</span></p>'
         )
 
         # ── 响应：text ──
@@ -304,14 +310,14 @@ class DebugInspector(QDialog):
             + ("..." if len(resp_text) > DEBUG_RESPONSE_PREVIEW_CHARS else "")
         )
         response_block = section_title('响应')
-        response_block += f'<p style="color:#666;margin:4px 0;">text（{len(resp_text)} 字）：</p>'
+        response_block += f'<p style="color:{sec};margin:4px 0;">text（{len(resp_text)} 字）：</p>'
         response_block += code_block(resp_view or "<em>（空）</em>")
 
         # ── 响应：thinking ──
         thinking = resp.get("thinking") or ""
         if thinking:
             response_block += (
-                f'<p style="color:#666;margin:8px 0 4px 0;">'
+                f'<p style="color:{sec};margin:8px 0 4px 0;">'
                 f'thinking / reasoning（{len(thinking)} 字）：</p>'
             )
             response_block += code_block(
@@ -319,44 +325,46 @@ class DebugInspector(QDialog):
                     thinking[:DEBUG_RESPONSE_PREVIEW_CHARS]
                     + ("..." if len(thinking) > DEBUG_RESPONSE_PREVIEW_CHARS else "")
                 ),
-                bg="#f5efff", fg="#5b66d6",
+                bg=c("mv_indigo_soft"), fg=c("mv_indigo"),
             )
 
         # ── 响应：tool calls ──
         tc_list = resp.get("tool_calls") or []
         response_block += (
-            f'<p style="color:#666;margin:8px 0 4px 0;">tool calls ({len(tc_list)})：</p>'
+            f'<p style="color:{sec};margin:8px 0 4px 0;">tool calls ({len(tc_list)})：</p>'
         )
         if tc_list:
             for tc in tc_list:
                 response_block += (
-                    f'<div style="margin:3px 0;padding:5px 10px;background:#eef9f3;'
-                    f'border-left:3px solid #16a085;">'
+                    f'<div style="margin:3px 0;padding:5px 10px;background:{c("mv_result_bg")};'
+                    f'border-left:3px solid {c("mv_ok")};">'
                     f'<b>{esc(tc.get("name",""))}</b>'
                     f'({esc(json.dumps(tc.get("args",{}), ensure_ascii=False))[:300]})'
                     f'</div>'
                 )
         else:
-            response_block += '<p style="color:#aaa;margin:4px 0;">（无）</p>'
+            response_block += f'<p style="color:{c("mv_muted3")};margin:4px 0;">（无）</p>'
 
         # ── Raw JSON 平铺展开（不折叠）──
         raw_block = section_title('▼ Raw JSON（完整 record）')
-        raw_block += code_block(
+        raw_block += code_block(   # 原始 JSON 在两种主题下都用深色代码块
             esc(debug_log.record_to_json(rec)), bg="#1e1e1e", fg="#e8e2d4",
         )
 
         return summary + err_block + request_block + response_block + raw_block
 
     def _apply_style(self):
+        c = theme_color
         self.setStyleSheet(
-            "QListWidget { background:#fafbfc; border:1px solid #e2e6ee; border-radius:6px;"
-            f"  font-family:{UI_CSS}; font-size:12px; }}"
-            "QListWidget::item { padding:8px 10px; border-bottom:1px solid #f0f0f0; }"
-            "QListWidget::item:selected { background:#e8ecff; color:#232b7a; }"
-            "QTextBrowser { background:#ffffff; border:1px solid #e2e6ee; border-radius:6px;"
-            "  padding:10px; }"
-            "QPushButton { padding:5px 12px; border:1px solid #dfe4ee; border-radius:5px;"
-            "  background:#ffffff; font-size:12px; }"
-            "QPushButton:hover { background:#f4f6fb; border-color:#5b66d6; color:#3842b8; }"
+            f"QDialog, QWidget {{ background:{c('mv_view_bg')}; color:{c('mv_text')}; }}"
+            f"QListWidget {{ background:{c('mv_result_bg')}; border:1px solid {c('mv_card_border')}; border-radius:6px;"
+            f"  font-family:{UI_CSS}; font-size:12px; color:{c('mv_text')}; }}"
+            f"QListWidget::item {{ padding:8px 10px; border-bottom:1px solid {c('mv_result_border')}; }}"
+            f"QListWidget::item:selected {{ background:{c('mv_indigo_soft')}; color:{c('mv_indigo')}; }}"
+            f"QTextBrowser {{ background:{c('mv_view_bg')}; border:1px solid {c('mv_card_border')}; border-radius:6px;"
+            f"  padding:10px; color:{c('mv_text')}; }}"
+            f"QPushButton {{ padding:5px 12px; border:1px solid {c('mv_chip_border')}; border-radius:6px;"
+            f"  background:{c('mv_card_bg')}; color:{c('mv_text3')}; font-size:12px; }}"
+            f"QPushButton:hover {{ border-color:{c('mv_indigo')}; color:{c('mv_indigo')}; }}"
             "QCheckBox { font-size:12px; }"
         )

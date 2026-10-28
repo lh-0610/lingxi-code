@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from .. import memory
 from .. import task_state as _ts
 from .fonts import MONO_CSS
+from .theme import color as _theme_color
 
 _REQUEST_SOURCE_NOTES = {   # 画的时候按当前主题上色
     "legacy_unknown": "；来源未确认",
@@ -75,37 +76,24 @@ class EditConstraintsDialog(QDialog):
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+        self._apply_style()
 
-        # 提示说明
-        hint = QLabel(
-            "设置本任务必须严格遵守的固定限制（如必须兼容的环境、禁止修改的接口等）。\n"
-            "• 仅用户可在此修改或删除，模型计划工具不得改写。\n"
-            "• 每行一条，按输入原文保存：行首的 -、*、编号等字符都算内容，已保存的条目再次保存不会被改动。\n"
-            "• 保存后在下次模型调用即刻生效。",
-            self,
-        )
+        title = QLabel("编辑固定限制", self)
+        title.setObjectName("dlgTitle")
+        layout.addWidget(title)
+        # 提示说明：行首的 -、*、编号也按原文保存，写在悬停提示里，不占地方
+        hint = QLabel("每行一条，按原文保存，从下一轮起对这个任务一直生效。只有你能在这里改，模型改不了。", self)
+        hint.setObjectName("dlgHint")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #64748b; font-size: 12px; line-height: 1.4;")
+        hint.setToolTip("行首的 -、*、编号等字符都算内容；已保存的条目再次保存不会被改动。")
         layout.addWidget(hint)
 
         # 文本框
         self.editor = QPlainTextEdit(self)
-        self.editor.setPlaceholderText("每行输入一条限制，按原文保存，例如：\n必须兼容 Windows 系统\n保留现有界面，不引入第三方重型框架\n导出格式必须支持 CSV")
-        self.editor.setStyleSheet(
-            "QPlainTextEdit {"
-            "  border: 1px solid #cbd5e1;"
-            "  border-radius: 8px;"
-            "  padding: 10px;"
-            "  font-size: 13px;"
-            "  background: #ffffff;"
-            "  color: #1e293b;"
-            "}"
-            "QPlainTextEdit:focus {"
-            "  border-color: #3b82f6;"
-            "}"
-        )
+        self.editor.setAccessibleName("固定限制")
+        self.editor.setPlaceholderText("每行一条，例如：\n必须兼容 Windows\n不改对外行为，测试要全部通过\n导出格式必须支持 CSV")
         task = getattr(sess, "current_task", None)
         # 对话框编辑的是**打开时**的那个任务。对话框是模态的，但 worker 不受它影响，
         # 编辑期间模型完全可能切换任务；保存时要核对，不能把 A 的限制写到 B 上。
@@ -121,67 +109,66 @@ class EditConstraintsDialog(QDialog):
         bottom_row.setSpacing(10)
 
         self.char_count_label = QLabel(self)
+        self.char_count_label.setObjectName("dlgCount")
         self.char_count_label.setWordWrap(True)      # 拒绝保存的说明较长，不换行会撑宽定宽对话框被裁掉
-        self.char_count_label.setStyleSheet("font-size: 12px; color: #64748b;")
-        bottom_row.addWidget(self.char_count_label)
-        bottom_row.addStretch(1)
+        bottom_row.addWidget(self.char_count_label, 1)
 
         self.cancel_btn = QPushButton("取消", self)
         self.cancel_btn.setCursor(Qt.PointingHandCursor)
-        self.cancel_btn.setStyleSheet(
-            "QPushButton {"
-            "  border: 1px solid #cbd5e1;"
-            "  border-radius: 6px;"
-            "  padding: 6px 14px;"
-            "  background: #f8fafc;"
-            "  color: #475569;"
-            "  font-size: 13px;"
-            "}"
-            "QPushButton:hover { background: #f1f5f9; }"
-        )
         self.cancel_btn.clicked.connect(self.reject)
         bottom_row.addWidget(self.cancel_btn)
 
         self.save_btn = QPushButton("保存限制", self)
+        self.save_btn.setObjectName("dlgPrimary")
         self.save_btn.setCursor(Qt.PointingHandCursor)
-        self.save_btn.setStyleSheet(
-            "QPushButton {"
-            "  border: none;"
-            "  border-radius: 6px;"
-            "  padding: 6px 16px;"
-            "  background: #2563eb;"
-            "  color: #ffffff;"
-            "  font-size: 13px;"
-            "  font-weight: 600;"
-            "}"
-            "QPushButton:hover { background: #1d4ed8; }"
-            "QPushButton:disabled { background: #94a3b8; }"
-        )
+        self.save_btn.setDefault(True)
         self.save_btn.clicked.connect(self._on_save)
         bottom_row.addWidget(self.save_btn)
 
         layout.addLayout(bottom_row)
         self._on_text_changed()
 
+    def _apply_style(self):
+        """配色取当前主题（深色下不能是白底），样式集中在对话框自己的样式表里。"""
+        c = _theme_color
+        self.setStyleSheet(
+            f"QDialog {{ background: {c('mv_view_bg')}; }}"
+            f"QLabel {{ background: transparent; color: {c('mv_text')}; font-size: 13px; }}"
+            f"QLabel#dlgTitle {{ font-size: 16px; font-weight: 600; }}"
+            f"QLabel#dlgHint {{ color: {c('mv_text_sec')}; }}"
+            f"QLabel#dlgCount {{ color: {c('mv_text_sec')}; font-size: 12px; }}"
+            f"QLabel#dlgCount[error=\"true\"] {{ color: {c('mv_err_text')}; font-weight: 600; }}"
+            f"QPlainTextEdit {{ border: 1px solid {c('mv_chip_border')}; border-radius: 8px; padding: 8px 10px;"
+            f" font-size: 13px; background: {c('mv_card_bg')}; color: {c('mv_text')}; }}"
+            f"QPlainTextEdit:focus {{ border-color: {c('mv_indigo')}; }}"
+            f"QPushButton {{ border: 1px solid {c('mv_chip_border')}; border-radius: 8px; padding: 6px 14px;"
+            f" background: {c('mv_card_bg')}; color: {c('mv_text3')}; font-size: 13px; }}"
+            f"QPushButton:hover {{ border-color: {c('mv_chip_hover')}; }}"
+            f"QPushButton#dlgPrimary {{ border: none; background: {c('mv_indigo')}; color: {c('mv_view_bg')};"
+            f" font-weight: 600; }}"
+            f"QPushButton#dlgPrimary:disabled {{ background: {c('mv_muted3')}; }}")
+
+    def _set_count_error(self, error: bool):
+        if self.char_count_label.property("error") != ("true" if error else "false"):
+            self.char_count_label.setProperty("error", "true" if error else "false")
+            self.char_count_label.style().unpolish(self.char_count_label)
+            self.char_count_label.style().polish(self.char_count_label)
+
     def _on_text_changed(self):
         # 计数与保存校验走同一个函数：各算各的话，界面说"没超"、保存却被拒（或反过来）。
         _, _, cleaned = _ts.validate_pinned_constraints(self.editor.toPlainText())
         total_chars = sum(len(c) for c in cleaned)
         limit = _ts.PINNED_CONSTRAINTS_MAX_CHARS
-        self.char_count_label.setText(f"{total_chars} / {limit} 字符")
-        if total_chars > limit:
-            self.char_count_label.setStyleSheet("font-size: 12px; color: #ef4444; font-weight: 600;")
-            self.save_btn.setEnabled(False)
-        else:
-            self.char_count_label.setStyleSheet("font-size: 12px; color: #64748b;")
-            self.save_btn.setEnabled(True)
+        self.char_count_label.setText(f"{total_chars} / {limit} 字")
+        over = total_chars > limit
+        self._set_count_error(over)
+        self.save_btn.setEnabled(not over)
 
     def _on_save(self):
         text = self.editor.toPlainText()
         valid, error_msg, cleaned = _ts.validate_pinned_constraints(text)
         if not valid:
-            self.char_count_label.setText(error_msg)
-            self.char_count_label.setStyleSheet("font-size: 12px; color: #ef4444; font-weight: 600;")
+            self._show_error(error_msg)
             return
 
         with self.sess.snapshot_lock:
@@ -228,7 +215,7 @@ class EditConstraintsDialog(QDialog):
 
     def _show_error(self, text: str):
         self.char_count_label.setText(text)
-        self.char_count_label.setStyleSheet("font-size: 12px; color: #ef4444; font-weight: 600;")
+        self._set_count_error(True)
 
 
 _STEP_NAMES = {"done": "完成", "in_progress": "进行中"}

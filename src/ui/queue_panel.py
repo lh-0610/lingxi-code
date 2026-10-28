@@ -113,8 +113,8 @@ class QueuePanel(QFrame):
         head_bg = c("mv_header_bg")
         state_color = c("mv_text_sec")
         if paused:
-            head_bg = c("mv_err_bg")
-            state_color = c("mv_orange")
+            head_bg = c("mv_gate_bg")
+            state_color = c("mv_gate_text")
         self.setStyleSheet(
             f"#queuePanel {{ background: {c('mv_card_bg')}; border: 1px solid {c('mv_card_border')}; "
             f"border-radius: 12px; }}"

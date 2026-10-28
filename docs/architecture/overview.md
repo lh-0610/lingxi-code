@@ -70,15 +70,16 @@ src/                     # 主代码
     message_view.py      # 消息流时间线：每轮一条线串起用户消息、思考、工具卡、计划步骤分段和结果卡；新一轮开始时上一轮的过程收成一行
     fonts.py             # 字体族与字号（界面 / 等宽），全界面唯一来源
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
+    queue_panel.py       # 输入队列面板（B09b）：排队 N 条 / 暂停横幅 / 编号列表 / 已发送折叠，只画不判
     task_panel.py        # 停靠在窗口右侧的任务面板与限制编辑对话框（B05）：要求/计划/执行状态/验证证据，可撤销横幅，硬预算校验
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理
-    search_overlay.py    # SearchOverlayMixin：Ctrl+F 浮窗搜索
+    search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开）
     sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组）+ 项目添加/切换/移除
-    header.py            # HeaderMixin：顶栏（模型/Plan-Act/撤销/思考/角色卡/主题）+ 所有 _style_*_btn + 角色卡多卡扫描
+    header.py            # HeaderMixin：顶栏（模型/撤销/隔离/计划|执行/思考/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描
     debug_inspector.py   # F12 调试弹窗（请求/响应/usage 可视化）
-    theme.py             # THEMES dict + build_stylesheet + build_tooltip_qss(app 级) + load/save_theme_choice
-    widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / CloseConfirmDialog
+    theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
+    widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / CloseConfirmDialog / FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）
     settings_dialog.py   # 设置弹窗（provider 卡片式 API key + 自定义模型增删改）
     helpers.py           # _make_button_icon / _build_image_content_block / _escape
     prefs.py             # UI 偏好持久化（关闭按钮选择等）
