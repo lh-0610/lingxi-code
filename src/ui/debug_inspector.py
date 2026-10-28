@@ -7,7 +7,7 @@
 """
 import json
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QPushButton, QSplitter, QTextBrowser, QVBoxLayout, QApplication,
@@ -112,6 +112,27 @@ class DebugInspector(QDialog):
         if not self._has_positioned:
             self._dock_beside_parent()
             self._has_positioned = True
+
+    def event(self, event):
+        # 设置、确认框、文件选择这类应用级模态框打开时，本窗口会被锁住不能点；要是还置顶，
+        # 就会盖住那个对话框，两边都点不了，只能按 Esc。被锁住期间让出置顶、退到后面，解锁后恢复。
+        etype = event.type()
+        if etype == QEvent.WindowBlocked:
+            self._set_on_top(False)
+        elif etype == QEvent.WindowUnblocked:
+            self._set_on_top(True)
+        return super().event(event)
+
+    def _set_on_top(self, on: bool):
+        handle = self.windowHandle()
+        if handle is None or not self.isVisible():
+            return
+        # 改 QWindow 的标志而不是 QWidget.setWindowFlags：后者会把窗口先藏起来再显示
+        handle.setFlag(Qt.WindowStaysOnTopHint, on)
+        if on:
+            self.raise_()
+        else:
+            self.lower()
 
     def _dock_beside_parent(self):
         """第一次 show 时，自动把 Inspector 贴到主窗口右侧（屏幕装不下则贴左边）。"""
