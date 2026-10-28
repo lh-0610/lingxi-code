@@ -193,7 +193,7 @@ class SendMixin:
         for m in pat.finditer(text):
             if m.start() > pos:
                 parts.append(_html.escape(text[pos:m.start()]))
-            parts.append(f'<b style="color:#5b6cf0;">{_html.escape(m.group(0))}</b>')
+            parts.append(f'<b style="color:{self._t("mv_indigo")};">{_html.escape(m.group(0))}</b>')
             pos = m.end()
         if pos < len(text):
             parts.append(_html.escape(text[pos:]))
@@ -464,6 +464,8 @@ class SendMixin:
         # 活跃会话完成：完整收尾（若中途切走过，切回时已 _redraw_chat + 重放 render_log
         # 补齐，worker 这轮的后续也是实时渲染的，这里无需再整体重绘）
         self._ai_reply_start = None
+        if hasattr(self, "chat_area"):
+            self.chat_area.end_run()   # 回复上方的用时定格，开着的思考 / 工具卡收尾
         self._update_btn_state("enabled" if self._has_input else "disabled")
         self._refresh_session_list()
         # AI 这一轮可能新建了 checkpoint，刷新撤销按钮状态

@@ -367,8 +367,31 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     def _redraw_chat(self):
         self.chat_area.clear()
+        # 重绘的是历史：回复上方不起秒表、不标当前模式
+        self.chat_area.replaying = True
+        try:
+            rendered_any = self._replay_history(list(agent.chat_history))
+        finally:
+            self.chat_area.replaying = False
+        if not rendered_any:
+            self._show_empty_state()
+        self._redraw_result_card()
+        # 计划面板的刷新已统一到 _reset_render_state（新建/切换/切项目三路共用漏斗），
+        # 且 _load_session 调 _redraw_chat 前必先调 _reset_render_state，这里无需重复渲染。
+
+    def _replay_history(self, history_snapshot):
+        """把历史消息按实时那一套画回消息流：工具调用画成同样的工具卡（结果取对应的
+        ToolMessage），被接受的计划变化推演成步骤分段。返回是否画出了任何内容。"""
+        from langchain_core.messages import ToolMessage
+        from ..limits import TOOL_RESULT_PREVIEW_CHARS
+        from ..streaming import describe_tool_call
+        from .message_view import replay_plan_change
+        results = {m.tool_call_id: str(m.content or "") for m in history_snapshot
+                   if isinstance(m, ToolMessage)}
+        role_name = agent.get_current_role_name()
         rendered_any = False
-        history_snapshot = list(agent.chat_history)
+        labeled = False      # 这一轮的回复已经起过头（实时也是一轮只标一次模型名）
+        plan = []
         for msg in history_snapshot:
             if self._is_hidden_bridge_message(msg):
                 continue
@@ -376,10 +399,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if note is not None:
                 # 恢复说明是程序写的，画成程序说明，不画成"你"的气泡
                 rendered_any = True
+                labeled = False
                 self._append_html(note + "\n\n", "tool_result")
                 continue
             if isinstance(msg, HumanMessage):
                 rendered_any = True
+                labeled = False
                 self._append_html("你\n", "user_label")
                 # 多模态消息
                 if isinstance(msg.content, list):
@@ -410,14 +435,19 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                         t for t in (block_text(_blk) for _blk in _ai_content) if t
                     )
                 _has_text = bool(_ai_content and _ai_content.strip())
-                _tool_names = [tc.get('name', '?') for tc in (getattr(msg, 'tool_calls', None) or [])
-                               if isinstance(tc, dict)]
-                ai_name = agent.get_current_role_name() or "AI"
+                _calls = [tc for tc in (getattr(msg, 'tool_calls', None) or []) if isinstance(tc, dict)]
+                if not (_has_text or _calls):
+                    continue
+                rendered_any = True
+                if not labeled:
+                    # 角色卡优先（和实时一致）；否则是写这条回复时记下的模型，旧会话没有就不标
+                    model = (role_name or (getattr(msg, "additional_kwargs", None) or {})
+                             .get("lingxi_model") or "")
+                    self._append_html(f"{model}\n", "ai_label")
+                    labeled = True
 
-                # 有正文就渲染正文（MessageView：起一轮 + 定格 markdown 富文本）
+                # 有正文就渲染正文（定格 markdown 富文本）
                 if _has_text:
-                    rendered_any = True
-                    self._append_html(f"{ai_name}\n", "ai_label")
                     self._msg_buffers[str(len(self._msg_buffers))] = _ai_content
                     self.chat_area.finalize_markdown(self._md_to_html(_ai_content))
                     from PySide6.QtWidgets import QApplication
@@ -425,19 +455,25 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                         on_copy=lambda t=_ai_content: (QApplication.clipboard().setText(t),
                                                        self._show_toast("已复制")))
 
-                # 有工具调用就显示摘要——不管这条 AIMessage 有没有正文。
-                # （之前只在"无正文"时显示，导致 MiMo "短文字 + 工具调用"同条时工具被吞，
-                #   恢复的历史看不出调了哪些工具，整段很怪）
-                if _tool_names:
-                    rendered_any = True
-                    if not _has_text:
-                        self._append_html(f"{ai_name}\n", "ai_label")
-                    self._append_html(f"调用了工具: {', '.join(_tool_names)}\n\n", "tool_result")
-        if not rendered_any:
-            self._show_empty_state()
-        self._redraw_result_card()
-        # 计划面板的刷新已统一到 _reset_render_state（新建/切换/切项目三路共用漏斗），
-        # 且 _load_session 调 _redraw_chat 前必先调 _reset_render_state，这里无需重复渲染。
+                # 工具调用画成和实时一样的工具卡——不管这条 AIMessage 有没有正文
+                # （MiMo 常把"短文字 + 工具调用"放在同一条里）
+                for tc in _calls:
+                    name = tc.get("name") or "?"
+                    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+                    display_name, detail = describe_tool_call(name, args)
+                    self._append_html(f"\n{display_name}", "tool_tag")
+                    self._append_html(f"  {detail}\n", "tool_detail")
+                    result = results.get(tc.get("id"))
+                    if result:
+                        if len(result) > TOOL_RESULT_PREVIEW_CHARS:
+                            result = result[:TOOL_RESULT_PREVIEW_CHARS] + "\n... [结果已截断]"
+                        self._append_html(result + "\n", "tool_result")
+                    self._append_html("", "reset_ai_reply")
+                    new_plan = replay_plan_change(plan, name, args, result)
+                    if new_plan is not None:
+                        plan = new_plan
+                        self.chat_area.on_plan(plan)
+        return rendered_any
 
     def _show_empty_state(self):
         """聊天为空时显示欢迎态。"""
@@ -523,6 +559,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.chat_area = MessageView()
         self.chat_area.setObjectName("chatArea")
         self.chat_area.image_clicked.connect(self._show_image_dialog)   # 点击图片 → 放大遮罩
+        self.chat_area.meta_provider = self._stream_meta               # 回复上方那行小字里的模式
         self.chat_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         parent_layout.addWidget(self.chat_area, 1)
         self._build_empty_state()
@@ -541,6 +578,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         sb = self.chat_area.verticalScrollBar()
         sb.valueChanged.connect(self._on_scroll_changed)
         sb.rangeChanged.connect(self._on_scroll_changed)
+
+    def _stream_meta(self):
+        from .. import session as _session
+        mode = getattr(_session.get_active(), "agent_mode", "act")
+        return {"mode": "计划模式" if mode == "plan" else "执行模式"}
 
     # 窗口比这窄时自动收起任务面板，给对话让位置
     _TASK_PANEL_MIN_WINDOW = 1100
@@ -1842,6 +1884,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if sess is not _session.get_active() or items != sess.current_plan:
             return
         self._render_plan_panel(items)
+        self.chat_area.on_plan(items)   # 当前步骤换了：消息流里插一个步骤分段
 
     def _tick_plan_spinner(self):
         if hasattr(self, "plan_panel"):

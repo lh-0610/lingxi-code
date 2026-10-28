@@ -637,7 +637,7 @@ def _completion_gate(ui, clean_text):
                 state.chat_history.append(gate_msg)
                 return result, clean_text, True
             clean_text = (
-                "⚠️ 验证仍未完整完成：\n"
+                "验证仍未完整完成：\n"
                 + "\n".join(f"- {g}" for g in _gaps)
                 + "\n\n"
                 + (clean_text or "")
@@ -645,7 +645,7 @@ def _completion_gate(ui, clean_text):
     except Exception as _ge:
         result = AgentResult("unverified", f"验证闸门检查失败: {_ge}")
         logger.warning(result.reason)
-        clean_text = f"⚠️ {result.reason}\n\n{clean_text}"
+        clean_text = f"{result.reason}\n\n{clean_text}"
     return result, clean_text, False
 
 

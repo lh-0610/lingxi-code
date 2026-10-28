@@ -1,21 +1,27 @@
-"""消息流的真控件渲染（替代 QTextBrowser）。
+"""消息流：真 Qt 控件拼成的对话时间线（设计稿 A5「一线加任务面板」）。
 
-设计 handoff（design_handoff_lingxi_chat）要求消息流是圆角卡 + 阴影 + 可展开思考块——
-QTextBrowser 画不了文本块的圆角/阴影,故消息流改成真 Qt 控件:每"块"一个 QWidget,
-拼进 MessageView 的纵向布局里。本文件先放【块级组件】(Phase A),MessageView 容器 +
-tag→控件分发(Phase B)、接进 ChatUI(Phase C)随后。
+每一轮（用户的一句话，加上这一轮里 AI 的回复、思考、工具调用、计划步骤和结果卡）
+装在一个 _Round 里。_Round 左边留出 38px 的线槽，一条主题色竖线把这一轮串起来，
+线上的节点标出：用户消息（空心圆）、思考与程序提示（小圆点）、工具调用（带点的圆环）、
+计划步骤（带编号的圆）和结果卡（实心圆加勾 / 叉 / 感叹号）。
 
-配色/字号/圆角全部对齐 design_handoff_lingxi_chat 的浅色规格。颜色先内联在 _P,
-接进主题系统时再抽 token。
+节点由各块登记，绘制时按块的当前位置现算：展开 / 收起、流式追加都不用另外维护坐标。
+开新一轮时，上一轮的思考、工具和步骤收成一行"调用了 N 次工具　展开过程"，正文和结果卡保留。
+
+配色全部取当前主题的 mv_* token（_P）；已经画出来的块不会自己变色，切主题后由 ChatUI 重绘。
 """
-from PySide6.QtCore import Qt, QByteArray, QSize, QTimer, Signal
-from PySide6.QtGui import QPixmap, QPainter, QIcon
+import re
+import time
+
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 
 from .helpers import strip_leading_emoji
-from .fonts import MONO_CSS, UI_CSS
+from .fonts import MONO_CSS, UI_CSS, mono_font
 from .theme import color as theme_color
 
 try:
@@ -37,6 +43,10 @@ _P = _ThemePalette()
 
 _SANS = UI_CSS
 _MONO = MONO_CSS
+
+GUTTER = 38          # 每轮左侧线槽的宽度
+_CX = 11             # 竖线和节点的中心 x（节点最宽 22px，留足不被裁）
+COLUMN_MAX = 820     # 消息栏最大宽度（含线槽）；窗口再宽，两侧留白
 
 
 def _icon(svg: str, color: str, size: int = 16) -> QPixmap:
@@ -61,32 +71,78 @@ def _icon_label(svg: str, color: str, size: int = 16) -> QLabel:
     return lbl
 
 
-# 内联 SVG（来自 design handoff；currentColor 占位）
-SVG_CLIPBOARD = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-                 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-                 '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>')
-SVG_STAR = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-            'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-            '<path d="M12 2l2.4 7.4H22l-6 4.4 2.3 7.2L12 16.6 5.7 21l2.3-7.2-6-4.4h7.6z"/></svg>')
-SVG_BULB = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-            'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-            '<path d="M9.5 16a5 5 0 1 1 5 0v2h-5z"/><path d="M10 21h4"/></svg>')
-SVG_COPY = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-            'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-            '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>')
-SVG_REFRESH = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-               'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-               '<path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>')
+def _svg(body: str) -> str:
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" '
+            'stroke="currentColor" stroke-width="1.4" stroke-linecap="round" '
+            f'stroke-linejoin="round">{body}</svg>')
+
+
+# 内联 SVG（currentColor 占位）
+SVG_CLIPBOARD = _svg('<rect x="3" y="2.5" width="10" height="11.5" rx="1.5"/><path d="M5.5 6h5M5.5 8.5h5M5.5 11h3"/>')
+SVG_STAR = _svg('<path d="M8 1.8l1.7 3.9 4.2.4-3.2 2.8 1 4.1L8 10.8l-3.7 2.2 1-4.1-3.2-2.8 4.2-.4z"/>')
+SVG_COPY = _svg('<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3 10.5V3.5A1 1 0 014 2.5h6.5"/>')
+SVG_REFRESH = _svg('<path d="M13.5 3v3.2h-3.2"/><path d="M13.3 6.2A5.5 5.5 0 102.6 9.5"/>')
+SVG_TERMINAL = _svg('<rect x="1.8" y="2.5" width="12.4" height="11" rx="1.5"/><path d="M4.5 6l2 2-2 2M8.5 10h3"/>')
+SVG_FILE = _svg('<path d="M9 1.8H4.5A1.5 1.5 0 003 3.3v9.4a1.5 1.5 0 001.5 1.5h7a1.5 1.5 0 001.5-1.5V5.8z"/><path d="M9 1.8v4h4"/>')
+SVG_PEN = _svg('<path d="M10.5 2.5l3 3L6 13H3v-3z"/>')
+SVG_SEARCH = _svg('<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5l3.5 3.5"/>')
+SVG_TOOL = _svg('<path d="M10 2.2a3.3 3.3 0 00-3.9 4.3L2.3 10.3a1.4 1.4 0 002 2l3.8-3.8A3.3 3.3 0 0012.4 4.6l-2 2-1.7-.4-.4-1.7z"/>')
+SVG_CHEVRON_RIGHT = _svg('<path d="M6 4l4 4-4 4"/>')
+SVG_CHEVRON_DOWN = _svg('<path d="M4 6l4 4 4-4"/>')
+
+# 工具名（显示名）里出现这些词，就用对应图标
+_TOOL_ICONS = (
+    (("执行命令", "测试", "代码检查", "后台"), SVG_TERMINAL),
+    (("写入", "编辑", "追加", "补丁"), SVG_PEN),
+    (("搜索", "查找", "跳转", "检索"), SVG_SEARCH),
+    (("读取", "目录", "文件", "地图", "改动", "历史", "状态"), SVG_FILE),
+    (("计划", "步骤"), SVG_CLIPBOARD),
+)
+
+
+def _tool_icon(name: str) -> str:
+    for words, svg in _TOOL_ICONS:
+        if any(w in name for w in words):
+            return svg
+    return SVG_TOOL
 
 
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _fmt_secs(secs) -> str:
+    s = max(0, int(secs))
+    if s < 60:
+        return f"{s} 秒"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m} 分 {s:02d} 秒"
+    h, m = divmod(m, 60)
+    return f"{h} 小时 {m:02d} 分"
+
+
+def _one_line(detail: str) -> str:
+    """工具参数压成一行摘要：路径 / 命令原样；多行 JSON 依次取各字段的值（多行的值只取第一行）。"""
+    s = (detail or "").strip()
+    if not s:
+        return ""
+    if not s.startswith("{"):
+        return s.splitlines()[0]
+    values = []
+    for line in s.splitlines()[1:]:
+        m = re.match(r'\s*"[^"]*"\s*:\s*(.*)', line)
+        if not m:
+            continue        # 多行字符串值的后续行 / 结构括号
+        value = m.group(1).strip().rstrip(",").strip('"')
+        if value and value not in ("{", "[", "true", "false", "null"):
+            values.append(value)
+    return "  ".join(values)
+
+
 def highlight_json(text: str) -> str:
-    """极简 JSON 着色 → rich HTML（key/字符串/数字/标点分色），用于工具卡 body。
+    """极简 JSON 着色 → rich HTML（key/字符串/数字/标点分色），用于工具卡展开后的参数。
     非严格解析,够用就行;失败退化为转义纯文本。"""
-    import re
     out = []
     s = text or ""
     token = re.compile(r'"(?:[^"\\]|\\.)*"|-?\d+\.?\d*|[{}\[\],:]|\s+|[^\s{}\[\],:"]+')
@@ -110,18 +166,174 @@ def highlight_json(text: str) -> str:
             f'line-height:1.7; white-space:pre-wrap; word-break:break-word;">{body}</pre>')
 
 
-class ModelTag(QLabel):
-    """模型名：正文上方一行小字，不再用大号橙色衬线标题。"""
-    def __init__(self, name: str, parent=None):
-        super().__init__(name, parent)
-        self.setStyleSheet(
-            f"color:{_P['muted']}; font-family:{_SANS}; font-size:12px; "
-            f"background:transparent;"
-        )
+class _ElidedLabel(QLabel):
+    """单行文字，放不下时末尾省略；完整内容放在 tooltip 里。"""
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setMinimumWidth(0)
+        self.set_full(text)
 
+    def set_full(self, text: str):
+        self._full = " ".join((text or "").split())
+        self.setToolTip(self._full if len(self._full) > 40 else "")
+        self._apply()
+
+    def full(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply()
+
+    def _apply(self):
+        width = max(0, self.width() - 2)
+        super().setText(self.fontMetrics().elidedText(self._full, Qt.ElideRight, width))
+
+
+class _FlatButton(QPushButton):
+    """消息流里的文字按钮（展开 / 收起 / 展开过程）：无边框，主题色字。"""
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet(
+            f"QPushButton {{ border:none; background:transparent; color:{_P['indigo']}; "
+            f"font-size:12px; padding:2px 6px; border-radius:6px; }}"
+            f"QPushButton:hover {{ background:{_P['indigo_soft']}; }}")
+
+
+# ── 一轮：线槽 + 节点 ─────────────────────────────────────────
+
+_RESULT_TONE = {"ok": "indigo", "warn": "orange", "interrupted": "orange", "bad": "bad",
+                "muted": "muted3", "running": "indigo"}
+
+
+class _Round(QWidget):
+    """一轮对话：左边线槽里画竖线和节点，右边纵向排这一轮的各块。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._v = QVBoxLayout(self)
+        self._v.setContentsMargins(GUTTER, 0, 0, 0)
+        self._v.setSpacing(0)
+        self._nodes = []              # [(widget, kind, info)]
+        self.assistant_turns = []
+        self.current_step = None      # (步号, 步骤名)：流里最近插过的计划步骤分段
+
+    def add(self, w, top_gap=0):
+        if top_gap and self._v.count():
+            self._v.addSpacing(top_gap)
+        self._v.addWidget(w)
+        return w
+
+    def add_node(self, widget, kind, **info):
+        self._nodes.append((widget, kind, info))
+        self.update()
+
+    def collapse_process(self):
+        for turn in self.assistant_turns:
+            turn.collapse_process()
+
+    def event(self, e):
+        handled = super().event(e)
+        if e.type() == QEvent.LayoutRequest:
+            self.update()    # 子块高度变了（展开、流式追加）：节点位置跟着重画
+        return handled
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.update()
+
+    def paintEvent(self, e):
+        pts = []
+        for w, kind, info in self._nodes:
+            try:
+                if not w.isVisibleTo(self):
+                    continue
+                dy = info.get("dy", 10)
+                y = w.mapTo(self, QPoint(0, 0)).y() + (dy(w) if callable(dy) else dy)
+            except RuntimeError:   # 块已被删除
+                continue
+            pts.append((y, w, kind, info))
+        if not pts:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        thread = QColor(_P["indigo"])
+        if len(pts) > 1:
+            ys = [pt[0] for pt in pts]
+            p.setPen(QPen(thread, 2))
+            p.drawLine(QPointF(_CX, min(ys)), QPointF(_CX, max(ys)))
+        for y, w, kind, info in pts:
+            _draw_node(p, kind, QPointF(_CX, y), w, info)
+        p.end()
+
+
+def _draw_node(p, kind, c, w, info):
+    bg = QColor(_P["view_bg"])
+    thread = QColor(_P["indigo"])
+    if kind == "user":                       # 用户消息：空心圆
+        p.setPen(QPen(thread, 2))
+        p.setBrush(bg)
+        p.drawEllipse(c, 6, 6)
+    elif kind == "dot":                      # 思考 / 提示 / 收起的过程：小圆点
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(_P[info.get("color", "muted2")]))
+        p.drawEllipse(c, 3, 3)
+    elif kind == "tool":                     # 工具调用：带点的圆环
+        p.setPen(QPen(thread, 2))
+        p.setBrush(bg)
+        p.drawEllipse(c, 5, 5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(thread)
+        p.drawEllipse(c, 2, 2)
+    elif kind == "step":                     # 计划步骤：带编号的圆
+        status = getattr(w, "status", "pending")
+        r = 8
+        if status == "done":
+            p.setPen(Qt.NoPen)
+            p.setBrush(thread)
+            ink = bg
+        elif status == "in_progress":
+            p.setPen(QPen(thread, 2))
+            p.setBrush(bg)
+            ink = thread
+        else:
+            ink = QColor(_P["muted2"])
+            p.setPen(QPen(ink, 1.5))
+            p.setBrush(bg)
+        p.drawEllipse(c, r, r)
+        f = QFont(p.font())
+        f.setPixelSize(10)
+        f.setWeight(QFont.DemiBold)
+        p.setFont(f)
+        p.setPen(ink)
+        p.drawText(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), Qt.AlignCenter, str(getattr(w, "n", "")))
+    elif kind == "result":                   # 结果卡：实心圆 + 勾 / 叉 / 感叹号
+        tone = info.get("tone") or "muted"
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(_P[_RESULT_TONE.get(tone, "muted3")]))
+        p.drawEllipse(c, 10, 10)
+        pen = QPen(bg, 2.2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        x, y = c.x(), c.y()
+        if tone in ("ok", "running"):
+            p.drawPolyline([QPointF(x - 4.4, y + 0.2), QPointF(x - 1.2, y + 3.4), QPointF(x + 4.6, y - 3.4)])
+        elif tone == "bad":
+            p.drawLine(QPointF(x - 3.5, y - 3.5), QPointF(x + 3.5, y + 3.5))
+            p.drawLine(QPointF(x + 3.5, y - 3.5), QPointF(x - 3.5, y + 3.5))
+        else:
+            p.drawLine(QPointF(x, y - 4.8), QPointF(x, y + 1.0))
+            p.drawPoint(QPointF(x, y + 4.4))
+
+
+# ── 块 ────────────────────────────────────────────────────────
 
 class BodyText(QLabel):
-    """正文段落（15.5px/1.75）。富文本,支持后续 markdown HTML。"""
+    """正文段落。富文本，流式时是转义后的纯文本，结束后换成渲染好的 markdown。"""
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self.setWordWrap(True)
@@ -133,122 +345,71 @@ class BodyText(QLabel):
         self.setText(text)
 
 
-class ToolCallCard(QFrame):
-    """工具调用卡:圆角边框 + 灰底头部(图标+名+tool call) + 代码 body(JSON 高亮)。"""
-    def __init__(self, name: str, code_text: str, icon_svg: str = SVG_CLIPBOARD,
-                 icon_color: str = _P["indigo"], parent=None):
+class MetaLine(QWidget):
+    """回复上方的一行小字：模型、模式、用时。进行中每秒走一次，这一轮结束后定格。"""
+    def __init__(self, model_name: str = "", mode: str = "", live: bool = False, parent=None):
         super().__init__(parent)
-        self.setObjectName("toolCard")
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"#toolCard {{ background:{_P['card_bg']}; border:1px solid {_P['card_border']}; "
-            f"border-radius:12px; }}"
-        )
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-
-        header = QWidget()
-        header.setObjectName("toolCardHeader")
-        header.setAttribute(Qt.WA_StyledBackground, True)
-        header.setStyleSheet(
-            f"#toolCardHeader {{ background:{_P['header_bg']}; "
-            f"border-top-left-radius:11px; border-top-right-radius:11px; "
-            f"border-bottom:1px solid {_P['card_border']}; }}"
-        )
-        h = QHBoxLayout(header)
-        h.setContentsMargins(14, 11, 14, 11)
-        h.setSpacing(8)
-        h.addWidget(_icon_label(icon_svg, icon_color, 15), 0, Qt.AlignVCenter)
-        name_lbl = QLabel(name)
-        name_lbl.setStyleSheet(f"color:{_P['text3']}; font-size:13px; font-weight:600; background:transparent;")
-        h.addWidget(name_lbl, 0, Qt.AlignVCenter)
-        tc = QLabel("tool call")
-        tc.setStyleSheet(f"color:{_P['muted3']}; font-size:12px; background:transparent;")
-        h.addWidget(tc, 0, Qt.AlignVCenter)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(14)
+        style = f"color:{_P['text_sec']}; font-size:12px; background:transparent;"
+        for text in (model_name, mode):
+            if text:
+                lbl = QLabel(text)
+                lbl.setStyleSheet(style)
+                h.addWidget(lbl)
+        self._t0 = time.monotonic()
+        self._clock = None
+        self._timer = None
+        if live:
+            self._clock = QLabel()
+            self._clock.setStyleSheet(style)
+            h.addWidget(self._clock)
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._tick)
+            self._timer.start(1000)
+            self._tick()
         h.addStretch(1)
-        v.addWidget(header)
 
-        self._body = QLabel()
-        self._body.setObjectName("toolCardBody")
-        self._body.setWordWrap(True)
-        self._body.setTextFormat(Qt.RichText)
-        self._body.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._body.setStyleSheet(f"color:{_P['text_sec']}; background:transparent; padding:14px 16px;")
-        self._body.setText(highlight_json(code_text))
-        self._body.setVisible(bool(code_text.strip()))   # 参数还没来时不留空白行
-        self._v = v
-        v.addWidget(self._body)
+    @property
+    def live(self) -> bool:
+        return self._timer is not None
 
-    def set_body(self, code_text: str):
-        """工具参数（tool_detail）到位后填进卡 body。"""
-        self._body.setText(highlight_json(code_text))
-        self._body.setVisible(bool(code_text.strip()))
+    def _tick(self):
+        self._clock.setText(f"进行中 {_fmt_secs(time.monotonic() - self._t0)}")
 
-
-class ChecklistCard(QFrame):
-    """结果清单卡:浅底圆角 + 说明 + 若干「□ N. 描述」行(可勾选高亮)。"""
-    def __init__(self, caption_html: str, rows: list, parent=None):
-        # rows: list of dict(n, txt, checked)
-        super().__init__(parent)
-        self.setObjectName("checkCard")
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"#checkCard {{ background:{_P['result_bg']}; border:1px solid {_P['result_border']}; "
-            f"border-radius:12px; }}"
-        )
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(0)
-        cap = QLabel(caption_html)
-        cap.setTextFormat(Qt.RichText)
-        cap.setStyleSheet(f"color:{_P['muted']}; font-size:13px; background:transparent;")
-        v.addWidget(cap)
-        v.addSpacing(10)
-        for r in rows:
-            row = QWidget()
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(0, 5, 0, 5)
-            rl.setSpacing(10)
-            box = QFrame()
-            box.setFixedSize(16, 16)
-            box.setAttribute(Qt.WA_StyledBackground, True)
-            if r.get("checked"):
-                box.setStyleSheet(f"background:{_P['indigo_soft']}; border:1.6px solid {_P['indigo']}; border-radius:5px;")
-            else:
-                box.setStyleSheet(f"background:transparent; border:1.6px solid {_P['box_border']}; border-radius:5px;")
-            rl.addWidget(box, 0, Qt.AlignVCenter)
-            color = _P["indigo"] if r.get("checked") else _P["text_sec"]
-            lbl = QLabel(f"<b>{r['n']}.</b> {_esc(r['txt'])}")
-            lbl.setWordWrap(True)
-            lbl.setTextFormat(Qt.RichText)
-            lbl.setStyleSheet(f"color:{color}; font-size:14px; background:transparent;")
-            rl.addWidget(lbl, 1)
-            v.addWidget(row)
+    def finish(self):
+        if self._timer is None:
+            return
+        self._timer.stop()
+        self._timer = None
+        self._clock.setText(f"用时 {_fmt_secs(time.monotonic() - self._t0)}")
 
 
 class ThinkingChip(QWidget):
-    """可展开思考块:chip(灯泡 + 思考·N字/思考中 + ▸)→ 点开下方面板(左竖线 + 灰底)。
-    流式期 set_live(True) 显示「思考中」+ update_content 累加;think_collapse 后定格「思考·N字」。"""
+    """思考块：一个小按钮（思考中… / 思考了 N 秒），点开看思考内容。"""
     def __init__(self, char_count: int = 0, content: str = "", parent=None):
         super().__init__(parent)
         self._open = False
         self._live = False
         self._content = content
+        self._char_count = char_count
+        self._t0 = time.monotonic()
+        self._secs = None
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
 
-        # 用 QPushButton 原生 icon+text（不要往按钮里塞 QLabel 布局——真机上子 label 常不绘制）
+        # 用 QPushButton 原生 icon+text（不要往按钮里塞 QLabel 布局——真机上子 label 常不绘制）；
+        # 从右往左排，箭头就在文字右边
         self.btn = QPushButton()
         self.btn.setObjectName("thinkChip")
         self.btn.setCursor(Qt.PointingHandCursor)
-        self.btn.setIcon(QIcon(_icon(SVG_BULB, _P["indigo"], 14)))
-        self.btn.setIconSize(QSize(14, 14))
+        self.btn.setLayoutDirection(Qt.RightToLeft)
+        self.btn.setIconSize(QSize(12, 12))
         self.btn.setStyleSheet(
             f"#thinkChip {{ border:1px solid {_P['chip_border']}; background:{_P['header_bg']}; "
-            f"border-radius:8px; padding:5px 12px; color:{_P['indigo']}; "
-            f"font-size:13px; font-weight:600; text-align:left; }} "
+            f"border-radius:8px; padding:3px 10px; color:{_P['text_sec']}; font-size:12px; }} "
             f"#thinkChip:hover {{ border-color:{_P['chip_hover']}; }}"
         )
         chip_wrap = QHBoxLayout()
@@ -266,24 +427,29 @@ class ThinkingChip(QWidget):
         self.panel.setStyleSheet(
             f"#thinkPanel {{ background:{_P['header_bg']}; border-left:2px solid {_P['panel_accent']}; "
             f"border-top-right-radius:8px; border-bottom-right-radius:8px; "
-            f"color:{_P['muted']}; font-size:14px; padding:14px 16px; }}"
+            f"color:{_P['muted']}; font-size:13px; padding:12px 14px; }}"
         )
         self.panel.setVisible(False)
         v.addWidget(self.panel)
 
-        self._char_count = char_count
         self.update_content(content)
         self.btn.clicked.connect(self._toggle)
 
     def _refresh_label(self):
-        chev = "   ▾" if self._open else "   ▸"
         if self._live:
-            self.btn.setText("思考中" + chev)
+            text = "思考中…"
+        elif self._secs is not None:
+            text = f"思考了 {_fmt_secs(self._secs)}"
         else:
             n = self._char_count if self._content == "" else len(self._content)
-            self.btn.setText(f"思考 · {n} 字" + chev)
+            text = f"思考过程 {n} 字"
+        self.btn.setText(text)
+        chevron = SVG_CHEVRON_DOWN if self._open else SVG_CHEVRON_RIGHT
+        self.btn.setIcon(QIcon(_icon(chevron, _P["text_sec"], 12)))
 
     def set_live(self, live: bool):
+        if self._live and not live and self._secs is None:
+            self._secs = max(1, round(time.monotonic() - self._t0))
         self._live = live
         self._refresh_label()
 
@@ -298,40 +464,236 @@ class ThinkingChip(QWidget):
         self._refresh_label()
 
 
-class StepHeader(QWidget):
-    """步骤标题:方角徽章「N」 + 「第 N 步:…」。"""
-    def __init__(self, n: int, title: str, parent=None):
+class ToolCallCard(QFrame):
+    """工具调用卡：一行头部（图标、名称、参数摘要、输出行数、展开），收起时下面再露一行
+    最新输出；展开看完整参数和输出。默认收起，消息流里只留"做了什么、结果怎样"。"""
+
+    _OUT_MAX_LINES = 16      # 展开后输出框最多这么高，更多的在框里滚动
+    _OUT_MAX_BLOCKS = 4000   # 输出框最多保留的行数（长命令的流式输出），更早的丢弃
+
+    def __init__(self, name: str, code_text: str = "", icon_svg: str | None = None,
+                 icon_color: str | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("toolCard")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._open = False
+        self._detail = ""
+        self._args_needed = False
+        self._out_lines = 0
+        self._chunks = 0
+        self._first_line = ""
+        self._last_line = ""
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        self.header = QWidget()
+        self.header.setObjectName("toolCardHeader")
+        self.header.setAttribute(Qt.WA_StyledBackground, True)
+        h = QHBoxLayout(self.header)
+        h.setContentsMargins(12, 6, 8, 6)
+        h.setSpacing(8)
+        h.addWidget(_icon_label(icon_svg or _tool_icon(name), icon_color or _P["indigo"], 15),
+                    0, Qt.AlignVCenter)
+        name_lbl = QLabel(name)
+        name_lbl.setStyleSheet(f"color:{_P['text3']}; font-size:13px; font-weight:600; background:transparent;")
+        h.addWidget(name_lbl, 0, Qt.AlignVCenter)
+        self._summary = _ElidedLabel()
+        self._summary.setStyleSheet(
+            f"color:{_P['text_sec']}; font-family:{_MONO}; font-size:12px; background:transparent;")
+        h.addWidget(self._summary, 1, Qt.AlignVCenter)
+        self._count = QLabel()
+        self._count.setStyleSheet(f"color:{_P['muted']}; font-size:12px; background:transparent;")
+        self._count.setVisible(False)
+        h.addWidget(self._count, 0, Qt.AlignVCenter)
+        self._toggle_btn = _FlatButton("展开")
+        self._toggle_btn.clicked.connect(self.toggle)
+        self._toggle_btn.setVisible(False)
+        h.addWidget(self._toggle_btn, 0, Qt.AlignVCenter)
+        v.addWidget(self.header)
+
+        self._tail = _ElidedLabel()
+        self._tail.setObjectName("toolTail")
+        self._tail.setStyleSheet(
+            f"#toolTail {{ color:{_P['muted']}; font-family:{_MONO}; font-size:12px; "
+            f"background:transparent; padding:5px 14px 6px 14px; }}")
+        self._tail.setVisible(False)
+        v.addWidget(self._tail)
+
+        self._body = QWidget()
+        self._body.setStyleSheet("background:transparent;")
+        bl = QVBoxLayout(self._body)
+        bl.setContentsMargins(14, 10, 14, 12)
+        bl.setSpacing(8)
+        self._args = QLabel()
+        self._args.setWordWrap(True)
+        self._args.setTextFormat(Qt.RichText)
+        self._args.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._args.setStyleSheet(f"color:{_P['text_sec']}; background:transparent;")
+        self._args.setVisible(False)
+        bl.addWidget(self._args)
+        self._out = QPlainTextEdit()
+        self._out.setReadOnly(True)
+        self._out.setFrameShape(QFrame.NoFrame)
+        self._out.setFont(mono_font(12))
+        self._out.setMaximumBlockCount(self._OUT_MAX_BLOCKS)
+        self._out.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._out.setStyleSheet(
+            f"QPlainTextEdit {{ background:{_P['result_bg']}; color:{_P['text_sec']}; "
+            f"border:1px solid {_P['result_border']}; border-radius:8px; padding:4px 6px; }}")
+        self._out.setVisible(False)
+        bl.addWidget(self._out)
+        self._body.setVisible(False)
+        v.addWidget(self._body)
+
+        self.set_body(code_text)
+
+    # 线上节点对齐头部中线
+    def header_center(self, _w=None) -> int:
+        return max(14, self.header.height() // 2)
+
+    def set_body(self, code_text: str):
+        """工具参数（tool_detail）到位：头部放一行摘要，多行参数留到展开后看。"""
+        self._detail = (code_text or "").strip()
+        self._summary.set_full(_one_line(self._detail))
+        self._args_needed = "\n" in self._detail
+        if self._args_needed:
+            self._args.setText(highlight_json(self._detail))
+        self._sync()
+
+    def append_output(self, text: str):
+        """工具输出（流式命令逐行来，其余工具一次来）：累进输出框，收起时露最后一行。"""
+        chunk = strip_leading_emoji(text or "")
+        if not chunk.strip():
+            return
+        cur = self._out.textCursor()
+        cur.movePosition(QTextCursor.End)
+        if self._out_lines:        # 已有输出：新的一段另起一行（不读整段文本，长输出逐行来也不变慢）
+            cur.insertText("\n")
+        cur.insertText(chunk.strip("\n"))
+        lines = [ln.strip() for ln in chunk.splitlines() if ln.strip()]
+        self._out_lines += len(lines)
+        self._chunks += 1
+        if lines:
+            self._first_line = self._first_line or lines[0]
+            self._last_line = lines[-1]
+        # 一次给完的结果（读文件、改计划）第一行是结论；逐行流式来的命令输出看最后一行（退出码）
+        self._tail.set_full(self._first_line if self._chunks == 1 else self._last_line)
+        self._count.setText(f"输出 {self._out_lines} 行")
+        self._fit_output()
+        self._sync()
+
+    def output_text(self) -> str:
+        return self._out.toPlainText()
+
+    def is_open(self) -> bool:
+        return self._open
+
+    def toggle(self):
+        self._open = not self._open
+        self._sync()
+
+    def _fit_output(self):
+        lines = min(self._out.document().blockCount(), self._OUT_MAX_LINES)
+        self._out.setFixedHeight(lines * self._out.fontMetrics().lineSpacing() + 18)
+
+    def _sync(self):
+        has_out = self._out_lines > 0
+        expandable = has_out or self._args_needed
+        self._toggle_btn.setVisible(expandable)
+        self._toggle_btn.setText("收起" if self._open else "展开")
+        self._count.setVisible(has_out)
+        self._tail.setVisible(has_out and not self._open)
+        self._body.setVisible(self._open and expandable)
+        self._args.setVisible(self._open and self._args_needed)
+        self._out.setVisible(self._open and has_out)
+        below = self._tail.isVisibleTo(self) or self._body.isVisibleTo(self)
+        self._restyle(below)
+
+    def _restyle(self, below: bool):
+        if below == getattr(self, "_styled_below", None):
+            return             # 流式输出每来一行都会走到这里：样式没变就不重设
+        self._styled_below = below
+        self.setStyleSheet(
+            f"#toolCard {{ background:{_P['card_bg']}; border:1px solid {_P['card_border']}; "
+            f"border-radius:10px; }}")
+        bottom = "0px" if below else "9px"
+        rule = f"border-bottom:1px solid {_P['card_border']};" if below else "border:none;"
+        self.header.setStyleSheet(
+            f"#toolCardHeader {{ background:{_P['header_bg']}; {rule} "
+            f"border-top-left-radius:9px; border-top-right-radius:9px; "
+            f"border-bottom-left-radius:{bottom}; border-bottom-right-radius:{bottom}; }}")
+
+
+class Notice(QLabel):
+    """程序提示（自动重试、拒绝调用、恢复说明……）：不是工具输出，也不是模型说的话。"""
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("notice")
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.PlainText)
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"#notice {{ color:{_P['text_sec']}; font-size:12px; background:{_P['header_bg']}; "
+            f"border-radius:8px; padding:6px 10px; }}")
+        self.setText(text)
+
+
+def _notice_tone(text: str) -> str:
+    s = (text or "").lstrip()
+    if s.startswith(("❌", "⛔")):
+        return "bad"
+    if s.startswith(("⚠", "🔒", "⏱", "⏹")):
+        return "orange"
+    return "muted2"
+
+
+class StepHeader(QWidget):
+    """计划步骤分段：线上一个带编号的圆（完成 / 进行中 / 待办），右边是步骤名。
+
+    步骤来自任务计划本身（模型调用计划工具后程序记下的状态），不是从回复文字里猜的。"""
+    _NOTES = {"in_progress": "进行中", "done": "已完成"}
+
+    def __init__(self, n: int, title: str, status: str = "in_progress", parent=None):
+        super().__init__(parent)
+        self.n = n
+        self.status = status
         h = QHBoxLayout(self)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(9)
-        badge = QLabel(str(n))
-        badge.setFixedSize(24, 24)
-        badge.setAlignment(Qt.AlignCenter)
-        badge.setAttribute(Qt.WA_StyledBackground, True)
-        badge.setStyleSheet(
-            f"background:{_P['indigo_soft']}; color:{_P['indigo']}; border-radius:7px; "
-            f"font-size:13px; font-weight:600;"
-        )
-        h.addWidget(badge, 0, Qt.AlignVCenter)
-        lbl = QLabel(title)
-        lbl.setStyleSheet(f"color:{_P['text']}; font-size:16px; font-weight:600; background:transparent;")
-        h.addWidget(lbl, 0, Qt.AlignVCenter)
-        h.addStretch(1)
+        h.setContentsMargins(0, 4, 0, 4)
+        h.setSpacing(12)
+        self._title = QLabel(title)
+        self._title.setWordWrap(True)
+        self._title.setStyleSheet(f"color:{_P['text']}; font-size:13px; font-weight:600; background:transparent;")
+        h.addWidget(self._title, 1)
+        self._note = QLabel()
+        self._note.setStyleSheet(f"color:{_P['text_sec']}; font-size:12px; background:transparent;")
+        h.addWidget(self._note, 0, Qt.AlignTop)
+        self.set_status(status)
+
+    def set_status(self, status: str):
+        self.status = status
+        self._note.setText(self._NOTES.get(status, ""))
+        self.update()
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, _Round):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.update()
 
 
 class WaitingIndicator(QWidget):
-    """等待响应:转圈 + 「等待响应 (Ns)」(自走秒表)。"""
+    """等待模型响应：转圈 + 「等待响应 N 秒」（自走秒表）。"""
     def __init__(self, start_elapsed: int = 0, parent=None):
         super().__init__(parent)
         self._elapsed = start_elapsed
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(9)
+        h.setSpacing(8)
         from .widgets import LoadingSpinner
-        h.addWidget(LoadingSpinner(size=16, color=_P["indigo"]), 0, Qt.AlignVCenter)
+        h.addWidget(LoadingSpinner(size=14, color=_P["indigo"]), 0, Qt.AlignVCenter)
         self._lbl = QLabel()
-        self._lbl.setStyleSheet(f"color:{_P['indigo']}; font-size:14px; font-weight:500; background:transparent;")
+        self._lbl.setStyleSheet(f"color:{_P['text_sec']}; font-size:13px; background:transparent;")
         h.addWidget(self._lbl, 0, Qt.AlignVCenter)
         h.addStretch(1)
         self._tick()
@@ -340,61 +702,105 @@ class WaitingIndicator(QWidget):
         self._timer.start(1000)
 
     def _tick(self):
-        self._lbl.setText(f"等待响应 ({self._elapsed}s)")
+        self._lbl.setText(f"等待响应 {self._elapsed} 秒")
 
     def _bump(self):
         self._elapsed += 1
         self._tick()
 
 
+class _ProcessSummary(QWidget):
+    """上一轮收起后的一行：调用了 N 次工具，思考 M 次　展开过程。"""
+    def __init__(self, text: str, on_toggle, parent=None):
+        super().__init__(parent)
+        self._open = False
+        self._on_toggle = on_toggle
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{_P['text_sec']}; font-size:13px; background:transparent;")
+        h.addWidget(lbl, 0, Qt.AlignVCenter)
+        self.btn = _FlatButton("展开过程")
+        self.btn.clicked.connect(self._toggle)
+        h.addWidget(self.btn, 0, Qt.AlignVCenter)
+        h.addStretch(1)
+
+    def _toggle(self):
+        self._open = not self._open
+        self.btn.setText("收起过程" if self._open else "展开过程")
+        self._on_toggle(self._open)
+
+
 class UserTurn(QWidget):
-    """用户一轮：「你」标签 + 文本。"""
+    """用户的一句话：线上一个空心圆，右边是原文（不再另加"你"标签）。"""
     def __init__(self, parent=None):
         super().__init__(parent)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(6)
-        lab = QLabel("你")
-        lab.setStyleSheet(f"color:{_P['indigo']}; font-family:{_SANS}; font-size:13px; font-weight:600; background:transparent;")
-        v.addWidget(lab)
-        self._body = QLabel()
-        self._body.setWordWrap(True)
-        self._body.setTextFormat(Qt.RichText)
-        self._body.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._body.setStyleSheet(f"color:{_P['text2']}; font-family:{_SANS}; font-size:14px; background:transparent;")
-        v.addWidget(self._body)
+        v.setSpacing(0)
+        self.body = QLabel()
+        self.body.setWordWrap(True)
+        self.body.setTextFormat(Qt.RichText)
+        self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.body.setStyleSheet(f"color:{_P['text']}; font-family:{_SANS}; font-size:14px; background:transparent;")
+        v.addWidget(self.body)
         self._text = ""
 
     def append(self, text):
         self._text += text
-        self._body.setText(_esc(self._text).replace("\n", "<br>"))
+        self.set_html(_esc(self._text).replace("\n", "<br>"))
 
     def set_html(self, html):
-        self._body.setText(html)
+        # 发送时文本末尾带着换行（旧分隔约定）：去掉，不然用户消息下面空出两行
+        html = re.sub(r"^(?:\s*<br\s*/?>)+|(?:<br\s*/?>\s*)+$", "", (html or "").strip())
+        self.body.setText(f'<p style="margin:0; line-height:160%;">{html}</p>')
+
+
+class _Block(QWidget):
+    """块外面的一层：带上方间距。收起过程时整块藏起来，间距一起走，不留空洞。"""
+    def __init__(self, inner: QWidget, top_gap: int):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, top_gap, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(inner)
+        self.inner = inner
 
 
 class AssistantTurn(QWidget):
-    """助手一轮:模型名 tag + 纵向块容器(思考块/正文/工具卡/结果/等待/步骤标题…)。
-    流式期间各 show_message tag 往这里追加/更新块。"""
-    def __init__(self, model_name="", parent=None):
+    """AI 的一段回复：顶上一行模型 / 模式 / 用时，下面依次是思考、正文、工具卡、步骤分段……
+    流式期间各 show_message tag 往这里追加 / 更新块。"""
+    def __init__(self, model_name="", parent=None, *, mode="", live=False, round_=None):
         super().__init__(parent)
         self._v = QVBoxLayout(self)
         self._v.setContentsMargins(0, 0, 0, 0)
         self._v.setSpacing(0)
-        if model_name:
-            self._v.addWidget(ModelTag(model_name))
+        self._round = round_
+        self.meta = None
+        if model_name or mode or live:
+            self.meta = MetaLine(model_name, mode, live)
+            self._v.addWidget(self.meta)
         # 当前流式状态
         self._cur_body = None          # 正在流式的正文 BodyText（累加纯文本）
         self._cur_body_text = ""
         self._cur_think = None         # 当前 ThinkingChip（流式累加）
         self._cur_think_text = ""
-        self._cur_tool = None          # 当前 ToolCallCard
+        self._cur_tool = None          # 当前 ToolCallCard（还在接收输出）
         self._waiting = None           # WaitingIndicator
+        self._process = []             # 可收起的过程块（思考、工具、步骤分段）
+        self._steps = {}               # 步号 → StepHeader
+        self._summary = None
 
-    def _add(self, w, top_gap=14):
-        if top_gap:
-            self._v.addSpacing(top_gap)
-        self._v.addWidget(w)
+    def _add(self, w, top_gap=14, node=None, process=False, **info):
+        if self._v.count() == 0:
+            top_gap = 0
+        blk = _Block(w, top_gap)
+        self._v.addWidget(blk)
+        if node and self._round is not None:
+            self._round.add_node(w, node, **info)
+        if process:
+            self._process.append(blk)
         return w
 
     # —— 块级操作 ——
@@ -402,25 +808,32 @@ class AssistantTurn(QWidget):
         self._cur_body = None
         self._cur_body_text = ""
 
+    def end_tool(self):
+        self._cur_tool = None
+
     def append_body(self, text):
         self.clear_waiting()
+        self._close_think()
+        self.end_tool()
         if self._cur_body is None:
-            self._cur_body = self._add(BodyText(""), top_gap=16)
+            self._cur_body = self._add(BodyText(""), top_gap=12)
         self._cur_body_text += text
         self._cur_body.setText(_esc(self._cur_body_text).replace("\n", "<br>"))
 
     def finalize_markdown(self, html):
         """流式结束:把当前正文替换成渲染好的 markdown 富文本。"""
+        self._close_think()
         if self._cur_body is None:
-            self._cur_body = self._add(BodyText(""), top_gap=16)
+            self._cur_body = self._add(BodyText(""), top_gap=12)
         self._cur_body.setText(html)
         self.end_body()
 
     def think_start(self):
         self.clear_waiting()
         self.end_body()
+        self._close_think()
         self._cur_think_text = ""
-        self._cur_think = self._add(ThinkingChip(0, ""), top_gap=14)
+        self._cur_think = self._add(ThinkingChip(0, ""), top_gap=12, node="dot", process=True, dy=13)
         self._cur_think.set_live(True)
 
     def think_append(self, text):
@@ -430,6 +843,9 @@ class AssistantTurn(QWidget):
         self._cur_think.update_content(self._cur_think_text)
 
     def think_collapse(self):
+        self._close_think()
+
+    def _close_think(self):
         if self._cur_think is not None:
             self._cur_think.set_live(False)
             self._cur_think.update_content(self._cur_think_text)
@@ -438,58 +854,118 @@ class AssistantTurn(QWidget):
     def tool_call(self, name, code_text="", icon_svg=None, icon_color=None):
         self.clear_waiting()
         self.end_body()
-        # 步骤类工具用橙星,其余用蓝剪贴板（对齐设计：更新步骤=star,更新计划=clipboard）
-        if icon_svg is None:
-            if any(k in name for k in ("步骤", "step")):
-                icon_svg, icon_color = SVG_STAR, _P["orange"]
-            else:
-                icon_svg, icon_color = SVG_CLIPBOARD, _P["indigo"]
-        self._cur_tool = self._add(
-            ToolCallCard(name, code_text, icon_svg, icon_color or _P["indigo"]), top_gap=16)
+        self._close_think()
+        # 步骤类工具用橙星，其余按工具种类取图标
+        if icon_svg is None and any(k in name for k in ("步骤", "step")):
+            icon_svg, icon_color = SVG_STAR, _P["orange"]
+        card = ToolCallCard(name, code_text, icon_svg, icon_color)
+        self._cur_tool = self._add(card, top_gap=10, node="tool", process=True, dy=card.header_center)
         return self._cur_tool
 
     def tool_detail(self, text):
-        """工具参数到位：填进当前工具卡 body；没有当前卡则退化成普通块。"""
+        """工具参数到位：填进当前工具卡；没有当前卡则退化成一条提示。"""
         if self._cur_tool is not None:
             self._cur_tool.set_body(text)
         else:
-            self.result_block(text)
+            self.notice(text)
 
-    def result_block(self, text):
+    def tool_output(self, text):
+        """工具输出：进当前工具卡；工具已结束（或根本没有）时是程序提示。"""
+        if self._cur_tool is not None:
+            self._cur_tool.append_output(text)
+        elif (text or "").strip():
+            self.notice(text.strip())
+
+    def notice(self, text):
         self.clear_waiting()
         self.end_body()
-        lbl = QLabel(_esc(text).replace("\n", "<br>"))
-        lbl.setWordWrap(True)
-        lbl.setTextFormat(Qt.RichText)
-        lbl.setStyleSheet(
-            f"color:{_P['muted']}; font-family:{_MONO}; font-size:12px; background:{_P['result_bg']}; "
-            f"border:1px solid {_P['result_border']}; border-radius:10px; padding:10px 14px;"
-        )
-        lbl.setAttribute(Qt.WA_StyledBackground, True)
-        self._add(lbl, top_gap=12)
+        tone = _notice_tone(text)
+        self._add(Notice(strip_leading_emoji(text.strip())), top_gap=10, node="dot", color=tone, dy=15)
 
-    def checklist(self, caption_html, rows):
-        self.clear_waiting()
+    # 兼容旧名：一段独立的说明文字
+    result_block = notice
+
+    def step(self, n, title, status="in_progress"):
+        """插入（或更新）一个计划步骤分段。"""
         self.end_body()
-        self._add(ChecklistCard(caption_html, rows), top_gap=14)
+        self._close_think()
+        hdr = self._steps.get(n)
+        if hdr is not None and hdr.isVisibleTo(self):
+            hdr.set_status(status)
+            return hdr
+        hdr = self._add(StepHeader(n, title, status), top_gap=14, node="step", process=True, dy=13)
+        self._steps[n] = hdr
+        return hdr
 
+    # 兼容旧名
     def step_header(self, n, title):
-        self.end_body()
-        self._add(StepHeader(n, title), top_gap=22)
+        return self.step(n, title)
+
+    def update_steps(self, statuses: dict):
+        for n, hdr in self._steps.items():
+            st = statuses.get(n)
+            if st and st != hdr.status:
+                hdr.set_status(st)
 
     def show_waiting(self):
         self.clear_waiting()
-        self._waiting = self._add(WaitingIndicator(0), top_gap=18)
+        self._waiting = self._add(WaitingIndicator(0), top_gap=14)
 
     def clear_waiting(self):
         if self._waiting is not None:
-            self._waiting.setParent(None)
-            self._waiting.deleteLater()
+            blk = self._waiting.parentWidget()
+            target = blk if isinstance(blk, _Block) else self._waiting
+            target.setParent(None)
+            target.deleteLater()
             self._waiting = None
+
+    def finish(self):
+        """这一轮结束：用时定格，还开着的思考 / 工具 / 等待都收尾。"""
+        if self.meta is not None:
+            self.meta.finish()
+        self._close_think()
+        self.clear_waiting()
+        self.end_tool()
+
+    def collapse_process(self):
+        """把思考、工具和步骤分段收成一行摘要（正文、提示和结果卡照常显示）。"""
+        if self._summary is not None:
+            return
+        blocks = [b for b in self._process if not _deleted(b)]
+        tools = sum(isinstance(b.inner, ToolCallCard) for b in blocks)
+        thinks = sum(isinstance(b.inner, ThinkingChip) for b in blocks)
+        if not tools and not thinks:
+            return
+        parts = []
+        if tools:
+            parts.append(f"调用了 {tools} 次工具")
+        if thinks:
+            parts.append(f"思考 {thinks} 次")
+
+        def show(open_):
+            for b in blocks:
+                b.setVisible(open_)
+
+        summary = _ProcessSummary("，".join(parts), show)
+        idx = self._v.indexOf(blocks[0])
+        blk = _Block(summary, 0 if idx == 0 else 10)
+        self._v.insertWidget(idx, blk)
+        if self._round is not None:
+            self._round.add_node(summary, "dot", color="muted2", dy=12)
+        self._summary = summary
+        show(False)
+
+
+def _deleted(w) -> bool:
+    try:
+        w.objectName()
+        return False
+    except RuntimeError:
+        return True
 
 
 class MessageView(QScrollArea):
-    """消息流容器:QScrollArea + 纵向 turn 列表。对外 handle(text, tag) 镜像 show_message 协议,
+    """消息流容器:QScrollArea + 纵向的轮次列表。对外 handle(text, tag) 镜像 show_message 协议,
     finalize_markdown(html) 对应 render_final_markdown,clear()/redraw 复位。"""
 
     image_clicked = Signal(QPixmap)   # 点击聊天区图片 → 宿主弹放大遮罩(传全分辨率原图)
@@ -503,13 +979,17 @@ class MessageView(QScrollArea):
         self._content = QWidget()
         self.apply_theme()
         self._col = QVBoxLayout(self._content)
-        self._col.setContentsMargins(32, 32, 32, 28)
+        self._col.setContentsMargins(32, 28, 32, 28)
         self._col.setSpacing(0)
-        # 内容靠中间一栏(max 780)。简化:外层留白由 margins 给,后续可加居中 wrap。
         self._col.addStretch(1)
         self.setWidget(self._content)
         self._cur_user = None
         self._cur_assistant = None
+        self._cur_round = None
+        # 重绘历史时为 True：回复不是"正在进行"的，不起秒表、不标模式
+        self.replaying = False
+        # ChatUI 提供：当前会话的模式等（{"mode": "执行模式"}），新回复的那行小字用
+        self.meta_provider = None
 
     def apply_theme(self, extra_qss=""):
         """背景跟当前主题走。extra_qss 是宿主补充的滚动条等样式——setStyleSheet 会整体替换，
@@ -518,6 +998,12 @@ class MessageView(QScrollArea):
         bg = _P["view_bg"]
         self.setStyleSheet(f"#messageView {{ background:{bg}; border:none; }}" + extra_qss)
         self._content.setStyleSheet(f"background:{bg};")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 消息栏最多 COLUMN_MAX 宽，居中；窄窗口时两侧至少留 24px
+        side = max(24, (self.viewport().width() - COLUMN_MAX) // 2)
+        self._col.setContentsMargins(side, 28, side, 28)
 
     def clear(self):
         while self._col.count() > 1:   # 留最后的 stretch
@@ -528,24 +1014,39 @@ class MessageView(QScrollArea):
                 w.deleteLater()
         self._cur_user = None
         self._cur_assistant = None
+        self._cur_round = None
 
     def _add_turn(self, w, top_gap=28):
         if self._col.count() > 1 and top_gap:
-            # 在 stretch 前插入,turn 之间留间距
+            # 在 stretch 前插入,轮次之间留间距
             self._col.insertSpacing(self._col.count() - 1, top_gap)
         self._col.insertWidget(self._col.count() - 1, w)
 
+    def _round(self):
+        if self._cur_round is None:
+            self._cur_round = _Round()
+            self._add_turn(self._cur_round)
+        return self._cur_round
+
     def _assistant(self):
+        """当前这段回复；还没有（比如程序提示先到）就起一段不带模型名的。"""
         if self._cur_assistant is None:
-            self._cur_assistant = AssistantTurn()
-            self._add_turn(self._cur_assistant)
+            r = self._round()
+            self._cur_assistant = AssistantTurn(round_=r)
+            r.add(self._cur_assistant, top_gap=12)
+            r.assistant_turns.append(self._cur_assistant)
         return self._cur_assistant
 
     def add_user_turn(self, text=""):
+        if self._cur_round is not None:
+            self._cur_round.collapse_process()   # 新的一轮开始：上一轮的过程收起来
+        self._cur_round = _Round()
+        self._add_turn(self._cur_round)
         self._cur_user = UserTurn()
+        self._cur_round.add(self._cur_user)
+        self._cur_round.add_node(self._cur_user.body, "user", dy=11)
         if text:
             self._cur_user.append(text)
-        self._add_turn(self._cur_user)
         self._cur_assistant = None
         return self._cur_user
 
@@ -555,15 +1056,48 @@ class MessageView(QScrollArea):
         self._cur_user.set_html(html)
 
     def start_assistant(self, model_name=""):
-        self._cur_assistant = AssistantTurn(model_name)
-        self._add_turn(self._cur_assistant)
+        r = self._round()
+        live = not self.replaying
+        mode = ""
+        if live and self.meta_provider is not None:
+            try:
+                mode = (self.meta_provider() or {}).get("mode", "")
+            except Exception:
+                mode = ""
+        self._cur_assistant = AssistantTurn(model_name, mode=mode, live=live, round_=r)
+        r.add(self._cur_assistant, top_gap=12)
+        r.assistant_turns.append(self._cur_assistant)
         return self._cur_assistant
+
+    def end_run(self):
+        """这一轮运行结束（停止、失败也算）：回复的用时定格，开着的块收尾。"""
+        if self._cur_round is not None:
+            for turn in self._cur_round.assistant_turns:
+                turn.finish()
+
+    def on_plan(self, items):
+        """任务计划变了：当前步骤换了就在这一轮里插一个步骤分段，已有分段更新状态。"""
+        r = self._cur_round
+        if r is None or not items:
+            return
+        stick = self._at_bottom()
+        statuses = {i + 1: it.get("status") for i, it in enumerate(items)}
+        for turn in r.assistant_turns:
+            turn.update_steps(statuses)
+        cur = next((i + 1 for i, it in enumerate(items) if it.get("status") == "in_progress"), None)
+        if cur is not None:
+            key = (cur, items[cur - 1].get("text") or "")
+            if key != r.current_step:
+                r.current_step = key
+                self._assistant().step(cur, key[1], "in_progress")
+        if stick:
+            QTimer.singleShot(0, self, self._scroll_to_bottom)
 
     def finalize_markdown(self, html):
         stick = self._at_bottom()
         self._assistant().finalize_markdown(html)
         if stick:
-            QTimer.singleShot(0, self._scroll_to_bottom)
+            QTimer.singleShot(0, self, self._scroll_to_bottom)
 
     def add_message_actions(self, on_copy=None, on_regen=None):
         """回复末尾的操作按钮:复制 / 重新生成(幽灵图标按钮)。"""
@@ -573,28 +1107,29 @@ class MessageView(QScrollArea):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(6)
+        h.setSpacing(4)
         specs = [(SVG_COPY, on_copy, "复制")]
         if on_regen is not None:
             specs.append((SVG_REFRESH, on_regen, "重新生成"))
         for svg, cb, tip in specs:
             b = QPushButton()
             b.setObjectName("msgAction")
-            b.setFixedSize(32, 32)
+            b.setFixedSize(28, 28)
             b.setCursor(Qt.PointingHandCursor)
             b.setToolTip(tip)
-            b.setIcon(QIcon(_icon(svg, _P["muted3"], 15)))
-            b.setIconSize(QSize(15, 15))
+            b.setAccessibleName(tip)
+            b.setIcon(QIcon(_icon(svg, _P["muted"], 14)))
+            b.setIconSize(QSize(14, 14))
             b.setStyleSheet(
-                "#msgAction { border:none; background:transparent; border-radius:8px; } "
+                "#msgAction { border:none; background:transparent; border-radius:6px; } "
                 f"#msgAction:hover {{ background:{_P['header_bg']}; }}")
             if cb is not None:
                 b.clicked.connect(lambda _checked=False, c=cb: c())
             h.addWidget(b, 0, Qt.AlignVCenter)
         h.addStretch(1)
-        a._add(row, top_gap=14)
+        a._add(row, top_gap=6)
         if stick:
-            QTimer.singleShot(0, self._scroll_to_bottom)
+            QTimer.singleShot(0, self, self._scroll_to_bottom)
 
     def handle(self, text, tag):
         """tag→控件分发。镜像 chat_window._append_html 的 tag 协议。"""
@@ -622,22 +1157,24 @@ class MessageView(QScrollArea):
         elif tag == "tool_tag":
             # 拒绝/错误类(⚠️/⛔/🔒)是独立提示,不建工具卡;其余是真工具调用 → 建卡
             if any(w in text for w in ("⚠️", "⛔", "🔒", "未知工具")):
-                self._assistant().result_block(strip_leading_emoji(text.strip()))
+                self._assistant().notice(text.strip())
             else:
-                self._assistant().tool_call(_parse_tool_tag(text))
+                name, detail = _parse_tool_tag(text)
+                self._assistant().tool_call(name, detail)
         elif tag == "tool_detail":
-            self._assistant().tool_detail(text.strip())   # 工具参数 → 填进当前工具卡 body
+            self._assistant().tool_detail(text.strip())   # 工具参数 → 当前工具卡的摘要 / 展开内容
         elif tag == "tool_result":
-            self._assistant().result_block(strip_leading_emoji(text.strip()))
+            self._assistant().tool_output(text)
         elif tag == "ai_image":
             self.add_image(QPixmap(text.strip()))   # text = 图片本地路径
         elif tag == "reset_ai_reply":
             if self._cur_assistant is not None:
                 self._cur_assistant.end_body()   # 工具调用结束,下一轮 ai_msg 另起正文块
+                self._cur_assistant.end_tool()   # 之后到的输出不再算进这张卡
         elif tag == "spacer":
             pass   # 间距由布局给
         if stick:
-            QTimer.singleShot(0, self._scroll_to_bottom)
+            QTimer.singleShot(0, self, self._scroll_to_bottom)
 
     def remove_waiting(self):
         if self._cur_assistant is not None:
@@ -661,11 +1198,13 @@ class MessageView(QScrollArea):
         msg.setWordWrap(True)
         msg.setStyleSheet(f"color:{_P['err_text']}; font-size:13px; background:transparent;")
         cv.addWidget(msg)
-        btn = QPushButton("↻ 重试")
+        btn = QPushButton("重试")
         btn.setCursor(Qt.PointingHandCursor)
+        btn.setIcon(QIcon(_icon(SVG_REFRESH, _P["err_text"], 14)))
+        btn.setIconSize(QSize(14, 14))
         btn.setStyleSheet(
             f"QPushButton {{ background:{_P['card_bg']}; border:1px solid {_P['err_border']}; "
-            f"border-radius:8px; padding:5px 16px; color:{_P['err_text']}; font-size:13px; }} "
+            f"border-radius:8px; padding:5px 14px; color:{_P['err_text']}; font-size:13px; }} "
             f"QPushButton:hover {{ background:{_P['err_bg']}; }}")
         if on_retry is not None:
             btn.clicked.connect(lambda: on_retry())
@@ -674,7 +1213,7 @@ class MessageView(QScrollArea):
         row.addWidget(btn, 0, Qt.AlignLeft)
         row.addStretch(1)
         cv.addLayout(row)
-        a._add(card, top_gap=12)
+        a._add(card, top_gap=12, node="dot", color="bad", dy=20)
 
     def add_image(self, pixmap, max_w=320):
         """插入一张图片块（用户多模态消息 / 生成图）。接受 QPixmap 或 QImage。
@@ -702,10 +1241,13 @@ class MessageView(QScrollArea):
         holder.setLayout(wrap)
         wrap.addWidget(lbl, 0, Qt.AlignLeft)
         wrap.addStretch(1)
-        self._add_turn(holder, top_gap=8)
+        if self._cur_round is not None:
+            self._cur_round.add(holder, top_gap=8)
+        else:
+            self._add_turn(holder, top_gap=8)
 
     def add_result_card(self, card):
-        """把一张运行结果卡插到消息流末尾，并返回它。
+        """把一张运行结果卡插到这一轮末尾（线上画结果节点），并返回它。
 
         结果卡是**应用状态**，不是模型说的话——所以它走独立控件插入，
         绝不为了显示它往 chat_history 里塞一条伪造的 AIMessage。
@@ -713,14 +1255,19 @@ class MessageView(QScrollArea):
         if card is None:
             return None
         stick = self._at_bottom()
-        # **直接加卡，不套一层 QWidget**：包一层的话那个壳不向上传递 heightForWidth，
-        # 卡片被算矮、底部按钮被整条切掉（实测差 300px 以上）。
-        self._add_turn(card, top_gap=16)
-        # 结果卡后面必然要开新一轮，清掉当前 assistant turn 指针，
-        # 免得下一轮的内容被追加到卡片**之前**的那个 turn 里。
+        # **直接加卡，不再套一层只为留白的 QWidget**：那种壳不向上传递 heightForWidth，
+        # 卡片被算矮、底部按钮被整条切掉（实测差 300px 以上）。轮次 _Round 本身是带
+        # 纵向布局的容器，和 AssistantTurn 装正文一样，高度能正确传上去。
+        if self._cur_round is not None:
+            self._cur_round.add(card, top_gap=14)
+            tone = (getattr(card, "view", None) or {}).get("tone")
+            self._cur_round.add_node(card, "result", tone=tone, dy=23)
+        else:
+            self._add_turn(card, top_gap=16)
+        # 结果卡后面的内容（继续任务的说明等）另起一段，不追加到卡片**之前**的那段回复里。
         self._cur_assistant = None
         if stick:
-            QTimer.singleShot(0, self._scroll_to_bottom)
+            QTimer.singleShot(0, self, self._scroll_to_bottom)
         return card
 
     def _at_bottom(self, slack=40):
@@ -735,9 +1282,40 @@ class MessageView(QScrollArea):
         sb.setValue(sb.maximum())
 
 
+def replay_plan_change(plan, name, args, result):
+    """重绘历史时推演计划：只认被工具接受了的变化（结果里写着已更新）。
+
+    推演出的计划只用来画消息流里的步骤分段；任务面板仍以会话保存的计划为准。
+    返回新计划，这次调用没改计划时返回 None。"""
+    if name not in ("update_plan", "set_step_status") or not result:
+        return None
+    if not any(k in result for k in ("计划已更新", "已开启新任务", "已把第", "计划已清空")):
+        return None
+    if name == "update_plan":
+        from .. import state
+        text = re.split(r"\s*\[(?:历史摘要|之前已有摘要|新增对话)\]\s*:?",
+                        str(args.get("plan") or ""), maxsplit=1)[0]
+        return state.parse_plan(text)
+    from ..tools import _auto_advance_plan, _normalize_step_status
+    try:
+        idx = int(args.get("step"))
+    except (TypeError, ValueError):
+        return None
+    status = _normalize_step_status(args.get("status", ""))
+    if status is None or not 1 <= idx <= len(plan):
+        return None
+    new_plan = [dict(it) for it in plan]
+    new_plan[idx - 1]["status"] = status
+    _auto_advance_plan(new_plan)
+    return new_plan
+
+
 def _parse_tool_tag(text):
-    """从 tool_tag 文本里抽工具名——去掉开头的 emoji 图标(🔧/📋/✏️ 等)和空白。"""
-    import re
+    """从 tool_tag 文本里拆出工具名和（同一行带来的）参数摘要：去掉开头的 emoji 图标。
+
+    普通工具的参数随后由 tool_detail 送来；Claude Code 模式把参数和名字放在同一行，
+    中间隔两个空格。"""
     s = (text or "").strip()
     s = re.sub(r'^[\U0001F000-\U0001FAFF☀-➿️←-⇿\s]+', '', s)
-    return s.strip()
+    name, _, detail = s.partition("  ")
+    return name.strip(), detail.strip()

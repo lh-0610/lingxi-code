@@ -51,7 +51,7 @@
 - 取代不等于免疫：最新那次之后又改了文件，照样过期
 - **证据在工具边界就进 `last_run`**，不是只在 finalize 拷一次：进程死在"工具结果已提交"与收尾之间时，磁盘上工具输出和完成回执都在、检查记录却一条不剩，而那正是最需要它的中断场景。恢复出来的只作**历史展示**，不回填 `verification`，所以不会变成当前一轮的通行凭证
 - **`last_result` 缓存要跟着失效**：`reset_history` 和 `load_session` 都清它（Session 对象会被复用来装别的会话），重绘前还要用 `_result_belongs_here` 核对 run_id + session_id。不清的话"新建对话"之后旧那轮的结果卡会重新画出来，而 `last_run` 明明已经空了
-- **布局上的两个坑（都只有真渲染才暴露）**：① 把卡片包进一层 `QWidget` 再进布局，那层壳不向上传递 heightForWidth，整张卡被算矮、底部按钮被边框整条切掉——检查行和按钮行一律 `addLayout` 直接加，`MessageView.add_result_card` 也直接加卡；② 等宽字体的长行是撑宽卡片的元凶（消息流关掉了横向滚动条，撑宽就是被裁掉），路径中间省略、摘要压成一行省略、无断点长串按字符数强插换行
+- **布局上的两个坑（都只有真渲染才暴露）**：① 把卡片包进一层 `QWidget` 再进布局，那层壳不向上传递 heightForWidth，整张卡被算矮、底部按钮被边框整条切掉——检查行和按钮行一律 `addLayout` 直接加，`MessageView.add_result_card` 也直接把卡加进这一轮的 `_Round`（它自带纵向布局，和回复装正文一样能把高度传上去；`scripts/test_message_view.py` 钉住按钮不被切）；② 等宽字体的长行是撑宽卡片的元凶（消息流关掉了横向滚动条，撑宽就是被裁掉），路径中间省略、摘要压成一行省略、无断点长串按字符数强插换行
 
 ## 恢复检查与继续任务（src/recovery.py + workspace_anchor.py，B04）
 - **两条入口、一套处置**，都排在 `begin_run` **之前**（`agent_loop` 里的 `recovery.before_run`）：

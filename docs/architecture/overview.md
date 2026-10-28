@@ -67,9 +67,10 @@ src/                     # 主代码
     run_admission.py     # RunAdmissionMixin + _PendingRunRequest：待启动请求的准入（B09a 统一退出屏障）
     queue_dispatch.py    # QueueDispatchMixin：运行中输入队列的入队、派发与收尾（B09b）
     run_results.py       # RunResultMixin：运行结果卡（B06）与「继续任务」（B04）的 UI 侧
-    message_view.py      # 消息流的块级真控件渲染（圆角卡/阴影/可展开思考块）—— 逐步替代 QTextBrowser
+    message_view.py      # 消息流时间线：每轮一条线串起用户消息、思考、工具卡、计划步骤分段和结果卡；新一轮开始时上一轮的过程收成一行
+    fonts.py             # 字体族与字号（界面 / 等宽），全界面唯一来源
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
-    task_panel.py        # 任务面板浮层与限制编辑对话框（B05）：三段式要求/计划/执行状态，可撤销横幅，硬预算校验
+    task_panel.py        # 停靠在窗口右侧的任务面板与限制编辑对话框（B05）：要求/计划/执行状态/验证证据，可撤销横幅，硬预算校验
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 浮窗搜索

@@ -601,6 +601,9 @@ def _msg_to_dict(msg):
         ak = getattr(msg, 'additional_kwargs', None) or {}
         if ak.get('reasoning_content'):
             d["reasoning_content"] = ak['reasoning_content']
+        model = ak.get("lingxi_model")
+        if isinstance(model, str) and model:
+            d["lingxi_model"] = model[:80]
     if isinstance(msg, ToolMessage):
         d["tool_call_id"] = msg.tool_call_id
 
@@ -653,6 +656,8 @@ def _dict_to_msg(d):
         ak = dict(internal)
         if "reasoning_content" in d:
             ak["reasoning_content"] = d["reasoning_content"]
+        if isinstance(d.get("lingxi_model"), str) and d["lingxi_model"]:
+            ak["lingxi_model"] = d["lingxi_model"][:80]
         msg = AIMessage(
             content=d["content"],
             tool_calls=d.get("tool_calls", []),
@@ -675,6 +680,12 @@ def _build_ai_message(gathered, clean_text, tool_calls):
     能把它们回传给服务端（MiMo / DeepSeek 等要求回传 thinking 上下文）。
     """
     ak = dict(getattr(gathered, 'additional_kwargs', {}) or {}) if gathered else {}
+    # 记下是哪个模型写的：重绘历史时回复上方能标出模型名。只做展示，不参与任何判断。
+    try:
+        from .models import MODEL_LIST
+        ak["lingxi_model"] = str(MODEL_LIST[state.current_model_index][0])[:80]
+    except Exception:
+        pass
 
     # content blocks：保留 thinking 块 + 去掉空块
     content_blocks = []

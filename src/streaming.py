@@ -39,6 +39,22 @@ from .images import (
 )
 
 
+def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
+    """工具调用在界面上的（显示名, 参数摘要）。实时执行和重绘历史共用，两边画出来一致。"""
+    display_name = TOOL_DISPLAY_NAMES.get(name, f"🔧 {name}")
+    if name in ("read_file", "write_file", "append_file", "edit_file"):
+        detail = args.get("path", "")
+    elif name == "list_directory":
+        detail = args.get("path", ".")
+    elif name == "run_command":
+        detail = args.get("command", "")
+    elif name == "search_in_file":
+        detail = f"{args.get('path', '')} → '{args.get('keyword', '')}'"
+    else:
+        detail = _pretty_args(args)
+    return display_name, detail
+
+
 def _pretty_args(args) -> str:
     """把工具参数 dict 美化成多行 JSON（给 UI 展示用，非合法 JSON）。
 
@@ -1385,18 +1401,7 @@ def _execute_tool(tc, ui, _preinvoked=None):
         logger.warning(f"工具 {name} 参数为空，跳过执行并请模型重试")
         return
 
-    display_name = TOOL_DISPLAY_NAMES.get(name, f"🔧 {name}")
-
-    if name in ("read_file", "write_file", "append_file", "edit_file"):
-        detail = args.get("path", "")
-    elif name == "list_directory":
-        detail = args.get("path", ".")
-    elif name == "run_command":
-        detail = args.get("command", "")
-    elif name == "search_in_file":
-        detail = f"{args.get('path', '')} → '{args.get('keyword', '')}'"
-    else:
-        detail = _pretty_args(args)
+    display_name, detail = describe_tool_call(name, args)
 
     ui.show_message(f"\n{display_name}", "tool_tag")
     ui.show_message(f"  {detail}\n", "tool_detail")
