@@ -198,6 +198,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 | `[MCP] xxx: 启动失败` | 先**手动**在终端跑那条 `npx ...` 命令看真实报错（路径不存在 / 缺 token / 没装 Node） |
 | stdio server 路径无效 | filesystem 的目录参数必须是**真实存在**的路径 |
 | 想临时关掉 MCP | 设置里取消勾选「启用 MCP」（或 config.json 设 `"mcp_enabled": false`），重启 |
+| 只关某一个 server | config.json 里该 server 设 `"enabled": false`（或 `"disabled": true`），重启；日志会写「已在配置里关掉，不启动」 |
 
 > stdio server 第一次 `npx -y` 会联网下载包，慢一点正常；之后走缓存就快了。
 

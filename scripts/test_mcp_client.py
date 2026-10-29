@@ -191,3 +191,17 @@ def test_missing_start_command_is_caught_before_spawning(tmp_path):
     assert not mcp_client._command_exists(str(tmp_path / ".venv" / "Scripts" / "uvx.exe"), env)
     assert mcp_client._command_exists(sys.executable, env)
     assert not mcp_client._command_exists("surely-not-a-real-command-xyz", env)
+
+
+def test_servers_switched_off_in_config_are_not_started(tmp_path, monkeypatch):
+    """每个 server 的 "enabled": false（或 "disabled": true）要生效：原来只看总开关，单个关不掉。"""
+    import json
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"mcp_servers": {
+        "memory": {"enabled": True, "command": "npx"},
+        "fetch": {"enabled": False, "command": "uvx"},
+        "other": {"disabled": True, "command": "uvx"},
+        "plain": {"command": "npx"},
+    }}), encoding="utf-8")
+    monkeypatch.setattr(mcp_client, "CONFIG_PATH", str(cfg))
+    assert set(mcp_client._load_mcp_config()) == {"memory", "plain"}

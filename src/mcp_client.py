@@ -105,7 +105,13 @@ def _load_mcp_config() -> dict:
         if not cfg.get("mcp_enabled", True):
             logger.info("[MCP] mcp_enabled=false，已禁用 MCP")
             return {}
-        return cfg.get("mcp_servers") or cfg.get("mcp") or {}
+        servers = cfg.get("mcp_servers") or cfg.get("mcp") or {}
+        # 单个 server 的开关："enabled": false（或其它客户端常用的 "disabled": true）就不连它
+        off = [n for n, s in servers.items()
+               if isinstance(s, dict) and (s.get("enabled") is False or s.get("disabled") is True)]
+        if off:
+            logger.info(f"[MCP] 已在配置里关掉，不启动: {off}")
+        return {n: s for n, s in servers.items() if n not in off}
     except Exception as e:
         logger.error(f"[MCP] 读取配置失败: {e}")
         return {}
