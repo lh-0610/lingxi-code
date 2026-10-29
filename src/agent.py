@@ -150,14 +150,15 @@ _activate_llm()
 def _init_mcp_bg():
     try:
         from .mcp_client import init_mcp
-        init_mcp()
+        mcp_tools = init_mcp()
         # 清掉旧的（启动时绑的、不含 MCP 的）bound 缓存，并**立即重新绑定**当前模型。
         # 注意：agent_loop 直接用 state.llm_with_tools、不会自己调 _activate_llm，
         # 所以光 clear 缓存不够——必须主动 _activate_llm() 把 state.llm_with_tools
         # 换成带 MCP 工具的版本，否则模型一直看不到 MCP 工具（除非用户手动切一次模型）。
         _BOUND_LLM_CACHE.clear()
         _activate_llm()
-        logger.info("MCP 工具已就绪")
+        # 写实际数：原来不管注册成没成功都写"已就绪"，工具全没加载上也看不出来
+        logger.info(f"MCP 初始化结束：可用 {len(mcp_tools)} 个工具")
     except Exception as e:
         logger.warning(f"MCP 初始化失败: {e}", exc_info=True)
 

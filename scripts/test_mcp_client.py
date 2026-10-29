@@ -9,6 +9,7 @@
 注：mcp_client 顶层不 import mcp（懒导入在各函数内），所以无需装 mcp 包即可测这个函数。
 """
 import os
+import sys
 
 import pytest
 
@@ -94,3 +95,99 @@ class TestExpansion:
         result = mcp_client._resolve_stdio_command(rel)
         # ~ 展开后通常是绝对路径 → 原样返回（不再相对 config 解析）
         assert result == os.path.expandvars(expanded)
+
+
+# ── 远程工具包装（mcp 1.x 驼峰 / 2.x 下划线字段都要认）──
+
+class _OldStyleTool:
+    """mcp 1.x 的 Tool：字段是 inputSchema。"""
+
+    def __init__(self, name, schema):
+        self.name, self.description, self.inputSchema = name, f"old {name}", schema
+
+
+@pytest.fixture()
+def server_tools(monkeypatch):
+    registry = {}
+    monkeypatch.setattr(mcp_client, "_server_tools", registry)
+    monkeypatch.setattr(mcp_client, "MCP_DISPLAY_NAMES", {})
+    return registry
+
+
+def _args(tool):
+    return set(tool.args_schema.model_fields)
+
+
+def test_wraps_tools_from_the_installed_mcp_and_the_old_field_name(server_tools):
+    """mcp 2.x 把 inputSchema 改成了 input_schema：只认旧名字时整个 MCP 守护线程会崩，一个工具都注册不上。"""
+    from mcp.types import Tool
+    schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+    server_tools["docs"] = [Tool(name="search-docs", description="搜文档", inputSchema=schema)]
+    server_tools["legacy"] = [_OldStyleTool("read", schema)]
+    tools = {t.name: t for t in mcp_client._build_mcp_tools()}
+    assert set(tools) == {"mcp_docs_search_docs", "mcp_legacy_read"}
+    assert _args(tools["mcp_docs_search_docs"]) == {"query"} == _args(tools["mcp_legacy_read"])
+
+
+def test_list_typed_parameters(server_tools):
+    """sequential-thinking 的参数类型写成 ["integer", "null"]：拿列表查表会抛 unhashable。"""
+    schema = {"type": "object", "properties": {"revisesThought": {"type": ["integer", "null"]},
+                                               "thought": {"type": "string"}},
+              "required": ["thought"]}
+    server_tools["seq"] = [_OldStyleTool("think", schema)]
+    (tool,) = mcp_client._build_mcp_tools()
+    model = tool.args_schema
+    assert model(thought="x", revisesThought=None).revisesThought is None
+    assert model(thought="x", revisesThought=2).revisesThought == 2
+
+
+def test_one_broken_tool_does_not_take_the_others_down(server_tools):
+    class Broken:
+        name = "broken"
+        description = ""
+
+        @property
+        def input_schema(self):
+            raise RuntimeError("schema 读不出来")
+
+    schema = {"type": "object", "properties": {}}
+    server_tools["srv"] = [Broken(), _OldStyleTool("fine", schema)]
+    assert [t.name for t in mcp_client._build_mcp_tools()] == ["mcp_srv_fine"]
+
+
+def test_tool_errors_are_reported_as_errors(server_tools, monkeypatch):
+    """工具自己报错（is_error）时要标明是错：不标的话模型会把报错文字当成正常结果。"""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    class FakeSession:
+        def __init__(self, failing):
+            self.failing = failing
+
+        async def call_tool(self, name, arguments=None):
+            return SimpleNamespace(content=[SimpleNamespace(text="找不到这个文档")], is_error=self.failing)
+
+    try:
+        monkeypatch.setattr(mcp_client, "_mcp_loop", loop)
+        server_tools["docs"] = [_OldStyleTool("get", {"type": "object", "properties": {}})]
+        (tool,) = mcp_client._build_mcp_tools()
+        monkeypatch.setattr(mcp_client, "_sessions", {"docs": FakeSession(True)})
+        assert tool.invoke({}) == "MCP 工具报错：找不到这个文档"
+        monkeypatch.setattr(mcp_client, "_sessions", {"docs": FakeSession(False)})
+        assert tool.invoke({}) == "找不到这个文档"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+
+def test_missing_start_command_is_caught_before_spawning(tmp_path):
+    env = dict(os.environ)
+    assert not mcp_client._command_exists(str(tmp_path / ".venv" / "Scripts" / "uvx.exe"), env)
+    assert mcp_client._command_exists(sys.executable, env)
+    assert not mcp_client._command_exists("surely-not-a-real-command-xyz", env)

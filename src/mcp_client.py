@@ -79,6 +79,14 @@ def _resolve_stdio_command(command: str) -> str:
     return raw
 
 
+def _command_exists(command: str, env: dict) -> bool:
+    """解析后的启动命令能不能找到：路径就看文件在不在，裸命令名按（合并后的）PATH 找。"""
+    if os.path.isabs(command):
+        return os.path.isfile(command)
+    import shutil
+    return shutil.which(command, path=env.get("PATH")) is not None
+
+
 # ═══════════════════════════════════════════════════════
 # 配置读取
 # ═══════════════════════════════════════════════════════
@@ -218,6 +226,12 @@ async def _server_loop(name: str, cfg: dict):
     command = _resolve_stdio_command(command)
     args = cfg.get("args", [])
     env = cfg.get("env", {})
+    if not _command_exists(command, _merge_env(env)):
+        # 先查一遍：不然要等起子进程时才报"[WinError 2] 系统找不到指定的文件"，看不出缺的是什么
+        logger.error(f"[MCP] ❌ {name}: 找不到启动命令 {command}。请先安装它，"
+                     f"或在 config.json 的 mcp_servers 里改成正确的命令 / 把这个 Server 关掉")
+        _server_ready_events.get(name) and _server_ready_events[name].set()
+        return
 
     from mcp import StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -298,7 +312,16 @@ def _schema_to_model(name: str, schema: dict):
     }
     field_defs = {}
     for pname, pschema in props.items():
-        py_type = type_map.get(pschema.get("type", "string"), str)
+        declared = pschema.get("type", "string")
+        nullable = False
+        if isinstance(declared, list):
+            # JSON Schema 允许类型写成列表（如 sequential-thinking 的 ["integer", "null"]）：
+            # 取第一个非 null 的；直接拿列表去查表会抛 unhashable，整个工具就注册不上
+            nullable = "null" in declared
+            declared = next((t for t in declared if t != "null"), "string")
+        py_type = type_map.get(declared, str)
+        if nullable:
+            py_type = py_type | None
         if pname not in required:
             py_type = (py_type | None)  # Optional
             field_defs[pname] = (py_type, Field(default=None, description=pschema.get("description", "")))
@@ -324,80 +347,103 @@ def _build_mcp_tools() -> list:
 
     for server_name, tools_list in _server_tools.items():
         for mcp_tool in tools_list:
-            original_name = mcp_tool.name
-            description = mcp_tool.description or f"MCP tool: {original_name}"
-            input_schema = mcp_tool.inputSchema or {"type": "object", "properties": {}}
-
-            # 命名规则：mcp_{server}_{tool}（非法字符 → _，防撞内置工具）
-            safe_name = re.sub(r"[^a-zA-Z0-9]", "_", original_name).strip("_")
-            wrapped_name = f"mcp_{server_name}_{safe_name}"
-            if wrapped_name in _seen_names:   # 撞名 → 加数字后缀，别让后者悄悄覆盖前者
-                _suffix = 2
-                while f"{wrapped_name}_{_suffix}" in _seen_names:
-                    _suffix += 1
-                wrapped_name = f"{wrapped_name}_{_suffix}"
-            _seen_names.add(wrapped_name)
-
-            # display name 加 🔌 前缀
-            MCP_DISPLAY_NAMES[wrapped_name] = f"🔌 {original_name}（{server_name}）"
-
-            # 转成 pydantic model（StructuredTool 需要 pydantic model 作为 args_schema）
-            args_model = _schema_to_model(f"{wrapped_name}Args", input_schema)
-
-            # 用闭包正确捕获 server_name 和 original_name
-            def _make_invoker(srv=server_name, tn=original_name):
-                def _invoke(**kwargs) -> str:
-                    sess = _sessions.get(srv)
-                    if sess is None:
-                        return f"错误：MCP Server '{srv}' 未连接"
-                    # 剔除 None：pydantic 给可选字段填的默认 None 不该发给 server，
-                    # 否则像 fetch 的 max_length 会被当 integer 校验、收到 None 直接报错。
-                    # 可选字段没传就省略，让 server 用它自己的默认值。
-                    call_args = {k: v for k, v in kwargs.items() if v is not None}
-                    try:
-                        future = asyncio.run_coroutine_threadsafe(
-                            sess.call_tool(tn, arguments=call_args), _mcp_loop
-                        )
-                        # 分片等待：每 0.3s 检查一次 stop_flag，让用户点暂停能立刻生效，
-                        # 而不是傻等整个工具调用（最长 120s）返回。
-                        import concurrent.futures as _cf
-                        deadline = time.time() + 120
-                        result = None
-                        while True:
-                            if state.stop_flag:
-                                future.cancel()
-                                return "已取消：用户停止了生成。"
-                            try:
-                                result = future.result(timeout=0.3)
-                                break
-                            except _cf.TimeoutError:
-                                if time.time() > deadline:
-                                    future.cancel()
-                                    return "MCP 工具调用超时（120s）。"
-                        # result.content: list[TextContent | ImageContent | ...]
-                        parts = []
-                        for item in result.content:
-                            if hasattr(item, "text"):
-                                parts.append(item.text)
-                            else:
-                                parts.append(str(item))
-                        return "\n".join(parts) or "(工具未返回内容)"
-                    except Exception as e:
-                        logger.error(f"[MCP] 工具 {tn} 调用失败: {e}")
-                        return f"MCP 工具执行失败: {e}"
-                return _invoke
-
-            invoker = _make_invoker()
-
-            tool = StructuredTool(
-                name=wrapped_name,
-                description=f"[MCP:{server_name}] {description}",
-                args_schema=args_model,
-                func=invoker,
-            )
-            all_tools.append(tool)
+            # 包一个出错就跳过它：异常冒到守护线程会让整个事件循环退出，连已连上的 server 一起断
+            try:
+                all_tools.append(_wrap_mcp_tool(server_name, mcp_tool, _seen_names, StructuredTool))
+            except Exception as e:
+                logger.error(f"[MCP] {server_name} 的工具 {getattr(mcp_tool, 'name', '?')} "
+                             f"包装失败，已跳过: {e}", exc_info=True)
 
     return all_tools
+
+
+def _field(obj, snake, camel, default=None):
+    """mcp 2.x 的字段是下划线写法（input_schema / is_error），1.x 是驼峰（inputSchema / isError）；
+    requirements 写的是 mcp>=1.9，两种都要认。"""
+    value = getattr(obj, snake, None)
+    if value is None:
+        value = getattr(obj, camel, None)
+    return default if value is None else value
+
+
+def _wrap_mcp_tool(server_name, mcp_tool, _seen_names, StructuredTool):
+    """把一个远程 Tool 包装成 LangChain StructuredTool。"""
+    original_name = mcp_tool.name
+    description = mcp_tool.description or f"MCP tool: {original_name}"
+    input_schema = _field(mcp_tool, "input_schema", "inputSchema") or {"type": "object", "properties": {}}
+
+    # 命名规则：mcp_{server}_{tool}（非法字符 → _，防撞内置工具）
+    safe_name = re.sub(r"[^a-zA-Z0-9]", "_", original_name).strip("_")
+    wrapped_name = f"mcp_{server_name}_{safe_name}"
+    if wrapped_name in _seen_names:   # 撞名 → 加数字后缀，别让后者悄悄覆盖前者
+        _suffix = 2
+        while f"{wrapped_name}_{_suffix}" in _seen_names:
+            _suffix += 1
+        wrapped_name = f"{wrapped_name}_{_suffix}"
+    _seen_names.add(wrapped_name)
+
+    # display name 加 🔌 前缀
+    MCP_DISPLAY_NAMES[wrapped_name] = f"🔌 {original_name}（{server_name}）"
+
+    # 转成 pydantic model（StructuredTool 需要 pydantic model 作为 args_schema）
+    args_model = _schema_to_model(f"{wrapped_name}Args", input_schema)
+
+    # 用闭包正确捕获 server_name 和 original_name
+    def _make_invoker(srv=server_name, tn=original_name):
+        def _invoke(**kwargs) -> str:
+            sess = _sessions.get(srv)
+            if sess is None:
+                return f"错误：MCP Server '{srv}' 未连接"
+            # 剔除 None：pydantic 给可选字段填的默认 None 不该发给 server，
+            # 否则像 fetch 的 max_length 会被当 integer 校验、收到 None 直接报错。
+            # 可选字段没传就省略，让 server 用它自己的默认值。
+            call_args = {k: v for k, v in kwargs.items() if v is not None}
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    sess.call_tool(tn, arguments=call_args), _mcp_loop
+                )
+                # 分片等待：每 0.3s 检查一次 stop_flag，让用户点暂停能立刻生效，
+                # 而不是傻等整个工具调用（最长 120s）返回。
+                import concurrent.futures as _cf
+                deadline = time.time() + 120
+                result = None
+                while True:
+                    if state.stop_flag:
+                        future.cancel()
+                        return "已取消：用户停止了生成。"
+                    try:
+                        result = future.result(timeout=0.3)
+                        break
+                    except _cf.TimeoutError:
+                        if time.time() > deadline:
+                            future.cancel()
+                            return "MCP 工具调用超时（120s）。"
+                # result.content: list[TextContent | ImageContent | ...]
+                parts = []
+                for item in result.content:
+                    if hasattr(item, "text"):
+                        parts.append(item.text)
+                    else:
+                        parts.append(str(item))
+                text = "\n".join(parts) or "(工具未返回内容)"
+                # 工具自己报的错（is_error）要说明是错：不标的话，模型会把报错文字当成正常结果
+                if _field(result, "is_error", "isError", False):
+                    return f"MCP 工具报错：{text}"
+                return text
+            except Exception as e:
+                logger.error(f"[MCP] 工具 {tn} 调用失败: {e}")
+                return f"MCP 工具执行失败: {e}"
+        return _invoke
+
+    invoker = _make_invoker()
+
+    tool = StructuredTool(
+        name=wrapped_name,
+        description=f"[MCP:{server_name}] {description}",
+        args_schema=args_model,
+        func=invoker,
+    )
+    return tool
 
 
 # ═══════════════════════════════════════════════════════

@@ -41,6 +41,7 @@
 - 配置在 `config.json` 的 `mcp_servers`（dict，key=server 名）：`transport` 支持 `stdio`（command+args）/ `sse`（url）/ `streamable_http`
 - **同步/异步桥接**：mcp SDK 是 asyncio 异步、灵犀 agent 是同步。`mcp_client.py` 起**一个常驻后台线程跑 asyncio loop**；每个 server 一个常驻协程，`async with stdio_client/sse_client ... await _shutdown_event.wait()` 挂住保持连接（**绝不能 return session 出去，上下文一退连接就断**）。工具调用走 `run_coroutine_threadsafe(session.call_tool(...), loop).result()` 从 agent 线程投进 loop
 - **致命坑（已避开）**：不要在 loop 自己的线程上对同一 loop 用 `run_coroutine_threadsafe().result()` —— 自死锁。`_build_mcp_tools` 是纯同步、读 `_server_loop` 提前缓存好的 `_server_tools`
+- **包装工具**：`_wrap_mcp_tool` 逐个包装，一个工具出错只跳过它并记日志（异常冒到守护线程会让整个 loop 退出、已连上的 server 一起断）。`requirements` 是 `mcp>=1.9`：1.x 的字段是驼峰（`inputSchema` / `isError`），2.x 改成下划线（`input_schema` / `is_error`），统一走 `_field` 两种都认；参数 `type` 可能是列表（如 `["integer", "null"]`）。工具结果 `is_error` 时返回「MCP 工具报错：…」。stdio 启动前先查命令存不存在，找不到直接说缺哪个命令
 - 工具名加 `mcp_{server}_{tool}` 前缀（防撞内置工具）；`_execute_tool` 里 `name.startswith("mcp_")` 的工具走**执行前确认**（MCP 工具能干任意事）；Plan 模式当写工具拦截
 - 启动时 `agent.py` 后台线程调 `init_mcp()`，工具就绪后清 `_BOUND_LLM_CACHE` 让下次 stream 重新 `bind_tools`；关窗 `main.py` 调 `shutdown()`
 - 打包：`lingxi.spec` 用 `collect_submodules('mcp')` + `collect_data_files('jsonschema_specifications')`（懒导入 + 数据文件，静态分析抓不到）
