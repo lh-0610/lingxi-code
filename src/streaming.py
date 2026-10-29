@@ -1225,15 +1225,28 @@ PARALLEL_SAFE_TOOLS = {
 }
 
 
-# 这些只读工具所有参数都有默认值，空参（{}）调用合法（用默认值）。必须和 _execute_tool 的
-# 空参保护协同：模型空参调它们是对的，别误判成"生成中断"拦掉——尤其它们被并行预取成功后，
-# 回放阶段若被拦，预取结果会被丢弃（Codex review 4 的 P2）。read_file/search_files 等有必填
-# 参数的工具不在此列：它们空参确实是错误调用，该拦下并请模型重新完整调用。
-NO_ARG_OK_TOOLS = {
-    "list_directory", "code_map", "git_diff", "git_log", "git_status", "list_background_commands",
-    "get_project_instructions",  # 所有参数均可选，空参合法（默认读当前项目）
-    "find_tests",  # 所有参数均可选，空参合法（默认项目根）
-}
+def _tools_without_required_args():
+    """内置工具里没有必填参数的那些：空参（{}）调用合法（全用默认值）。
+
+    必须和 _execute_tool 的空参保护协同：模型空参调它们是对的，别误判成"生成中断"拦掉——
+    尤其它们被并行预取成功后，回放阶段若被拦，预取结果会被丢弃（Codex review 4 的 P2）。
+    read_file / search_files 等有必填参数的工具不在此列：空参确实是错误调用，该拦下并请模型
+    重新完整调用。按工具自己的参数定义算，不手写名单——手写的漏过 run_tests：它的参数全可选，
+    空参调用被当成"生成中断"拦下，模型每次都要再调一遍，评测里编码用例几乎每次白多一轮。"""
+    from .tools import ALL_TOOLS
+    out = set()
+    for tool in ALL_TOOLS:
+        schema = getattr(tool, "args_schema", None)
+        try:
+            required = schema.model_json_schema().get("required") if schema is not None else None
+        except Exception:
+            continue
+        if not required:
+            out.add(tool.name)
+    return out
+
+
+NO_ARG_OK_TOOLS = _tools_without_required_args()
 
 
 def _can_parallel(tool_calls):
@@ -1387,8 +1400,8 @@ def _execute_tool(tc, ui, _preinvoked=None):
     # 空参数保护：模型流式生成 tool_call 时 arguments 没传全 / JSON 解析失败
     # （常见于 new_string 很长、或服务端流式不稳），会 fallback 成 {}。直接 invoke
     # 只会撞一坨 pydantic 校验错、对模型没指引。这里给清晰中文让它重新完整调用。
-    # NO_ARG_OK_TOOLS（list_directory/code_map/git_diff/git_log/list_background_commands）
-    # 所有参数都有默认值、空参合法，放行；MCP 工具的空参数由远程 server 自己校验，也放行。
+    # NO_ARG_OK_TOOLS（没有必填参数的内置工具，如 list_directory / run_tests / git_diff）
+    # 空参合法，放行；MCP 工具的空参数由远程 server 自己校验，也放行。
     if not args and name not in NO_ARG_OK_TOOLS and not name.startswith("mcp_"):
         ui.show_message(f"\n⚠️ {name} 的参数为空（生成中断），已请模型重试\n", "tool_result")
         state.chat_history.append(ToolMessage(

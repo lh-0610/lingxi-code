@@ -119,3 +119,15 @@ class TestPreinvokedReplay:
         last = state.chat_history[-1]
         assert isinstance(last, ToolMessage)
         assert "参数为空" in last.content or "重新调用" in last.content
+
+
+def test_tools_whose_args_are_all_optional_accept_empty_calls():
+    """按工具自己的参数定义算：手写名单漏过 run_tests（参数全可选），空参调用被当成"生成中断"
+    拦下，模型每次都得再调一遍。"""
+    from src.tools import ALL_TOOLS
+    assert "run_tests" in NO_ARG_OK_TOOLS
+    by_name = {t.name: t for t in ALL_TOOLS}
+    for name in NO_ARG_OK_TOOLS:
+        assert not by_name[name].args_schema.model_json_schema().get("required"), name
+    for name in ("read_file", "search_files", "edit_file", "web_search"):
+        assert name not in NO_ARG_OK_TOOLS, name
