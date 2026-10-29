@@ -633,7 +633,9 @@ def web_search(query: str, max_results: int = 5, topic: str = "general", time_ra
     except (TypeError, ValueError):
         count = 5
 
+    import time as _time
     failures = []
+    started = _time.monotonic()
     for name in order:
         try:
             answer, results = _SEARCHERS[name](query, count, topic, time_range, depth,
@@ -641,16 +643,23 @@ def web_search(query: str, max_results: int = 5, topic: str = "general", time_ra
             break
         except _SearchFailed as e:
             failures.append(f"{_SEARCHER_NAMES[name]}：{e}" if len(order) > 1 else str(e))
+            logger.warning(f"web_search：{_SEARCHER_NAMES[name]} 失败（{e}），查询 {query[:60]!r}")
     else:
         return "；".join(failures)
 
+    used = _SEARCHER_NAMES[name]
     if not results and not answer:
-        return "没搜到"
+        logger.info(f"web_search：{used} 没搜到，查询 {query[:60]!r}")
+        return f"（用 {used} 搜索）没搜到"
     deep_read = _deep_read(query, results) if config.WEB_SEARCH_DEEP else 0
+    logger.info(f"web_search：用 {used}，{len(results)} 条，{_time.monotonic() - started:.1f}s"
+                + (f"，深读 {deep_read} 篇" if deep_read else "") + f"，查询 {query[:60]!r}")
 
-    lines = []
+    # 第一行写明用的是哪家：AI 只管调"网络搜索"，走哪家由设置决定，不写出来用户看不出来
     if failures:
-        lines.append(f"（{'；'.join(failures)}，这次改用 {_SEARCHER_NAMES[name]}）")
+        lines = [f"（{'；'.join(failures)}；这次改用 {used} 搜索）"]
+    else:
+        lines = [f"（用 {used} 搜索）"]
     if deep_read:
         lines.append(f"（深度搜索：前 {deep_read} 个结果读了原文，下面标「原文」的是按问题挑出的段落）")
     if answer:

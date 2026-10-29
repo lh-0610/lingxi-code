@@ -298,7 +298,9 @@ class TestBetterSearch:
             "results": [{"title": "S16 瑞士轮抽签", "url": "http://news/1",
                          "published_date": "Wed, 28 Oct 2026 10:00:00 GMT", "content": noisy}],
         })
-        assert out.startswith("直接答案") and "10 月 29 日" in out.split("\n")[0]
+        blocks = out.split("\n\n")
+        assert blocks[0] == "（用 Tavily 搜索）"
+        assert blocks[1].startswith("直接答案") and "10 月 29 日" in blocks[1]
         assert "发布：Wed, 28 Oct 2026" in out
         snippet = out.split("\n")[-1].strip()
         chunks = snippet.split(" … ")
@@ -618,3 +620,21 @@ class TestPageEncoding:
     def test_cut_in_the_middle_of_a_character_is_still_utf8(self):
         raw = "晋级八强".encode("utf-8")[:-1]
         assert self._decode(raw).startswith("晋级八")
+
+
+def test_first_line_and_log_say_which_service_was_used(monkeypatch, caplog):
+    """AI 只管调"网络搜索"，走哪家由设置决定：结果第一行和日志都要写明，用户才看得出来。"""
+    import logging
+    router = _Router(
+        tavily=FakeResp(200, {}, "", {"results": [{"title": "T", "url": "http://t/1", "content": "tavily 内容"}]}),
+        deepseek=FakeResp(402, {}, "", {"error": {"message": "Insufficient Balance"}}))
+    monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "sk-real-ds")
+    monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", "tvly-x")
+    monkeypatch.setattr(requests, "post", router.post)
+    with caplog.at_level(logging.INFO, logger="agent"):
+        out = web_search.func("S16 赛程")
+    assert out.splitlines()[0] == "（DeepSeek：DeepSeek 搜索返回 HTTP 402（账户余额不足）；这次改用 Tavily 搜索）"
+    logs = caplog.text
+    assert "web_search：DeepSeek 失败" in logs and "web_search：用 Tavily，1 条" in logs
+    monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "")
+    assert web_search.func("S16 赛程").splitlines()[0] == "（用 Tavily 搜索）"
