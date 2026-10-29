@@ -86,9 +86,11 @@ src/                     # 主代码
     _base.py             # 共享 BASE_DIR / CONFIG_PATH / THEME_CONFIG_PATH 常量
 
 scripts/                 # pytest 测试套件 + conftest fixtures
+  conftest.py            #   **测试隔离在这里、且在任何 src 导入之前**：LINGXI_LOG_DIR 指向临时目录（paths.py 一导入就接日志、
+                         #   清理旧日志），init_mcp 换成空函数（agent.py 一导入就开线程按真实 config 拉起 MCP 服务）
   measure_save_cost.py   #   非 pytest：量典型/长会话的保存耗时与字节数（要不要上增量日志得先有数)
   evals/                 # **agent 行为评测集**（真调 API、不进 pytest；详见 evals/README.md）
-    runner.py            #   fixture 全新副本 + HeadlessUI 驱动 + 7 类判定 + 多次取通过率
+    runner.py            #   fixture 全新副本 + HeadlessUI 驱动 + 8 类判定（含 tool_called）+ 多次取通过率
     cases/*.json         #   任务 + 判定 + 预算；含防作弊（file_unchanged）与负面用例
     fixtures/            #   给 agent 修的素材（broken-calc 必须是坏的；已从 pytest 收集排除）
 

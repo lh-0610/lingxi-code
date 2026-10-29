@@ -6,10 +6,33 @@
 """
 import os
 import sys
+import tempfile
+
 import pytest
+
+# ── 测试隔离：必须在任何 src 模块被导入之前做（pytest 先加载本文件，再收集测试模块）──
+# 1. 日志写进临时目录：src/paths.py 一导入就把日志接到程序目录下的 logs/当天.log（还会清理
+#    30 天前的旧日志），不拦的话每跑一遍测试，用户真实的日志里就混进一大串测试记录。
+_TEST_LOG_DIR = tempfile.mkdtemp(prefix="lingxi-test-logs-")
+os.environ["LINGXI_LOG_DIR"] = _TEST_LOG_DIR
 
 # 确保能 import src
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# 2. 不启动用户配置的 MCP 服务：src/agent.py 一导入就开后台线程，按真实 config.json 用 npx
+#    把它们拉起来；各测试自己的 monkeypatch 晚于这个线程，两边抢先后。线程里是运行时才取
+#    mcp_client.init_mcp，所以在这里先换掉就一定拿到空的。
+import src.mcp_client as _mcp_client  # noqa: E402
+
+_mcp_client.init_mcp = lambda: []
+
+
+def pytest_unconfigure(config):
+    """跑完关掉日志文件再删临时目录（Windows 上开着的文件删不掉）。"""
+    import logging
+    import shutil
+    logging.shutdown()
+    shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

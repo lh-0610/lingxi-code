@@ -38,7 +38,9 @@ def _resource_dir():
 
 APP_DIR = _app_data_dir()
 RESOURCE_DIR = _resource_dir()
-LOG_DIR = os.path.join(APP_DIR, "logs")
+# LINGXI_LOG_DIR：测试把日志指到临时目录（scripts/conftest.py），免得测试记录混进用户真实日志、
+# 顺手还清理掉用户 30 天前的旧日志。正常启动不设，仍是程序目录下的 logs。
+LOG_DIR = os.environ.get("LINGXI_LOG_DIR") or os.path.join(APP_DIR, "logs")
 MEMORY_DIR = os.path.join(APP_DIR, "chat_memory")
 MEMORY_INDEX = os.path.join(MEMORY_DIR, "index.json")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
