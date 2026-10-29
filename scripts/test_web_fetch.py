@@ -279,7 +279,10 @@ class TestBetterSearch:
         assert sent["max_results"] == 10
 
     def test_answer_first_and_snippets_cleaned_and_bounded(self, monkeypatch):
-        noisy = ("瑞士轮第四轮抽签结果[编辑] [...] BLG 对 TES[12]，^ 12.0 G2 对 HLE。 " + "赛况" * 600)
+        """Tavily 的 content 是用 [...] 隔开的几段相关原文：按段收，每段有上限，段间用 … 隔开。
+        整条硬截会把后面几段相关内容一起砍掉。"""
+        noisy = ("### 瑞士轮第四轮抽签结果[编辑] [...] BLG 对 TES[12]，^ 12.0 G2 对 HLE。" + "赛况" * 600 +
+                 " [...] 10 月 29 日 MKOI 对 T1")
         out, _ = self._search(monkeypatch, {
             "answer": "瑞士轮第四轮 10 月 29 日开赛。",
             "results": [{"title": "S16 瑞士轮抽签", "url": "http://news/1",
@@ -288,10 +291,19 @@ class TestBetterSearch:
         assert out.startswith("直接答案") and "10 月 29 日" in out.split("\n")[0]
         assert "发布：Wed, 28 Oct 2026" in out
         snippet = out.split("\n")[-1].strip()
-        assert "BLG 对 TES" in snippet and "G2 对 HLE" in snippet
-        for junk in ("[编辑]", "[...]", "[12]", "^ 12.0"):
+        chunks = snippet.split(" … ")
+        assert chunks[0] == "瑞士轮第四轮抽签结果"
+        assert chunks[1].startswith("BLG 对 TES，") and "G2 对 HLE" in chunks[1]
+        assert len(chunks[1]) <= 351 and chunks[1].endswith("…"), "长的那段有上限"
+        assert chunks[2] == "10 月 29 日 MKOI 对 T1", "最后一段相关内容没被砍掉"
+        for junk in ("[编辑]", "[...]", "[12]", "^ 12.0", "###"):
             assert junk not in snippet, junk
-        assert len(snippet) <= 601 and snippet.endswith("…")
+
+    def test_depth(self, monkeypatch):
+        _, sent = self._search(monkeypatch, {"results": []}, depth="advanced")
+        assert sent["search_depth"] == "advanced" and sent["chunks_per_source"] == 3
+        _, sent = self._search(monkeypatch, {"results": []}, depth="deepest")
+        assert "search_depth" not in sent, "不认识的值按默认 basic，不传"
 
     def test_answer_alone_is_still_returned(self, monkeypatch):
         out, _ = self._search(monkeypatch, {"answer": "在洛杉矶。", "results": []})

@@ -267,31 +267,46 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
 # Tavily 的可选参数，值不在这里面就不传（传错值 Tavily 会整个请求报 400）
 _SEARCH_TOPICS = ("general", "news")
 _SEARCH_TIME_RANGES = ("day", "week", "month", "year")
+_SEARCH_DEPTHS = ("basic", "advanced")
 _SEARCH_MAX_RESULTS = 10
-# 每条摘要的上限：原来整段照搬，一次搜索往对话里塞八千到一万多字，还夹着维基的引用标记
-_SNIPPET_MAX = 600
+# Tavily 每条结果的 content 是它按问题挑出的 2~3 段原文，用 "[...]" 隔开（basic、advanced 都是）。
+# 按段收：每段留开头一截，段间用 … 隔开——整条硬截会把后面几段相关内容一起砍掉。
+_CHUNK_SEPARATOR = re.compile(r"\s*\[(?:\.\.\.|…)\]\s*")
+_CHUNK_MAX = 350
 _SNIPPET_NOISE = (
-    re.compile(r"\[(?:编辑|編輯|edit|\.\.\.|…)\]", re.I),   # [编辑] / [...]
+    re.compile(r"\[(?:编辑|編輯|edit)\]", re.I),             # [编辑]
     re.compile(r"\[\d+\]"),                                 # [12] 引用角标
     re.compile(r"\^\s*\d+(?:\.\d+)*"),                      # ^ 12.0 引用回链
+    re.compile(r"(?m)^#{1,6}\s*"),                          # Markdown 标题的 ###
 )
 
 
 def _clean_snippet(text: str) -> str:
-    for pattern in _SNIPPET_NOISE:
-        text = pattern.sub("", text or "")
-    text = " ".join(text.split())
-    return text if len(text) <= _SNIPPET_MAX else text[:_SNIPPET_MAX].rstrip() + "…"
+    chunks = []
+    for chunk in _CHUNK_SEPARATOR.split(text or ""):
+        for pattern in _SNIPPET_NOISE:
+            chunk = pattern.sub("", chunk)
+        chunk = " ".join(chunk.split())
+        if chunk:
+            chunks.append(chunk if len(chunk) <= _CHUNK_MAX else chunk[:_CHUNK_MAX].rstrip() + "…")
+    return " … ".join(chunks)
 
 
 @tool
-def web_search(query: str, max_results: int = 5, topic: str = "general", time_range: str = "") -> str:
-    """用 Tavily 搜索网络，返回一句直接答案（有的话）和每条结果的标题、链接、发布时间、摘要。
+def web_search(query: str, max_results: int = 5, topic: str = "general", time_range: str = "",
+               depth: str = "basic") -> str:
+    """用 Tavily 搜索网络，返回一句直接答案（有的话）和每条结果的标题、链接、发布时间，
+    以及每个网页里和问题最相关的几段原文。
+
+    一次把问题问全（比如"S16 瑞士轮第四轮 对阵 比分"），先看直接答案和这次的结果够不够，
+    够了就答；通常 1~3 次就够，不要一场比赛、一个名字各搜一次。
 
     query: 搜索关键词
     max_results: 最大返回结果数，默认 5，最多 10
     topic: "general" 普通搜索（默认）；"news" 新闻——查赛事、时事、最新动态时用
     time_range: 只要最近一段时间的结果："day" / "week" / "month" / "year"；留空不限
+    depth: "basic"（默认，先用它）；"advanced" 段落挑得更准，但每次多花一份额度——
+           只在 basic 的结果里确实缺关键细节时再用，或改用 fetch_url 抓那篇原文
 
     需要在 config.json 配置 web_search_api_key（tavily.com 免费申请）。
     只读、不弹确认。"""
@@ -310,6 +325,9 @@ def web_search(query: str, max_results: int = 5, topic: str = "general", time_ra
                "include_answer": True}
     if time_range in _SEARCH_TIME_RANGES:
         payload["time_range"] = time_range
+    if depth in _SEARCH_DEPTHS and depth != "basic":
+        payload["search_depth"] = depth
+        payload["chunks_per_source"] = 3
     try:
         resp = _requests.post("https://api.tavily.com/search", json=payload, timeout=15)
     except _requests.Timeout:
