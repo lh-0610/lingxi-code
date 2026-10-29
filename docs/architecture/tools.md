@@ -31,7 +31,7 @@
 | `check_code` | 静态检查单文件（lint/语法）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`），其它语言用 config 的 `check_command`；不弹确认；**Plan 模式拦截**（见下） |
 | `apply_patch` | 多文件补丁（Codex 风格 `*** Begin Patch`）：统一校验、确认后，暂存新内容和原文件备份再写入。写入失败回滚，回滚受阻保留备份并报告；审批期间目标变化拒绝覆盖。不承诺崩溃时跨文件原子性。写工具、Plan/遥控自动拦 |
 | `search_knowledge` | 知识库语义检索（`query` + `scope` 分域，默认 all 各域按配额取；只读、Plan 放行、不弹确认；`kb_dir` 未配置/索引未建/索引锚不一致都返回明确提示而非空结果） |
-| `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、HTML 去标签转文本、二进制拒绝、无需 key）；`web_search` 用 Tavily（config `web_search_api_key`，没配优雅降级）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
+| `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、二进制拒绝、无需 key；HTML 只留正文——去掉导航 / 页眉页脚 / 侧栏 / 维基目录和引用角标，优先取 main / article，表格按行转成「列 | 列」；请求头中文优先，User-Agent 如实写灵犀，冒充 Chrome 实测无益反而被部分站拒）；`web_search` 用 Tavily（config `web_search_api_key`，没配优雅降级；可选 topic=news、time_range=day/week/month/year，开 include_answer 把直接答案放最前，每条摘要清掉引用标记并限 600 字）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
 
 > 写盘类工具（edit/write/append）共用 `tools.py:_confirm_file_write()`：算 unified diff → `ui.confirm_edit` 弹蓝色卡片 → worker 阻塞等审批。CLI/测试无 UI 时直接放行。
 

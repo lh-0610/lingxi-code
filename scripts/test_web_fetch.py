@@ -202,3 +202,97 @@ class TestWebSearch:
         monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", "fake-key")
         monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(401, {}, ""))
         assert "HTTP 401" in web_search.func("python")
+
+
+class TestReadablePages:
+    """抓网页只留正文、表格转行：原来维基页面前一千来字全是菜单，赛程表被拆成一格一行。"""
+
+    WIKI = ("<html><head><title>英雄联盟2026赛季全球总决赛 - 维基百科</title></head><body>"
+            "<a class='mw-jump-link' href='#content'>跳转到内容</a>"
+            "<header><nav>主菜单 首页 分类索引 特色内容</nav></header>"
+            "<div class='vector-toc'>目录 1 主办地遴选 2 比赛场馆</div>"
+            "<main id='content'><h1>英雄联盟2026赛季全球总决赛</h1>"
+            "<h2>主办地遴选<span class='mw-editsection'>[编辑]</span></h2>"
+            "<p>本届大赛将在美国举行，比赛时间为2026年10月15日至11月14日" + "。" * 200 +
+            "<sup class='reference'>[3]</sup></p>"
+            "<table><tr><th>阶段</th><th>日期</th><th>城市</th></tr>"
+            "<tr><td>瑞士轮</td><td>10月23日–11月1日</td><td>纽约</td></tr>"
+            "<tr><td>决赛</td><td>11月14日</td><td>洛杉矶</td></tr></table>"
+            "</main><footer>本页面最后修订于… 隐私政策</footer></body></html>")
+
+    def _fetch(self, monkeypatch, html):
+        seen = {}
+
+        def fake_get(*a, **k):
+            seen["headers"] = k.get("headers") or {}
+            return FakeResp(200, {"Content-Type": "text/html; charset=utf-8"}, html)
+        monkeypatch.setattr(requests, "get", fake_get)
+        return fetch_url.func("http://x"), seen
+
+    def test_keeps_the_article_and_drops_site_chrome(self, monkeypatch):
+        out, _ = self._fetch(monkeypatch, self.WIKI)
+        assert out.startswith("标题：英雄联盟2026赛季全球总决赛 - 维基百科")
+        assert "本届大赛将在美国举行" in out
+        for junk in ("跳转到内容", "主菜单", "目录 1", "[编辑]", "[3]", "隐私政策"):
+            assert junk not in out, junk
+
+    def test_tables_become_rows(self, monkeypatch):
+        out, _ = self._fetch(monkeypatch, self.WIKI)
+        assert "阶段 | 日期 | 城市" in out
+        assert "瑞士轮 | 10月23日–11月1日 | 纽约" in out
+        assert "决赛 | 11月14日 | 洛杉矶" in out
+
+    def test_small_article_card_is_not_mistaken_for_the_page(self, monkeypatch):
+        html = ("<body><article>推荐阅读</article><div id='content'>" + "正文内容。" * 80 +
+                "</div></body>")
+        out, _ = self._fetch(monkeypatch, html)
+        assert "正文内容" in out
+
+    def test_asks_for_chinese_pages_without_pretending_to_be_chrome(self, monkeypatch):
+        """冒充 Chrome 实测没让任何 403 站放行，反而被核对出来拒掉原本能访问的站：标识保持如实。"""
+        _, seen = self._fetch(monkeypatch, "<p>hi</p>")
+        assert seen["headers"]["User-Agent"] == "Mozilla/5.0 (LingXi)"
+        assert seen["headers"]["Accept-Language"].startswith("zh-CN")
+
+
+class TestBetterSearch:
+    def _search(self, monkeypatch, data, **kwargs):
+        sent = {}
+
+        def fake_post(url, json=None, **k):
+            sent.update(json or {})
+            return FakeResp(200, {}, "", data)
+        monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", "fake-key")
+        monkeypatch.setattr(requests, "post", fake_post)
+        return web_search.func("S16 赛程", **kwargs), sent
+
+    def test_news_and_time_range_are_passed_through(self, monkeypatch):
+        _, sent = self._search(monkeypatch, {"results": []}, topic="news", time_range="week")
+        assert sent["topic"] == "news" and sent["time_range"] == "week"
+        assert sent["include_answer"] is True
+
+    def test_unknown_values_are_not_sent(self, monkeypatch):
+        """乱填的值 Tavily 会整个请求报 400：不认识的就按默认。"""
+        _, sent = self._search(monkeypatch, {"results": []}, topic="sports", time_range="fortnight",
+                               max_results=99)
+        assert sent["topic"] == "general" and "time_range" not in sent
+        assert sent["max_results"] == 10
+
+    def test_answer_first_and_snippets_cleaned_and_bounded(self, monkeypatch):
+        noisy = ("瑞士轮第四轮抽签结果[编辑] [...] BLG 对 TES[12]，^ 12.0 G2 对 HLE。 " + "赛况" * 600)
+        out, _ = self._search(monkeypatch, {
+            "answer": "瑞士轮第四轮 10 月 29 日开赛。",
+            "results": [{"title": "S16 瑞士轮抽签", "url": "http://news/1",
+                         "published_date": "Wed, 28 Oct 2026 10:00:00 GMT", "content": noisy}],
+        })
+        assert out.startswith("直接答案") and "10 月 29 日" in out.split("\n")[0]
+        assert "发布：Wed, 28 Oct 2026" in out
+        snippet = out.split("\n")[-1].strip()
+        assert "BLG 对 TES" in snippet and "G2 对 HLE" in snippet
+        for junk in ("[编辑]", "[...]", "[12]", "^ 12.0"):
+            assert junk not in snippet, junk
+        assert len(snippet) <= 601 and snippet.endswith("…")
+
+    def test_answer_alone_is_still_returned(self, monkeypatch):
+        out, _ = self._search(monkeypatch, {"answer": "在洛杉矶。", "results": []})
+        assert "在洛杉矶" in out and "没搜到" not in out

@@ -15,6 +15,59 @@ _MAX_REDIRECTS = 5
 # 单次抓取最多下载字节数，防超大响应吃内存（正文随后再按 max_chars 截断）。
 _MAX_DOWNLOAD_BYTES = 5_000_000
 
+# 请求头：中文优先（多语言站点直接给中文页）。User-Agent 保持如实标明是灵犀——试过冒充
+# Chrome：原本 403 的站（百度百科、fandom、redbull…）一个没放行，反而有站核对出"自称 Chrome
+# 却不像 Chrome"把原来能访问的也拒了（hk.trip.com 200 → 432）。
+_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (LingXi)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+# 网页里不是正文的部分：导航、页眉页脚、侧栏、表单，以及维基的目录 / 编辑链接 / 引用角标。
+# 不去掉的话，维基页面前一千来字全是"跳转到内容 | 主菜单 | 导航…"，正文被挤到截断线后面。
+_NON_CONTENT_TAGS = ("script", "style", "head", "noscript", "template", "svg", "iframe",
+                     "nav", "header", "footer", "aside", "form", "button")
+_NON_CONTENT_SELECTORS = (
+    "[role=navigation]", "[role=banner]", "[role=contentinfo]", "[role=search]",
+    "[aria-hidden=true]", "[hidden]",
+    ".mw-jump-link", ".mw-editsection", ".vector-toc", "#toc", ".toc", ".navbox",
+    ".catlinks", ".printfooter", "sup.reference", ".reference", ".mw-references-wrap",
+)
+# 正文容器，按优先级找；文字太少（只是个卡片）就不算
+_MAIN_SELECTORS = ("main", "article", "[role=main]", "#mw-content-text", "#content", ".content")
+_MAIN_MIN_CHARS = 200
+
+
+def _html_to_text(html: str) -> str:
+    """HTML → 读得下去的纯文本：只留正文，表格按行转成「列 | 列 | 列」。
+
+    表格是重点：赛程、价格、参数这类信息几乎都在表格里，原来按格拆成一行一个，
+    模型对不上哪个日期配哪场比赛。"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    for tag in soup(list(_NON_CONTENT_TAGS)):
+        tag.decompose()
+    for selector in _NON_CONTENT_SELECTORS:
+        for el in soup.select(selector):
+            el.decompose()
+    root = soup.body or soup
+    for selector in _MAIN_SELECTORS:
+        el = soup.select_one(selector)
+        if el is not None and len(el.get_text(strip=True)) >= _MAIN_MIN_CHARS:
+            root = el
+            break
+    for table in root.find_all("table"):
+        rows = []
+        for tr in table.find_all("tr"):
+            cells = [" ".join(c.get_text(" ", strip=True).split()) for c in tr.find_all(["th", "td"])]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        table.replace_with("\n" + "\n".join(rows) + "\n")
+    text = root.get_text(separator="\n")
+    return f"标题：{title}\n\n{text}" if title else text
+
 
 def _ssrf_reject(url: str) -> str:
     """对单个 URL 做 SSRF 校验：协议白名单 + 把主机名解析成 IP 后拒绝
@@ -134,7 +187,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
         try:
             resp = _requests.get(
                 current, timeout=15,
-                headers={"User-Agent": "Mozilla/5.0 (LingXi)"},
+                headers=_BROWSER_HEADERS,
                 allow_redirects=False,
                 stream=True,   # 先拿到连接、校验实际 peer IP，再决定读不读 body
                 proxies=_req_proxies,
@@ -190,13 +243,9 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
             result += "... [已截断]"
         return result
 
-    # HTML → 纯文本
+    # HTML → 纯文本（只留正文、表格转行）
     try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(text, "html.parser")
-        for tag in soup(["script", "style", "head"]):
-            tag.decompose()
-        result = soup.get_text(separator="\n")
+        result = _html_to_text(text)
     except ImportError:
         # beautifulsoup4 未安装，用正则处理
         cleaned = re.sub(r"<(script|style|head)[^>]*>.*?</\1>", "", text, flags=re.S | re.I)
@@ -215,12 +264,34 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
     return result
 
 
+# Tavily 的可选参数，值不在这里面就不传（传错值 Tavily 会整个请求报 400）
+_SEARCH_TOPICS = ("general", "news")
+_SEARCH_TIME_RANGES = ("day", "week", "month", "year")
+_SEARCH_MAX_RESULTS = 10
+# 每条摘要的上限：原来整段照搬，一次搜索往对话里塞八千到一万多字，还夹着维基的引用标记
+_SNIPPET_MAX = 600
+_SNIPPET_NOISE = (
+    re.compile(r"\[(?:编辑|編輯|edit|\.\.\.|…)\]", re.I),   # [编辑] / [...]
+    re.compile(r"\[\d+\]"),                                 # [12] 引用角标
+    re.compile(r"\^\s*\d+(?:\.\d+)*"),                      # ^ 12.0 引用回链
+)
+
+
+def _clean_snippet(text: str) -> str:
+    for pattern in _SNIPPET_NOISE:
+        text = pattern.sub("", text or "")
+    text = " ".join(text.split())
+    return text if len(text) <= _SNIPPET_MAX else text[:_SNIPPET_MAX].rstrip() + "…"
+
+
 @tool
-def web_search(query: str, max_results: int = 5) -> str:
-    """用 Tavily 搜索引擎搜索网络内容，返回标题、链接和摘要。
+def web_search(query: str, max_results: int = 5, topic: str = "general", time_range: str = "") -> str:
+    """用 Tavily 搜索网络，返回一句直接答案（有的话）和每条结果的标题、链接、发布时间、摘要。
 
     query: 搜索关键词
-    max_results: 最大返回结果数，默认 5
+    max_results: 最大返回结果数，默认 5，最多 10
+    topic: "general" 普通搜索（默认）；"news" 新闻——查赛事、时事、最新动态时用
+    time_range: 只要最近一段时间的结果："day" / "week" / "month" / "year"；留空不限
 
     需要在 config.json 配置 web_search_api_key（tavily.com 免费申请）。
     只读、不弹确认。"""
@@ -231,11 +302,16 @@ def web_search(query: str, max_results: int = 5) -> str:
         return "未配置搜索服务，请在 config.json 填 web_search_api_key（tavily.com 免费申请）"
 
     try:
-        resp = _requests.post(
-            "https://api.tavily.com/search",
-            json={"api_key": WEB_SEARCH_API_KEY, "query": query, "max_results": max_results},
-            timeout=15,
-        )
+        count = max(1, min(int(max_results), _SEARCH_MAX_RESULTS))
+    except (TypeError, ValueError):
+        count = 5
+    payload = {"api_key": WEB_SEARCH_API_KEY, "query": query, "max_results": count,
+               "topic": topic if topic in _SEARCH_TOPICS else "general",
+               "include_answer": True}
+    if time_range in _SEARCH_TIME_RANGES:
+        payload["time_range"] = time_range
+    try:
+        resp = _requests.post("https://api.tavily.com/search", json=payload, timeout=15)
     except _requests.Timeout:
         return "搜索请求超时（15 秒），请稍后重试"
     except _requests.ConnectionError as e:
@@ -251,14 +327,18 @@ def web_search(query: str, max_results: int = 5) -> str:
     except Exception:
         return "搜索服务返回了无法解析的响应"
 
-    results = data.get("results", [])
-    if not results:
+    results = data.get("results") or []
+    answer = (data.get("answer") or "").strip()
+    if not results and not answer:
         return "没搜到"
 
     lines = []
+    if answer:
+        lines.append(f"直接答案（搜索服务根据下面的结果归纳，引用前对照来源核实）：{answer}")
     for item in results:
-        title = item.get("title", "(无标题)")
+        title = item.get("title") or "(无标题)"
         url = item.get("url", "")
-        content = item.get("content", "")
-        lines.append(f"{title}\n  {url}\n  {content}")
+        date = item.get("published_date")
+        head = f"{title}\n  {url}" + (f"\n  发布：{date}" if date else "")
+        lines.append(f"{head}\n  {_clean_snippet(item.get('content', ''))}")
     return "\n\n".join(lines)
