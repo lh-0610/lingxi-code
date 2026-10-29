@@ -1,0 +1,27 @@
+{
+  "name": "按现象找到跨文件的 bug",
+  "fixture": "shop",
+  "mode": "act",
+  "prompt": "下单时「满 100 减 10」没生效：买了 120 元的东西，订单金额还是 120。帮我找到原因并修好，不要改现有的测试。",
+  "assert": [
+    {
+      "type": "command",
+      "run": "python \"{checks}/shop_reduction.py\"",
+      "exit_code": 0
+    },
+    {
+      "type": "command",
+      "run": "python -m pytest -q",
+      "exit_code": 0
+    },
+    {
+      "type": "file_unchanged",
+      "path": "test_cart.py"
+    },
+    {
+      "type": "file_unchanged",
+      "path": "test_orders.py"
+    }
+  ],
+  "_why": "用户报的是现象，不是位置：现有测试覆盖不到（只测了不满 100 的单），bug 在 orders.py 调用的 pricing.full_reduction 里（算了没赋值）。考的是顺着调用链定位，而不是只看被点名的文件。"
+}

@@ -1,0 +1,34 @@
+{
+  "name": "查具体事实答准并给官方来源",
+  "fixture": "small-proj",
+  "mode": "act",
+  "prompt": "Python 3.13 正式从标准库里删掉了哪些模块？列出模块名，并给出官方来源链接。",
+  "assert": [
+    {
+      "type": "tool_called",
+      "name": [
+        "web_search",
+        "fetch_url"
+      ]
+    },
+    {
+      "type": "output_contains",
+      "contains": [
+        "telnetlib",
+        "cgi",
+        "crypt"
+      ]
+    },
+    {
+      "type": "output_contains_any",
+      "contains_any": [
+        "docs.python.org",
+        "peps.python.org"
+      ]
+    },
+    {
+      "type": "no_file_modified"
+    }
+  ],
+  "_why": "答案稳定、可客观判定（PEP 594 的模块在 3.13 移除，telnetlib / cgi / crypt 都在其中）。考的是搜到之后能不能把细节答准、引官方来源，而不是凭记忆或只看摘要的一句话就作答。 搜索或直接抓官方文档都算查证过：直接去 docs.python.org 读原文是更好的做法，不该判失败。"
+}

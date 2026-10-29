@@ -1,0 +1,27 @@
+{
+  "name": "跨文件改名并保持测试通过",
+  "fixture": "shop",
+  "mode": "act",
+  "prompt": "把 pricing.py 里的 apply_discount 改名为 discounted_price，所有用到它的地方一起改掉，改完测试要能过。",
+  "assert": [
+    {
+      "type": "command",
+      "run": "python -m pytest -q",
+      "exit_code": 0
+    },
+    {
+      "type": "command",
+      "run": "python \"{checks}/shop_renamed.py\"",
+      "exit_code": 0
+    },
+    {
+      "type": "file_unchanged",
+      "path": "test_cart.py"
+    },
+    {
+      "type": "file_unchanged",
+      "path": "test_orders.py"
+    }
+  ],
+  "_why": "日常最常见的跨文件改动：定义和调用分在两个文件里，漏改一处就是导入错误。隐藏检查确认旧名字一处不剩、新名字行为不变。"
+}

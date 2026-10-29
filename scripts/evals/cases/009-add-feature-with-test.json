@@ -1,0 +1,27 @@
+{
+  "name": "加功能并补测试",
+  "fixture": "shop",
+  "mode": "act",
+  "prompt": "给 Cart 加一个 remove(name) 方法：按商品名删除一件商品，删不存在的商品时抛 KeyError。顺手把对应的测试补上。",
+  "assert": [
+    {
+      "type": "command",
+      "run": "python -m pytest -q",
+      "exit_code": 0
+    },
+    {
+      "type": "command",
+      "run": "python \"{checks}/shop_remove.py\"",
+      "exit_code": 0
+    },
+    {
+      "type": "file_contains",
+      "path": "test_cart.py",
+      "contains": [
+        "remove",
+        "KeyError"
+      ]
+    }
+  ],
+  "_why": "照需求加功能 + 补测试。隐藏检查按需求独立验证行为（不靠模型自己写的测试），测试文件里要真有覆盖删除和异常的用例。"
+}

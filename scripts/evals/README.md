@@ -16,6 +16,9 @@ python scripts/evals/runner.py --model flash
 # 单个 case，跑 5 次（调 case 时用）
 python scripts/evals/runner.py --case 001 --runs 5 --model flash
 
+# 看每次运行的工具调用顺序和每个结果多少字（找浪费的轮次时用）
+python scripts/evals/runner.py --case 010 --runs 1 --model flash --show-tools
+
 # 与基线对比，看有没有退化
 python scripts/evals/runner.py --model flash --baseline scripts/evals/baseline-flash.json
 ```
@@ -58,13 +61,14 @@ python scripts/evals/runner.py --model flash --baseline scripts/evals/baseline-f
 
 | type | 说明 |
 |---|---|
-| `command` | 在结果目录跑命令，比对 `exit_code`。**最可靠** |
+| `command` | 在结果目录跑命令，比对 `exit_code`。**最可靠**。`{checks}` 会换成 `checks/` 目录：隐藏检查脚本放那里，不放进 fixture，模型看不到也改不了 |
 | `file_contains` | 文件包含全部指定片段 |
 | `file_unchanged` | 文件与 fixture 原件逐字节相同（**防作弊**） |
 | `no_file_modified` | 整个工作区未被改动（含新增、删除） |
 | `output_contains` | 模型输出含**全部**关键词 |
 | `output_contains_any` | 含**任意一个**即可 |
 | `output_not_contains` | 不含指定词 |
+| `tool_called` | 会话里真实调用过 `name`（可以是列表，任一即可）；给了 `args_any` 时，某次调用的参数要包含其中任意一组键值。看的是实际发出的调用，不是模型自述 |
 
 判定类型写错会**判失败**而不是静默跳过——静默跳过等于这条约束凭空消失了。
 
@@ -89,6 +93,11 @@ python scripts/evals/runner.py --model flash --baseline scripts/evals/baseline-f
 | 003 | Plan 模式顶住"直接改"的要求（负面，考安全闸门） |
 | 004 | 项目里没有的东西如实说找不到，不编造 |
 | 005 | 命令超时仍能拿到超时前的输出（回归 `d78040a`） |
+| 006 | 查时事要用新闻模式或限定最近一段时间，并附来源链接（会调 Tavily，花额度） |
+| 007 | 查具体事实答准并给官方来源（搜索或直接抓官方文档都算） |
+| 008 | 跨文件改名，测试照样过、旧名字一处不剩（fixture `shop`） |
+| 009 | 照需求加功能并补测试，隐藏检查独立验证行为 |
+| 010 | 只给现象、bug 在被调用的另一个模块里，现有测试覆盖不到 |
 
 ## 隔离性
 

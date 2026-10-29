@@ -44,6 +44,7 @@ for _s in (sys.stdout, sys.stderr):
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 CASES_DIR = os.path.join(EVAL_DIR, "cases")
 FIXTURES_DIR = os.path.join(EVAL_DIR, "fixtures")
+CHECKS_DIR = os.path.join(EVAL_DIR, "checks")
 
 
 # ══════════════════════════════════════
@@ -53,7 +54,9 @@ FIXTURES_DIR = os.path.join(EVAL_DIR, "fixtures")
 def _assert_command(spec, workdir, output):
     """在结果目录跑一条命令，比对退出码。最可靠的判定方式。"""
     expected = int(spec.get("exit_code", 0))
-    r = subprocess.run(spec["run"], shell=True, cwd=workdir, capture_output=True,
+    # {checks}：隐藏检查脚本的目录。放在 fixture 外面，模型看不到也改不了
+    run = spec["run"].replace("{checks}", CHECKS_DIR)
+    r = subprocess.run(run, shell=True, cwd=workdir, capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=spec.get("timeout", 120))
     ok = r.returncode == expected
     tail = (r.stdout or "")[-400:] + (r.stderr or "")[-400:]
@@ -125,6 +128,23 @@ def _assert_output_not_contains(spec, workdir, output):
     return not hit, ("未出现禁止词" if not hit else f"出现了不该有的: {hit}")
 
 
+def _assert_tool_called(spec, workdir, output):
+    """调过某个工具，且（给了 args_any 时）某次调用的参数包含其中任意一组键值。
+    看的是会话里真实发出的工具调用，不是模型说自己做了什么。"""
+    names = spec["name"] if isinstance(spec["name"], list) else [spec["name"]]
+    calls = [args for name, args in spec["_tool_calls"] if name in names]
+    if not calls:
+        return False, f"没有调用 {' / '.join(names)}"
+    wanted = spec.get("args_any")
+    if not wanted:
+        return True, f"调用了 {' / '.join(names)} {len(calls)} 次"
+    for args in calls:
+        for want in wanted:
+            if all(args.get(k) == v for k, v in want.items()):
+                return True, f"{' / '.join(names)} 用了 {want}"
+    return False, f"{' / '.join(names)} 的参数都不含 {wanted}（实际: {calls[:3]}）"
+
+
 ASSERTIONS = {
     "command": _assert_command,
     "file_contains": _assert_file_contains,
@@ -133,6 +153,7 @@ ASSERTIONS = {
     "output_contains": _assert_output_contains,
     "output_contains_any": _assert_output_contains_any,
     "output_not_contains": _assert_output_not_contains,
+    "tool_called": _assert_tool_called,
 }
 
 
@@ -201,22 +222,30 @@ def run_once(case, workdir, model_index):
 
     usage = getattr(sess, "session_token_usage", {}) or {}
     rounds = sum(1 for m in (sess.chat_history or []) if type(m).__name__ == "AIMessage")
-    tool_calls = sum(len(getattr(m, "tool_calls", []) or [])
-                     for m in (sess.chat_history or []))
+    tool_log = [(tc.get("name"), tc.get("args") or {})
+                for m in (sess.chat_history or []) for tc in (getattr(m, "tool_calls", []) or [])]
+    result_sizes = {getattr(m, "tool_call_id", None): len(str(m.content or ""))
+                    for m in (sess.chat_history or []) if type(m).__name__ == "ToolMessage"}
+    call_ids = [tc.get("id") for m in (sess.chat_history or [])
+                for tc in (getattr(m, "tool_calls", []) or [])]
+    tool_sizes = [result_sizes.get(cid, 0) for cid in call_ids]
     return ui.text(), {
         "rounds": rounds,
-        "tool_calls": tool_calls,
+        "tool_calls": len(tool_log),
         "tokens": usage.get("total", 0),
         "seconds": round(elapsed, 1),
+        "tool_log": tool_log,
+        "tool_sizes": tool_sizes,
     }, err
 
 
-def evaluate(case, workdir, fixture, output):
+def evaluate(case, workdir, fixture, output, tool_log=()):
     """跑完之后判定。全部 assert 都过才算通过。"""
     results = []
     for spec in case.get("assert", []):
         spec = dict(spec)
         spec["_fixture"] = fixture
+        spec["_tool_calls"] = list(tool_log)
         fn = ASSERTIONS.get(spec.get("type"))
         if fn is None:
             results.append((False, f"未知判定类型: {spec.get('type')}"))
@@ -228,7 +257,7 @@ def evaluate(case, workdir, fixture, output):
     return all(ok for ok, _ in results), results
 
 
-def run_case(case, runs: int, model_index: int):
+def run_case(case, runs: int, model_index: int, show_tools: bool = False):
     fixture = os.path.join(FIXTURES_DIR, case["fixture"])
     assert os.path.isdir(fixture), f"fixture 不存在: {fixture}"
     attempts = []
@@ -238,7 +267,9 @@ def run_case(case, runs: int, model_index: int):
         shutil.copytree(fixture, workdir)          # 每次跑全新副本
         try:
             output, metrics, err = run_once(case, workdir, model_index)
-            passed, details = evaluate(case, workdir, fixture, output)
+            tool_log = metrics.pop("tool_log", ())
+            tool_sizes = metrics.pop("tool_sizes", ())
+            passed, details = evaluate(case, workdir, fixture, output, tool_log)
             if err:
                 passed = False
                 details.append((False, f"agent 异常: {err}"))
@@ -246,6 +277,10 @@ def run_case(case, runs: int, model_index: int):
             mark = "✅" if passed else "❌"
             print(f"    {mark} 第 {i+1}/{runs} 次  轮数 {metrics['rounds']} "
                   f"工具 {metrics['tool_calls']} token {metrics['tokens']} {metrics['seconds']}s")
+            if show_tools:
+                for (name, args), size in zip(tool_log, tool_sizes):
+                    brief = ", ".join(f"{k}={str(v)[:40]!r}" for k, v in args.items())
+                    print(f"         · {name}({brief[:110]}) → {size} 字")
             if not passed:
                 for ok, msg in details:
                     if not ok:
@@ -286,6 +321,7 @@ def main():
     ap.add_argument("--out", default="", help="结果写到这个 JSON 文件")
     ap.add_argument("--baseline", default="", help="与该基线 JSON 对比")
     ap.add_argument("--model", default="", help="模型名片段（默认取第一个非 Claude Code 的）")
+    ap.add_argument("--show-tools", action="store_true", help="打印每次运行的工具调用顺序和结果字数（调优用）")
     args = ap.parse_args()
 
     cases = load_cases(args.case)
@@ -300,7 +336,7 @@ def main():
     results = []
     for case in cases:
         print(f"[{case['id']}] {case['name']}")
-        results.append(run_case(case, args.runs, model_index))
+        results.append(run_case(case, args.runs, model_index, args.show_tools))
         print()
 
     print("=" * 72)

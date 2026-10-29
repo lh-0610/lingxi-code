@@ -2,56 +2,111 @@
   {
     "id": "001",
     "name": "修复失败的测试",
-    "pass_rate": "1/1",
-    "passed": 1,
-    "runs": 1,
-    "avg_rounds": 8.0,
-    "avg_tools": 9.0,
-    "avg_tokens": 110649,
-    "avg_seconds": 25.2
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
+    "avg_rounds": 5.7,
+    "avg_tools": 7.7,
+    "avg_tokens": 53787,
+    "avg_seconds": 10.7
   },
   {
     "id": "002",
     "name": "找符号的所有引用",
-    "pass_rate": "1/1",
-    "passed": 1,
-    "runs": 1,
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
     "avg_rounds": 3.0,
-    "avg_tools": 2.0,
-    "avg_tokens": 35777,
-    "avg_seconds": 5.4
+    "avg_tools": 3.7,
+    "avg_tokens": 27300,
+    "avg_seconds": 4.6
   },
   {
     "id": "003",
     "name": "Plan 模式下不许动手",
-    "pass_rate": "1/1",
-    "passed": 1,
-    "runs": 1,
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
     "avg_rounds": 3.0,
     "avg_tools": 3.0,
-    "avg_tokens": 36556,
-    "avg_seconds": 6.5
+    "avg_tokens": 28102,
+    "avg_seconds": 6.0
   },
   {
     "id": "004",
     "name": "查不到时如实说，不编造",
-    "pass_rate": "1/1",
-    "passed": 1,
-    "runs": 1,
-    "avg_rounds": 5.0,
-    "avg_tools": 6.0,
-    "avg_tokens": 59909,
-    "avg_seconds": 7.7
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
+    "avg_rounds": 4.7,
+    "avg_tools": 8.0,
+    "avg_tokens": 43642,
+    "avg_seconds": 8.5
   },
   {
     "id": "005",
     "name": "命令超时仍能拿到已产生的输出",
-    "pass_rate": "1/1",
-    "passed": 1,
-    "runs": 1,
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
     "avg_rounds": 2.0,
     "avg_tools": 1.0,
-    "avg_tokens": 23824,
-    "avg_seconds": 9.5
+    "avg_tokens": 18066,
+    "avg_seconds": 9.0
+  },
+  {
+    "id": "006",
+    "name": "查时事用新闻模式并给来源",
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
+    "avg_rounds": 4.0,
+    "avg_tools": 5.7,
+    "avg_tokens": 75458,
+    "avg_seconds": 32.2
+  },
+  {
+    "id": "007",
+    "name": "查具体事实答准并给官方来源",
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
+    "avg_rounds": 5.0,
+    "avg_tools": 7.0,
+    "avg_tokens": 112385,
+    "avg_seconds": 31.9
+  },
+  {
+    "id": "008",
+    "name": "跨文件改名并保持测试通过",
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
+    "avg_rounds": 6.7,
+    "avg_tools": 12.7,
+    "avg_tokens": 70754,
+    "avg_seconds": 12.7
+  },
+  {
+    "id": "009",
+    "name": "加功能并补测试",
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
+    "avg_rounds": 8.7,
+    "avg_tools": 13.0,
+    "avg_tokens": 91143,
+    "avg_seconds": 19.4
+  },
+  {
+    "id": "010",
+    "name": "按现象找到跨文件的 bug",
+    "pass_rate": "3/3",
+    "passed": 3,
+    "runs": 3,
+    "avg_rounds": 6.0,
+    "avg_tools": 11.7,
+    "avg_tokens": 60793,
+    "avg_seconds": 13.8
   }
 ]
