@@ -151,11 +151,33 @@ def _read_bounded(resp) -> str:
         if total >= _MAX_DOWNLOAD_BYTES:
             break
     raw = b"".join(chunks)[:_MAX_DOWNLOAD_BYTES]
-    enc = resp.encoding or "utf-8"
+    return _decode_body(raw, resp)
+
+
+_META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_-]+)""", re.I)
+
+
+def _decode_body(raw: bytes, resp) -> str:
+    """按网页实际用的编码解码。响应头没写 charset 时，requests 按 HTTP 老规矩给 ISO-8859-1，
+    中文网页（多是 UTF-8 / GBK）就成了乱码（实测直播吧的标题变成 "T1å»è´¥MKOI…"）。
+    依次信：响应头写明的 → 页面里 <meta charset> 写明的 → 能完整按 UTF-8 解开就是 UTF-8 → GB18030。"""
+    import codecs
+    declared = ""
+    if "charset=" in (resp.headers.get("Content-Type") or "").lower():
+        declared = resp.encoding or ""
+    if not declared:
+        found = _META_CHARSET.search(raw[:4096])
+        declared = found.group(1).decode("ascii", "ignore") if found else ""
+    if declared:
+        try:
+            return raw.decode(declared, errors="replace")
+        except LookupError:
+            pass
     try:
-        return raw.decode(enc, errors="replace")
-    except (LookupError, TypeError):
-        return raw.decode("utf-8", errors="replace")
+        # 增量解码：被截断在半个汉字上的结尾不算"不是 UTF-8"
+        return codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)
+    except UnicodeDecodeError:
+        return raw.decode("gb18030", errors="replace")
 
 
 def _fetch_text(url: str, max_chars: int = 8000) -> tuple[bool, str]:
@@ -266,7 +288,48 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
 
     只允许 http/https 协议；按 Content-Type 处理内容类型；
     HTML 自动去标签转为可读纯文本。只读、不弹确认。"""
-    return _fetch_text(url, max_chars)[1]
+    return _fetch_page(url, max_chars)[1]
+
+
+# 网站自己拒绝我们（403 / 429 / 5xx / 超时……）时，改由 DeepSeek 的抓取接口去读。只在请求已经发出、
+# 是网站那边不给的情况下才转——被我们自己的 SSRF 检查拦下的（内网 / 本机地址）、不支持的类型，
+# 绝不把网址转给第三方。
+_FALLBACK_FAILURES = re.compile(r"^(?:HTTP (?:401|403|429|451|5\d\d)\b|请求超时|连接失败)")
+
+
+def _deepseek_fetch(url, max_chars):
+    import requests as _requests
+    key, base = _deepseek_key_and_base()
+    if not key:
+        return False, ""
+    try:
+        resp = _requests.post(f"{base}/v1/tools/fetch", json={"url": url}, timeout=30,
+                              headers={"Authorization": f"Bearer {key}"})
+    except Exception as e:
+        return False, f"DeepSeek 抓取失败: {e}"
+    if resp.status_code != 200:
+        return False, _deepseek_error(resp, "抓取")
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "DeepSeek 抓取返回了无法解析的响应"
+    content = (data.get("content") or "").strip()
+    if not content:
+        return False, "DeepSeek 抓取没有拿到正文"
+    title = (data.get("title") or "").strip()
+    text = (f"标题：{title}\n\n" if title else "") + content
+    return True, text if len(text) <= max_chars else text[:max_chars] + "\n... [已截断]"
+
+
+def _fetch_page(url, max_chars):
+    """先自己抓；网站拒绝时（见 _FALLBACK_FAILURES）有 DeepSeek key 就改用它的抓取接口再试一次。"""
+    ok, text = _fetch_text(url, max_chars)
+    if ok or not _FALLBACK_FAILURES.match(text):
+        return ok, text
+    ok2, text2 = _deepseek_fetch(url, max_chars)
+    if ok2:
+        return True, f"（网站拒绝了直接访问：{text}。以下内容经 DeepSeek 抓取接口获取）\n{text2}"
+    return False, text + (f"；{text2}" if text2 else "")
 
 
 # Tavily 的可选参数，值不在这里面就不传（传错值 Tavily 会整个请求报 400）
@@ -301,7 +364,7 @@ class _SearchFailed(Exception):
     """这个搜索服务这次没给出结果（HTTP 出错、额度用完、响应解析不了……）；消息给模型看。"""
 
 
-def _tavily_search(query, count, topic, time_range, depth):
+def _tavily_search(query, count, topic, time_range, depth, deep=False):
     """Tavily：返回 (直接答案, [结果])。每条结果的 content 是按问题挑出的几段原文。"""
     import requests as _requests
     from .config import WEB_SEARCH_API_KEY
@@ -341,7 +404,7 @@ _BOCHA_FRESHNESS = {"day": "oneDay", "week": "oneWeek", "month": "oneMonth", "ye
 _BOCHA_CHUNK_MAX = 600
 
 
-def _bocha_search(query, count, topic, time_range, depth):
+def _bocha_search(query, count, topic, time_range, depth, deep=False):
     """博查 Web Search：返回 ("", [结果])。打开 summary，每条带网页长摘要。"""
     import requests as _requests
     from .config import BOCHA_API_KEY
@@ -378,23 +441,85 @@ def _bocha_search(query, count, topic, time_range, depth):
     return "", results
 
 
-_SEARCHERS = {"tavily": _tavily_search, "bocha": _bocha_search}
-_SEARCHER_NAMES = {"tavily": "Tavily", "bocha": "博查"}
+# DeepSeek 自家的搜索 / 抓取接口（2026-10 上线，和模型共用一个 key，按成功请求计费、失败和空结果
+# 不收）。没有时间范围参数，用查询语法 after:日期 限定；查询最长 128 字。
+# 文档：https://api-docs.deepseek.com/guides/search
+_DEEPSEEK_SINCE_DAYS = {"day": 1, "week": 7, "month": 31, "year": 366}
+_DEEPSEEK_QUERY_MAX = 128
+_DEEPSEEK_CHUNK_MAX = 800    # summary 是给模型读的长摘要（官方说 600~800 字）
+
+
+def _deepseek_key_and_base():
+    """模型那边配的 DeepSeek key 和地址（示例里的占位 key 不算）。地址带了 /v1 的去掉，接口路径自己带。"""
+    from . import config
+    key = str(config.DEEPSEEK_API_KEY or "").strip()
+    v = key.lower()
+    if not key or "xxxx" in v or v in {"sk-", "your-api-key", "your_api_key"}:
+        return "", ""
+    base = str(config.DEEPSEEK_BASE_URL or "https://api.deepseek.com").rstrip("/")
+    return key, base[:-3] if base.endswith("/v1") else base
+
+
+def _deepseek_error(resp, what):
+    try:
+        message = (resp.json().get("error") or {}).get("message") or ""
+    except Exception:
+        message = ""
+    reason = {401: "key 无效", 402: "账户余额不足", 429: "请求太频繁"}.get(resp.status_code, "")
+    return f"DeepSeek {what}返回 HTTP {resp.status_code}" + (f"（{reason or message}）" if reason or message else "")
+
+
+def _deepseek_search(query, count, topic, time_range, depth, deep=False):
+    """DeepSeek 搜索：返回 ("", [结果])。summary 是给模型读的长摘要；深度搜索时要回正文（need_content），
+    深读就不用再自己去抓网页、也就不会被网站 403。"""
+    import requests as _requests
+    from datetime import date, timedelta
+    key, base = _deepseek_key_and_base()
+    days = _DEEPSEEK_SINCE_DAYS.get(time_range) or (7 if topic == "news" else None)
+    operator = f" after:{(date.today() - timedelta(days=days)).isoformat()}" if days else ""
+    text = " ".join((query or "").split())[:_DEEPSEEK_QUERY_MAX - len(operator)]
+    payload = {"query": text + operator, "count": count, "need_content": bool(deep)}
+    try:
+        resp = _requests.post(f"{base}/v1/tools/search", json=payload, timeout=20,
+                              headers={"Authorization": f"Bearer {key}"})
+    except _requests.Timeout:
+        raise _SearchFailed("DeepSeek 搜索超时（20 秒）")
+    except Exception as e:
+        raise _SearchFailed(f"DeepSeek 搜索连接失败: {e}")
+    if resp.status_code != 200:
+        raise _SearchFailed(_deepseek_error(resp, "搜索"))
+    try:
+        items = resp.json().get("results") or []
+    except Exception:
+        raise _SearchFailed("DeepSeek 搜索返回了无法解析的响应")
+    results = [{"title": it.get("title"), "url": it.get("url", ""), "site": it.get("site_name"),
+                "date": it.get("date"), "content": it.get("summary") or it.get("snippet") or "",
+                "chunk_max": _DEEPSEEK_CHUNK_MAX, "full_text": it.get("content") or ""}
+               for it in items]
+    return "", results
+
+
+_SEARCHERS = {"tavily": _tavily_search, "bocha": _bocha_search, "deepseek": _deepseek_search}
+_SEARCHER_NAMES = {"tavily": "Tavily", "bocha": "博查", "deepseek": "DeepSeek"}
 _CJK = re.compile(r"[一-鿿]")
 
 
 def _search_order(query):
     """这次按什么顺序试搜索服务（只列配了 key 的）。
 
-    auto：中文问题先博查、其余先 Tavily，一个出错就换另一个；tavily / bocha：只用它——
+    auto：中文问题先 DeepSeek（中文最好、最便宜，用模型那边的 key）、再博查、再 Tavily；
+    其余先 Tavily、再 DeepSeek、再博查；一个出错就换下一个。tavily / bocha / deepseek：只用它——
     用户选了"只用"，就不偷偷换成另一家。"""
     from . import config
-    keys = {"tavily": config.WEB_SEARCH_API_KEY, "bocha": config.BOCHA_API_KEY}
+    keys = {"tavily": config.WEB_SEARCH_API_KEY, "bocha": config.BOCHA_API_KEY,
+            "deepseek": _deepseek_key_and_base()[0]}
     pref = config.WEB_SEARCH_PROVIDER
     if pref in _SEARCHERS:
         order = [pref]
+    elif _CJK.search(query or ""):
+        order = ["deepseek", "bocha", "tavily"]
     else:
-        order = ["bocha", "tavily"] if _CJK.search(query or "") else ["tavily", "bocha"]
+        order = ["tavily", "deepseek", "bocha"]
     return [name for name in order if keys[name]]
 
 
@@ -457,13 +582,20 @@ def _top_passages(query, text, k=_DEEP_PASSAGES):
 
 
 def _deep_read(query, results):
-    """并发抓前几个结果的原文，挑出最相关的段落放进 result["deep"]。抓不到（403、超时）的保留原摘要。"""
+    """读前几个结果的原文，挑出最相关的段落放进 result["deep"]。搜索服务已经带回正文的（DeepSeek）
+    直接用，其余并发去抓；抓不到（403、超时）的保留原摘要。"""
     import concurrent.futures as _cf
     targets = [r for r in results if r.get("url")][:_DEEP_PAGES]
     if not targets:
         return 0
+
+    def _text_of(result):
+        if result.get("full_text"):
+            return True, result["full_text"]
+        return _fetch_page(result["url"], _DEEP_FETCH_CHARS)
+
     with _cf.ThreadPoolExecutor(max_workers=len(targets)) as pool:
-        fetched = list(pool.map(lambda r: _fetch_text(r["url"], _DEEP_FETCH_CHARS), targets))
+        fetched = list(pool.map(_text_of, targets))
     read = 0
     for result, (ok, text) in zip(targets, fetched):
         passages = _top_passages(query, text) if ok else []
@@ -489,12 +621,13 @@ def web_search(query: str, max_results: int = 5, topic: str = "general", time_ra
     depth: "basic"（默认，先用它）；"advanced" 段落挑得更准，但每次多花一份额度——
            只在 basic 的结果里确实缺关键细节时再用，或改用 fetch_url 抓那篇原文
 
-    需要在设置里填 Tavily 或博查的 key。只读、不弹确认。"""
+    用 DeepSeek（模型的 key）/ Tavily / 博查，见设置 → 高级 → 网络搜索。只读、不弹确认。"""
     from . import config
 
     order = _search_order(query)
     if not order:
-        return "未配置搜索服务，请在设置 → 高级 → 网络搜索 里填 Tavily 或博查的 key（tavily.com 有免费额度）"
+        return ("未配置搜索服务：在设置里填 DeepSeek 模型的 key（它自带搜索），或在设置 → 高级 → 网络搜索 "
+                "里填 Tavily / 博查的 key（tavily.com 有免费额度）")
     try:
         count = max(1, min(int(max_results), _SEARCH_MAX_RESULTS))
     except (TypeError, ValueError):
@@ -503,7 +636,8 @@ def web_search(query: str, max_results: int = 5, topic: str = "general", time_ra
     failures = []
     for name in order:
         try:
-            answer, results = _SEARCHERS[name](query, count, topic, time_range, depth)
+            answer, results = _SEARCHERS[name](query, count, topic, time_range, depth,
+                                               deep=config.WEB_SEARCH_DEEP)
             break
         except _SearchFailed as e:
             failures.append(f"{_SEARCHER_NAMES[name]}：{e}" if len(order) > 1 else str(e))

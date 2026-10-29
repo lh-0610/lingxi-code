@@ -15,9 +15,10 @@ from src.tools import fetch_url, web_search
 
 @pytest.fixture(autouse=True)
 def _search_defaults(monkeypatch):
-    """搜索相关配置固定成默认值：用户真实 config 里填了博查 key / 开了深度搜索时，
-    测试不能因此去真实联网或改变行为。"""
+    """搜索相关配置固定成默认值：用户真实 config 里填了博查 / DeepSeek key、开了深度搜索时，
+    测试不能因此去真实联网或改变行为（DeepSeek 的 key 是模型那边的，几乎总有）。"""
     monkeypatch.setattr(config, "BOCHA_API_KEY", "")
+    monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "")
     monkeypatch.setattr(config, "WEB_SEARCH_PROVIDER", "auto")
     monkeypatch.setattr(config, "WEB_SEARCH_DEEP", False)
 
@@ -329,12 +330,22 @@ def _bocha_page(name, url, summary, site="新浪体育", date="2026-10-28T10:00:
 class _Router:
     """按网址分发假响应，记下每个服务收到的请求。"""
 
-    def __init__(self, tavily=None, bocha=None):
-        self.responses = {"tavily": tavily, "bocha": bocha}
+    def __init__(self, tavily=None, bocha=None, deepseek=None, deepseek_fetch=None):
+        self.responses = {"tavily": tavily, "bocha": bocha, "deepseek": deepseek,
+                          "deepseek_fetch": deepseek_fetch}
         self.sent = {}
+        self.urls = []
 
     def post(self, url, json=None, headers=None, **k):
-        name = "bocha" if "bochaai" in url else "tavily"
+        if "bochaai" in url:
+            name = "bocha"
+        elif "/v1/tools/fetch" in url:
+            name = "deepseek_fetch"
+        elif "/v1/tools/search" in url:
+            name = "deepseek"
+        else:
+            name = "tavily"
+        self.urls.append(url)
         self.sent[name] = {"json": json or {}, "headers": headers or {}}
         resp = self.responses[name]
         return resp() if callable(resp) else resp
@@ -467,3 +478,143 @@ def test_deep_mode_keeps_the_other_results_to_one_line(monkeypatch):
     others = out.split("R5\n")[1].splitlines()
     snippet = others[-1].strip()
     assert len(snippet) <= 121 and "第二段" not in snippet
+
+
+# ── DeepSeek 自家的搜索 / 抓取接口（和模型共用 key）──
+
+def _ds_item(title, url, summary, content=""):
+    return {"title": title, "url": url, "site_name": "新浪电竞", "date": "2026-10-28T16:00:00+00:00",
+            "snippet": summary[:30], "summary": summary, "content": content,
+            "rerank_score": 2.3, "authority": 3}
+
+
+class TestDeepSeekSearch:
+    def _setup(self, monkeypatch, router, ds_key="sk-real-ds", base="https://api.deepseek.com",
+               tavily_key="tvly-x", provider="auto", deep=False):
+        monkeypatch.setattr(config, "DEEPSEEK_API_KEY", ds_key)
+        monkeypatch.setattr(config, "DEEPSEEK_BASE_URL", base)
+        monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", tavily_key)
+        monkeypatch.setattr(config, "WEB_SEARCH_PROVIDER", provider)
+        monkeypatch.setattr(config, "WEB_SEARCH_DEEP", deep)
+        monkeypatch.setattr(requests, "post", router.post)
+
+    def _router(self, items=None):
+        items = items if items is not None else [_ds_item("IG 2:1 LYON", "http://ds/1", "IG 2:1 战胜 LYON 晋级八强")]
+        return _Router(tavily=FakeResp(200, {}, "", {"results": [{"title": "T", "url": "http://t/1", "content": "tavily 内容"}]}),
+                       deepseek=FakeResp(200, {}, "", {"results": items}))
+
+    def test_chinese_goes_to_deepseek_first(self, monkeypatch):
+        router = self._router()
+        self._setup(monkeypatch, router)
+        out = web_search.func("S16 瑞士轮 第四轮 比分")
+        assert "IG 2:1 战胜 LYON" in out and "来源：新浪电竞" in out
+        assert router.urls == ["https://api.deepseek.com/v1/tools/search"]
+        assert router.sent["deepseek"]["headers"]["Authorization"] == "Bearer sk-real-ds"
+        router.sent.clear()
+        web_search.func("Worlds 2026 swiss round 4")
+        assert "tavily" in router.sent and "deepseek" not in router.sent
+
+    def test_time_range_becomes_an_after_operator(self, monkeypatch):
+        from datetime import date, timedelta
+        router = self._router()
+        self._setup(monkeypatch, router)
+        web_search.func("S16 赛程", time_range="week", max_results=8)
+        sent = router.sent["deepseek"]["json"]
+        week_ago = (date.today() - timedelta(days=7)).isoformat()
+        assert sent == {"query": f"S16 赛程 after:{week_ago}", "count": 8, "need_content": False}
+        web_search.func("S16 赛程", topic="news")
+        assert router.sent["deepseek"]["json"]["query"].endswith(f"after:{week_ago}")
+        web_search.func("赛程" * 100, time_range="day")
+        q = router.sent["deepseek"]["json"]["query"]
+        assert len(q) <= 128 and " after:" in q, "超长查询截断时保住时间条件"
+
+    def test_base_url_with_v1_and_placeholder_key(self, monkeypatch):
+        router = self._router()
+        self._setup(monkeypatch, router, base="https://api.deepseek.com/v1/")
+        web_search.func("S16 赛程")
+        assert router.urls[-1] == "https://api.deepseek.com/v1/tools/search"
+        router.sent.clear()
+        self._setup(monkeypatch, router, ds_key="sk-xxxxxxxxxxxxxxxx")
+        web_search.func("S16 赛程")
+        assert "deepseek" not in router.sent, "示例配置里的占位 key 不能拿去请求"
+
+    def test_insufficient_balance_falls_back(self, monkeypatch):
+        router = self._router()
+        router.responses["deepseek"] = FakeResp(402, {}, "", {"error": {"message": "Insufficient Balance"}})
+        self._setup(monkeypatch, router)
+        out = web_search.func("S16 赛程")
+        assert "账户余额不足" in out and "改用 Tavily" in out and "tavily 内容" in out
+
+    def test_deep_search_uses_the_returned_page_text(self, monkeypatch):
+        from src import tools_web
+        page = TestDeepSearch.PAGE
+        router = self._router([_ds_item("S16 战报", "http://ds/1", "摘要", content=page)])
+        self._setup(monkeypatch, router, deep=True)
+        monkeypatch.setattr(tools_web, "_fetch_text", lambda *a: (_ for _ in ()).throw(AssertionError("不该自己抓")))
+        out = web_search.func("瑞士轮第四轮 比分")
+        assert router.sent["deepseek"]["json"]["need_content"] is True
+        assert "原文：" in out and "T1 对 MKOI" in out
+
+
+class TestFetchFallback:
+    def _setup(self, monkeypatch, router, ds_key="sk-real-ds"):
+        monkeypatch.setattr(config, "DEEPSEEK_API_KEY", ds_key)
+        monkeypatch.setattr(config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        monkeypatch.setattr(requests, "post", router.post)
+
+    def test_site_refusal_is_retried_through_deepseek(self, monkeypatch):
+        router = _Router(deepseek_fetch=FakeResp(200, {}, "", {"title": "Worlds 2026", "content": "# Swiss stage\nT1 2:1 MKOI"}))
+        self._setup(monkeypatch, router)
+        monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp(403, {}, ""))
+        out = fetch_url.func("http://blocked.example/a")
+        assert "网站拒绝了直接访问：HTTP 403" in out and "T1 2:1 MKOI" in out and "标题：Worlds 2026" in out
+        assert router.sent["deepseek_fetch"]["json"] == {"url": "http://blocked.example/a"}
+
+    def test_not_forwarded_when_we_blocked_it_or_the_page_is_gone(self, monkeypatch):
+        router = _Router(deepseek_fetch=FakeResp(200, {}, "", {"title": "x", "content": "y"}))
+        self._setup(monkeypatch, router)
+        monkeypatch.setattr(socket, "getaddrinfo",
+                            lambda host, *a, **k: [(socket.AF_INET, None, None, "", ("169.254.169.254", 0))])
+        assert "拒绝" in fetch_url.func("http://169.254.169.254/latest/meta-data/")
+        monkeypatch.setattr(socket, "getaddrinfo",
+                            lambda host, *a, **k: [(socket.AF_INET, None, None, "", ("93.184.216.34", 0))])
+        monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp(404, {}, ""))
+        assert "HTTP 404" in fetch_url.func("http://x/gone")
+        assert "deepseek_fetch" not in router.sent, "内网地址、404 都不转给第三方"
+
+    def test_no_key_means_no_fallback(self, monkeypatch):
+        router = _Router()
+        self._setup(monkeypatch, router, ds_key="")
+        monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp(403, {}, ""))
+        assert fetch_url.func("http://blocked.example/a").startswith("HTTP 403") and not router.sent
+
+
+class TestPageEncoding:
+    """响应头没写 charset 时 requests 按 ISO-8859-1 解，中文网页成了乱码。"""
+
+    class _Raw:
+        def __init__(self, raw, content_type):
+            self.headers = {"Content-Type": content_type}
+            self.encoding = requests.utils.get_encoding_from_headers(self.headers)
+            self._raw = raw
+
+    def _decode(self, raw, content_type="text/html"):
+        from src.tools_web import _decode_body
+        return _decode_body(raw, self._Raw(raw, content_type))
+
+    def test_utf8_without_any_declaration(self):
+        assert self._decode("T1 击败 MKOI 晋级八强".encode("utf-8")) == "T1 击败 MKOI 晋级八强"
+
+    def test_meta_charset_is_honoured(self):
+        page = '<html><head><meta charset="gbk"></head><body>晋级八强</body></html>'
+        assert "晋级八强" in self._decode(page.encode("gbk"))
+
+    def test_gbk_without_declaration_still_reads(self):
+        assert self._decode("瑞士轮第四轮".encode("gbk")) == "瑞士轮第四轮"
+
+    def test_header_charset_wins(self):
+        assert self._decode("晋级".encode("gbk"), "text/html; charset=gbk") == "晋级"
+
+    def test_cut_in_the_middle_of_a_character_is_still_utf8(self):
+        raw = "晋级八强".encode("utf-8")[:-1]
+        assert self._decode(raw).startswith("晋级八")

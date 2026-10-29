@@ -253,7 +253,8 @@ class SettingsDialog(QDialog):
 
         self._add_section(a, "网络搜索")
         self._add_combo(a, "web_search_provider", "用哪个搜索服务", [
-            ("自动：中文问题用博查，其余用 Tavily；一个出错换另一个", "auto"),
+            ("自动：中文问题先 DeepSeek，其余先 Tavily；出错就换下一个", "auto"),
+            ("只用 DeepSeek", "deepseek"),
             ("只用 Tavily", "tavily"),
             ("只用博查", "bocha"),
         ])
@@ -262,8 +263,10 @@ class SettingsDialog(QDialog):
         self._add_bool(a, "web_search_deep",
                        "深度搜索：自动读前几个结果的原文，按问题挑出最相关的段落", default=False)
         search_hint = QLabel(
-            "• Tavily（tavily.com）每月有免费额度；博查（open.bochaai.com）中文和国内站点更全，只用它的普通搜索\n"
-            "• 深度搜索更准，但每次搜索会多等几秒（要去抓网页原文），不额外花搜索额度\n"
+            "• DeepSeek 搜索直接用「模型」页里 DeepSeek 的 key，中文结果最好，约 5 元 / 千次（失败和空结果不收费）\n"
+            "• Tavily（tavily.com）每月有免费额度；博查（open.bochaai.com）只用它的普通搜索\n"
+            "• 网站拒绝直接抓取（403 等）时，会改用 DeepSeek 的抓取接口再读一次\n"
+            "• 深度搜索更准，但每次搜索会多等几秒（要读网页原文），不额外花搜索额度\n"
             "• 这几项保存后立即生效，不用重启"
         )
         search_hint.setObjectName("providerCardHint")
