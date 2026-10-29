@@ -253,3 +253,37 @@ class TestBudgetSqueeze:
             assert _current_history_budget() >= 8_000
         finally:
             _session.bind_thread(None)
+
+
+class TestLostToolCall:
+    """结束原因是"要调用工具"，却没给出可执行的调用（工具名缺失 / 不存在）：原来当成"连接被中断"
+    整轮失败，编码任务做到一半莫名挂掉。现在请模型重来一次。"""
+
+    def _lost(self):
+        from langchain_core.messages import AIMessageChunk
+        chunk = AIMessageChunk(content="", tool_calls=[{"name": "no_such_tool", "args": {}, "id": "x1"}])
+        chunk.response_metadata = {"finish_reason": "tool_calls"}
+        return ("", [], {"input": 1, "output": 1, "total": 2}, chunk)
+
+    def test_retries_once_then_finishes(self, agent_env, monkeypatch):
+        from langchain_core.messages import AIMessage
+        _agent, sess = agent_env
+        replies = [self._lost(), ("改好了", [], {"input": 1, "output": 1, "total": 2}, None)]
+        monkeypatch.setattr(_agent, "_stream_with_tools", lambda ui: replies.pop(0))
+        monkeypatch.setattr(_agent, "_build_ai_message", lambda g, t, tcs: AIMessage(content=t))
+        ui = _UI()
+        assert _agent.agent_loop(ui).status == "completed"
+        hints = [m for m in sess.chat_history if "没有收到可识别的工具调用" in str(m.content)]
+        assert len(hints) == 1 and "no_such_tool" in str(hints[0].content)
+        assert not ui.retries, "重来成功就不该再弹失败卡"
+
+    def test_gives_up_after_one_retry(self, agent_env, monkeypatch):
+        _agent, sess = agent_env
+        calls = {"n": 0}
+
+        def always_lost(ui):
+            calls["n"] += 1
+            return self._lost()
+        monkeypatch.setattr(_agent, "_stream_with_tools", always_lost)
+        assert _agent.agent_loop(_UI()).status == "failed"
+        assert calls["n"] == 2, "只重来一次，不能无限循环"

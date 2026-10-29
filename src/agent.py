@@ -321,6 +321,7 @@ def _agent_loop_body(ui):
             return AgentResult("failed", "无法连接 Ollama 服务。"), clean_text
 
         round_i = -1
+        lost_tool_call_retried = False   # 声明要调工具却没给出可执行的调用：每轮运行只让重来一次
         # 角色卡存在时用角色名替代模型名
         display_name = get_current_role_name() or model_name
 
@@ -370,6 +371,10 @@ def _agent_loop_body(ui):
 
             # ── 闸门：纯文本回复，先过完成闸门，再渲染 Markdown 并结束 ──
             if not clean_text:
+                if not lost_tool_call_retried and _announced_tool_call(gathered):
+                    lost_tool_call_retried = True
+                    _ask_to_redo_tool_call(ui, gathered)
+                    continue
                 result = _empty_reply_result(ui, gathered, round_i)
                 break
             result, clean_text, rerun = _completion_gate(ui, clean_text)
@@ -574,6 +579,32 @@ def _maybe_inject_repair(ui, tool_calls):
                 break  # 每轮最多注入一条修复提示
     except Exception as _re_err:
         logger.debug(f"修复循环检查异常（已忽略）: {_re_err}")
+
+
+def _announced_tool_call(gathered) -> bool:
+    """这一轮的结束原因是"要调用工具"，却没解析出任何可执行的调用（工具名缺失或不存在）。"""
+    meta = getattr(gathered, "response_metadata", None) or {}
+    reason = meta.get("finish_reason") or meta.get("stop_reason") or ""
+    return reason in ("tool_calls", "tool_use", "function_call")
+
+
+def _ask_to_redo_tool_call(ui, gathered):
+    """请模型把工具调用重发一次。原来这种情况被当成"连接被中断"、整轮失败——
+    编码任务做到一半莫名其妙地挂掉，提示还是错的（评测里约 3% 的运行这样结束）。
+    这条失败的回复不进历史，所以补一条提示再重来不会留下没配对结果的工具调用。"""
+    from . import task_state as _ts
+    names = [tc.get("name") or "（空）"
+             for tc in list(getattr(gathered, "tool_calls", None) or [])
+             + list(getattr(gathered, "invalid_tool_calls", None) or [])]
+    logger.warning(f"模型声明要调用工具但没有可执行的调用（给出的工具名: {names or '无'}），请它重来一次")
+    hint = ("上一条回复表示要调用工具，但没有收到可识别的工具调用"
+            + (f"（工具名 {'、'.join(names)} 不存在）" if names else "（工具名缺失）")
+            + "。请按工具列表里的名字重新调用，或者直接给出回答。")
+    state.chat_history.append(_ts.tag_internal_message(HumanMessage(content=hint), kind="repair"))
+    try:
+        ui.show_message("\n⚠️ 没收到可识别的工具调用，已请模型重来一次\n", "tool_result")
+    except Exception:
+        pass
 
 
 def _empty_reply_result(ui, gathered, round_i):
