@@ -40,3 +40,37 @@ def test_get_nested_safe_on_corrupt_node():
     """读取端对损坏节点回退默认值（启动/加载不崩）。"""
     f = _fake({"rag": "oops"})
     assert SettingsDialog._get_nested(f, "rag.embed_model", "def") == "def"
+
+
+def test_search_settings_save_and_apply_without_restart(tmp_path, monkeypatch):
+    """设置 → 高级 → 网络搜索：保存写进 config.json，并立即反映到运行中的程序（web_search 每次
+    调用才读这几个值），不用重启。"""
+    import json
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from src import config
+    from src.ui import settings_dialog as sd
+
+    QApplication.instance() or QApplication([])
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"web_search_api_key": "tvly-old"}), encoding="utf-8")
+    monkeypatch.setattr(sd, "CONFIG_PATH", str(cfg_path))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)       # 不弹"已保存"
+    for name in ("WEB_SEARCH_API_KEY", "BOCHA_API_KEY", "WEB_SEARCH_PROVIDER", "WEB_SEARCH_DEEP"):
+        monkeypatch.setattr(config, name, getattr(config, name))   # 测完还原
+
+    dlg = sd.SettingsDialog()
+    assert dlg.fields["web_search_api_key"].text() == "tvly-old"
+    assert dlg.fields["web_search_provider"].currentData() == "auto"
+    assert dlg.fields["web_search_deep"].isChecked() is False
+    dlg.fields["bocha_api_key"].setText("sk-bocha")
+    dlg.fields["web_search_provider"].setCurrentIndex(
+        dlg.fields["web_search_provider"].findData("bocha"))
+    dlg.fields["web_search_deep"].setChecked(True)
+    dlg._save()
+
+    saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert saved["bocha_api_key"] == "sk-bocha" and saved["web_search_provider"] == "bocha"
+    assert saved["web_search_deep"] is True
+    assert (config.BOCHA_API_KEY, config.WEB_SEARCH_PROVIDER, config.WEB_SEARCH_DEEP) == \
+        ("sk-bocha", "bocha", True)
+    dlg.deleteLater()

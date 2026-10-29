@@ -14,6 +14,15 @@ from src.tools import fetch_url, web_search
 
 
 @pytest.fixture(autouse=True)
+def _search_defaults(monkeypatch):
+    """搜索相关配置固定成默认值：用户真实 config 里填了博查 key / 开了深度搜索时，
+    测试不能因此去真实联网或改变行为。"""
+    monkeypatch.setattr(config, "BOCHA_API_KEY", "")
+    monkeypatch.setattr(config, "WEB_SEARCH_PROVIDER", "auto")
+    monkeypatch.setattr(config, "WEB_SEARCH_DEEP", False)
+
+
+@pytest.fixture(autouse=True)
 def _stub_dns(monkeypatch):
     """fetch_url 的 SSRF 检查会 getaddrinfo(host)；测试用假 host，统一解析成公网 IP 放行。"""
     monkeypatch.setattr(
@@ -308,3 +317,153 @@ class TestBetterSearch:
     def test_answer_alone_is_still_returned(self, monkeypatch):
         out, _ = self._search(monkeypatch, {"answer": "在洛杉矶。", "results": []})
         assert "在洛杉矶" in out and "没搜到" not in out
+
+
+# ── 搜索服务：Tavily / 博查 / 自动兜底 ──
+
+def _bocha_page(name, url, summary, site="新浪体育", date="2026-10-28T10:00:00+08:00"):
+    return {"name": name, "url": url, "siteName": site, "snippet": summary[:20],
+            "summary": summary, "datePublished": date}
+
+
+class _Router:
+    """按网址分发假响应，记下每个服务收到的请求。"""
+
+    def __init__(self, tavily=None, bocha=None):
+        self.responses = {"tavily": tavily, "bocha": bocha}
+        self.sent = {}
+
+    def post(self, url, json=None, headers=None, **k):
+        name = "bocha" if "bochaai" in url else "tavily"
+        self.sent[name] = {"json": json or {}, "headers": headers or {}}
+        resp = self.responses[name]
+        return resp() if callable(resp) else resp
+
+
+class TestProviders:
+    def _setup(self, monkeypatch, router, tavily_key="tvly-x", bocha_key="sk-b", provider="auto"):
+        monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", tavily_key)
+        monkeypatch.setattr(config, "BOCHA_API_KEY", bocha_key)
+        monkeypatch.setattr(config, "WEB_SEARCH_PROVIDER", provider)
+        monkeypatch.setattr(requests, "post", router.post)
+
+    def _ok_both(self):
+        return _Router(
+            tavily=FakeResp(200, {}, "", {"results": [{"title": "T", "url": "http://t/1", "content": "tavily 内容"}]}),
+            bocha=FakeResp(200, {}, "", {"code": 200, "data": {"webPages": {"value": [
+                _bocha_page("S16 瑞士轮抽签", "http://b/1", "BLG 对 TES，IG 对 LYON")]}}}),
+        )
+
+    def test_auto_sends_chinese_to_bocha_and_english_to_tavily(self, monkeypatch):
+        router = self._ok_both()
+        self._setup(monkeypatch, router)
+        out = web_search.func("S16 瑞士轮 抽签")
+        assert "BLG 对 TES" in out and "来源：新浪体育" in out and set(router.sent) == {"bocha"}
+        router.sent.clear()
+        out = web_search.func("Worlds 2026 swiss draw")
+        assert "tavily 内容" in out and set(router.sent) == {"tavily"}
+
+    def test_bocha_request_shape(self, monkeypatch):
+        router = self._ok_both()
+        self._setup(monkeypatch, router)
+        web_search.func("S16 赛程", max_results=8, time_range="day")
+        sent = router.sent["bocha"]
+        assert sent["headers"]["Authorization"] == "Bearer sk-b"
+        assert sent["json"] == {"query": "S16 赛程", "count": 8, "summary": True, "freshness": "oneDay"}
+        web_search.func("S16 赛程", topic="news")
+        assert router.sent["bocha"]["json"]["freshness"] == "oneWeek", "新闻没给时间范围：按最近一周"
+        web_search.func("S16 赛程")
+        assert router.sent["bocha"]["json"]["freshness"] == "noLimit"
+
+    def test_falls_back_when_one_fails(self, monkeypatch):
+        router = self._ok_both()
+        router.responses["bocha"] = FakeResp(402, {}, "")
+        self._setup(monkeypatch, router)
+        out = web_search.func("S16 瑞士轮 抽签")
+        assert "博查额度用完" in out and "改用 Tavily" in out and "tavily 内容" in out
+
+    def test_bocha_business_error_counts_as_failure(self, monkeypatch):
+        router = self._ok_both()
+        router.responses["bocha"] = FakeResp(200, {}, "", {"code": 403, "msg": "余额不足", "data": None})
+        self._setup(monkeypatch, router)
+        assert "余额不足" in web_search.func("S16 赛程") and "tavily 内容" in web_search.func("S16 赛程")
+
+    def test_fixed_provider_never_switches(self, monkeypatch):
+        router = self._ok_both()
+        router.responses["bocha"] = FakeResp(401, {}, "")
+        self._setup(monkeypatch, router, provider="bocha")
+        out = web_search.func("Worlds 2026 swiss draw")
+        assert "博查 key 无效" in out and "tavily" not in router.sent, "选了只用博查，就不偷偷换成别家"
+
+    def test_only_configured_services_are_tried(self, monkeypatch):
+        router = self._ok_both()
+        self._setup(monkeypatch, router, bocha_key="")
+        web_search.func("S16 瑞士轮")
+        assert set(router.sent) == {"tavily"}
+        self._setup(monkeypatch, router, tavily_key="", bocha_key="")
+        assert "未配置搜索服务" in web_search.func("S16")
+
+    def test_bocha_long_summary_is_kept_longer(self, monkeypatch):
+        router = self._ok_both()
+        router.responses["bocha"] = FakeResp(200, {}, "", {"webPages": {"value": [
+            _bocha_page("长文", "http://b/2", "赛况" * 400)]}})       # 没包 data 的老格式也认
+        self._setup(monkeypatch, router)
+        snippet = web_search.func("S16 赛况").split("\n")[-1].strip()
+        assert 500 < len(snippet) <= 601 and snippet.endswith("…")
+
+
+# ── 深度搜索：读前几个结果的原文，按问题挑段落 ──
+
+class TestDeepSearch:
+    PAGE = ("英雄联盟2026全球总决赛\n\n网站导航 首页 新闻 视频 下载\n\n"
+            "瑞士轮第四轮 10月29日：T1 对 MKOI，BLG 对 TES，比分 2:1。\n\n"
+            "| 场次 | 对阵 | 比分 |\n| 1 | T1 vs MKOI | 2:1 |\n\n"
+            "版权所有 © 2026 联系我们 隐私政策")
+
+    def test_picks_relevant_passages_in_original_order(self):
+        from src.tools_web import _top_passages
+        got = _top_passages("S16 瑞士轮第四轮 对阵 比分", self.PAGE)
+        assert got and "瑞士轮第四轮" in got[0]
+        assert not any("隐私政策" in p and "比分" not in p for p in got), "毫不相关的段落不要"
+        assert _top_passages("完全无关的词语", "abc def") == []
+
+    def test_deep_reads_top_results_and_keeps_snippets_when_a_page_fails(self, monkeypatch):
+        from src import tools_web
+        monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", "tvly-x")
+        monkeypatch.setattr(config, "WEB_SEARCH_DEEP", True)
+        results = [{"title": f"R{i}", "url": f"http://r/{i}", "content": f"摘要{i}"} for i in range(5)]
+        monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(200, {}, "", {"results": results}))
+        fetched = []
+
+        def fake_fetch(url, max_chars):
+            fetched.append(url)
+            return (False, "HTTP 403") if url.endswith("/1") else (True, self.PAGE)
+        monkeypatch.setattr(tools_web, "_fetch_text", fake_fetch)
+        out = web_search.func("瑞士轮第四轮 比分")
+        assert sorted(fetched) == ["http://r/0", "http://r/1", "http://r/2"], "只读前 3 个"
+        assert "深度搜索：前 2 个结果读了原文" in out
+        assert out.count("原文：") >= 2 and "摘要1" in out, "403 的那篇保留原摘要"
+        assert "摘要0" not in out, "读到原文的用原文段落替换摘要"
+
+    def test_off_by_default(self, monkeypatch):
+        from src import tools_web
+        monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", "tvly-x")
+        monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(200, {}, "", {"results": [
+            {"title": "R", "url": "http://r/0", "content": "摘要"}]}))
+        monkeypatch.setattr(tools_web, "_fetch_text", lambda *a: (_ for _ in ()).throw(AssertionError("不该抓")))
+        assert "原文：" not in web_search.func("瑞士轮")
+
+
+def test_deep_mode_keeps_the_other_results_to_one_line(monkeypatch):
+    """前几条已有原文段落，其余只留一句话当线索——照常给完整摘要，开了深度反而更费 token。"""
+    from src import tools_web
+    monkeypatch.setattr(config, "WEB_SEARCH_API_KEY", "tvly-x")
+    monkeypatch.setattr(config, "WEB_SEARCH_DEEP", True)
+    long = "第一段赛况" * 60 + " [...] " + "第二段赛况" * 60
+    results = [{"title": f"R{i}", "url": f"http://r/{i}", "content": long} for i in range(6)]
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(200, {}, "", {"results": results}))
+    monkeypatch.setattr(tools_web, "_fetch_text", lambda url, n: (True, TestDeepSearch.PAGE))
+    out = web_search.func("瑞士轮第四轮 比分")
+    others = out.split("R5\n")[1].splitlines()
+    snippet = others[-1].strip()
+    assert len(snippet) <= 121 and "第二段" not in snippet

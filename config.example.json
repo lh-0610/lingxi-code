@@ -26,9 +26,12 @@
   "default_model_id":  "mimo-v2.5-pro",
 
   "web_search_api_key": "",
+  "bocha_api_key": "",
+  "web_search_provider": "auto",
+  "web_search_deep": false,
   "fetch_url_allow_proxy": false,
   "_fetch_url_allow_proxy_说明": "fetch_url 是否走系统代理。默认 false（直连，SSRF 防线完整、能校验目标真实 IP）。必须靠代理才能访问外网时设 true，但此时跳过防 DNS 重绑定的 peer 校验。",
-  "_web_search_说明": "web_search 工具用 Tavily 搜网络（tavily.com 免费申请 key）。留空 = web_search 不可用（会优雅提示），不影响 fetch_url 抓网址（fetch_url 无需 key）。",
+  "_web_search_说明": "web_search 用 Tavily（tavily.com，有免费额度）或博查（open.bochaai.com，中文和国内站点更全，只用它的普通 Web Search）。web_search_provider：auto = 有博查 key 时中文问题用博查、其余用 Tavily，一个出错换另一个；tavily / bocha = 只用它。两个 key 都没填 = web_search 不可用（不影响 fetch_url，它不需要 key）。web_search_deep：深度搜索，自动读前几个结果的原文、按问题挑出最相关的段落，更准但每次多等几秒。这几项在设置 → 高级 → 网络搜索 里改，保存后立即生效。",
 
   "agent_max_rounds": 50,
   "_agent_max_rounds_说明": "agent 主循环单次交互的最大轮次（一轮 = 一次模型调用 + 它请求的工具执行）。到达上限自动停下并把原因写进对话。正常编码任务 10~20 轮封顶，触顶通常意味着模型陷进了循环。**设 0 = 不限轮次**：一直调用到模型自己停或你点停止，此时没有任何自动刹车，模型打转时 token 会一直烧下去——只在需要超长自主任务、且你会盯着时才这么设。设置弹窗「高级」页可改，改动需重启。",

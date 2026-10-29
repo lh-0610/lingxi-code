@@ -126,8 +126,14 @@ REMOTE_BLOCKLIST: list = _remote_cfg.get("readonly_blocklist", []) or []
 # 配了 telegram_bot_token/chat_id 才实际生效（push_confirm 内部会校验，没配则静默跳过）。
 REMOTE_TELEGRAM_CONFIRM: bool = _remote_cfg.get("telegram_confirm", True)
 
-# 网络搜索（Tavily）
+# 网络搜索：Tavily / 博查（只用博查的普通 Web Search，不用收费更高、带大模型总结的 AI Search——
+# 总结本来就由灵犀自己的模型做）。设置里改这几项会即时生效（settings_dialog._save 直接改这里）。
 WEB_SEARCH_API_KEY: str = _config.get("web_search_api_key", "")
+BOCHA_API_KEY: str = _config.get("bocha_api_key", "")
+# auto：有博查 key 时中文问题走博查、其余走 Tavily，一个出错就换另一个；tavily / bocha：只用它
+WEB_SEARCH_PROVIDER: str = _config.get("web_search_provider", "auto")
+# 深度搜索：搜到之后自动抓前几个结果的原文，按问题挑出最相关的段落（更准，每次慢几秒）
+WEB_SEARCH_DEEP: bool = bool(_config.get("web_search_deep", False))
 # fetch_url 是否走系统代理。**默认 False（直连）**：直连才能校验实际 peer IP、SSRF 防线完整。
 # 设 true 后按系统代理抓取（适合必须靠代理访问外网的环境），但此时无法校验目标真实 IP，
 # 防 DNS 重绑定的 peer 检查会跳过——属于用代理换可达性的显式取舍。

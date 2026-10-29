@@ -158,15 +158,9 @@ def _read_bounded(resp) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
-@tool
-def fetch_url(url: str, max_chars: int = 8000) -> str:
-    """抓取网页正文，用于查文档/报错信息/API 参考。
-
-    url: 要抓取的网址（必须是 http:// 或 https://）
-    max_chars: 最大返回字符数，默认 8000
-
-    只允许 http/https 协议；按 Content-Type 处理内容类型；
-    HTML 自动去标签转为可读纯文本。只读、不弹确认。"""
+def _fetch_text(url: str, max_chars: int = 8000) -> tuple[bool, str]:
+    """抓一个网址的正文。返回 (是否拿到了正文, 正文或失败原因)——深度搜索要分得清
+    哪个网页抓到了、哪个只拿回一句报错。"""
     import requests as _requests
     import html as _html
 
@@ -183,7 +177,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
     for _hop in range(_MAX_REDIRECTS + 1):
         reject = _ssrf_reject(current)
         if reject:
-            return reject
+            return False, reject
         try:
             resp = _requests.get(
                 current, timeout=15,
@@ -193,11 +187,11 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
                 proxies=_req_proxies,
             )
         except _requests.Timeout:
-            return f"请求超时（15 秒）: {current}"
+            return False, f"请求超时（15 秒）: {current}"
         except _requests.ConnectionError as e:
-            return f"连接失败: {e}"
+            return False, f"连接失败: {e}"
         except Exception as e:
-            return f"请求异常: {e}"
+            return False, f"请求异常: {e}"
 
         # 直连时校验实际 peer IP（防 DNS 重绑定）。仅当确实走了代理才跳过——那时 peer 是
         # 代理地址、校验无意义（且本地代理会把所有请求误判成内网）。
@@ -206,7 +200,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
             peer_reject = _peer_ip_reject(resp)
             if peer_reject:
                 _safe_close(resp)
-                return peer_reject
+                return False, peer_reject
 
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location")
@@ -218,19 +212,19 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
             # 没给 Location，当普通响应处理
         break
     else:
-        return f"重定向次数过多（> {_MAX_REDIRECTS} 跳），已中止: {url}"
+        return False, f"重定向次数过多（> {_MAX_REDIRECTS} 跳），已中止: {url}"
 
     # stream=True 拿到的连接必须确保关闭；正文有界读取，避免超大响应吃内存。
     try:
         if resp.status_code < 200 or resp.status_code >= 300:
-            return f"HTTP {resp.status_code}: 服务器返回非 2xx 状态码"
+            return False, f"HTTP {resp.status_code}: 服务器返回非 2xx 状态码"
 
         content_type = resp.headers.get("Content-Type", "").lower()
 
         # 二进制类型直接拒绝
         if any(t in content_type for t in ("image/", "application/pdf", "audio/", "video/",
                                             "application/zip", "application/octet-stream")):
-            return f"不支持的内容类型: {content_type.split(';')[0].strip()}"
+            return False, f"不支持的内容类型: {content_type.split(';')[0].strip()}"
 
         text = _read_bounded(resp)
     finally:
@@ -241,7 +235,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
         result = text[:max_chars]
         if len(text) > max_chars:
             result += "... [已截断]"
-        return result
+        return True, result
 
     # HTML → 纯文本（只留正文、表格转行）
     try:
@@ -261,7 +255,18 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
     result = result[:max_chars]
     if truncated:
         result += "\n... [已截断]"
-    return result
+    return True, result
+
+@tool
+def fetch_url(url: str, max_chars: int = 8000) -> str:
+    """抓取网页正文，用于查文档/报错信息/API 参考。
+
+    url: 要抓取的网址（必须是 http:// 或 https://）
+    max_chars: 最大返回字符数，默认 8000
+
+    只允许 http/https 协议；按 Content-Type 处理内容类型；
+    HTML 自动去标签转为可读纯文本。只读、不弹确认。"""
+    return _fetch_text(url, max_chars)[1]
 
 
 # Tavily 的可选参数，值不在这里面就不传（传错值 Tavily 会整个请求报 400）
@@ -281,21 +286,197 @@ _SNIPPET_NOISE = (
 )
 
 
-def _clean_snippet(text: str) -> str:
+def _clean_snippet(text: str, chunk_max: int = _CHUNK_MAX) -> str:
     chunks = []
     for chunk in _CHUNK_SEPARATOR.split(text or ""):
         for pattern in _SNIPPET_NOISE:
             chunk = pattern.sub("", chunk)
         chunk = " ".join(chunk.split())
         if chunk:
-            chunks.append(chunk if len(chunk) <= _CHUNK_MAX else chunk[:_CHUNK_MAX].rstrip() + "…")
+            chunks.append(chunk if len(chunk) <= chunk_max else chunk[:chunk_max].rstrip() + "…")
     return " … ".join(chunks)
+
+
+class _SearchFailed(Exception):
+    """这个搜索服务这次没给出结果（HTTP 出错、额度用完、响应解析不了……）；消息给模型看。"""
+
+
+def _tavily_search(query, count, topic, time_range, depth):
+    """Tavily：返回 (直接答案, [结果])。每条结果的 content 是按问题挑出的几段原文。"""
+    import requests as _requests
+    from .config import WEB_SEARCH_API_KEY
+
+    payload = {"api_key": WEB_SEARCH_API_KEY, "query": query, "max_results": count,
+               "topic": topic if topic in _SEARCH_TOPICS else "general",
+               "include_answer": True}
+    if time_range in _SEARCH_TIME_RANGES:
+        payload["time_range"] = time_range
+    if depth in _SEARCH_DEPTHS and depth != "basic":
+        payload["search_depth"] = depth
+        payload["chunks_per_source"] = 3
+    try:
+        resp = _requests.post("https://api.tavily.com/search", json=payload, timeout=15)
+    except _requests.Timeout:
+        raise _SearchFailed("搜索请求超时（15 秒），请稍后重试")
+    except _requests.ConnectionError as e:
+        raise _SearchFailed(f"搜索连接失败: {e}")
+    except Exception as e:
+        raise _SearchFailed(f"搜索请求异常: {e}")
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise _SearchFailed(f"搜索服务返回 HTTP {resp.status_code}，请检查 API key 是否正确")
+    try:
+        data = resp.json()
+    except Exception:
+        raise _SearchFailed("搜索服务返回了无法解析的响应")
+    results = [{"title": item.get("title"), "url": item.get("url", ""),
+                "date": item.get("published_date"), "content": item.get("content", "")}
+               for item in (data.get("results") or [])]
+    return (data.get("answer") or "").strip(), results
+
+
+# 博查只接普通的 Web Search（不接收费更高、带大模型总结的 AI Search：总结由灵犀自己的模型做）。
+# 时间范围对应 freshness；"新闻"博查没有单独的类型，没给时间范围时按最近一周找。
+_BOCHA_FRESHNESS = {"day": "oneDay", "week": "oneWeek", "month": "oneMonth", "year": "oneYear"}
+# 博查的 summary 是一整段长摘要（不像 Tavily 用 [...] 分段），上限放宽一些
+_BOCHA_CHUNK_MAX = 600
+
+
+def _bocha_search(query, count, topic, time_range, depth):
+    """博查 Web Search：返回 ("", [结果])。打开 summary，每条带网页长摘要。"""
+    import requests as _requests
+    from .config import BOCHA_API_KEY
+
+    freshness = _BOCHA_FRESHNESS.get(time_range) or ("oneWeek" if topic == "news" else "noLimit")
+    payload = {"query": query, "count": count, "summary": True, "freshness": freshness}
+    try:
+        resp = _requests.post("https://api.bochaai.com/v1/web-search", json=payload, timeout=15,
+                              headers={"Authorization": f"Bearer {BOCHA_API_KEY}"})
+    except _requests.Timeout:
+        raise _SearchFailed("博查搜索超时（15 秒）")
+    except Exception as e:
+        raise _SearchFailed(f"博查搜索连接失败: {e}")
+    if resp.status_code in (401, 403):
+        raise _SearchFailed(f"博查 key 无效或没有权限（HTTP {resp.status_code}）")
+    if resp.status_code in (402, 429):
+        raise _SearchFailed(f"博查额度用完或请求太频繁（HTTP {resp.status_code}）")
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise _SearchFailed(f"博查搜索返回 HTTP {resp.status_code}")
+    try:
+        data = resp.json()
+    except Exception:
+        raise _SearchFailed("博查返回了无法解析的响应")
+    # 正式接口外面包一层 {"code", "msg", "data": SearchResponse}；HTTP 200 也可能是业务错误
+    code = data.get("code")
+    if isinstance(code, int) and code != 200:
+        raise _SearchFailed(f"博查返回错误（{code}）：{data.get('msg') or '未说明原因'}")
+    body = data.get("data") if isinstance(data.get("data"), dict) else data
+    pages = ((body or {}).get("webPages") or {}).get("value") or []
+    results = [{"title": p.get("name"), "url": p.get("url", ""), "site": p.get("siteName"),
+                "date": p.get("datePublished"), "content": p.get("summary") or p.get("snippet") or "",
+                "chunk_max": _BOCHA_CHUNK_MAX}
+               for p in pages]
+    return "", results
+
+
+_SEARCHERS = {"tavily": _tavily_search, "bocha": _bocha_search}
+_SEARCHER_NAMES = {"tavily": "Tavily", "bocha": "博查"}
+_CJK = re.compile(r"[一-鿿]")
+
+
+def _search_order(query):
+    """这次按什么顺序试搜索服务（只列配了 key 的）。
+
+    auto：中文问题先博查、其余先 Tavily，一个出错就换另一个；tavily / bocha：只用它——
+    用户选了"只用"，就不偷偷换成另一家。"""
+    from . import config
+    keys = {"tavily": config.WEB_SEARCH_API_KEY, "bocha": config.BOCHA_API_KEY}
+    pref = config.WEB_SEARCH_PROVIDER
+    if pref in _SEARCHERS:
+        order = [pref]
+    else:
+        order = ["bocha", "tavily"] if _CJK.search(query or "") else ["tavily", "bocha"]
+    return [name for name in order if keys[name]]
+
+
+# ── 深度搜索：抓前几个结果的原文，按问题挑出最相关的段落（设置里的开关）──
+_DEEP_PAGES = 3          # 读前几个结果的原文
+_DEEP_PASSAGES = 3       # 每篇留几段
+_DEEP_PASSAGE_MAX = 500  # 一段最多多少字
+_DEEP_FETCH_CHARS = 60000
+_DEEP_OTHERS_MAX = 120   # 深度模式下没读原文的结果只留一句话
+
+
+def _terms(text):
+    """打分用的词：英文 / 数字按词切，中文按相邻两字切（不需要分词库）。"""
+    text = (text or "").lower()
+    words = re.findall(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", text)
+    grams = []
+    for run in re.findall(r"[一-鿿]+", text):
+        if len(run) == 1:
+            grams.append(run)
+        else:
+            grams.extend(run[i:i + 2] for i in range(len(run) - 1))
+    return words + grams
+
+
+def _split_passages(text):
+    """把网页正文切成几百字一段：按行攒，遇到空行或攒够就断。表格行（列 | 列）和上下文留在一起。"""
+    passages, buf = [], []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            if sum(len(x) for x in buf) >= 80:
+                passages.append(" ".join(buf))
+                buf = []
+            continue
+        buf.append(line)
+        if sum(len(x) for x in buf) >= 300:
+            passages.append(" ".join(buf))
+            buf = []
+    if buf:
+        passages.append(" ".join(buf))
+    return [p if len(p) <= _DEEP_PASSAGE_MAX else p[:_DEEP_PASSAGE_MAX].rstrip() + "…" for p in passages]
+
+
+def _top_passages(query, text, k=_DEEP_PASSAGES):
+    """按和问题的相关度挑 k 段：主要看覆盖了问题里多少个不同的词，其次看命中次数。
+    按原文顺序返回（读起来连贯）。一个词都没命中的段不要。"""
+    wanted = set(_terms(query))
+    if not wanted:
+        return []
+    scored = []
+    for i, passage in enumerate(_split_passages(text)):
+        terms = _terms(passage)
+        covered = wanted & set(terms)
+        if not covered:
+            continue
+        hits = sum(1 for t in terms if t in wanted)
+        scored.append((len(covered) / len(wanted) + 0.1 * min(hits, 20) / 20, i, passage))
+    best = sorted(scored, key=lambda x: (-x[0], x[1]))[:k]
+    return [p for _, _, p in sorted(best, key=lambda x: x[1])]
+
+
+def _deep_read(query, results):
+    """并发抓前几个结果的原文，挑出最相关的段落放进 result["deep"]。抓不到（403、超时）的保留原摘要。"""
+    import concurrent.futures as _cf
+    targets = [r for r in results if r.get("url")][:_DEEP_PAGES]
+    if not targets:
+        return 0
+    with _cf.ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        fetched = list(pool.map(lambda r: _fetch_text(r["url"], _DEEP_FETCH_CHARS), targets))
+    read = 0
+    for result, (ok, text) in zip(targets, fetched):
+        passages = _top_passages(query, text) if ok else []
+        if passages:
+            result["deep"] = passages
+            read += 1
+    return read
 
 
 @tool
 def web_search(query: str, max_results: int = 5, topic: str = "general", time_range: str = "",
                depth: str = "basic") -> str:
-    """用 Tavily 搜索网络，返回一句直接答案（有的话）和每条结果的标题、链接、发布时间，
+    """搜索网络，返回一句直接答案（有的话）和每条结果的标题、链接、发布时间，
     以及每个网页里和问题最相关的几段原文。
 
     一次把问题问全（比如"S16 瑞士轮第四轮 对阵 比分"），先看直接答案和这次的结果够不够，
@@ -308,55 +489,52 @@ def web_search(query: str, max_results: int = 5, topic: str = "general", time_ra
     depth: "basic"（默认，先用它）；"advanced" 段落挑得更准，但每次多花一份额度——
            只在 basic 的结果里确实缺关键细节时再用，或改用 fetch_url 抓那篇原文
 
-    需要在 config.json 配置 web_search_api_key（tavily.com 免费申请）。
-    只读、不弹确认。"""
-    import requests as _requests
+    需要在设置里填 Tavily 或博查的 key。只读、不弹确认。"""
+    from . import config
 
-    from .config import WEB_SEARCH_API_KEY
-    if not WEB_SEARCH_API_KEY:
-        return "未配置搜索服务，请在 config.json 填 web_search_api_key（tavily.com 免费申请）"
-
+    order = _search_order(query)
+    if not order:
+        return "未配置搜索服务，请在设置 → 高级 → 网络搜索 里填 Tavily 或博查的 key（tavily.com 有免费额度）"
     try:
         count = max(1, min(int(max_results), _SEARCH_MAX_RESULTS))
     except (TypeError, ValueError):
         count = 5
-    payload = {"api_key": WEB_SEARCH_API_KEY, "query": query, "max_results": count,
-               "topic": topic if topic in _SEARCH_TOPICS else "general",
-               "include_answer": True}
-    if time_range in _SEARCH_TIME_RANGES:
-        payload["time_range"] = time_range
-    if depth in _SEARCH_DEPTHS and depth != "basic":
-        payload["search_depth"] = depth
-        payload["chunks_per_source"] = 3
-    try:
-        resp = _requests.post("https://api.tavily.com/search", json=payload, timeout=15)
-    except _requests.Timeout:
-        return "搜索请求超时（15 秒），请稍后重试"
-    except _requests.ConnectionError as e:
-        return f"搜索连接失败: {e}"
-    except Exception as e:
-        return f"搜索请求异常: {e}"
 
-    if resp.status_code < 200 or resp.status_code >= 300:
-        return f"搜索服务返回 HTTP {resp.status_code}，请检查 API key 是否正确"
+    failures = []
+    for name in order:
+        try:
+            answer, results = _SEARCHERS[name](query, count, topic, time_range, depth)
+            break
+        except _SearchFailed as e:
+            failures.append(f"{_SEARCHER_NAMES[name]}：{e}" if len(order) > 1 else str(e))
+    else:
+        return "；".join(failures)
 
-    try:
-        data = resp.json()
-    except Exception:
-        return "搜索服务返回了无法解析的响应"
-
-    results = data.get("results") or []
-    answer = (data.get("answer") or "").strip()
     if not results and not answer:
         return "没搜到"
+    deep_read = _deep_read(query, results) if config.WEB_SEARCH_DEEP else 0
 
     lines = []
+    if failures:
+        lines.append(f"（{'；'.join(failures)}，这次改用 {_SEARCHER_NAMES[name]}）")
+    if deep_read:
+        lines.append(f"（深度搜索：前 {deep_read} 个结果读了原文，下面标「原文」的是按问题挑出的段落）")
     if answer:
         lines.append(f"直接答案（搜索服务根据下面的结果归纳，引用前对照来源核实）：{answer}")
     for item in results:
         title = item.get("title") or "(无标题)"
-        url = item.get("url", "")
-        date = item.get("published_date")
-        head = f"{title}\n  {url}" + (f"\n  发布：{date}" if date else "")
-        lines.append(f"{head}\n  {_clean_snippet(item.get('content', ''))}")
+        head = f"{title}\n  {item.get('url', '')}"
+        if item.get("site"):
+            head += f"\n  来源：{item['site']}"
+        if item.get("date"):
+            head += f"\n  发布：{item['date']}"
+        if item.get("deep"):
+            body = "\n".join(f"  原文：{p}" for p in item["deep"])
+        elif deep_read:
+            # 深度模式下前几条已有原文段落，其余只留一句话当线索：照常给完整摘要的话，
+            # 一次搜索仍有七八千字，评测里开了深度反而更费 token
+            body = "  " + _clean_snippet(item.get("content", ""), _DEEP_OTHERS_MAX).split(" … ")[0]
+        else:
+            body = "  " + _clean_snippet(item.get("content", ""), item.get("chunk_max", _CHUNK_MAX))
+        lines.append(f"{head}\n{body}")
     return "\n\n".join(lines)

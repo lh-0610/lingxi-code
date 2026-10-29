@@ -251,6 +251,25 @@ class SettingsDialog(QDialog):
         rounds_hint.setWordWrap(True)
         a.addWidget(rounds_hint)
 
+        self._add_section(a, "网络搜索")
+        self._add_combo(a, "web_search_provider", "用哪个搜索服务", [
+            ("自动：中文问题用博查，其余用 Tavily；一个出错换另一个", "auto"),
+            ("只用 Tavily", "tavily"),
+            ("只用博查", "bocha"),
+        ])
+        self._add_text(a, "web_search_api_key", "Tavily API Key", "tvly-...", password=True)
+        self._add_text(a, "bocha_api_key", "博查 API Key", "sk-...", password=True)
+        self._add_bool(a, "web_search_deep",
+                       "深度搜索：自动读前几个结果的原文，按问题挑出最相关的段落", default=False)
+        search_hint = QLabel(
+            "• Tavily（tavily.com）每月有免费额度；博查（open.bochaai.com）中文和国内站点更全，只用它的普通搜索\n"
+            "• 深度搜索更准，但每次搜索会多等几秒（要去抓网页原文），不额外花搜索额度\n"
+            "• 这几项保存后立即生效，不用重启"
+        )
+        search_hint.setObjectName("providerCardHint")
+        search_hint.setWordWrap(True)
+        a.addWidget(search_hint)
+
         self._add_section(a, "MCP（高级 · 可选）")
         self._add_bool(a, "mcp_enabled",
                        "启用 MCP（连接外部工具服务器）", default=True)
@@ -951,6 +970,11 @@ class SettingsDialog(QDialog):
             from .. import config as _cfg
             _rc = self.config.get("remote_control") or {}
             _cfg.REMOTE_TELEGRAM_CONFIRM = bool(_rc.get("telegram_confirm", True))
+            # 网络搜索几项同理即时生效：web_search 每次调用时才读这几个模块属性
+            _cfg.WEB_SEARCH_API_KEY = str(self.config.get("web_search_api_key") or "")
+            _cfg.BOCHA_API_KEY = str(self.config.get("bocha_api_key") or "")
+            _cfg.WEB_SEARCH_PROVIDER = str(self.config.get("web_search_provider") or "auto")
+            _cfg.WEB_SEARCH_DEEP = bool(self.config.get("web_search_deep", False))
         except Exception:
             pass
 
