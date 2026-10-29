@@ -1271,3 +1271,94 @@ class TestReviewFixes:
         done = fh.execute_undo(first["checkpoint_id"], session_id=sid, workspace=ws)
         assert done["status"] == "ok" and done["changed"] is True
         assert (workspace / "c1.txt").read_text(encoding="utf-8") == "v1\n"
+
+
+# ══════════════════════════════════════════════════════════════
+# 非 Git 项目里"看改动"（git_diff 退回本轮改动文件的对比 / 完整内容）
+# ══════════════════════════════════════════════════════════════
+
+class TestReviewWithoutGit:
+    """原来非 Git 项目里 git_diff 只回"不是 git 仓库"、从不记审阅，改完代码这一轮永远收不了
+    completed（评测"修复失败的测试"因此 0/3）。现在逐个展示本轮改过的文件，全部完整展示了
+    才记为已审阅；看不全、或有没观察到的改动（盲区），照旧不放行。"""
+
+    def _git_gaps(self, sess):
+        from src import verification
+        return [g for g in verification.get_verification_gaps(sess.verification) if "git_diff" in g]
+
+    def test_shows_a_diff_against_the_first_baseline_and_counts_as_reviewed(self, workspace):
+        from src import tools_git
+        (workspace / "app.py").write_text("def total(a, b):\n    return a - b\n", encoding="utf-8")
+        sess = _make_saved_session(workspace)
+        run_records.begin_run(sess)
+        _drive("edit_file", {"path": "app.py", "old_string": "a - b", "new_string": "a + b"})
+        _drive("edit_file", {"path": "app.py", "old_string": "def total", "new_string": "def add"})
+        out = tools_git.git_diff.func("")
+        assert "不是 git 仓库" in out and "对比本会话里 AI 第一次改它之前的版本" in out
+        assert "-def total(a, b):" in out and "-    return a - b" in out, "基线是第一次写之前，不是最后一次"
+        assert "+def add(a, b):" in out and "+    return a + b" in out
+        assert sess.verification["diff_reviewed"] is True and not self._git_gaps(sess)
+
+    def test_new_file_is_diffed_against_nothing(self, workspace):
+        from src import tools_git
+        sess = _make_saved_session(workspace)
+        run_records.begin_run(sess)
+        _drive("write_file", {"path": "new.py", "content": "x = 1\n"})
+        out = tools_git.git_diff.func("")
+        assert "+x = 1" in out and sess.verification["diff_reviewed"] is True
+
+    def test_change_without_a_record_shows_the_whole_file(self, workspace):
+        """命令写的文件没有改前快照：给完整的当前内容，看过了照样算。"""
+        from src import tools_git, verification
+        (workspace / "gen.py").write_text("VALUE = 42\n", encoding="utf-8")
+        sess = _make_saved_session(workspace)
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "gen.py", abs_path=str(workspace / "gen.py"))
+        out = tools_git.git_diff.func("")
+        assert "没有改前版本，以下是完整的当前内容" in out and "VALUE = 42" in out
+        assert sess.verification["diff_reviewed"] is True and not self._git_gaps(sess)
+
+    def test_a_file_too_long_to_show_keeps_the_gate_closed(self, workspace):
+        from src import tools_git, verification
+        (workspace / "big.py").write_text("# 很长\n" + "x = 1\n" * 4000, encoding="utf-8")
+        (workspace / "small.py").write_text("y = 2\n", encoding="utf-8")
+        sess = _make_saved_session(workspace)
+        run_records.begin_run(sess)
+        for name in ("big.py", "small.py"):
+            verification.mark_dirty(sess.verification, name, abs_path=str(workspace / name))
+        out = tools_git.git_diff.func("")
+        assert "没展示全" in out and "big.py" in out.split("没展示全")[-1]
+        assert sess.verification["diff_reviewed"] is False, "有一个没看全就整体不算"
+        out = tools_git.git_diff.func("big.py", max_chars=60000)
+        assert "x = 1" in out and sess.verification["diff_reviewed"] is True
+
+    def test_unobserved_changes_still_block(self, workspace):
+        """盲区里发生过什么没人看见：看了记录到的文件也不能替它结清。"""
+        from src import tools_git, verification
+        (workspace / "a.py").write_text("a = 1\n", encoding="utf-8")
+        sess = _make_saved_session(workspace)
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "a.py", abs_path=str(workspace / "a.py"))
+        verification.mark_blind_period(sess.verification, str(workspace), "枚举超时")
+        tools_git.git_diff.func("")
+        assert self._git_gaps(sess), "盲区目录没被任何 diff 覆盖，闸门不能放行"
+
+
+class TestSessionBaseline:
+    def test_first_record_wins_and_damaged_material_is_not_trusted(self, workspace):
+        sess = _make_saved_session(workspace)
+        run_records.begin_run(sess)
+        (workspace / "f.txt").write_text("v0\n", encoding="utf-8")
+        _drive("write_file", {"path": "f.txt", "content": "v1\n"})
+        _drive("write_file", {"path": "f.txt", "content": "v2\n"})
+        sid, ws = sess.current_session_id, fh.session_workspace()
+        target = str(workspace / "f.txt")
+        data, known = fh.session_baseline(sid, ws, target)
+        assert known and data.replace(b"\r\n", b"\n") == b"v0\n"
+        assert fh.session_baseline("someone-else", ws, target) == (None, False)
+        assert fh.session_baseline(sid, ws, str(workspace / "never.txt")) == (None, False)
+        first = min((r for _c, r, _e in fh._scan_records() if r and r["path"].endswith("f.txt")),
+                    key=lambda r: r["created_at"])
+        with open(fh._blob_path(first["checkpoint_id"]), "wb") as stream:
+            stream.write(b"tampered")
+        assert fh.session_baseline(sid, ws, target) == (None, False), "材料对不上指纹就不当基线"

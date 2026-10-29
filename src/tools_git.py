@@ -29,6 +29,87 @@ def _mark_reviewed(root):
 _UNCOVERED_SAMPLE = 20
 
 
+def _render_change(rel, abs_path, baseline, room):
+    """非 Git 项目里一个改动文件的展示文字 + 是否完整展示了。
+
+    baseline 是 file_history.session_baseline 的结果：有可信的改前状态就给对比，没有就给
+    完整的当前内容。放不下（超过 room）就不展示，交给调用方记成"没看全"。"""
+    import difflib
+    before, known = baseline
+    try:
+        with open(abs_path, "rb") as stream:
+            now = stream.read()
+    except FileNotFoundError:
+        now = None
+    except OSError as error:
+        return f"### {rel}\n读取失败（{error}），无法展示。", False
+    if any(b is not None and b"\0" in b[:8192] for b in (before, now)):
+        size = len(now) if now is not None else 0
+        return f"### {rel}\n二进制文件（现在 {size} 字节），不展示内容。", True
+
+    def _lines(data):
+        return data.decode("utf-8", errors="replace").splitlines(keepends=True) if data else []
+
+    if known:
+        title = f"### {rel}（对比本会话里 AI 第一次改它之前的版本）"
+        if now is None:
+            title += "（文件已删除）"
+        body = "".join(difflib.unified_diff(_lines(before), _lines(now),
+                                            fromfile=f"a/{rel}", tofile=f"b/{rel}")) or "（和改前完全一样）"
+    elif now is None:
+        return f"### {rel}\n文件已经不存在了，也没有改前版本可对比。", True
+    else:
+        title = f"### {rel}（没有改前版本，以下是完整的当前内容）"
+        body = now.decode("utf-8", errors="replace")
+    text = f"{title}\n{body}"
+    if len(text) > room:
+        return (f"{title}\n（内容太长，这次没展示。单独看：git_diff(path=\"{rel}\", max_chars=30000)）",
+                False)
+    return text, True
+
+
+def _review_without_git(path: str, max_chars: int, reason: str) -> str:
+    """当前项目不是 Git 仓库（或没装 git）时的"看改动"：逐个展示本轮改过的文件。
+
+    **全部改动文件都完整展示了才记为已审阅**。原来这里只回一句"不是 git 仓库"、从不记审阅，
+    于是非 Git 项目里改完代码这一轮永远收不了 completed，完成闸门还会把模型打回去白跑几轮。
+    看不全的照旧不放行，并点名去哪儿单独看。"""
+    from . import file_history as _fh
+    from . import session as _session
+
+    v = _session.get_verification()
+    located = dict(v.get("dirty_abs") or {})
+    targets = [(rel, located.get(rel) or _resolve_path(rel)) for rel in v.get("dirty_files") or []]
+    if path:
+        want = os.path.realpath(_resolve_path(path))
+        targets = [(rel, p) for rel, p in targets
+                   if os.path.realpath(p) == want
+                   or os.path.realpath(p).startswith(want.rstrip(os.sep) + os.sep)]
+    if not targets:
+        where = f"{path} 在本轮" if path else "本轮"
+        return f"{reason}{where}也没有记录到文件改动。"
+
+    sid = getattr(_session.current_session(), "current_session_id", "") or ""
+    workspace = _fh.session_workspace()
+    try:
+        budget = max(1000, min(int(max_chars), 60000))
+    except (TypeError, ValueError):
+        budget = 8000
+    parts = [f"{reason}下面逐个列出本轮改过的文件：有改前版本的给出对比，没有的给出完整的当前内容。"]
+    shown, missing = [], []
+    for rel, abs_path in targets:
+        room = budget - sum(len(p) + 2 for p in parts)
+        section, complete = _render_change(rel, abs_path, _fh.session_baseline(sid, workspace, abs_path), room)
+        parts.append(section)
+        (shown if complete else missing).append((rel, abs_path))
+    if missing:
+        parts.append("以下文件这次没展示全，这一项先不算看过：" + "、".join(rel for rel, _ in missing))
+    else:
+        for _rel, abs_path in shown:
+            _mark_reviewed(abs_path)
+    return "\n\n".join(parts)
+
+
 def _uncovered_changes(cwd):
     """默认 `git diff` 看不见的那些改动：(已暂存文件, 未跟踪文件, 错误原因)。
 
@@ -76,7 +157,7 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
     try:
         import shutil as _shutil
         if not _shutil.which("git"):
-            return "git 未安装或不在 PATH 中，无法查看 diff。"
+            return _review_without_git(path, max_chars, "没有找到 git，")
 
         cwd = _project_cwd()
         cmd = ["git", "diff"]
@@ -102,7 +183,7 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
             if "not a git repository" in stderr.lower():
-                return "当前项目不是 git 仓库。"
+                return _review_without_git(path, max_chars, "当前项目不是 git 仓库，")
             return f"git diff 执行出错: {stderr or '未知错误'}"
 
         output = result.stdout or ""

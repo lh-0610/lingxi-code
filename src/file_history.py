@@ -576,6 +576,37 @@ def _summary(record) -> dict:
     }
 
 
+def session_baseline(session_id: str, workspace: str, path: str):
+    """这个会话里 AI **第一次**写这个文件之前它是什么样——给非 Git 项目"看改动"用，不参与撤销。
+
+    返回 (原始字节或 None, 是否有可信的改前状态)：
+      (bytes, True)  第一次写之前文件存在，备份完好；
+      (None, True)   第一次写之前文件不存在（是 AI 新建的）；
+      (None, False)  没有这个文件的记录，或第一条记录的写前材料不完整 / 已损坏。
+    只取第一条：之后的记录说明不了更早的样子，拿它当基线会把前面的改动藏掉。
+    """
+    if not session_id:
+        return None, False
+    want_ws, want_path = _norm(workspace), _norm(path)
+    first, first_key = None, None
+    with _LOCK:
+        for _cid, record, _error in _scan_records():
+            if record is None or record["session_id"] != session_id:
+                continue
+            if _norm(record.get("workspace")) != want_ws or _norm(record.get("path")) != want_path:
+                continue
+            key = record.get("created_at") or ""
+            if first is None or key < first_key:
+                first, first_key = record, key
+        if first is None:
+            return None, False
+        pre = first.get("pre") or {}
+        if pre.get("existed") is False and not pre.get("read_error"):
+            return None, True
+        data, _error = _read_blob(first)
+        return (data, True) if data is not None else (None, False)
+
+
 def latest_undoable(session_id: str, workspace: str):
     """(session, workspace) 下最近一条材料齐全的可撤销记录摘要；没有则 None。
 
