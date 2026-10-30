@@ -51,6 +51,13 @@ class TestRemoteSafety:
         last = _exec({"name": "read_files", "args": {"paths": ["main.py", "config.json"]}, "id": "1"})
         assert isinstance(last, ToolMessage) and "拒绝" in last.content and "config.json" in last.content
 
+    def test_safe_readonly_blocks_explore(self, monkeypatch, clean_state):
+        """explore 的子代理能读项目里任何文件、不过遥控黑名单：遥控只读模式下不能放行。"""
+        monkeypatch.setattr(state, "remote_session", True)
+        monkeypatch.setattr(config, "REMOTE_MODE", "safe_readonly")
+        last = _exec({"name": "explore", "args": {"question": "config.json 里写了什么"}, "id": "1"})
+        assert isinstance(last, ToolMessage) and "拒绝" in last.content
+
     def test_allow_web_lets_fetch_through_in_chat_only(self, monkeypatch, clean_state):
         # allow_web_search=true:chat_only 下也放行 fetch_url / web_search(其它仍拦)
         monkeypatch.setattr(state, "remote_session", True)

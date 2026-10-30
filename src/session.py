@@ -52,6 +52,12 @@ _SESSION_FIELDS = {
     "verification": lambda: __import__("src.verification", fromlist=["new_verification"]).new_verification(),
     # git worktree 隔离区路径（运行期临时状态；会话文件不持久化）
     "worktree": lambda: None,
+    # 只读探索子代理（tools_explore.explore）用的运行期限制，不持久化：
+    # allowed_tools 非空时模型只绑定、也只能调用这些工具；max_rounds 覆盖设置里的轮次上限；
+    # system_prompt_override 非空时 get_system_prompt 直接返回它（streaming 每轮都会重渲染系统提示词）。
+    "allowed_tools": lambda: None,
+    "max_rounds": lambda: None,
+    "system_prompt_override": lambda: None,
     # ── B03 运行记录（随会话 JSON 的 progress 持久化）──
     # 上一轮运行的记录：run_id / phase / outcome / 来源 / 证据。None = 本会话还没跑过。
     # phase 是"程序有没有收到本轮结果"，outcome 是"实际返回的 AgentResult"，两者不能互推。

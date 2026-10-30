@@ -9,6 +9,12 @@
 - 子 Agent 是 `is_subagent=True` 的会话，`ui_ref=None`（不弹前台确认）；文件/命令严格限定在自己 worktree（`tools_common._subagent_path_rejection` / `_subagent_command_rejection` best-effort 沙箱）
 - `worktree.py` 管隔离区生命周期；`Session.worktree` 路由该会话所有文件/命令落点（`_project_cwd` 优先返回 worktree）
 
+## 只读探索子代理（src/tools_explore.py）
+- `explore(question, thoroughness)`：主 Agent 把要翻好几个文件才弄得清的问题派出去，子代理在自己的上下文里搜、读，只交回带 `路径:行号` 的报告。七家主流 coding agent 都这么做；评测 011 里主循环挨个读文件要 60 轮
+- 子会话 `is_subagent=True`、`worktree=项目根`（只能读项目里的文件），不建 worktree；三个会话级字段：`allowed_tools`（`resolve_bound_llm` 只绑这些、`_execute_tool` 再硬拦）、`max_rounds`（quick 8 / medium 20 / thorough 40）、`system_prompt_override`（`get_system_prompt` 直接返回它——streaming 每轮都会重渲染系统提示词）
+- 跑满上限时多调一次模型（不带工具）把已查到的写成报告，而不是只交回"已达上限"；父任务停止时子代理跟着停
+- 遥控只读模式不放行：子代理能读项目里任何文件，绕得过敏感文件黑名单
+
 ## 代码导航（src/lsp_client.py + codeintel.py + tools_codemap.py）
 - `find_definition` / `find_references`：**LSP（最准，装了语言服务器）→ jedi（Python）→ 退回 search_files** 的降级链
 - `codeintel.py`：tree-sitter 符号提取 / 导入追踪（多语言），支撑 `code_map` / `related_files`

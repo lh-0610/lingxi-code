@@ -93,7 +93,10 @@ def resolve_bound_llm(session):
     # 读【目标会话】的 rag_mode（会话级）——前台切知识库不影响后台编码会话的绑定；
     # streaming 每轮都调这里，切模式后下一条消息自动换绑定。
     rag = bool(getattr(session, "rag_mode", False))
-    key = (mi, mtype, model_id, effective_reasoning, rag)
+    # 只读探索子代理只绑它能用的读/搜工具（模型看不到写工具就不会去调），同样进缓存键
+    allowed = getattr(session, "allowed_tools", None)
+    allowed_key = tuple(sorted(allowed)) if allowed else None
+    key = (mi, mtype, model_id, effective_reasoning, rag, allowed_key)
     if key not in _BOUND_LLM_CACHE:
         try:
             llm = _create_llm(mi, effective_reasoning)
@@ -106,7 +109,12 @@ def resolve_bound_llm(session):
             if issues:
                 raise ModelConfigError("".join(issues)) from e   # 每条已以"。"结尾
             raise
-        tools = build_rag_tools() if rag else build_all_tools()
+        if rag:
+            tools = build_rag_tools()
+        elif allowed:
+            tools = [t for t in build_all_tools() if t.name in allowed]
+        else:
+            tools = build_all_tools()
         _BOUND_LLM_CACHE[key] = (llm, llm.bind_tools(tools))
     return _BOUND_LLM_CACHE[key]
 
@@ -441,7 +449,7 @@ def _run_claude_code(ui):
     return result
 
 
-_READ_ONLY_TOOLS = {"read_file", "read_files", "search_files", "search_in_file", "list_directory", "find_definition",
+_READ_ONLY_TOOLS = {"read_file", "read_files", "explore", "search_files", "search_in_file", "list_directory", "find_definition",
                     "find_references", "code_map", "git_diff", "git_status", "git_log", "related_files",
                     "find_tests", "fetch_url", "web_search"}
 
@@ -476,7 +484,11 @@ def _check_round_limit(ui, round_i):
     **0 = 不限**（用户在设置里显式关掉了刹车）。
     """
     from . import config as _cfg_mod
-    _max_rounds = getattr(_cfg_mod, "AGENT_MAX_ROUNDS", 100)
+    from . import session as _session
+    # 会话自己的上限优先（只读探索子代理按快 / 中 / 彻底三档设），没有才用设置里的
+    _max_rounds = getattr(_session.current_session(), "max_rounds", None)
+    if _max_rounds is None:
+        _max_rounds = getattr(_cfg_mod, "AGENT_MAX_ROUNDS", 100)
     if not (_max_rounds > 0 and round_i >= _max_rounds):
         return None
     # 把结论写进 chat_history（而不是只弹 UI 提示）——否则用户接着发消息时，模型看不到

@@ -19,6 +19,9 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 - set_step_status: 推进进度用它改【单步】状态（步号+状态），别反复重发整份计划
 
 **读 / 查代码**
+- explore: **派只读子代理去弄清一个问题**（"X 是怎么工作的""Y 在哪里处理""改 Z 会影响哪些地方"）。它在自己的上下文里搜、读，
+  只交回带 `路径:行号` 的报告，不占你的上下文。**要读 3 个以上文件才弄得清的问题，先派它，别自己一个个读**；
+  几个互不相关的问题同一轮各派一个，会并行跑。它看不到你的对话，question 里写清要查什么、要拿来干嘛
 - read_file: 读文件（行号前缀，`offset`/`limit` 分页读大文件）
 - read_files: 一次读多个文件（`paths=[...]`，最多 8 个）——要看几个文件时用它，别一轮读一个
 - search_in_file: 单文件搜关键词（substring）
@@ -94,7 +97,8 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 
 每一轮都要把整段上下文重新发一遍，单次任务还有轮次上限，绕路既慢又会半途被停。照这个顺序来：
 1. **先复现**：拿到报错先用最短的办法复现（一条 `run_command` 跑出错的那句，或一个最小测试），确认看到的就是用户说的错
-2. **顺着报错找**：从报错栈、出错的函数名出发，`find_definition` / `search_files` 定位，再 `read_file` 整份读（默认 2000 行，
+2. **顺着报错找**：调用链不清楚（要翻好几个文件）就先 `explore` 一次拿到报告，再只读要改的那几处；
+   位置明确时从报错栈、出错的函数名出发，`find_definition` / `search_files` 定位，再 `read_file` 整份读（默认 2000 行，
    只有超长文件才用 offset 分段）。和这个问题无关的模块、别的功能的测试、CI 配置、文档不要去翻；读过的别再读
 3. **一轮多做几件事**：要看几个文件就 `read_files(paths=[...])` 一次读完；要搜几个关键词就同一轮把几个 `search_files` 一起发出去
 4. **尽早测**：定位清楚就把复现写成测试，改完马上跑它和相关测试——不要等到最后才第一次 `run_tests`
@@ -184,6 +188,40 @@ _PROJECT_RULES_PRECEDENCE = (
 )
 
 
+EXPLORE_SYSTEM_PROMPT = """你是**只读的代码探索助手**。主 Agent 正在做一件编码任务，派你去弄清代码库里的一个问题；
+你看不到它的对话，只看得到下面这条问题。你查清楚、写一份报告交回去，它据此动手。
+
+**你只能读、只能搜**：search_files、find_definition、find_references、code_map、related_files、find_tests、
+read_file、read_files、list_directory、search_in_file、git_log、git_diff、get_project_instructions。不能改文件、不能跑命令。
+
+**怎么查**
+1. 先定位再读：search_files / find_definition / find_references 找到相关位置，code_map 看一个目录里有哪些函数和类
+2. 读就整份读：要看几个文件用 read_files 一次读完；几个独立的搜索同一轮一起发出去
+3. 读到能回答问题就停，别为了"完整"去翻无关模块
+
+**彻底程度**（问题末尾会写）：quick——几轮内给出最可能的位置；medium——把主要调用链走通；
+thorough——把相关入口、分支、测试都找全
+
+**报告**：最后一条回复就是报告，原样交给主 Agent。不要寒暄，不要说"我将…"：
+1. 结论：一两句话
+2. 关键位置：每条 `路径:行号` + 这里做了什么
+3. 调用链 / 数据流（问的是流程时）
+4. 要改的话改哪里、要注意什么（问题里提到要改时）
+5. 没查清的地方
+1500 字以内；只写查到的事实，推测要标明是推测。"""
+
+
+def get_explore_system_prompt(project_root) -> str:
+    """只读探索子代理的系统提示词：探索规则 + 项目根 + 项目指令（CLAUDE.md 等常写着架构说明，探索最用得上）。"""
+    base = EXPLORE_SYSTEM_PROMPT + f"\n\n# 项目\n根目录：`{project_root}`，报告里的路径相对它写。"
+    if project_root and os.path.isdir(project_root):
+        rule_sources = read_rule_sources(project_root)
+        if rule_sources:
+            base += ("\n\n# 项目指令（来自 CLAUDE.md / AGENTS.md / .lingxirules）\n" + _PROJECT_RULES_PRECEDENCE
+                     + render_rule_sources(rule_sources, _COMBINED_RULES_MAX))
+    return base
+
+
 def _shell_context() -> str:
     """告诉模型 run_command 用的是哪种 shell。
 
@@ -226,6 +264,10 @@ def get_system_prompt(web_search=None):
     # 上下文，**也不注入长期记忆**——记忆属于"检索资料之外的知识"，注入会破坏
     # "只依据知识库检索结果回答"的接地约束（答案可能混进记忆内容却标不出来源）。
     from . import state as _state_rag
+    # 专用子代理（只读探索）带着自己的提示词：streaming 每轮重渲染时也要原样给它，不能换回主提示词
+    _override = getattr(_state_rag, "system_prompt_override", None)
+    if _override:
+        return _override
     if getattr(_state_rag, "rag_mode", False):
         from datetime import datetime as _dt_rag
         return RAG_SYSTEM_PROMPT + f"\n\n# 当前日期\n今天是 {_dt_rag.now().strftime('%Y年%m月%d日')}。"
