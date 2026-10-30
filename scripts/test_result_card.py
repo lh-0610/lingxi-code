@@ -831,6 +831,36 @@ class TestQtRendering:
         assert "继续任务" not in [b.text() for b in done.findChildren(QPushButton)]
         done.close()
 
+    def test_continue_comes_before_the_check_list(self, qt_app, isolated_memory):
+        """没做完的卡先给「继续任务」，长长的检查清单放后面——跑满轮数时不用往下翻找按钮。"""
+        from PySide6.QtWidgets import QLabel, QPushButton
+        from src.ui.result_card import ResultCard
+        sess = _new_session()
+        _saved(sess)
+        sess.project = "D:/proj"
+        run_records.begin_run(sess)
+        for i in range(6):
+            verification.record_evidence(sess.verification, kind="static", checker="ruff",
+                                         status="passed", exit_code=0, argv=["ruff", f"f{i}.py"])
+        card = ResultCard(_describe(_finish(sess, "limit_reached")))
+
+        def _position(match):
+            col = card.layout()
+            for i in range(col.count()):
+                item = col.itemAt(i)
+                widgets = [item.widget()] if item.widget() else [
+                    item.layout().itemAt(j).widget() for j in range(item.layout().count())
+                ] if item.layout() else []
+                if any(w is not None and match(w) for w in widgets):
+                    return i
+            return None
+
+        continue_at = _position(lambda w: isinstance(w, QPushButton) and w.text() == "继续任务")
+        checks_at = _position(lambda w: isinstance(w, QLabel) and w.text() == "实际执行的检查")
+        assert continue_at is not None and checks_at is not None
+        assert continue_at < checks_at
+        card.close()
+
     def test_buttons_carry_their_own_card_identity(self, qt_app, isolated_memory):
         """按钮带着**这张卡自己的**归属走，不去读当前前台会话。"""
         from PySide6.QtWidgets import QPushButton

@@ -441,6 +441,33 @@ def _run_claude_code(ui):
     return result
 
 
+_READ_ONLY_TOOLS = {"read_file", "search_files", "search_in_file", "list_directory", "find_definition",
+                    "find_references", "code_map", "git_diff", "git_status", "git_log", "related_files",
+                    "find_tests", "fetch_url", "web_search"}
+
+
+def _repeating_tool_call(history, window=15):
+    """最近 window 次工具调用里，有没有同一个调用（工具名 + 参数完全一样）反复出现。
+
+    只读的查看类调用重复 3 次、其它（跑命令、跑测试……改完再跑一遍是正常的）重复 4 次才算。
+    返回 (工具名, 次数)，没有返回 None。"""
+    import json as _json
+    calls = [tc for m in history for tc in (getattr(m, "tool_calls", None) or []) if isinstance(tc, dict)]
+    counts = {}
+    for tc in calls[-window:]:
+        try:
+            args = _json.dumps(tc.get("args") or {}, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            args = str(tc.get("args"))
+        key = (tc.get("name") or "", args)
+        counts[key] = counts.get(key, 0) + 1
+    worst = None
+    for (name, _args), n in counts.items():
+        if n >= (3 if name in _READ_ONLY_TOOLS else 4) and (worst is None or n > worst[1]):
+            worst = (name, n)
+    return worst
+
+
 def _check_round_limit(ui, round_i):
     """轮次上限：模型持续返回 tool_calls 时主循环没有自然终点，触顶就停下来说明情况。
 
@@ -449,15 +476,24 @@ def _check_round_limit(ui, round_i):
     **0 = 不限**（用户在设置里显式关掉了刹车）。
     """
     from . import config as _cfg_mod
-    _max_rounds = getattr(_cfg_mod, "AGENT_MAX_ROUNDS", 50)
+    _max_rounds = getattr(_cfg_mod, "AGENT_MAX_ROUNDS", 100)
     if not (_max_rounds > 0 and round_i >= _max_rounds):
         return None
     # 把结论写进 chat_history（而不是只弹 UI 提示）——否则用户接着发消息时，模型看不到
     # 上一轮"被截断"这件事，会以为自己顺利做完了。
-    _msg = (f"⚠️ 已达单次交互轮次上限（{_max_rounds} 轮）并自动停止。"
-            "模型可能陷入了循环。请查看上面的执行记录，把任务拆小后重新提出。"
-            "（如需不限轮次，可在设置 → 高级里把上限设为 0）")
-    logger.warning(f"agent_loop 触顶 {_max_rounds} 轮，强制停止")
+    # 跑满不等于打转：大仓库里的正常任务也会跑满。只有真在重复同一个调用时才说"卡住了"，
+    # 否则一律说"在接着干、可以继续"——以前一律说"可能陷入了循环"，把做到九成的活说成了失败。
+    _repeat = _repeating_tool_call(state.chat_history)
+    if _repeat:
+        _name, _times = _repeat
+        _msg = (f"⚠️ 已达单次交互轮次上限（{_max_rounds} 轮），自动停下。"
+                f"最近几轮在重复同样的操作（{_name} 用一模一样的参数调了 {_times} 次），像是卡住了："
+                "建议换个说法、补充线索或把任务拆小再提。")
+    else:
+        _msg = (f"⚠️ 已达单次交互轮次上限（{_max_rounds} 轮），自动停下，任务还没做完。"
+                f"点结果卡上的「继续任务」可以接着做（再给 {_max_rounds} 轮）；"
+                "上限在设置 → 高级里改，0 = 不限。")
+    logger.warning(f"agent_loop 触顶 {_max_rounds} 轮，强制停止（{'重复调用' if _repeat else '未见重复'}）")
     state.chat_history.append(AIMessage(content=_msg))
     ui.show_message(f"\n{_msg}\n", "tool_result")
     return AgentResult("limit_reached", _msg)

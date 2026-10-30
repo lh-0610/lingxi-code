@@ -151,6 +151,75 @@ class TestRoundCap:
         assert _agent.agent_loop(ui).status == "completed"
         assert not any("轮次上限" in m for m in ui.messages)
 
+    def test_default_cap_leaves_room_for_big_repos(self):
+        """大仓库里的正常任务要 60~70 轮（评测 011），默认上限不能再是 50。"""
+        from src.limits import AGENT_MAX_ROUNDS_DEFAULT
+        assert AGENT_MAX_ROUNDS_DEFAULT >= 100
+
+
+def _calls(*specs):
+    """[(name, args), ...] → 每个调用一条带 tool_calls 的 AIMessage。"""
+    from langchain_core.messages import AIMessage
+    return [AIMessage(content="", tool_calls=[{"name": n, "args": a, "id": f"t{i}"}])
+            for i, (n, a) in enumerate(specs)]
+
+
+class TestStuckOrJustLong:
+    """跑满上限 ≠ 打转。只有同一个调用反复出现才说"卡住了"，否则说清可以继续。"""
+
+    def test_same_read_three_times_is_repeating(self):
+        from src.agent import _repeating_tool_call
+        h = _calls(("read_file", {"path": "a.py"}), ("search_files", {"regex": "x"}),
+                   ("read_file", {"path": "a.py"}), ("read_file", {"path": "a.py"}))
+        assert _repeating_tool_call(h) == ("read_file", 3)
+
+    def test_different_reads_are_not_repeating(self):
+        from src.agent import _repeating_tool_call
+        h = _calls(*[("read_file", {"path": "a.py", "offset": i * 100}) for i in range(10)])
+        assert _repeating_tool_call(h) is None
+
+    def test_rerunning_tests_needs_four(self):
+        """改完再跑一遍同样的测试是正常的，跑 3 次不算卡住，4 次才算。"""
+        from src.agent import _repeating_tool_call
+        three = _calls(*[("run_tests", {"path": "t.py"})] * 3)
+        assert _repeating_tool_call(three) is None
+        assert _repeating_tool_call(three + _calls(("run_tests", {"path": "t.py"}))) == ("run_tests", 4)
+
+    def test_only_recent_calls_count(self):
+        """很早以前读过三次、最近一直在干别的，不算现在卡住。"""
+        from src.agent import _repeating_tool_call
+        old = _calls(*[("read_file", {"path": "a.py"})] * 3)
+        recent = _calls(*[("read_file", {"path": f"f{i}.py"}) for i in range(15)])
+        assert _repeating_tool_call(old + recent) is None
+
+    def _run_to_cap(self, agent_env, monkeypatch, args_for_round):
+        from langchain_core.messages import AIMessage
+        _agent, sess = agent_env
+        _set_cap(monkeypatch, 5)
+        n = {"i": 0}
+
+        def _fake_stream(ui):
+            n["i"] += 1
+            return ("", [{"name": "read_file", "args": args_for_round(n["i"]), "id": f"c{n['i']}"}],
+                    {"input": 1, "output": 1, "total": 2}, None)
+        monkeypatch.setattr(_agent, "_stream_with_tools", _fake_stream)
+        monkeypatch.setattr(_agent, "_execute_tool", lambda *a, **k: None)
+        monkeypatch.setattr(_agent, "_build_ai_message",
+                            lambda g, t, tcs: AIMessage(content=t or "", tool_calls=tcs))
+        ui = _UI()
+        result = _agent.agent_loop(ui)
+        assert result.status == "limit_reached"
+        return result.reason
+
+    def test_long_task_message_offers_continue(self, agent_env, monkeypatch):
+        reason = self._run_to_cap(agent_env, monkeypatch, lambda i: {"path": f"f{i}.py"})
+        assert "轮次上限" in reason and "继续任务" in reason
+        assert "卡住" not in reason and "循环" not in reason
+
+    def test_repeating_task_message_says_stuck(self, agent_env, monkeypatch):
+        reason = self._run_to_cap(agent_env, monkeypatch, lambda i: {"path": "same.py"})
+        assert "轮次上限" in reason and "卡住" in reason and "read_file" in reason
+
 
 class TestOverflowRecovery:
     def test_squeeze_increments_then_succeeds(self, agent_env, monkeypatch):

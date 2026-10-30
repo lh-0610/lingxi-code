@@ -125,12 +125,21 @@ class ResultCard(QFrame):
                                  color=_P["text_sec"], size=12))
 
         self._continue_btn = None
-        self._add_files(col)
-        self._add_validations(col)
-        self._add_pending(col)
-        self._add_resume(col)
-        self._add_save_note(col)
-        self._add_buttons(col)
+        if self.view.get("resumable"):
+            # 没做完的卡：先说停在哪、给「继续任务」，长长的文件和检查清单放后面。
+            # 以前按钮压在一串检查记录下面，跑满轮数时得往下翻才找得到。
+            self._add_resume(col)
+            self._add_buttons(col)
+            self._add_files(col)
+            self._add_validations(col)
+            self._add_pending(col)
+            self._add_save_note(col)
+        else:
+            self._add_files(col)
+            self._add_validations(col)
+            self._add_pending(col)
+            self._add_save_note(col)
+            self._add_buttons(col)
 
     # ── 各区块 ──
 
@@ -250,11 +259,20 @@ class ResultCard(QFrame):
             # 按钮上的字整个消失（截图里见过）。
             btn.setMinimumHeight(30)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            btn.setStyleSheet(
-                f"QPushButton {{ border:1px solid {_P['chip_border']}; border-radius:8px;"
-                f" padding:5px 12px; background:{_P['card_bg']}; color:{_P['text3']};"
-                f" font-family:{_SANS}; font-size:12px; }}"
-                f"QPushButton:hover {{ border-color:{_P['chip_hover']}; }}")
+            if signal is self.continue_requested:
+                # 没做完的卡上最该点的就是它：实心主色，和旁边的查看类按钮分开
+                btn.setStyleSheet(
+                    f"QPushButton {{ border:1px solid {_P['indigo']}; border-radius:8px;"
+                    f" padding:5px 14px; background:{_P['indigo']}; color:{_P['view_bg']};"
+                    f" font-family:{_SANS}; font-size:12px; font-weight:600; }}"
+                    f"QPushButton:disabled {{ background:{_P['card_bg']}; color:{_P['muted2']};"
+                    f" border-color:{_P['chip_border']}; }}")
+            else:
+                btn.setStyleSheet(
+                    f"QPushButton {{ border:1px solid {_P['chip_border']}; border-radius:8px;"
+                    f" padding:5px 12px; background:{_P['card_bg']}; color:{_P['text3']};"
+                    f" font-family:{_SANS}; font-size:12px; }}"
+                    f"QPushButton:hover {{ border-color:{_P['chip_hover']}; }}")
             # 按钮带着**这张卡自己的** view 走，不去读当前前台会话——
             # 用户完全可能在点之前切到了别的会话。
             btn.clicked.connect(lambda _c=False, s=signal: s.emit(self.view))

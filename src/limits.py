@@ -11,9 +11,10 @@ SIDEBAR_GROUP_VISIBLE_STEP = 30
 # 实际生效值是 config.AGENT_MAX_ROUNDS（config.json 的 agent_max_rounds 可覆盖，
 # 设置弹窗「高级」页可改；**设 0 = 不限轮次**）。
 # 没有上限时主循环是裸 while True：模型只要一直返回 tool_calls 就一直跑，唯一的刹车是
-# 用户点停止。50 对正常编码任务绰绰有余（实测复杂任务 10~20 轮封顶），触顶基本意味着
-# 模型陷在循环里——此时停下来把情况告诉用户，比继续烧 token 有用。
-AGENT_MAX_ROUNDS_DEFAULT = 50
+# 用户点停止。小项目里的编码任务 10~20 轮就够，但在几百个文件的真实仓库里（评测 011：
+# 灵犀修自己的启动崩溃，DeepSeek V4.1 Flash）正常要 60~70 轮，原来的 50 会把做到九成的活
+# 拦下。100 留出这段余量；真打转由 agent._repeating_tool_call 认出来，触顶时说法不同。
+AGENT_MAX_ROUNDS_DEFAULT = 100
 
 HISTORY_TOKEN_BUDGET = 80_000
 
