@@ -1,6 +1,7 @@
 """系统托盘图标。
 
-主聊天窗口关闭后由托盘维持后台运行；托盘提供「打开对话 / 退出」，双击唤起窗口。
+主聊天窗口点 × 只收进托盘、后台照常运行（同 Codex）；托盘提供「打开对话 / 退出」，单击唤起窗口。
+「退出」走 chat_window.request_quit：还有任务在跑时先确认。
 （桌面宠物已移除——本应用专注代码助手；娱乐属性以后另开独立应用。）
 """
 import os
@@ -30,7 +31,7 @@ def create_tray(app, chat_window, icon_path=None):
         tray.setIcon(QIcon(icon_path))
     else:
         tray.setIcon(app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon))
-    tray.setToolTip("灵犀 AI 助手（双击唤起对话，右键退出）")
+    tray.setToolTip("灵犀（点击打开窗口，右键 → 退出）")
 
     def _show_chat():
         _restore_window(chat_window)
@@ -47,11 +48,12 @@ def create_tray(app, chat_window, icon_path=None):
     menu.addSeparator()
 
     a_exit = QAction("退出", menu)
-    a_exit.triggered.connect(app.quit)
+    a_exit.triggered.connect(chat_window.request_quit)
     menu.addAction(a_exit)
 
     tray.setContextMenu(menu)
     tray._menu = menu  # 双保险
+    chat_window._tray = tray  # 关窗时据此判断能不能收进托盘（closeEvent）
 
     def _on_activated(reason):
         if reason == QSystemTrayIcon.Trigger:

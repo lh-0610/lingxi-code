@@ -58,7 +58,7 @@ src/                     # 主代码
   images.py              # 图片输入格式归一化（视觉/多模态，Anthropic/OpenAI/Gemini 协议差异）
   debug_log.py           # F12 调试：请求/响应 record 环形缓冲 + Qt Signal
   claude_code.py         # 通过 subprocess 调本地 Claude Code CLI（permission-mode 映射 Plan/Act；--append-system-prompt-file + stdin 避 32K 命令行）
-  floating.py            # 系统托盘 create_tray（关窗维持后台 + 双击唤起 + _restore_window 保留最大化）
+  floating.py            # 系统托盘 create_tray（关窗收进托盘 + 单击唤起 + 退出前确认 + _restore_window 保留最大化）
 
   ui/                    # UI 包（chat_window.py 用 mixin 拆分）
     __init__.py          # 导出 ChatUI / SettingsDialog

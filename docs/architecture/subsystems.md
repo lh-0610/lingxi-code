@@ -31,8 +31,9 @@
 - 激活的角色记录在 `chat_memory/role_config.json`，启动时 `load_saved_role_card()` 自动恢复
 
 ## 系统托盘（src/floating.py）
-- `create_tray(app, chat_window, icon_path)`：`QSystemTrayIcon` + 右键菜单（打开对话 / 退出）+ 双击唤起窗口
-- `main.py` 设 `setQuitOnLastWindowClosed(False)`，关窗只隐藏、由托盘维持后台；托盘"退出"才真退
+- `create_tray(app, chat_window, icon_path)`：`QSystemTrayIcon` + 右键菜单（打开对话 / 退出）+ 单击唤起窗口；把自己挂到 `chat_window._tray`
+- `main.py` 设 `setQuitOnLastWindowClosed(False)`；`ChatUI.closeEvent` 点 × 只隐藏（同 Codex，不弹框），第一次冒托盘气泡；托盘不可用时关窗等于退出
+- 托盘"退出" → `ChatUI.request_quit`：还有对话（worker 线程活着）或后台命令在跑时弹 `QuitConfirmDialog`（默认取消），确认后置 `_quitting` 再 `QApplication.quit()`——Qt 6 的 quit 会去关可见窗口，不置标志 closeEvent 又会把它收进托盘、退出被打断
 - `_restore_window` 唤起时**保留最大化/全屏状态**（不用 `showNormal()`，否则会缩回默认尺寸）
 - 桌面宠物已移除（原 DesktopPet / GIF 动画 / `set_thinking` 钩子全部删除）；`thinking_indicator` 是聊天窗口自己的"思考中…"指示器，与托盘无关
 

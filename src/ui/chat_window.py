@@ -26,7 +26,7 @@ from ..content_blocks import block_text
 from ._base import BASE_DIR
 from .theme import THEMES, build_stylesheet, load_saved_theme, save_theme_choice, set_active_theme
 from .widgets import (
-    CloseConfirmDialog, DragDropTextEdit, FileCompleter,
+    DragDropTextEdit, FileCompleter, QuitConfirmDialog,
     SignalBridge,
 )
 from .helpers import (
@@ -1858,46 +1858,63 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         super().hideEvent(event)
 
     def closeEvent(self, event):
-        # 关窗前先唤醒任何还挂着的命令 / edit diff 确认请求——否则 worker 线程
-        # 会卡满 5 分钟才超时，期间 agent 线程整段挂死
+        # main.py 挂上系统托盘后会把 _hide_on_close 置 True；没挂（测试里直接建的窗口）就是普通关窗。
+        # _quitting：request_quit 已确认退出，QApplication.quit() 关窗时走到这里，要真关
+        if not getattr(self, "_hide_on_close", False) or getattr(self, "_quitting", False):
+            # 关窗前先唤醒任何还挂着的命令 / edit diff 确认请求——否则 worker 线程
+            # 会卡满 5 分钟才超时，期间 agent 线程整段挂死
+            self._release_pending_confirm()
+            self._release_pending_edit()
+            super().closeEvent(event)
+            return
+
+        # 和 Codex 一样：点 × / Alt+F4 只收进托盘，对话、命令和等你确认的请求都原样留着，
+        # 真正退出走托盘右键「退出」（request_quit）。托盘不可用时没处可收，关窗就是退出。
+        event.ignore()
+        tray = getattr(self, "_tray", None)
+        if tray is not None and tray.isVisible():
+            self.hide()
+            self._hint_still_running(tray)
+        else:
+            self.request_quit()
+
+    def request_quit(self):
+        """真正退出灵犀（托盘右键「退出」）。还有对话或后台命令在跑时先问一句，
+        默认按钮是「取消」，误点不会把任务杀掉。"""
+        if getattr(self, "_quitting", False):
+            return
+        busy = self._running_work_summary()
+        if busy and QuitConfirmDialog(busy, self).exec() != QDialog.Accepted:
+            return
+        self._quitting = True
+        # 窗口在托盘里时 QApplication.quit() 不会再走 closeEvent，这里先唤醒挂着的确认请求
         self._release_pending_confirm()
         self._release_pending_edit()
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
 
-        # main.py 在挂上系统托盘后会把 _hide_on_close 置 True
-        if not getattr(self, "_hide_on_close", False):
-            super().closeEvent(event)
-            return
+    def _running_work_summary(self) -> str:
+        """还在跑的对话和后台命令，拼成一句话（如"2 个对话、1 个后台命令还在运行"）；都没有返回空串。"""
+        from .. import background as _bg
+        from .. import session as _session
+        chats = sum(1 for s in _session.live_sessions() if self._worker_alive(s))
+        try:
+            commands = sum(1 for t in _bg.list_snapshots() if t.get("running"))
+        except Exception:
+            commands = 0
+        parts = [f"{chats} 个对话" if chats else "", f"{commands} 个后台命令" if commands else ""]
+        parts = [p for p in parts if p]
+        return f"{'、'.join(parts)}还在运行" if parts else ""
 
-        # 读已保存的选择（"hide" / "quit"），若有则跳过弹窗
+    def _hint_still_running(self, tray):
+        """第一次收进托盘时冒个气泡说清楚：任务没停、怎么找回窗口、怎么真正退出。只提示这一次。"""
         prefs = _load_ui_prefs()
-        saved = prefs.get("close_action")
-        if saved == "hide":
-            event.ignore()
-            self.hide()
+        if prefs.get("tray_hint_shown"):
             return
-        if saved == "quit":
-            super().closeEvent(event)
-            from PySide6.QtWidgets import QApplication
-            QApplication.quit()
-            return
-
-        dialog = CloseConfirmDialog(self)
-        if dialog.exec() != QDialog.Accepted or dialog.action is None:
-            event.ignore()
-            return
-
-        action = dialog.action
-        if dialog.remember_check.isChecked():
-            prefs["close_action"] = action
-            _save_ui_prefs(prefs)
-
-        if action == CloseConfirmDialog.ACTION_HIDE:
-            event.ignore()
-            self.hide()
-        else:
-            super().closeEvent(event)
-            from PySide6.QtWidgets import QApplication
-            QApplication.quit()
+        prefs["tray_hint_shown"] = True
+        _save_ui_prefs(prefs)
+        tray.showMessage("灵犀还在后台运行",
+                         "关掉窗口不会停止对话和命令。点托盘图标打开窗口，右键 → 退出才会真正关闭。")
 
     def keyPressEvent(self, event):
         """Esc / Ctrl+F / F3 / F12 key handler"""

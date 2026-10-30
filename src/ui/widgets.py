@@ -3,14 +3,14 @@
 - SignalBridge：worker 线程通过它把渲染请求 emit 到 UI 线程
 - DragDropTextBrowser / DragDropTextEdit：把拖拽事件转发给主窗口（避免子控件吞掉）
 - HistoryRow：侧栏会话条容器（删除按钮通过布局排在标题右侧）
-- CloseConfirmDialog：关闭软件时的"最小化到托盘 / 退出"二选一对话框
+- QuitConfirmDialog：还有对话 / 后台命令在跑时退出软件前的确认框
 """
 import os
 
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize, QRectF
 from PySide6.QtGui import QIcon, QPainter, QFont, QFontMetrics, QColor, QPalette
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QTextBrowser,
+    QDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QTextBrowser,
     QTextEdit, QVBoxLayout, QWidget, QStyle, QStyledItemDelegate,
 )
 
@@ -604,16 +604,17 @@ class GeneratingBadge(QWidget):
         self.setToolTip(text)
 
 
-class CloseConfirmDialog(QDialog):
-    ACTION_HIDE = "hide"
-    ACTION_QUIT = "quit"
+class QuitConfirmDialog(QDialog):
+    """退出软件前的确认，只在还有对话或后台命令在跑时弹。
 
-    def __init__(self, parent=None):
+    默认按钮是「取消」：误点了退出，按 Enter / Esc 都不会把正在跑的任务杀掉。
+    """
+
+    def __init__(self, busy: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("关闭灵犀")
+        self.setWindowTitle("退出灵犀")
         self.setModal(True)
-        self.setFixedSize(420, 200)
-        self.action = None
+        self.setFixedSize(420, 190)
 
         icon_path = os.path.join(BASE_DIR, "icon.ico")
         if os.path.exists(icon_path):
@@ -627,22 +628,15 @@ class CloseConfirmDialog(QDialog):
         text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(8)
 
-        title = QLabel("关闭灵犀？")
+        title = QLabel("还有任务在运行，确定退出？")
         title.setObjectName("closeTitle")
         title.setWordWrap(True)
         text_col.addWidget(title)
 
-        desc = QLabel(
-            "最小化到托盘后，后台的对话和命令会继续运行，双击托盘图标可以再打开。"
-            "退出软件会完全关闭灵犀。"
-        )
+        desc = QLabel(f"{busy}，退出会中断它们。只想关掉窗口的话点右上角 ×，任务会在后台继续。")
         desc.setObjectName("closeDescription")
         desc.setWordWrap(True)
         text_col.addWidget(desc)
-
-        self.remember_check = QCheckBox("记住我的选择，下次不再询问")
-        self.remember_check.setObjectName("closeRemember")
-        text_col.addWidget(self.remember_check)
         root.addLayout(text_col)
         root.addStretch()
 
@@ -651,21 +645,17 @@ class CloseConfirmDialog(QDialog):
         buttons.setSpacing(10)
         buttons.addStretch()
 
-        hide_btn = QPushButton("最小化到托盘")
-        hide_btn.setObjectName("closePrimaryButton")
-        hide_btn.setDefault(True)
-        hide_btn.clicked.connect(self._choose_hide)
-
-        quit_btn = QPushButton("退出软件")
+        quit_btn = QPushButton("仍然退出")
         quit_btn.setObjectName("closeSecondaryButton")
-        quit_btn.clicked.connect(self._choose_quit)
+        quit_btn.setAutoDefault(False)
+        quit_btn.clicked.connect(self.accept)
 
         cancel_btn = QPushButton("取消")
-        cancel_btn.setObjectName("closeSecondaryButton")
+        cancel_btn.setObjectName("closePrimaryButton")
+        cancel_btn.setDefault(True)
         cancel_btn.clicked.connect(self.reject)
 
-        # 设计稿的顺序：取消、退出软件，最右边是默认的"最小化到托盘"
-        for btn in (cancel_btn, quit_btn, hide_btn):
+        for btn in (quit_btn, cancel_btn):
             btn.setCursor(Qt.PointingHandCursor)
             btn.setMinimumSize(92, 32)
             buttons.addWidget(btn)
@@ -673,30 +663,15 @@ class CloseConfirmDialog(QDialog):
         root.addLayout(buttons)
         self._apply_style()
 
-    def _choose_hide(self):
-        self.action = self.ACTION_HIDE
-        self.accept()
-
-    def _choose_quit(self):
-        self.action = self.ACTION_QUIT
-        self.accept()
-
     def _apply_style(self):
         from .theme import color as c   # 配色跟当前主题（设计稿状态 5）
         accent = c("mv_indigo")
         border = c("mv_chip_border")
-        check_icon = os.path.join(BASE_DIR, "icons", "check_white.svg").replace("\\", "/")
 
         self.setStyleSheet(
-            f"CloseConfirmDialog {{ background: {c('mv_view_bg')}; color: {c('mv_text')}; }}\n"
+            f"QuitConfirmDialog {{ background: {c('mv_view_bg')}; color: {c('mv_text')}; }}\n"
             f"#closeTitle {{ color: {c('mv_text')}; font-size: 16px; font-weight: 600; }}\n"
             f"#closeDescription {{ color: {c('mv_text_sec')}; font-size: 13px; }}\n"
-            f"#closeRemember {{ color: {c('mv_text')}; font-size: 13px; spacing: 8px; }}\n"
-            f"#closeRemember::indicator {{ width: 16px; height: 16px;"
-            f" border-radius: 4px; border: 1px solid {border}; background: {c('mv_card_bg')}; }}\n"
-            f"#closeRemember::indicator:hover {{ border-color: {accent}; }}\n"
-            f"#closeRemember::indicator:checked {{ background: {accent}; border-color: {accent};"
-            f" image: url(\"{check_icon}\"); }}\n"
             f"#closePrimaryButton, #closeSecondaryButton {{ border-radius: 8px;"
             f" padding: 5px 12px; font-size: 13px; background: {c('mv_card_bg')};"
             f" color: {c('mv_text3')}; border: 1px solid {border}; }}\n"
