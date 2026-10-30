@@ -33,6 +33,15 @@ class ContextOverflowError(RuntimeError):
     """请求超出模型上下文窗口。单独一个类型，让 agent 主循环能识别并走压缩重试路径。"""
 
 
+class ModelConfigError(RuntimeError):
+    """当前模型的配置不完整，根本建不出 LLM 实例（典型：key 没填）。
+
+    与 AUTH 区分开：AUTH 是"key 发出去了但服务端不认"，这里连请求都没发出去。
+    消息文本直接用 get_model_config_issues() 给用户看的那句中文，因此它本身就可以
+    直接显示——describe() 会原样返回，不必再包一层英文原文。
+    """
+
+
 # 消息特征词。全部转小写后匹配，覆盖 Anthropic / OpenAI / DashScope / DeepSeek 的常见措辞。
 _OVERFLOW_PATTERNS = (
     "context length", "context window", "maximum context",
@@ -71,6 +80,11 @@ def _status_of(exc) -> int | None:
 
 def classify(exc) -> str:
     """把一个模型请求异常归类。返回上面六个常量之一。"""
+    if isinstance(exc, ModelConfigError):
+        # 配置不全，重试再多次也建不出实例。归到 AUTH（不重试的终态），
+        # 但给用户看的话术由 describe() 特殊处理——这里说的是"去设置里填 key"，
+        # 而不是"key 被服务端拒绝"。
+        return AUTH
     if isinstance(exc, ContextOverflowError):
         return CONTEXT_OVERFLOW
     name = type(exc).__name__.lower()
@@ -149,6 +163,9 @@ def retry_plan(exc, attempt: int, max_attempts: int) -> tuple[bool, float, str]:
     kind = classify(exc)
     last = attempt >= max_attempts - 1
 
+    if isinstance(exc, ModelConfigError):
+        # 配置不全：重试毫无意义（每次都会在同一处构造失败）
+        return False, 0.0, str(exc)
     if kind == AUTH:
         return False, 0.0, "API 密钥无效或无权限，重试不会有帮助——请检查配置里的 key。"
     if kind == CONTEXT_OVERFLOW:
@@ -196,6 +213,9 @@ _TRANSIENT_TEXT = (
 
 def describe(exc) -> str | None:
     """把一次模型请求失败说成一句中文白话；说不准就返回 None，由调用方照旧处理。"""
+    if isinstance(exc, ModelConfigError):
+        # 消息本身就是"XXX 需要先在设置里填 deepseek_api_key。"，比任何泛化话术都准
+        return str(exc)
     kind = classify(exc)
     if kind == CONTEXT_OVERFLOW:
         return "对话太长，超出了模型的上下文窗口"   # 很多服务商把超窗报成 400，按 400 说会说错

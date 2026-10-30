@@ -53,6 +53,7 @@ from .streaming import _stream_with_tools, _execute_tool, _extract_thinking
 from .claude_code import claude_code_loop as _claude_code_loop
 from . import session as _session_mod
 from .llm_errors import ContextOverflowError as _ContextOverflowError
+from .llm_errors import ModelConfigError
 from . import projects as _projects
 from .agent_result import AgentResult
 
@@ -94,16 +95,40 @@ def resolve_bound_llm(session):
     rag = bool(getattr(session, "rag_mode", False))
     key = (mi, mtype, model_id, effective_reasoning, rag)
     if key not in _BOUND_LLM_CACHE:
-        llm = _create_llm(mi, effective_reasoning)
+        try:
+            llm = _create_llm(mi, effective_reasoning)
+        except Exception as e:
+            # 建不出来基本就是配置没填全（典型：key 空 → OpenAIError('Missing credentials')）。
+            # 启动期那次创建已由 _activate_llm 吞掉、只记日志；真正发消息走到这里才该告诉
+            # 用户怎么办——直接把"去设置里填哪个 key"说出来，别把 SDK 的英文原文糊到脸上。
+            # 不进缓存：填好 key 后重启 / 再切一次模型就能立刻建出来。
+            issues = get_model_config_issues(mi)
+            if issues:
+                raise ModelConfigError("".join(issues)) from e   # 每条已以"。"结尾
+            raise
         tools = build_rag_tools() if rag else build_all_tools()
         _BOUND_LLM_CACHE[key] = (llm, llm.bind_tools(tools))
     return _BOUND_LLM_CACHE[key]
 
 
 def _activate_llm():
-    """把全局 state.llm / llm_with_tools 设为【当前会话】model 对应实例（主线程 / 调试用）。"""
+    """把全局 state.llm / llm_with_tools 设为【当前会话】model 对应实例（主线程 / 调试用）。
+
+    **建不出来不许抛**：启动期（模块末尾）、切模型、切思考、MCP 初始化都会走到这里，
+    而 key 没填时 ChatOpenAI / ChatAnthropic 构造即抛 OpenAIError('Missing credentials')。
+    那会让 import src.agent 直接炸、连窗口都开不出来——用户清空 key 后就再也进不去设置。
+    配置问题由界面在启动 / 切模型时提示（_show_current_model_config_warning），真正发消息时
+    resolve_bound_llm 再抛 ModelConfigError 说清缺哪个 key；这里只把 llm 置空并记一条日志。
+
+    失败不写缓存：用户填好 key 后重启 / 再切一次模型，应当能立刻建出来。
+    """
     from . import session as _session
-    state.llm, state.llm_with_tools = resolve_bound_llm(_session.current_session())
+    try:
+        state.llm, state.llm_with_tools = resolve_bound_llm(_session.current_session())
+    except Exception as e:
+        state.llm = None
+        state.llm_with_tools = None
+        logger.warning(f"当前模型暂时不可用（配置可能没填全）：{e}")
 
 
 def switch_model(index):
@@ -712,6 +737,8 @@ def _report_loop_error(ui, e):
         display_err = "Ollama 模型输出格式异常"
     elif is_ollama and ("Connection" in err_msg or "refused" in err_msg):
         display_err = "无法连接 Ollama 服务"
+    elif isinstance(e, ModelConfigError):
+        display_err = plain              # 本身就是"去设置里填哪个 key"的完整一句，请求没发出去，没有英文原文
     elif plain:
         display_err = f"{plain}。英文原文记在日志里。"
     else:

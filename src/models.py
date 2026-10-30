@@ -184,7 +184,8 @@ def get_model_config_issues(model_index=None):
         require_key("responses_api_key", RESPONSES_API_KEY)
     elif mtype == "custom":
         cm = _lookup_custom_model(model_id) or {}
-        require_key(f"{name} 的 api_key（设置 → 自定义模型）", cm.get("api_key", ""))
+        if _looks_like_placeholder(cm.get("api_key", "")):
+            issues.append(f"{name} 需要先在设置 → 自定义模型里填 api_key。")
         protocol = (cm.get("protocol") or "openai").lower()
         if protocol not in {"openai", "anthropic", "responses"}:
             issues.append(f"{name} 的 custom protocol 暂不支持：{protocol}")
