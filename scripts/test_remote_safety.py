@@ -44,6 +44,13 @@ class TestRemoteSafety:
         last = _exec({"name": "read_file", "args": {"path": "config.json"}, "id": "1"})
         assert isinstance(last, ToolMessage) and "拒绝" in last.content
 
+    def test_safe_readonly_checks_every_path_of_a_batch_read(self, monkeypatch, clean_state):
+        """read_files 一次读多个文件时，夹在中间的敏感文件也要拦，不能只看 path。"""
+        monkeypatch.setattr(state, "remote_session", True)
+        monkeypatch.setattr(config, "REMOTE_MODE", "safe_readonly")
+        last = _exec({"name": "read_files", "args": {"paths": ["main.py", "config.json"]}, "id": "1"})
+        assert isinstance(last, ToolMessage) and "拒绝" in last.content and "config.json" in last.content
+
     def test_allow_web_lets_fetch_through_in_chat_only(self, monkeypatch, clean_state):
         # allow_web_search=true:chat_only 下也放行 fetch_url / web_search(其它仍拦)
         monkeypatch.setattr(state, "remote_session", True)

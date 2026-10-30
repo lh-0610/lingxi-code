@@ -43,7 +43,9 @@ from .images import (
 def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
     """工具调用在界面上的（显示名, 参数摘要）。实时执行和重绘历史共用，两边画出来一致。"""
     display_name = TOOL_DISPLAY_NAMES.get(name, f"🔧 {name}")
-    if name in ("read_file", "write_file", "append_file", "edit_file"):
+    if name == "read_files":
+        detail = "、".join(str(p) for p in (args.get("paths") or []))
+    elif name in ("read_file", "write_file", "append_file", "edit_file"):
         detail = args.get("path", "")
     elif name == "list_directory":
         detail = args.get("path", ".")
@@ -87,7 +89,7 @@ STREAMING_TOOLS = {"run_command"}
 
 # Plan mode 下允许调用的"只读"工具白名单。AI 若试图调其它工具会被 _execute_tool 拦
 PLAN_MODE_READONLY_TOOLS = {
-    "read_file", "list_directory", "search_in_file", "search_files",
+    "read_file", "read_files", "list_directory", "search_in_file", "search_files",
     "remember", "forget",  # 记笔记不该被 Plan 拦
     "update_plan",  # 列计划是 Plan 模式的核心动作
     "set_step_status",  # 更新单步状态是 Plan 模式的核心动作
@@ -1232,7 +1234,7 @@ def _stream_with_tools(ui):
 # 纯读、无副作用、无确认卡的工具——同一轮里有多个这种时可并行 invoke 提速 IO
 # （写类 / run_command / 生图 / MCP / 改状态的都不在内，保持串行，避免确认卡冲突与副作用竞争）
 PARALLEL_SAFE_TOOLS = {
-    "read_file", "search_in_file", "search_files", "list_directory", "code_map",
+    "read_file", "read_files", "search_in_file", "search_files", "list_directory", "code_map",
     "find_definition", "find_references",  # jedi 代码导航，纯读无副作用
     "find_tests", "related_files",  # 测试发现 / 关联文件，纯读无副作用
     "git_diff", "git_log", "git_status", "check_code", "read_background_output",
@@ -1386,7 +1388,7 @@ def _execute_tool(tc, ui, _preinvoked=None):
             return
         elif REMOTE_MODE == "safe_readonly":
             # 跨目录搜(search_files)无法逐一过滤黑名单 → 直接禁；只放行可定位单文件的只读
-            _RO_ALLOWED = {"read_file", "search_in_file", "list_directory"}
+            _RO_ALLOWED = {"read_file", "read_files", "search_in_file", "list_directory"}
             if name not in _RO_ALLOWED:
                 ui.show_message(f"\n🔒 远程遥控（只读模式），拒绝 {name}\n", "tool_tag")
                 state.chat_history.append(ToolMessage(
@@ -1399,8 +1401,12 @@ def _execute_tool(tc, ui, _preinvoked=None):
                 ))
                 logger.info(f"遥控 safe_readonly 拒绝非只读工具: {name}")
                 return
-            target = args.get("path") or args.get("file") or ""
-            if _hits_remote_blocklist(target):
+            # read_files 一次读多个文件（paths）：每一个都要过黑名单，不能只看 path
+            targets = [args.get("path") or args.get("file") or ""]
+            _paths = args.get("paths") or []
+            targets += [_paths] if isinstance(_paths, str) else [str(p) for p in _paths if p]
+            target = next((t for t in targets if _hits_remote_blocklist(t)), "")
+            if target:
                 ui.show_message("\n🔒 该文件在遥控敏感黑名单，拒绝远程读取\n", "tool_tag")
                 state.chat_history.append(ToolMessage(
                     content=(

@@ -441,7 +441,7 @@ def _run_claude_code(ui):
     return result
 
 
-_READ_ONLY_TOOLS = {"read_file", "search_files", "search_in_file", "list_directory", "find_definition",
+_READ_ONLY_TOOLS = {"read_file", "read_files", "search_files", "search_in_file", "list_directory", "find_definition",
                     "find_references", "code_map", "git_diff", "git_status", "git_log", "related_files",
                     "find_tests", "fetch_url", "web_search"}
 

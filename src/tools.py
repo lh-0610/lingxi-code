@@ -31,6 +31,10 @@ from .limits import (
 )
 
 
+_READ_MANY_MAX_FILES = 8
+_READ_MANY_MAX_CHARS = 60_000   # 一次批量读的总字数上限（约 1.8 万 token 的代码）
+
+
 @tool
 def read_file(path: str, offset: int = 1, limit: int = READ_FILE_DEFAULT_LIMIT) -> str:
     """读取文件内容，按行返回（带行号前缀，方便后续 edit_file 定位）。
@@ -38,7 +42,7 @@ def read_file(path: str, offset: int = 1, limit: int = READ_FILE_DEFAULT_LIMIT) 
     参数：
       path: 文件路径（绝对或相对项目根）
       offset: 起始行号（**从 1 开始**），默认 1
-      limit: 最多读取的行数，默认 2000（大文件请分批）
+      limit: 最多读取的行数，默认 2000；文件更长时末尾会提示用 offset 接着读
 
     返回格式（类 `cat -n`）：
         1: import os
@@ -46,10 +50,37 @@ def read_file(path: str, offset: int = 1, limit: int = READ_FILE_DEFAULT_LIMIT) 
         ...
         [显示第 1-50 行 / 共 200 行]
 
-    用法：
-      - 想看大文件中段：`read_file("a.py", offset=500, limit=200)`
-      - 默认 2000 行通常已经够；如果文件 > 2000 行，会自动截断并提示总行数
+    要看好几个文件时用 read_files 一次读完。
     """
+    return _read_one(path, offset, limit)
+
+
+@tool
+def read_files(paths: list[str], offset: int = 1, limit: int = READ_FILE_DEFAULT_LIMIT) -> str:
+    """一次读多个文件（最多 8 个），每个都按 offset / limit 读，格式同 read_file，每个文件一段、
+    以 `### 路径` 开头。已经知道要看哪几个文件时用它一次拿全，比一轮读一个快得多。
+    总字数超过 6 万时，剩下的文件只列出来不读（单独读，或缩小 limit）。"""
+    return _read_many(paths, offset, limit)
+
+
+def _read_many(paths, offset, limit):
+    """批量读：每个文件一段，带 `### 路径` 标题。总字数到上限后，剩下的只报没读，不悄悄丢。"""
+    wanted = list(dict.fromkeys(str(p) for p in paths if str(p).strip()))
+    extra = wanted[_READ_MANY_MAX_FILES:]
+    parts, used = [], 0
+    for p in wanted[:_READ_MANY_MAX_FILES]:
+        if used >= _READ_MANY_MAX_CHARS:
+            parts.append(f"### {p}\n（这次批量读取已满 {_READ_MANY_MAX_CHARS} 字，这个文件没读：单独读，或缩小 limit）")
+            continue
+        body = _read_one(p, offset, limit)
+        parts.append(f"### {p}\n{body}")
+        used += len(body)
+    if extra:
+        parts.append(f"（一次最多读 {_READ_MANY_MAX_FILES} 个文件，没读：{'、'.join(extra)}）")
+    return "\n\n".join(parts)
+
+
+def _read_one(path, offset, limit):
     try:
         full = _resolve_path(path)
         reject = _subagent_path_rejection(full, "文件")
@@ -883,6 +914,19 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
             pass
 
     return f"退出码: {proc.returncode}\n{output}"
+
+
+# 模型调用 run_command 时看的是工具说明，不是系统提示词：shell 是哪种、在哪个目录跑，要写在这里
+# （DeepSeek Harness 的 bash / pwsh 工具也是这样写在说明里）。不写的话它默认按 bash 来，在 cmd 里
+# 不是报错就是没输出；还会每条都先 `cd /d 项目根`。
+run_command.description += (
+    "\n\n运行环境：" + (
+        "Windows 的 **cmd.exe**（不是 bash，也不保证有 grep / tail / sed / cat）。"
+        if os.name == "nt" else "/bin/sh。")
+    + "默认就在项目根目录执行，不用每条都先 cd。"
+    "看文件用 read_file、搜内容用 search_files、找文件用 search_files 的 file_pattern，"
+    "比用命令查快，结果也不用再过滤。输出第一行是「退出码: N」，不是 0 先查清原因再往下走。"
+)
 
 
 @tool
@@ -2553,7 +2597,7 @@ from .tools_rag import search_knowledge  # noqa: E402
 
 # 导出
 ALL_TOOLS = [
-    read_file, write_file, append_file, edit_file,
+    read_file, read_files, write_file, append_file, edit_file,
     list_directory, run_command,
     search_in_file, search_files,
     find_definition, find_references,
@@ -2613,6 +2657,7 @@ def get_tool_map() -> dict:
 
 TOOL_DISPLAY_NAMES = {
     "read_file": "📖 读取文件",
+    "read_files": "📖 读取多个文件",
     "write_file": "✏️ 写入文件",
     "append_file": "📝 追加文件",
     "edit_file": "🪄 精确编辑",
