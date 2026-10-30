@@ -405,7 +405,8 @@ def main():
             if not b:
                 print(f"  {r['id']} 新增")
                 continue
-            d_pass = r["passed"] - b["passed"]
+            # 比通过率而不是通过次数：基线跑 3 次、这次跑 1 次时，1/1 不是比 3/3 差
+            d_pass = r["passed"] / r["runs"] - b["passed"] / b["runs"]
             d_tok = r["avg_tokens"] - b["avg_tokens"]
             flag = "⚠️ 退化" if d_pass < 0 else ("↑" if d_pass > 0 else " ")
             print(f"  {flag} {r['id']} 通过 {b['pass_rate']}→{r['pass_rate']}  "

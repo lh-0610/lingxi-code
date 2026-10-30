@@ -143,13 +143,20 @@ class TestEvaluate:
 class TestCases:
     def test_shipped_cases_are_valid(self):
         """随仓库带的 case 必须结构合法、判定类型都认识、fixture 都存在。"""
+        import subprocess
         cases = load_cases()
         assert len(cases) >= 5
         fx_dir = os.path.join(os.path.dirname(__file__), "evals", "fixtures")
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for c in cases:
             assert c.get("name") and c.get("prompt"), c
             assert c.get("mode") in ("act", "plan"), c
-            assert os.path.isdir(os.path.join(fx_dir, c["fixture"])), c["fixture"]
+            if c.get("fixture_git"):      # 用本仓库的某个提交当 fixture：提交得存在
+                r = subprocess.run(["git", "cat-file", "-e", f"{c['fixture_git']}^{{commit}}"], cwd=repo,
+                                   capture_output=True, stdin=subprocess.DEVNULL)
+                assert r.returncode == 0, f"{c['id']} 的 fixture_git 提交不存在: {c['fixture_git']}"
+            else:
+                assert os.path.isdir(os.path.join(fx_dir, c["fixture"])), c["fixture"]
             assert c.get("assert"), f"{c['id']} 没有任何判定"
             for spec in c["assert"]:
                 assert spec["type"] in ASSERTIONS, spec["type"]
