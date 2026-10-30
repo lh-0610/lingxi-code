@@ -5,6 +5,7 @@
 - `_execute_tool`: 执行单个工具调用，把结果回写到 chat_history
 """
 import os
+import re
 import time
 import threading as _threading
 
@@ -271,32 +272,47 @@ def _stream_chunks_with_retry(llm_with_tools, messages, ui=None):
             time.sleep(delay)
 
 
+_CJK_CHARS = re.compile(r"[　-鿿가-힯＀-￯]")
+
+
+def _text_tokens(text: str) -> float:
+    """中日韩字符 ≈ 0.8 token / 字，其余（代码、英文、空白）≈ 0.3 token / 字符（约 3.3 字符一个）。
+
+    以前统一按 0.7 算：中文合适，代码却高估两倍多——读了几个源文件，实际十万出头的上下文就被
+    当成超了 20 万的预算，旧的读文件结果被回收成存根，模型只好一遍遍重读同一个文件（评测 011
+    里 models.py 一次任务读了 19 遍）。两种都往偏多的方向取，宁可早一点回收也不撑爆窗口。"""
+    if not text:
+        return 0.0
+    cjk = len(_CJK_CHARS.findall(text))
+    return cjk * 0.8 + (len(text) - cjk) * 0.3
+
+
 def _estimate_tokens(messages) -> int:
-    """粗估 token 数，不引外部库（tiktoken）。1 字符 ≈ 0.7 token（中英混排经验值）。
+    """粗估 token 数，不引外部库（tiktoken）：中文和代码分开算（见 _text_tokens）。
     多模态 image block 估 1000 token / 张，其它非 text block 估 200 token。"""
-    total = 0
+    total = 0.0
     for msg in messages:
         content = getattr(msg, "content", "") or ""
         if isinstance(content, str):
-            total += len(content)
+            total += _text_tokens(content)
         elif isinstance(content, list):
             for blk in content:
                 if isinstance(blk, dict):
                     bt = blk.get("type")
                     if bt == "text":
-                        total += len(blk.get("text", "") or "")
+                        total += _text_tokens(blk.get("text", "") or "")
                     elif bt in ("image", "image_url"):
                         total += 1000
                     elif bt == "thinking":
-                        total += len(blk.get("thinking", "") or "")
+                        total += _text_tokens(blk.get("thinking", "") or "")
                     else:
                         total += 200
         # tool_calls 里的 args
         tcs = getattr(msg, "tool_calls", None) or []
         for tc in tcs:
             if isinstance(tc, dict):
-                total += len(str(tc.get("args", {})))
-    return int(total * 0.7)
+                total += _text_tokens(str(tc.get("args", {})))
+    return int(total)
 
 
 def _maybe_trim_history(messages, budget=HISTORY_TOKEN_BUDGET, keep_recent=HISTORY_KEEP_RECENT):
