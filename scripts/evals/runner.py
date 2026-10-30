@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,9 @@ EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 CASES_DIR = os.path.join(EVAL_DIR, "cases")
 FIXTURES_DIR = os.path.join(EVAL_DIR, "fixtures")
 CHECKS_DIR = os.path.join(EVAL_DIR, "checks")
+# fixture_git 用例从这个仓库导出指定提交。在脱敏副本里跑评测时副本不是 git 仓库，
+# 用环境变量 LINGXI_EVAL_GIT_REPO 指回原仓库
+GIT_REPO = os.environ.get("LINGXI_EVAL_GIT_REPO") or os.path.dirname(os.path.dirname(EVAL_DIR))
 
 
 # ══════════════════════════════════════
@@ -257,9 +261,52 @@ def evaluate(case, workdir, fixture, output, tool_log=()):
     return all(ok for ok, _ in results), results
 
 
+def _rmtree(path):
+    """删临时目录。git 的对象文件在 Windows 上是只读的，ignore_errors 会悄悄留下整个仓库副本。"""
+    def _make_writable(func, p, _exc):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    try:
+        shutil.rmtree(path, onexc=_make_writable)
+    except Exception:
+        pass
+
+
+def _export_git_fixture(rev, dest):
+    """把本仓库的某个提交导出成 fixture，并建成只有一个提交的 git 仓库（agent 看 diff / 审阅改动要用）。
+
+    给"拿灵犀自己修灵犀"的用例用：几 MB 的源码树不必整份复制进 fixtures/，写个提交号就行。"""
+    import io
+    import tarfile
+    raw = subprocess.run(["git", "archive", "--format=tar", rev], cwd=GIT_REPO, capture_output=True,
+                         stdin=subprocess.DEVNULL, check=True).stdout
+    os.makedirs(dest)
+    with tarfile.open(fileobj=io.BytesIO(raw)) as t:
+        t.extractall(dest, filter="data")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "eval", "GIT_AUTHOR_EMAIL": "eval@example.invalid",
+           "GIT_COMMITTER_NAME": "eval", "GIT_COMMITTER_EMAIL": "eval@example.invalid"}
+    for cmd in (["git", "init", "-q"], ["git", "config", "commit.gpgSign", "false"],
+                ["git", "add", "-A"], ["git", "commit", "-qm", f"fixture {rev}"]):
+        subprocess.run(cmd, cwd=dest, env=env, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+
 def run_case(case, runs: int, model_index: int, show_tools: bool = False):
-    fixture = os.path.join(FIXTURES_DIR, case["fixture"])
+    pristine = None
+    if case.get("fixture_git"):
+        pristine = tempfile.mkdtemp(prefix=f"eval-{case['id']}-fixture-")
+        fixture = os.path.join(pristine, "repo")
+        _export_git_fixture(case["fixture_git"], fixture)
+    else:
+        fixture = os.path.join(FIXTURES_DIR, case["fixture"])
     assert os.path.isdir(fixture), f"fixture 不存在: {fixture}"
+    try:
+        return _run_attempts(case, runs, model_index, show_tools, fixture)
+    finally:
+        if pristine:
+            _rmtree(pristine)
+
+
+def _run_attempts(case, runs, model_index, show_tools, fixture):
     attempts = []
     for i in range(runs):
         tmp = tempfile.mkdtemp(prefix=f"eval-{case['id']}-")
@@ -286,7 +333,7 @@ def run_case(case, runs: int, model_index: int, show_tools: bool = False):
                     if not ok:
                         print(f"         ↳ {msg.splitlines()[0][:120]}")
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            _rmtree(tmp)
     ok_n = sum(1 for a in attempts if a["passed"])
     return {
         "id": case["id"],

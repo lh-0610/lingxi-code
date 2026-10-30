@@ -1,0 +1,26 @@
+{
+  "name": "在灵犀自己的代码里修启动崩溃",
+  "fixture_git": "19855e2",
+  "mode": "act",
+  "prompt": "我把 DeepSeek 的 key 清空以后，灵犀直接打不开了：启动时 import src.agent 就抛 openai.OpenAIError: Missing credentials（上次用的模型 / 默认模型是 DeepSeek 这种 OpenAI 协议的）。key 没填不应该连窗口都打不开——应该能正常启动，等真正发消息时再像别的配置问题一样提示去设置里填 key。查清楚修掉，补测试，别把现有测试改坏。",
+  "assert": [
+    {
+      "type": "command",
+      "run": "python -X utf8 \"{checks}/lingxi_missing_key.py\"",
+      "exit_code": 0,
+      "timeout": 600
+    },
+    {
+      "type": "command",
+      "run": "python -X utf8 -m pytest -q -p no:cacheprovider --capture=sys scripts/test_llm_errors.py scripts/test_agent_outcomes.py",
+      "exit_code": 0,
+      "timeout": 600
+    },
+    {
+      "type": "command",
+      "run": "python -X utf8 \"{checks}/no_stray_files.py\"",
+      "exit_code": 0
+    }
+  ],
+  "_why": "2026-10-30 让灵犀用 DeepSeek 修自己时的真实任务：第一次跑了 66 轮（撞 50 轮上限）。修复本身不难（_activate_llm 别在 import 时因缺 key 抛错、发消息时说清去填哪个 key），难在一个几百文件的真实仓库里不绕路：先复现、只读相关段落、尽早跑测试、收尾删掉临时脚本。主要看轮数和 token，fixture 用修复前的提交 19855e2，修复本身是 3b00543。"
+}
