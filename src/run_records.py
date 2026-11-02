@@ -312,6 +312,10 @@ def _normalize_validation_run(raw):
     for key, default in (("duration_ms", 0), ("change_revision", 0)):
         value = raw.get(key)
         out[key] = value if isinstance(value, int) and value >= 0 else default
+    # 有才留：没有这个字段的旧记录要保持"没有"，判过期时才会退回 change_revision
+    revision = raw.get("evidence_revision")
+    if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
+        out["evidence_revision"] = revision
     out["stale"] = raw.get("stale") is True
     return out
 
@@ -568,7 +572,7 @@ def collect_evidence(verification):
         if not isinstance(record, dict):
             continue
         entry = dict(record)
-        entry["stale"] = evidence_is_stale(record, current)
+        entry["stale"] = evidence_is_stale(record, verification)
         runs.append(entry)
     return {
         "changed_files": list(verification.get("dirty_files") or []),

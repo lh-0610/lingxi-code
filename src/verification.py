@@ -22,6 +22,10 @@ _CODE_EXTENSIONS = frozenset({
     ".vue", ".svelte",
 })
 
+# 纯文档（说明文字，不会被执行）：改了它不让之前的检查过期。
+# 只收这几种——.txt / .json / .toml 之类可能是测试读的数据或配置，改了照样算过期。
+_PROSE_EXTENSIONS = frozenset({".md", ".markdown", ".rst"})
+
 
 def new_verification() -> dict:
     """创建一个全新的验证状态字典（Session.__init__ 调用）。"""
@@ -49,6 +53,9 @@ def new_verification() -> dict:
         # 文件变化版本。**只随实际变更 / 追踪不确定性递增，不随保存递增**——
         # 用 progress_revision 当版本的话，一次纯保存就会把刚做完的检查标成过期。
         "change_revision": 0,
+        # 检查证据用的版本：同上，但改纯文档（_PROSE_EXTENSIONS）不涨——
+        # 测试全过之后顺手改一句文档，不该让整张结果卡变成"检查未全部通过"。
+        "evidence_revision": 0,
         "failure_diagnosis": {    # 自动修复循环状态（独立于上面的验证闸门）
             "tool": "",           # 触发失败的工具名（"run_tests" / "check_code"）
             "attempt": 0,         # 已注入修复提示的次数
@@ -75,6 +82,7 @@ def reset_verification(v: dict) -> None:
     # 把上轮跑过的命令算进这一轮。change_revision 同归零，它只在一轮之内用于比新旧。
     v["evidence"] = []
     v["change_revision"] = 0
+    v["evidence_revision"] = 0
     v.pop("workspace_snapshots", None)
     v.pop("tracking_errors", None)
     # 盲区同样在这里清、随后由 restore_obligations 按已保存的义务填回——
@@ -93,16 +101,26 @@ def _is_code_file(path: str) -> bool:
     return ext in _CODE_EXTENSIONS
 
 
-def bump_change_revision(v: dict) -> int:
+def _is_prose_file(path: str) -> bool:
+    """纯文档（.md / .rst）：改了不影响已跑过的检查结论。"""
+    return os.path.splitext(path or "")[1].lower() in _PROSE_EXTENSIONS
+
+
+def bump_change_revision(v: dict, *, affects_checks: bool = True) -> int:
     """文件确实变了（或追踪出现不确定）→ 推进文件变化版本。
 
     结果卡据此判断"这条检查证据是不是在改动之前拿到的"。**绝不能**拿
     `progress_revision` 代替：那个每保存一次就 +1，于是一次纯保存就把刚跑完的
     绿灯测试标成过期，用户看到的是"刚测完就失效了"。
+
+    affects_checks=False（只改了纯文档）时只推进 change_revision，检查证据不过期。
+    拿不准的（盲区、代码、配置、数据文件）一律按会影响算。
     """
     if not isinstance(v, dict):
         return 0
     v["change_revision"] = int(v.get("change_revision", 0) or 0) + 1
+    if affects_checks:
+        v["evidence_revision"] = int(v.get("evidence_revision", 0) or 0) + 1
     return v["change_revision"]
 
 
@@ -115,7 +133,7 @@ def mark_dirty(v: dict, rel_path: str, *, abs_path: str | None = None) -> None:
     """
     if not rel_path:
         return
-    bump_change_revision(v)
+    bump_change_revision(v, affects_checks=not _is_prose_file(rel_path))
     # 去重
     if rel_path not in v["dirty_files"]:
         v["dirty_files"].append(rel_path)
@@ -324,6 +342,8 @@ def record_evidence(v: dict, **fields) -> dict | None:
         "reason": redact(str(fields.get("reason") or ""))[:_SUMMARY_MAX],
         # 采集这一刻的文件变化版本。之后再有改动，版本一涨这条就算过期。
         "change_revision": int(v.get("change_revision", 0) or 0),
+        # 判过期实际用这个（改纯文档不涨），见 evidence_is_stale
+        "evidence_revision": int(v.get("evidence_revision", 0) or 0),
     }
     records = v.setdefault("evidence", [])
     records.append(record)
@@ -331,11 +351,17 @@ def record_evidence(v: dict, **fields) -> dict | None:
     return record
 
 
-def evidence_is_stale(record, current_revision) -> bool:
-    """这条证据是不是在之后的改动里失效了。"""
-    if not isinstance(record, dict):
+def evidence_is_stale(record, v) -> bool:
+    """这条证据是不是在之后的改动里失效了（v 是采集它的那份验证状态）。
+
+    比的是 evidence_revision：之后只改了纯文档，检查结论照样成立。没有这个字段的
+    旧记录退回去比 change_revision——宁可多判过期，不能少判。
+    """
+    if not isinstance(record, dict) or not isinstance(v, dict):
         return False
-    return int(record.get("change_revision", 0) or 0) < int(current_revision or 0)
+    if "evidence_revision" in record and "evidence_revision" in v:
+        return int(record.get("evidence_revision") or 0) < int(v.get("evidence_revision") or 0)
+    return int(record.get("change_revision", 0) or 0) < int(v.get("change_revision", 0) or 0)
 
 
 def mark_check(v: dict, rel_path: str, passed: bool | None, checker: str = "") -> None:

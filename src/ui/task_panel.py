@@ -51,7 +51,7 @@ _REQUEST_SOURCE_NOTES = {   # 画的时候按当前主题上色
     "missing": "；原文已不在历史中",
 }
 
-_EVIDENCE_MAX = 6   # 验证证据最多列几行，其余折成"另有 N 项"
+_EVIDENCE_MAX = 6   # 验证证据默认列几行，其余折起来，点「展开全部」就地列出
 _EVIDENCE_COLORS = {"passed": "mv_ok", "failed": "mv_bad", "error": "mv_bad", "timeout": "mv_orange"}
 
 
@@ -532,6 +532,10 @@ class TaskPanel(QFrame):
         self.evidence_label.setWordWrap(True)
         self.evidence_label.setTextFormat(Qt.RichText)
         self.evidence_label.setStyleSheet("font-size: 12px;")
+        # 「展开全部 / 收起」是正文末尾的一个链接：点了就地列出全部检查，每 2 秒的刷新保持住
+        self.evidence_label.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.evidence_label.linkActivated.connect(self._toggle_evidence_expanded)
+        self._evidence_expanded = False
         sec4_lay.addWidget(self.evidence_label)
         self.content_layout.addWidget(self.sec4_frame)
         self.content_layout.addStretch(1)
@@ -926,6 +930,11 @@ class TaskPanel(QFrame):
             v_status_lines.append(
                 f"<span style='color:{warn};'>已尝试 {st['inconclusive']} 项检查，但没有得到通过结论"
                 "（未执行、已取消或结果未知）</span>")
+        elif st.get("stale"):
+            # 跑过、只是之后又改了代码：照实说过期，"尚未执行检查"会抹掉跑过这件事
+            v_status_lines.append(
+                f"<span style='color:{warn};'>跑过的 {st['stale']} 项检查都在之后的代码改动之前，"
+                "已过期，需要重新跑</span>")
         else:
             v_status_lines.append(f"<span style='color:{muted};'>尚未执行检查，没有验证证据</span>")
         self.verification_status_label.setText("<br>".join(v_status_lines))
@@ -948,6 +957,12 @@ class TaskPanel(QFrame):
             self.switch_banner.setVisible(False)
             self.plan_count.setText("")
             self.plan_progress.setVisible(False)
+
+    def _toggle_evidence_expanded(self, _href: str = ""):
+        """验证证据的「展开全部 / 收起」。"""
+        self._evidence_expanded = not self._evidence_expanded
+        if self._evidence_sess is not None:
+            self._render_evidence(self._evidence_sess)
 
     def _render_evidence(self, sess: Any):
         """每项检查只列最后一次的结论——和结果卡共用 result_view.effective_rows 的归并，
@@ -985,7 +1000,8 @@ class TaskPanel(QFrame):
             return
         dim = self._t("text_dim")
         cells = []
-        for name, label, color in rows[:_EVIDENCE_MAX]:
+        shown = rows if self._evidence_expanded else rows[:_EVIDENCE_MAX]
+        for name, label, color in shown:
             cells.append(
                 "<tr>"
                 f"<td style=\"font-family:{MONO_CSS}; color:{dim}; padding:2px 10px 2px 0;\">"
@@ -993,7 +1009,10 @@ class TaskPanel(QFrame):
                 f"<td align=\"right\" style=\"color:{color}; padding:2px 0;\">{html.escape(label)}</td>"
                 "</tr>")
         more = ""
-        if len(rows) > _EVIDENCE_MAX:
-            more = f"<div style='color:{self._t('mv_muted')};'>另有 {len(rows) - _EVIDENCE_MAX} 项</div>"
+        extra = len(rows) - _EVIDENCE_MAX
+        if extra > 0:
+            link = "收起" if self._evidence_expanded else f"展开全部（还有 {extra} 项）"
+            more = (f"<div style='margin-top:2px;'><a href='toggle' style='color:{self._t('mv_indigo')}; "
+                    f"text-decoration:none;'>{link}</a></div>")
         self.evidence_label.setText(
             '<table cellspacing="0" cellpadding="0" width="100%">' + "".join(cells) + "</table>" + more)

@@ -874,7 +874,8 @@ def verification_status(sess: Any) -> dict[str, Any]:
     解除与否以 gaps 为准。"checked" 只认当前运行态里未被改动作废的检查证据，
     历史成功不是当前运行的通行凭证。
 
-    返回 {"state", "gaps", "passed", "failed", "inconclusive"}，state 取值：
+    返回 {"state", "gaps", "passed", "failed", "inconclusive", "stale"}（stale：跑过、但都在
+    之后的代码改动之前、已过期的检查项数），state 取值：
       - pending：存在尚未解除的验证缺口
       - blind：缺口涉及未被完整观察的盲区
       - failed：没有未解除的缺口，但最近的检查证据有未通过的
@@ -887,17 +888,22 @@ def verification_status(sess: Any) -> dict[str, Any]:
     v = getattr(sess, "verification", None)
     v = v if isinstance(v, dict) else {}
 
-    revision = int(v.get("change_revision", 0) or 0)
+    from .verification import evidence_is_stale
     latest: dict[str, dict] = {}
+    stale_ids: set[str] = set()
     for rec in v.get("evidence") or []:
         if not isinstance(rec, dict):
             continue
-        if int(rec.get("change_revision", 0) or 0) < revision:
-            continue        # 之后又有改动，这条证据已过期
-        latest[rec.get("identity") or rec.get("id") or str(len(latest))] = rec
+        key = rec.get("identity") or rec.get("id") or str(len(latest) + len(stale_ids))
+        if evidence_is_stale(rec, v):
+            stale_ids.add(key)      # 之后又改了代码，这条证据已过期
+            continue
+        latest[key] = rec
     passed = sum(1 for r in latest.values() if r.get("status") == "passed")
     failed = sum(1 for r in latest.values() if r.get("status") in _FAILED_EV)
     inconclusive = len(latest) - passed - failed
+    # 跑过、但全在之后的改动之前：要说"已过期"，不能说成"尚未执行检查"
+    stale = len(stale_ids - set(latest))
 
     if _run_state_has_content(v):
         gaps = _live_gaps(v)
@@ -915,7 +921,7 @@ def verification_status(sess: Any) -> dict[str, Any]:
     else:
         state = "none"
     return {"state": state, "gaps": gaps, "passed": passed,
-            "failed": failed, "inconclusive": inconclusive}
+            "failed": failed, "inconclusive": inconclusive, "stale": stale}
 
 
 # ══════════════════════════════════════════════════════════════

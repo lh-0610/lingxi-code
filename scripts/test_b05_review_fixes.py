@@ -405,8 +405,81 @@ def test_panel_stale_evidence_does_not_count(sess, app):
     plan()
     verification.record_evidence(sess.verification, kind="tests", status="passed", exit_code=0,
                                  argv=["pytest"], cwd="C:/p")
-    sess.verification["change_revision"] += 1
-    assert ts.verification_status(sess)["state"] == "none"
+    verification.bump_change_revision(sess.verification)      # 之后又改了代码
+    st = ts.verification_status(sess)
+    assert st["state"] == "none" and st["passed"] == 0
+    assert st["stale"] == 1, "跑过的检查要算成已过期，不能当成没跑过"
+
+
+def test_doc_edit_after_checks_keeps_them_valid(sess, app):
+    """测试全过之后只改了一句文档（.md）：检查结论照样成立，结果卡不能因此说"检查未全部通过"。
+    改代码、配置、数据文件照旧作废——它们可能影响检查结果。"""
+    from src import result_view, run_records, verification
+    v = sess.verification
+    verification.record_evidence(v, kind="tests", status="passed", exit_code=0, argv=["pytest"], cwd="C:/p")
+    verification.mark_dirty(v, "docs/architecture/runs-and-recovery.md")
+    snap = {"evidence": run_records.collect_evidence(v)}
+    assert not snap["evidence"]["validation_runs"][0]["stale"]
+    assert result_view.summarize_checks(snap) == "clear"
+    assert ts.verification_status(sess)["stale"] == 0
+
+    for later in ("src/app.py", "pytest.ini", "tests/data.json"):
+        verification.record_evidence(v, kind="tests", status="passed", exit_code=0, argv=["pytest"], cwd="C:/p")
+        verification.mark_dirty(v, later)
+        snap = {"evidence": run_records.collect_evidence(v)}
+        assert snap["evidence"]["validation_runs"][-1]["stale"], f"改了 {later} 之后旧检查要过期"
+        assert result_view.summarize_checks(snap) == "unresolved"
+
+
+def test_old_records_without_evidence_revision_still_go_stale(sess):
+    """升级前存下的记录没有 evidence_revision：退回去按 change_revision 判，宁可多判过期。"""
+    from src import verification
+    v = sess.verification
+    record = verification.record_evidence(v, kind="tests", status="passed", exit_code=0,
+                                          argv=["pytest"], cwd="C:/p")
+    record.pop("evidence_revision")
+    verification.mark_dirty(v, "README.md")      # 只改文档，但旧记录说不清，按过期算
+    assert verification.evidence_is_stale(record, v)
+
+
+def test_panel_says_checks_expired_not_never_run(sess, app):
+    """检查都过期时，面板写"已过期，需要重新跑"，不写"尚未执行检查"。"""
+    from src import verification
+    from src.ui.task_panel import TaskPanel
+    user(sess, "A")
+    plan()
+    verification.record_evidence(sess.verification, kind="tests", status="passed", exit_code=0,
+                                 argv=["pytest"], cwd="C:/p")
+    verification.bump_change_revision(sess.verification)
+    panel = TaskPanel(None, lambda key: "#eeeeee")
+    try:
+        panel.render_session(sess)
+        text = panel.verification_status_label.text()
+    finally:
+        panel.close()
+    assert "已过期" in text and "尚未执行检查" not in text
+
+
+def test_panel_evidence_list_expands_in_place(sess, app):
+    from src import verification
+    from src.ui.task_panel import TaskPanel, _EVIDENCE_MAX
+    user(sess, "A")
+    plan()
+    for i in range(_EVIDENCE_MAX + 3):
+        verification.record_evidence(sess.verification, kind="check", checker="ruff", path=f"f{i}.py",
+                                     status="passed", exit_code=0, argv=["ruff", f"f{i}.py"], cwd="C:/p")
+    panel = TaskPanel(None, lambda key: "#eeeeee")
+    try:
+        panel.render_session(sess)
+        assert "展开全部（还有 3 项）" in panel.evidence_label.text()
+        assert panel.evidence_label.text().count("<tr>") == _EVIDENCE_MAX
+        panel.evidence_label.linkActivated.emit("toggle")
+        assert panel.evidence_label.text().count("<tr>") == _EVIDENCE_MAX + 3
+        assert "收起" in panel.evidence_label.text()
+        panel._refresh_evidence()                     # 每 2 秒的刷新不把它收回去
+        assert panel.evidence_label.text().count("<tr>") == _EVIDENCE_MAX + 3
+    finally:
+        panel.close()
 
 
 def test_blind_period_reaches_model_context(sess):
