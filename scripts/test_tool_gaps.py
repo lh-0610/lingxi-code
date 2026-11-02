@@ -73,6 +73,27 @@ class TestReadFile:
         from src.tools import run_command
         assert ("cmd.exe" if os.name == "nt" else "/bin/sh") in run_command.description
         assert "不用每条都先 cd" in run_command.description
+        if os.name == "nt":
+            assert 'set "X=1"' in run_command.description      # cmd 的 set 会把 && 前的空格算进值里
+
+    def test_run_tests_runs_qt_offscreen(self, project_dir, monkeypatch):
+        """测试子进程默认离屏：别在用户桌面上弹窗口或 Qt 错误框（用户已经设了就不覆盖）。"""
+        import subprocess
+        from src import tools
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen.update(kwargs.get("env") or {})
+            return subprocess.CompletedProcess(cmd, 0, stdout="1 passed in 0.01s", stderr="")
+
+        monkeypatch.setattr(tools.subprocess, "run", fake_run)
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        tools.run_tests.func()
+        assert seen.get("QT_QPA_PLATFORM") == "offscreen"
+
+        monkeypatch.setenv("QT_QPA_PLATFORM", "windows")
+        tools.run_tests.func()
+        assert seen.get("QT_QPA_PLATFORM") == "windows"
 
 
 class TestWriteTools:

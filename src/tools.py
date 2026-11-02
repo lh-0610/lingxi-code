@@ -923,6 +923,8 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
 run_command.description += (
     "\n\n运行环境：" + (
         "Windows 的 **cmd.exe**（不是 bash，也不保证有 grep / tail / sed / cat）。"
+        "设环境变量要写 `set \"X=1\" && 命令`——不加引号，&& 前面的空格会算进值里"
+        "（`set QT_QPA_PLATFORM=offscreen && …` 得到的是 \"offscreen \"，Qt 起不来还会弹错误框）。"
         if os.name == "nt" else "/bin/sh。")
     + "默认就在项目根目录执行，不用每条都先 cd。"
     "看文件用 read_file、搜内容用 search_files、找文件用 search_files 的 file_pattern，"
@@ -1965,11 +1967,14 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
     # 早先这里只有布尔 + 原因，结果卡据此说不出"pytest 根本没装"和"测试跑完挂了"的区别。
     started = _evidence_now()
     t0 = time.time()
+    # 测试不该在用户桌面上弹窗口：Qt 起不来时还会弹一个模态错误框，点掉之前测试进程一直卡着
+    test_env = {**os.environ}
+    test_env.setdefault("QT_QPA_PLATFORM", "offscreen")
     try:
         result = subprocess.run(
             cmd, cwd=run_cwd,
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, env=test_env,
         )
         elapsed = time.time() - t0
     except FileNotFoundError:
