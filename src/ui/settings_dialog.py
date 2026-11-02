@@ -209,8 +209,9 @@ class SettingsDialog(QDialog):
                        "例如：claude-sonnet-4-20250514")
 
         self._add_section(m, "默认模型")
-        self._add_text(m, "default_model_id", "默认模型 ID（打开时先选上次用的模型，没有才用它）", "mimo-v2.5-pro",
-                       default="mimo-v2.5-pro")
+        self._add_text(m, "default_model_id",
+                       "默认模型（打开时先选上次用的模型，没有才用它）——可填模型 ID 或显示名",
+                       "mimo-v2.5-pro", default="mimo-v2.5-pro")
 
         self._add_section(m, "图片识别模型")
         self._add_vision_model_picker(m)
@@ -826,10 +827,14 @@ class SettingsDialog(QDialog):
     def _add_vision_model_picker(self, layout):
         """图片识别模型下拉：发图时若当前对话模型不是它，会先用它把图转成文字。
 
-        选项 = 当前 MODEL_LIST 所有条目（显示名 → model_id）+ "（不启用图片识别）"。
+        选项 = 当前 MODEL_LIST 所有条目（显示名 → 显示名）+ "（不启用图片识别）"。
         写回 config.json 的 vision_model_id（空字符串 = 不启用）。
+
+        itemData 存**显示名**而不是 model_id：两个模型可能共用同一个 model_id
+        （内置 deepseek-flash vs 自定义 ⚙ deepseek-v4.1-flash），存 id 会让下拉回显
+        落到列表里靠前的那个、保存后甚至把配置串到另一个模型上。显示名唯一。
         """
-        from ..models import MODEL_LIST
+        from ..models import MODEL_LIST, resolve_model_ref
 
         wrapper = QWidget()
         wl = QVBoxLayout(wrapper)
@@ -849,10 +854,17 @@ class SettingsDialog(QDialog):
             # 不能当图片识别模型（选了发图会崩）
             if not model_id or mtype == "claude-code":
                 continue
-            combo.addItem(name, model_id)
-        # 设当前值
+            combo.addItem(name, name)
+        # 设当前值：config 里存的可能是显示名（本版本保存的），也可能是 model_id
+        # （旧配置 / 手改的）。先按显示名精确找，找不到再按 models 的解析规则
+        # （显示名 → 去 ⚙ 的显示名 → model_id）换算成显示名回显；都找不到说明
+        # 那个模型已经从列表里删了，留在「不启用」。
         current = str(self.config.get("vision_model_id", "") or "")
-        idx = combo.findData(current)
+        idx = combo.findData(current) if current else -1
+        if idx < 0 and current:
+            resolved = resolve_model_ref(current, exclude_types=("claude-code",))
+            if resolved >= 0:
+                idx = combo.findData(MODEL_LIST[resolved][0])
         if idx >= 0:
             combo.setCurrentIndex(idx)
         wl.addWidget(combo)

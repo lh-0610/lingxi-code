@@ -99,6 +99,64 @@ def _build_model_list():
 MODEL_LIST = _build_model_list()
 
 
+# ── 模型标识解析（default_model_id / vision_model_id 共用）──
+# 配置里写的既可以是 model_id，也可以是显示名。自定义模型的 model_id 可能和内置的撞车
+# （如内置 deepseek-flash 与自定义「⚙ deepseek-v4.1-flash」同为 deepseek-flash），
+# 只按 model_id 匹配永远命中列表里靠前的那个，所以显示名优先。
+
+_GEAR_PREFIX = "⚙"
+
+
+def _strip_gear(value) -> str:
+    """去掉自定义模型显示名的 ⚙ 前缀（允许用户带或不带前缀地填）。"""
+    v = str(value or "").strip()
+    if v.startswith(_GEAR_PREFIX):
+        v = v[len(_GEAR_PREFIX):].strip()
+    return v
+
+
+def _model_ref_rank(name, model_id, ref) -> int | None:
+    """ref 在某一项上的匹配优先级：0 显示名完全一致 > 1 去掉 ⚙ 的显示名 > 2 带 ⚙ 填写的
+    显示名 > 3 model_id。不匹配返回 None。"""
+    if not ref:
+        return None
+    if name == ref:
+        return 0
+    plain_ref = _strip_gear(ref)
+    if not plain_ref:
+        return None
+    plain_name = _strip_gear(name)
+    if plain_name == ref:
+        return 1
+    if plain_name == plain_ref:
+        return 2
+    if str(model_id or "").strip() == plain_ref:
+        return 3
+    return None
+
+
+def resolve_model_ref(ref, model_list=None, exclude_types=()):
+    """把配置里的模型标识解析成 MODEL_LIST 下标；空值 / 找不到返回 -1。
+
+    解析顺序：显示名完全一致 → 去掉 ⚙ 的显示名 → model_id。同一优先级取列表里靠前的。
+    exclude_types 用来排掉不能承担该角色的类型（如图片识别模型不能是 claude-code）。
+    """
+    target = str(ref or "").strip()
+    if not target:
+        return -1
+    entries = MODEL_LIST if model_list is None else model_list
+    best, best_rank = -1, None
+    for i, (name, mtype, model_id, _) in enumerate(entries):
+        if mtype in exclude_types:
+            continue
+        rank = _model_ref_rank(name, model_id, target)
+        if rank is not None and (best_rank is None or rank < best_rank):
+            best, best_rank = i, rank
+            if rank == 0:      # 已有最优匹配，同 rank 只需保留靠前的
+                break
+    return best
+
+
 # ── 上次实际调用的模型（下次打开默认选它）──
 # 记 类型 + model_id + 名字，不记序号：config 里的模型列表一改，序号就对不上了。
 # 单独一个文件，不并进 ui_prefs.json：这里由 worker 线程写，和界面线程写偏好不抢同一个文件。
@@ -218,17 +276,12 @@ def get_vision_model_index():
     """返回图片识别模型的 index。
 
     语义：图片识别模型 = 用户在设置里通过 vision_model_id 显式选定的那一个。
-    找不到对应 model_id（用户没选 / config 里的 id 已删）时返回 -1，
-    UI 据此提示用户去设置里挑一个。
+    填显示名或 model_id 都行（显示名优先，见 resolve_model_ref）。
+    找不到（用户没选 / config 里的名字已删）时返回 -1，UI 据此提示用户去设置里挑一个。
     """
     from .config import VISION_MODEL_ID
-    if not VISION_MODEL_ID:
-        return -1
-    for i, (_, mtype, model_id, _) in enumerate(MODEL_LIST):
-        # claude-code 是 CLI 模式，不能当图片识别模型——即便用户手填了也忽略
-        if model_id == VISION_MODEL_ID and mtype != "claude-code":
-            return i
-    return -1
+    # claude-code 是 CLI 模式，不能当图片识别模型——即便用户手填了也忽略
+    return resolve_model_ref(VISION_MODEL_ID, exclude_types=("claude-code",))
 
 
 def current_model_supports_vision():
@@ -236,11 +289,13 @@ def current_model_supports_vision():
 
     是 → 可以直接发图，不走 OCR 桥接；否 → 调 describe_images_with_vision 先识别。
     没配 vision_model_id → 返回 False（让 UI 提示用户去设置里选）。
+
+    比的是**解析后的下标**而不是 model_id：两个模型可能共用同一个 model_id
+    （内置 deepseek-flash vs 自定义 ⚙ deepseek-v4.1-flash），只比 id 会把自定义那个
+    误判成图片识别模型。
     """
-    from .config import VISION_MODEL_ID
-    if not VISION_MODEL_ID:
-        return False
-    return MODEL_LIST[state.current_model_index][2] == VISION_MODEL_ID
+    vision_idx = get_vision_model_index()
+    return vision_idx >= 0 and vision_idx == state.current_model_index
 
 
 def check_ollama():
