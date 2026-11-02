@@ -224,7 +224,8 @@ def test_undo_task_switch_integrity(clean_session):
     assert ok is True
     assert "已撤销任务切换" in msg
     assert sess.current_task["id"] == task_a_id
-    assert sess.current_plan == [{"text": "原任务步骤", "status": "pending"}]
+    # 原计划原样取回（列计划时第一个待办已自动标成进行中）
+    assert sess.current_plan == [{"text": "原任务步骤", "status": "in_progress"}]
     assert sess.last_task_switch is None
     # 原任务 A 的归档项被取回；被撤销的 B 不消失，以 undone_switch 留在归档里
     assert [t["id"] for t in sess.archived_tasks] == [task_b_id]

@@ -19,8 +19,25 @@ def test_parse_and_render():
 def test_empty_without_reason_keeps_unfinished_plan():
     update_plan.func("[ ] 临时")
     out = update_plan.func("")
-    assert state.current_plan == [{"text": "临时", "status": "pending"}]
+    assert state.current_plan == [{"text": "临时", "status": "in_progress"}]
     assert "未更新" in out
+
+
+def test_new_plan_starts_its_first_step():
+    """列完计划（全是 [ ]）模型常常直接开干第 1 步、从不标进行中：第 1 步要自动成为进行中，
+    面板才会高亮它、消息流里才插得进它的步骤分段（否则点面板上的第 1 步滚不过去）。"""
+    state.current_plan = []
+    out = update_plan.func("[ ] A\n[ ] B")
+    assert [it["status"] for it in state.current_plan] == ["in_progress", "pending"]
+    assert "[~] A" in out or "进行中" in out
+
+
+def test_plan_mode_only_lists_steps(monkeypatch):
+    """Plan 模式只是列计划、还没开干：不替它标进行中。"""
+    state.current_plan = []
+    monkeypatch.setattr(state, "agent_mode", "plan", raising=False)
+    update_plan.func("[ ] A\n[ ] B")
+    assert [it["status"] for it in state.current_plan] == ["pending", "pending"]
 
 
 def test_explicit_cancel_clears():
@@ -121,7 +138,8 @@ def test_new_dependency_can_be_added_with_reason():
     assert [it["text"] for it in state.current_plan] == ["A", "B", "C"]
     assert state.current_plan[0]["status"] == "done"
     assert state.current_plan[1]["status"] == "done"
-    assert state.current_plan[2] == {"text": "C", "status": "pending"}
+    # A、B 都完成了，新加的 C 就是当前这一步
+    assert state.current_plan[2] == {"text": "C", "status": "in_progress"}
 
 
 @pytest.mark.parametrize("explanation", ["", " \n\t"])
@@ -186,7 +204,7 @@ class TestSetStepStatus:
     """set_step_status 增量更新测试。"""
 
     def _setup_three_steps(self):
-        """建 3 步计划 [ ] A, [ ] B, [ ] C。"""
+        """建 3 步计划 [ ] A, [ ] B, [ ] C（建好后 A 自动成为进行中）。"""
         state.current_plan = []
         update_plan.func("[ ] A\n[ ] B\n[ ] C")
         assert len(state.current_plan) == 3
@@ -195,7 +213,7 @@ class TestSetStepStatus:
         self._setup_three_steps()
         out = set_step_status.func(2, "进行中")
         assert state.current_plan[1]["status"] == "in_progress"
-        assert state.current_plan[0]["status"] == "pending"   # 不变
+        assert state.current_plan[0]["status"] == "in_progress"   # 不变（建计划时自动成了进行中）
         assert state.current_plan[2]["status"] == "pending"   # 不变
         assert "0/3" in out                                    # done 计数 = 0
 
@@ -293,5 +311,5 @@ class TestSetStepStatus:
         self._setup_three_steps()
         previous = state.current_plan
         set_step_status.func(1, "完成")
-        assert [it["status"] for it in previous] == ["pending", "pending", "pending"]
+        assert [it["status"] for it in previous] == ["in_progress", "pending", "pending"]
         assert state.current_plan[1]["status"] == "in_progress"

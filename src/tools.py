@@ -1339,6 +1339,11 @@ def update_plan(plan: str, explanation: str = "", new_task: bool = False) -> str
     items = state.parse_plan(clean_plan)
     if plan and not items:
         return "计划未更新：没有检测到合法 checklist 行，请用 [ ] / [~] / [x] 标记。"
+    # 和 set_step_status 同一个规矩：没有进行中的步骤就把第一个待办标成进行中。模型常常列完
+    # 计划（全是 [ ]）就直接开干第 1 步、从不标进行中——面板上那一步一直显示待办，消息流里也
+    # 插不进它的步骤分段，点面板上的第 1 步滚不过去。Plan 模式只是列计划、还没开干，不标。
+    if items and getattr(state, "agent_mode", "act") != "plan":
+        _auto_advance_plan(items)
 
     explanation = explanation.strip()
 
