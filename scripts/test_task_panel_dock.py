@@ -209,10 +209,10 @@ def test_changed_files_list_counts_and_opens_the_diff(ui, qapp, git_project, mon
     file_rows = [w for w in panel.findChildren(QWidget) if w.objectName() == "fileRow"]
     assert len(file_rows) == 2
 
-    opened = []
-    monkeypatch.setattr(ui, "_show_diff_dialog", lambda title, intro, text, is_diff: opened.append((title, is_diff)))
     QTest.mouseClick(file_rows[0], Qt.LeftButton)
-    assert opened == [("改动：app.py", True)]
+    _pump(qapp)
+    assert ui.file_panel.isVisible(), "点改动的文件：在停靠的文件面板里打开，不再弹模态窗口"
+    assert ui.file_panel.paths() == ["app.py"]
     assert sess.verification.get("diff_reviewed") is not True, "看一眼不替模型记已审阅"
 
 

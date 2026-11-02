@@ -382,7 +382,11 @@ def diff_numstat(cwd: str, rel_paths: list[str]) -> dict | None:
     return result
 
 
-def file_diff_text(cwd: str, rel_path: str, max_chars: int = 20000) -> str:
+# 新文件（git 还没跟踪）没有旧版本可对比：先给一行说明，后面接当前内容
+_NEW_FILE_NOTE = "新文件（git 还没跟踪），没有旧版本可对比。当前内容："
+
+
+def _file_diff_raw(cwd: str, rel_path: str, max_chars: int = 20000) -> str:
     """一个文件此刻相对上次提交的差异（只读，不记"已审阅"）。新文件给出当前内容。"""
     if not _git_available():
         return "git 未安装或不在 PATH 中，无法查看差异。"
@@ -399,11 +403,88 @@ def file_diff_text(cwd: str, rel_path: str, max_chars: int = 20000) -> str:
                     content = f.read(max_chars)
             except OSError as e:
                 return f"新文件（git 还没跟踪），读取失败：{e}"
-            return "新文件（git 还没跟踪），没有旧版本可对比。当前内容：\n\n" + content
+            return _NEW_FILE_NOTE + "\n\n" + content
         return "这个文件和上次提交相比没有差异（可能改了又改回去，或改动已经提交）。"
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n... [差异太长，只显示前 {max_chars} 字符]"
     return text
+
+
+def file_diff_text(cwd: str, rel_path: str, max_chars: int = 20000) -> str:
+    """一个文件此刻相对上次提交的差异（纯文本，给纯文本展示用）。"""
+    return _file_diff_raw(cwd, rel_path, max_chars)
+
+
+# 差异里每一行的种类，界面按它上色（新增绿 / 删除红）：
+#   "add" / "del"：新增 / 删除的正文行；"hunk"：@@ 段落头；"meta"：diff/index/---/+++ 头
+#   "ctx"：上下文行；"note"：不是 diff 的说明文字（新文件、没差异、git 不可用等）
+_HUNK_PREFIXES = ("diff ", "index ", "--- ", "+++ ", "new file", "deleted file ",
+                  "old mode", "new mode", "similarity index", "rename ", "copy ",
+                  "\\ No newline")
+
+
+def _classify_diff_line(line: str) -> str:
+    if line.startswith("@@"):
+        return "hunk"
+    if line.startswith("+") and not line.startswith("+++"):
+        return "add"
+    if line.startswith("-") and not line.startswith("---"):
+        return "del"
+    if (line[:1] in ("+", "-")) or line.startswith(_HUNK_PREFIXES):
+        return "meta"
+    return "ctx"
+
+
+def _hunk_numbers(line: str):
+    """从 `@@ -a,b +c,d @@` 里取出新文件一侧的起始行号；取不到返回 None。"""
+    try:
+        part = line.split("+", 1)[1].split("@@", 1)[0].strip()
+        return int(part.split(",")[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def file_diff_lines(cwd: str, rel_path: str, max_chars: int = 20000) -> list[tuple]:
+    """file_diff_text 的逐行版本：[(行号, 种类, 文本)]。
+
+    行号是新文件一侧的行号（删除行没有新行号，取 None），界面把它按显示行号处理；
+    不是 unified diff 的说明文字整段按 "note" 给出，行号 None。新文件没有 diff
+    （没有旧版本），说明那行按 "note"、当前内容按 "add" 逐行编号，界面同样能按绿
+    色显示——否则点一个刚建的文件只会看到一段灰字。
+    """
+    text = _file_diff_raw(cwd, rel_path, max_chars)
+    if text.startswith(_NEW_FILE_NOTE):
+        rows = [(None, "note", _NEW_FILE_NOTE)]
+        body = text[len(_NEW_FILE_NOTE):].lstrip("\n").splitlines()
+        for no, line in enumerate(body, 1):
+            rows.append((no, "add", line))
+        return rows
+    if not text.startswith("diff ") and "--- " not in text.splitlines()[:3]:
+        return [(None, "note", ln) for ln in text.splitlines()]
+    rows = []
+    new_no = None
+    for ln in text.splitlines():
+        if ln.startswith("... [差异太长"):
+            rows.append((None, "note", ln))
+            continue
+        kind = _classify_diff_line(ln)
+        if kind == "hunk":
+            new_no = _hunk_numbers(ln)
+            rows.append((None, "hunk", ln))
+            continue
+        if kind == "add":
+            rows.append((new_no, "add", ln))
+            new_no = None if new_no is None else new_no + 1
+            continue
+        if kind == "del":
+            rows.append((None, "del", ln))
+            continue
+        if kind == "meta":
+            rows.append((None, "meta", ln))
+            continue
+        rows.append((new_no, "ctx", ln))
+        new_no = None if new_no is None else new_no + 1
+    return rows
 
 
 def build_git_write_confirmation(name: str, args: dict | None = None) -> str:

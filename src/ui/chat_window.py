@@ -234,6 +234,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._style_scroll_bottom_btn()
         if hasattr(self, "plan_panel"):
             self._style_plan_panel()
+        if hasattr(self, "file_panel"):
+            self.file_panel.apply_theme()
         # 新一轮历史项（删除按钮）会用新色
         if hasattr(self, "history_layout"):
             self._refresh_session_list()
@@ -293,8 +295,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 窗口放不下时改成盖在对话区上的浮层（见 _apply_task_panel_collapse）
         self._main_layout = main_layout
         self._build_plan_panel()
-        main_layout.addWidget(self.plan_panel)
         self._task_panel_docked = True
+        # 文件面板紧挨着对话区（在任务面板左边），默认收起；点"改动的文件"才出来
+        self._build_file_panel()
+        main_layout.addWidget(self.file_panel)
+        main_layout.addWidget(self.plan_panel)
         self._apply_task_panel_collapse()
 
     # ── 侧边栏 ──
@@ -598,6 +603,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     # 面板停靠后，对话栏（含顶栏）至少要留这么宽，否则改成浮层——顶栏最窄一档约 590
     _TASK_PANEL_MIN_CHAT = 592
+    # 文件面板停靠时对话区也至少留这么宽（再窄顶栏按钮会叠在一起）；放不下时任务面板先让成浮层，
+    # 还放不下就把文件面板藏起来（标签页留着）
+    _FILE_PANEL_MIN_CHAT = _TASK_PANEL_MIN_CHAT
 
     def _build_plan_panel(self):
         # 最右侧的一栏（B05 三段式 + 验证证据），由 _build_ui 放进主布局
@@ -644,14 +652,19 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         return side.width() if side is not None and getattr(self, "_sidebar_visible", True) else 0
 
     def _task_panel_narrow(self):
-        """停靠进来的话，对话栏剩下的宽度不够：这时面板只能以浮层打开。"""
-        rest = self.width() - self._sidebar_shown_width() - self.plan_panel.width()
+        """停靠进来的话，对话栏剩下的宽度不够：这时面板只能以浮层打开。
+
+        文件面板开着标签页时先给它留出最窄一档——用户正在看文件，任务面板让成浮层，
+        关掉文件面板后自己停靠回来。"""
+        rest = (self.width() - self._sidebar_shown_width() - self.plan_panel.width()
+                - self._file_panel_reserved_width())
         return rest < self._TASK_PANEL_MIN_CHAT
 
     def _task_panel_max_width(self):
         """拖宽的上限：停靠时不能把对话栏挤到放不下顶栏；浮层时只要不超出窗口。"""
         if getattr(self, "_task_panel_docked", True):
-            return self.width() - self._sidebar_shown_width() - self._TASK_PANEL_MIN_CHAT
+            return (self.width() - self._sidebar_shown_width() - self._file_panel_reserved_width()
+                    - self._TASK_PANEL_MIN_CHAT)
         return self.width() - 120
 
     def _task_panel_wanted_open(self):
@@ -773,33 +786,99 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         return self._panel_files_cache[1]
 
     def _on_task_panel_file_clicked(self, rel_path):
-        """点改动的文件：看它此刻相对上次提交的差异（只读，不替模型记"已审阅"）。"""
-        from .. import session as _session
-        from ..tools_git import file_diff_text
-        work = self._undo_workspace_for(_session.get_active())
-        text = file_diff_text(work, rel_path)
-        is_diff = text.startswith("diff --git")
-        self._show_diff_dialog(
-            f"改动：{rel_path}",
-            f"{rel_path} 此刻相对上次提交的差异（当前状态，不是哪一轮保存下来的历史）：",
-            text, is_diff)
+        """点改动的文件：在右边停靠的文件面板里开一个标签页（只读，不替模型记"已审阅"）。
 
-    def _show_diff_dialog(self, title, intro, text, is_diff):
-        from PySide6.QtWidgets import QDialog, QTextBrowser
-        from .fonts import MONO_CSS
-        dlg = QDialog(self)
-        dlg.setWindowTitle(title)
-        dlg.resize(820, 560)
-        lay = QVBoxLayout(dlg)
-        note = QLabel(intro)
-        note.setWordWrap(True)
-        lay.addWidget(note)
-        view = QTextBrowser()
-        import html as _html
-        body = self._format_diff_html(text) if is_diff else _html.escape(text).replace("\n", "<br>")
-        view.setHtml(f'<div style="font-family:{MONO_CSS}; font-size:12px; white-space:pre-wrap;">{body}</div>')
-        lay.addWidget(view, 1)
-        dlg.exec()
+        不开模态窗口——看文件的时候对话照常能读、能输入，几个文件也能并排切着看。
+        """
+        from .. import session as _session
+        from ..tools_git import file_diff_lines
+        work = self._undo_workspace_for(_session.get_active())
+        rows = file_diff_lines(work, rel_path)
+        self.file_panel.open_file(rel_path, rows)
+        if not getattr(self, "_task_panel_docked", True) and self._task_panel_overlay_open:
+            self._task_panel_overlay_open = False      # 从浮层点的：收起浮层，别挡住刚开的文件
+        self._apply_task_panel_collapse()          # 有了文件面板，任务面板可能要让成浮层
+        self._apply_file_panel_collapse()
+        if not self.file_panel.isVisible():
+            # 窗口太小，面板放不下：标签页已经开好，窗口宽回来就会显示，这里说清楚
+            self._show_toast("窗口太窄，文件面板暂时放不下；拉宽窗口就能看到", 3500)
+
+    # ── 文件面板（对话区右边的停靠面板）──────────────────────────
+
+    def _build_file_panel(self):
+        from .file_panel import FilePanel
+        prefs = _load_ui_prefs()
+        self.file_panel = FilePanel(None, theme_lookup=self._t)
+        try:
+            width = int(prefs.get("file_panel_width", FilePanel.DEFAULT_WIDTH))
+        except (TypeError, ValueError):
+            width = FilePanel.DEFAULT_WIDTH
+        # 用户想要的宽度（拖宽时更新）；实际宽度还要受窗口空间约束，见 _apply_file_panel_collapse
+        self._file_panel_wanted_width = max(FilePanel.MIN_WIDTH, min(FilePanel.MAX_WIDTH, width))
+        self.file_panel.setFixedWidth(self._file_panel_wanted_width)
+        self.file_panel.max_width_fn = self._file_panel_max_width
+        self.file_panel.width_changed.connect(self._on_file_panel_width_changed)
+        self.file_panel.closed.connect(self._on_file_panel_closed)
+        # 出现 / 消失 / 变宽都会改变对话栏宽度：输入框和顶栏折叠档位要跟着重算
+        self.file_panel.installEventFilter(self)
+
+    def _file_panel_max_width(self):
+        """拖宽上限：对话栏至少还要留 _FILE_PANEL_MIN_CHAT，别把对话挤没了。"""
+        from .file_panel import FilePanel
+        return max(FilePanel.MIN_WIDTH, self._file_panel_room())
+
+    def _plan_panel_shown_width(self):
+        """停靠的任务面板占的宽度；浮层式打开是盖在对话上的，不占位置。"""
+        panel = getattr(self, "plan_panel", None)
+        if panel is None or not panel.isVisible() or not getattr(self, "_task_panel_docked", True):
+            return 0
+        return panel.width()
+
+    def _file_panel_reserved_width(self):
+        """任务面板决定停靠还是浮层时，要给开着标签页的文件面板留的宽度（最窄一档）。"""
+        panel = getattr(self, "file_panel", None)
+        return panel.MIN_WIDTH if panel is not None and panel.paths() else 0
+
+    def _file_panel_room(self):
+        """文件面板最多能占多宽：窗口去掉侧栏、停靠的任务面板，再给对话栏留一条底线。"""
+        return (self.width() - self._sidebar_shown_width() - self._plan_panel_shown_width()
+                - self._FILE_PANEL_MIN_CHAT)
+
+    def _apply_file_panel_collapse(self):
+        """文件面板只在有标签页、且窗口放得下时显示；收起时对话区恢复原来的宽度。
+
+        窗口临时变窄只把面板压窄（有下限），压不下就先藏起来——标签页留着，
+        窗口宽回来再显示，不替用户丢掉正在看的文件。
+        """
+        panel = getattr(self, "file_panel", None)
+        if panel is None:
+            return
+        if not panel.paths():
+            if panel.isVisible():
+                panel.setVisible(False)
+            return
+        if panel.is_dragging():
+            return          # 用户正拖着改宽度，别在这时候按可用空间改回去
+        room = self._file_panel_room()
+        if room < panel.MIN_WIDTH:
+            panel.setVisible(False)
+            return
+        want = max(panel.MIN_WIDTH, min(self._file_panel_wanted_width, room))
+        if panel.width() != want:
+            panel.setFixedWidth(want)
+        panel.setVisible(True)
+
+    def _on_file_panel_width_changed(self, width):
+        self._file_panel_wanted_width = max(self.file_panel.MIN_WIDTH,
+                                            min(self.file_panel.MAX_WIDTH, int(width)))
+        prefs = _load_ui_prefs()
+        prefs["file_panel_width"] = self._file_panel_wanted_width
+        _save_ui_prefs(prefs)
+        self._refresh_responsive_layout()
+
+    def _on_file_panel_closed(self):
+        """面板收起（标签都关完了）：对话区恢复原来的宽度，输入框和顶栏跟着重算。"""
+        self._refresh_responsive_layout()
 
     def _on_task_panel_width_changed(self, width):
         prefs = _load_ui_prefs()
@@ -1305,6 +1384,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             for delay in (0, 30):
                 QTimer.singleShot(delay, self, self._refresh_responsive_layout)
             return False
+
+        if (hasattr(self, 'file_panel') and obj is self.file_panel
+                and event.type() in (event.Type.Show, event.Type.Hide, event.Type.Resize)):
+            for delay in (0, 30):
+                QTimer.singleShot(delay, self, self._refresh_responsive_layout)
+            return False
         """Enter 发送，Shift+Enter 换行，Ctrl+V 粘贴图片"""
         if not hasattr(self, 'entry'):
             return super().eventFilter(obj, event)
@@ -1586,6 +1671,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if hasattr(self, 'scroll_bottom_btn'):
             self._position_scroll_btn()
         self._apply_task_panel_collapse()
+        self._apply_file_panel_collapse()
         self._refresh_header_compactness()
 
 
