@@ -353,7 +353,7 @@ def _prepare_task_map(ui):
         files = sum(1 for ln in sess.task_map.splitlines()
                     if ln and not ln.startswith((" ", "#", "（", "按")))
         logger.info(f"代码地图：{files} 个文件，{len(sess.task_map)} 字，{_time.monotonic() - t0:.1f}s")
-        ui.show_message(f"\n🗺️ 按任务挑出 {files} 个相关文件给模型参考\n", "tool_result")
+        ui.show_message(f"\n按任务挑出 {files} 个相关文件给模型参考\n", "tool_result")
 
 
 def _agent_loop_body(ui):
