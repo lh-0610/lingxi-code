@@ -61,6 +61,14 @@ class TestSystemPromptStability:
         assert "你是一个有帮助的AI助手" in p
         assert "当前日期" in p
 
+    def test_scripts_go_to_scratch_dir_not_the_project(self, sess):
+        """批量改文件的脚本、试验脚本都写到项目外的临时目录（任务六在项目根留下过 8 个 _tmp.py），
+        批量改完要 git_diff 核对；临时目录的路径是固定的，不影响缓存。"""
+        p = roles.get_system_prompt()
+        assert roles.scratch_dir() in p
+        assert "才写脚本批量改" in p and "git_diff" in p
+        assert roles.get_system_prompt() == p
+
     def test_project_rules_still_invalidate(self, sess, tmp_path):
         """项目规则**应该**进 system（它稳定），改了它缓存失效是正确且必要的。"""
         before = roles.get_system_prompt()

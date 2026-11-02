@@ -30,6 +30,31 @@ def test_readonly_command_does_not_create_dirty_files(project_dir):
     assert verification.get_verification_gaps(session.get_verification()) == []
 
 
+def test_command_reports_which_files_it_changed(project_dir, monkeypatch):
+    """确认卡上只看得到命令本身：命令（比如跑了个脚本）改了哪些文件，要列在命令卡上，也要告诉模型。"""
+    shown = []
+    monkeypatch.setattr(state, "ui_ref", SimpleNamespace(
+        confirm_command=lambda *_a, **_k: (True, ""),
+        show_message=lambda text, tag: shown.append((tag, text))))
+    (project_dir / "app.py").write_text("value = 1\n", encoding="utf-8")
+    result = tools.run_command.func(python_command(
+        "from pathlib import Path; Path('app.py').write_text('value = 2'); Path('new.py').write_text('x = 1')"))
+    assert "2 个文件变了" in result and "app.py" in result and "new.py" in result
+    cards = [text for tag, text in shown if tag == "tool_files"]
+    assert len(cards) == 1 and sorted(cards[0].splitlines()) == ["app.py", "new.py"]
+
+
+def test_readonly_command_reports_no_changed_files(project_dir, monkeypatch):
+    shown = []
+    monkeypatch.setattr(state, "ui_ref", SimpleNamespace(
+        confirm_command=lambda *_a, **_k: (True, ""),
+        show_message=lambda text, tag: shown.append((tag, text))))
+    (project_dir / "app.py").write_text("value = 1\n", encoding="utf-8")
+    result = tools.run_command.func(python_command("print('read only')"))
+    assert "个文件变了" not in result
+    assert not [tag for tag, _ in shown if tag == "tool_files"]
+
+
 def test_rewriting_identical_bytes_does_not_invalidate_tests(project_dir):
     target = project_dir / "app.py"
     target.write_text("value = 1\n", encoding="utf-8")

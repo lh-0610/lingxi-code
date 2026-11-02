@@ -720,8 +720,46 @@ def run_command(command: str, timeout: int | None = None, background: bool = Fal
     立即返回 bg_id；用 read_background_output 看输出，stop_background_command 停止。
     """
     from .workspace_changes import track_workspace_changes
-    with track_workspace_changes(_project_cwd()):
-        return _run_command(command, timeout, background)
+    root = _project_cwd()
+    with track_workspace_changes(root) as changed:
+        result = _run_command(command, timeout, background)
+    return result + _report_command_changes(root, changed)
+
+
+# 工具结果里最多列这么多个被命令改动的文件（界面上的卡片另有自己的上限）
+_COMMAND_CHANGES_LIST_MAX = 20
+
+
+def _report_command_changes(root: str, changed: list) -> str:
+    """命令运行期间项目里变了的文件：在命令卡上列出来（点开在文件面板里看），并告诉模型。
+
+    用户在确认卡上同意的只是一条命令；命令要是跑了个脚本批量改文件，改了哪些
+    确认卡上看不出来——这里补上。返回追加到工具结果末尾的说明（没改动返回空串）。
+    """
+    if not changed:
+        return ""
+    rels = []
+    for path in changed:
+        try:
+            rel = os.path.relpath(path, root)
+        except ValueError:          # 跨盘符
+            rel = path
+        rel = (path if rel.startswith("..") else rel).replace("\\", "/")
+        if rel not in rels:
+            rels.append(rel)
+    try:
+        ui = None if getattr(_session.current_session(), "is_subagent", False) else getattr(state, "ui_ref", None)
+    except Exception:
+        ui = None
+    if ui is not None:
+        try:
+            ui.show_message("\n".join(rels), "tool_files")
+        except Exception:
+            pass
+    shown = "、".join(rels[:_COMMAND_CHANGES_LIST_MAX])
+    more = f" 等 {len(rels)} 个" if len(rels) > _COMMAND_CHANGES_LIST_MAX else ""
+    return (f"\n\n（这条命令运行期间，项目里有 {len(rels)} 个文件变了：{shown}{more}。"
+            "如果是脚本改的，用 git_diff 核对一遍实际改动。）")
 
 
 def _run_command(command: str, timeout: int | None, background: bool) -> str:

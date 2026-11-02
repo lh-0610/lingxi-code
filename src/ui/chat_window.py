@@ -576,6 +576,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.chat_area = MessageView()
         self.chat_area.setObjectName("chatArea")
         self.chat_area.image_clicked.connect(self._show_image_dialog)   # 点击图片 → 放大遮罩
+        # 命令卡上"改动了 N 个文件"里的文件名：和任务面板的改动文件一样，在文件面板里开
+        self.chat_area.file_clicked.connect(self._on_task_panel_file_clicked)
         self.chat_area.meta_provider = self._stream_meta               # 回复上方那行小字里的模式
         self.chat_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         parent_layout.addWidget(self.chat_area, 1)

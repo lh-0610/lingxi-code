@@ -531,3 +531,30 @@ class TestToolCardTooltip:
             QToolTip.hideText()
             label.close()
             qt_app.setStyleSheet("")
+
+
+class TestCommandChangedFiles:
+    def test_card_lists_changed_files_and_clicking_one_opens_it(self, qt_app):
+        """命令改了哪些文件列在命令卡上（收起时也看得到），点文件名交给宿主在文件面板里打开。"""
+        mv = _view()
+        _round_with_reply(mv)
+        mv.handle("\n🖥️ 执行命令", "tool_tag")
+        mv.handle("  python fix.py\n", "tool_detail")
+        mv.handle("✓ 退出码 0\n", "tool_result")
+        mv.handle("src/a.py\nsrc/b.py", "tool_files")
+        _pump(qt_app)
+        card = mv._cur_assistant._cur_tool
+        assert "改动了 2 个文件" in card.changed_files_text()
+        assert "a.py" in card.changed_files_text() and "b.py" in card.changed_files_text()
+
+        opened = []
+        mv.file_clicked.connect(opened.append)
+        card._files.linkActivated.emit("src/b.py")
+        assert opened == ["src/b.py"]
+
+    def test_files_after_the_card_ended_are_ignored(self, qt_app):
+        mv = _view()
+        _round_with_reply(mv)
+        _tool(mv, "\U0001F5A5️ 执行命令", "python fix.py", "✓ 退出码 0\n")
+        mv.handle("src/a.py", "tool_files")       # 卡已结束：不挂到别的卡上，也不报错
+        assert mv._cur_assistant._cur_tool is None

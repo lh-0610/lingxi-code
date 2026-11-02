@@ -174,7 +174,7 @@ class _ElidedLabel(QLabel):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self._full = ""
-        self.setObjectName("elidedLabel")
+        self.setProperty("elided", True)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setMinimumWidth(0)
         self.set_full(text)
@@ -183,7 +183,7 @@ class _ElidedLabel(QLabel):
         # 悬停提示按"所属控件"的样式表级联：不带选择器的 background:transparent 会让提示框
         # 在 Windows 上变成黑底，字体也跟着成了等宽。套上只匹配自己的选择器，提示框回到主题样式。
         if css and "{" not in css:
-            css = f"QLabel#elidedLabel {{ {css} }}"
+            css = f'QLabel[elided="true"] {{ {css} }}'
         super().setStyleSheet(css)
 
     def set_full(self, text: str):
@@ -495,6 +495,9 @@ class ToolCallCard(QFrame):
 
     _OUT_MAX_LINES = 16      # 展开后输出框最多这么高，更多的在框里滚动
     _OUT_MAX_BLOCKS = 4000   # 输出框最多保留的行数（长命令的流式输出），更早的丢弃
+    _FILES_MAX_LINKS = 6     # "改动了 N 个文件"那一行最多列几个文件名，全部的在悬停提示里
+
+    file_clicked = Signal(str)   # 点了"改动了 N 个文件"里的文件名（项目相对路径）
 
     def __init__(self, name: str, code_text: str = "", icon_svg: str | None = None,
                  icon_color: str | None = None, parent=None):
@@ -582,6 +585,19 @@ class ToolCallCard(QFrame):
         self._body.setVisible(False)
         v.addWidget(self._body)
 
+        # 命令运行期间项目里变了的文件（收起 / 展开都显示）：确认卡上只看得到命令本身，
+        # 命令要是跑脚本批量改了文件，改了哪些在这里看，点文件名在文件面板里打开
+        self._files = QLabel()
+        self._files.setObjectName("toolFiles")
+        self._files.setTextFormat(Qt.RichText)
+        self._files.setWordWrap(True)
+        self._files.setStyleSheet(
+            f"#toolFiles {{ color:{_P['text_sec']}; font-size:12px; background:transparent; "
+            f"padding:0px 14px 7px 14px; }}")
+        self._files.linkActivated.connect(self.file_clicked)
+        self._files.setVisible(False)
+        v.addWidget(self._files)
+
         self.set_body(code_text)
 
     # 线上节点对齐头部中线
@@ -618,6 +634,24 @@ class ToolCallCard(QFrame):
         self._count.setText(f"输出 {self._out_lines} 行")
         self._fit_output()
         self._sync()
+
+    def set_changed_files(self, paths: list):
+        """列出这条命令运行期间变了的文件：前几个是可点的文件名，全部的在悬停提示里。"""
+        paths = [p for p in paths if p]
+        if not paths:
+            return
+        links = "、".join(
+            f'<a href="{_esc(p)}" style="color:{_P["indigo"]}; text-decoration:none;">'
+            f'{_esc(p.rsplit("/", 1)[-1])}</a>'
+            for p in paths[:self._FILES_MAX_LINKS])
+        more = f" 等 {len(paths)} 个" if len(paths) > self._FILES_MAX_LINKS else ""
+        self._files.setText(f"改动了 {len(paths)} 个文件：{links}{more}")
+        self._files.setToolTip("<p>这条命令运行期间项目里变了的文件（点文件名看差异）：<br>"
+                               + "<br>".join(_esc(p) for p in paths) + "</p>")
+        self._files.setVisible(True)
+
+    def changed_files_text(self) -> str:
+        return self._files.text() if self._files.isVisibleTo(self) else ""
 
     def output_text(self) -> str:
         return self._out.toPlainText()
@@ -974,6 +1008,13 @@ class AssistantTurn(QWidget):
         elif (text or "").strip():
             self.notice(text.strip())
 
+    def tool_files(self, text):
+        """命令改动的文件（每行一个路径）：进当前工具卡；返回那张卡，没有当前卡返回 None。"""
+        if self._cur_tool is None:
+            return None
+        self._cur_tool.set_changed_files([ln.strip() for ln in (text or "").splitlines()])
+        return self._cur_tool
+
     def notice(self, text):
         self.clear_waiting()
         self.end_body()
@@ -1122,6 +1163,7 @@ class MessageView(QScrollArea):
     finalize_markdown(html) 对应 render_final_markdown,clear()/redraw 复位。"""
 
     image_clicked = Signal(QPixmap)   # 点击聊天区图片 → 宿主弹放大遮罩(传全分辨率原图)
+    file_clicked = Signal(str)        # 点了命令卡上改动的文件 → 宿主在文件面板里打开
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1419,6 +1461,10 @@ class MessageView(QScrollArea):
             self._assistant().tool_detail(text.strip())   # 工具参数 → 当前工具卡的摘要 / 展开内容
         elif tag == "tool_result":
             self._assistant().tool_output(text)
+        elif tag == "tool_files":
+            card = self._assistant().tool_files(text)
+            if card is not None:
+                card.file_clicked.connect(self.file_clicked)
         elif tag == "ai_image":
             self.add_image(QPixmap(text.strip()))   # text = 图片本地路径
         elif tag == "reset_ai_reply":

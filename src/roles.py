@@ -85,6 +85,7 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 4. 改：**单处**用 `edit_file(path, old_string, new_string)` 精确替换；**多处 / 跨多个文件**的协调改动用 `apply_patch` 批量完成（别 edit_file 来回改很多趟）
 5. 改完看工具返回：出现"⚠️ 自动校验发现问题"就**接着修**，直到干净；改了逻辑就 `run_tests` 跑一下
 6. **不要**走"`read_file` 拿全文 → `write_file` 重写"的路线，既慢又危险（容易丢掉你没看到的部分）
+7. **几十处同一种机械改动**（比如给所有 subprocess 调用补同一个参数）才写脚本批量改：脚本放在「运行环境」里给的临时目录，**不放项目里**；先在一两个文件上试，跑完用 `git_diff` 核对实际改动（缩进有没有坏、有没有改到不该改的地方）。其余改动一律用 edit_file / apply_patch——用户在确认卡上只看得到这条命令，看不到脚本改了哪些行
 
 **edit_file 的 old_string 必须**：
 - 与文件中的原文**一字不差**（含缩进、换行、标点）
@@ -227,22 +228,30 @@ def get_explore_system_prompt(project_root) -> str:
     return base
 
 
+def scratch_dir() -> str:
+    """模型写临时脚本 / 试验文件的地方：系统临时目录下，不在项目里（不会留成垃圾、不算进项目改动）。"""
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "lingxi-scratch")
+
+
 def _shell_context() -> str:
     """告诉模型 run_command 用的是哪种 shell。
 
     不说的话模型默认写 bash：`| tail`、`rm -f`、heredoc、`cd /c/...`，在 Windows 的 cmd 里不是报错就是
     什么都不输出，它只好换个写法再试——评测 011 里三次运行合计 79 条命令，大半在为这个绕路，
     `rm -f` 删不掉临时脚本还留在了项目里。"""
+    scratch = (f"- 临时脚本、试验文件写到 `{scratch_dir()}` 下（不是项目目录，写的时候用这个完整路径）；"
+               "只读的查看、统计用 run_code，不用写脚本\n")
     if os.name != "nt":
-        return "\n\n# 运行环境\n`run_command` 在 /bin/sh 里执行。"
+        return "\n\n# 运行环境\n`run_command` 在 /bin/sh 里执行。\n" + scratch
     return (
         "\n\n# 运行环境\n"
         "Windows。`run_command` 在 **cmd.exe** 里执行，不是 bash，也不保证装了 grep / tail / sed：\n"
         "- 别写 `| tail`、`| head`、`| grep`、`sed -n`、`cat`、`ls -la`、`rm -f`、heredoc（`<<'EOF'`）、`cd /c/...`\n"
         "- 看文件、搜内容用 read_file / search_files（比命令快，结果也不用再过滤）；删文件用 `del`；"
         "切目录用 `cd /d`；命令输出过长会自动截断，不必接管道\n"
-        "- 多行的试验脚本用 write_file 写成文件再 `python 文件` 运行，跑完 `del` 掉；"
-        "别把命令输出重定向成项目里的文件（`> _base.txt` 这种），会留成垃圾\n"
+        + scratch +
+        "- 别把命令输出重定向成项目里的文件（`> _base.txt` 这种），会留成垃圾\n"
     )
 
 

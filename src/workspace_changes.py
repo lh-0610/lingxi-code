@@ -87,8 +87,10 @@ def _snapshot(root, previous=None):
 
 
 def refresh_workspace_tracking(v):
+    """和上次快照比对，变了的文件记成改动；返回这次比出来的文件（绝对路径）。"""
     from .verification import mark_blind_period, mark_dirty
 
+    changed = []
     for root, previous in list(v.get("workspace_snapshots", {}).items()):
         try:
             current = _snapshot(root, previous)
@@ -112,11 +114,15 @@ def refresh_workspace_tracking(v):
                     # 位置一起记：这个根目录不一定是项目根（恢复时会给别的目录种基线），
                     # 相对路径本身说不出它相对的是谁。
                     mark_dirty(v, path, abs_path=os.path.join(root, path))
+                    changed.append(os.path.join(root, path))
         v["workspace_snapshots"][root] = current
+    return changed
 
 
 @contextmanager
 def track_workspace_changes(root):
+    """追踪一次工具调用前后的文件变化。yield 一个列表，退出时填上这次调用期间变了的文件
+    （绝对路径）——进来前那次比对查到的是调用之前别人改的，不算这次的。"""
     from . import session
     from .verification import mark_blind_period
 
@@ -136,7 +142,8 @@ def track_workspace_changes(root):
             mark_blind_period(v, root, str(error))
     else:
         refresh_workspace_tracking(v)
+    changed = []
     try:
-        yield
+        yield changed
     finally:
-        refresh_workspace_tracking(v)
+        changed.extend(refresh_workspace_tracking(v))
