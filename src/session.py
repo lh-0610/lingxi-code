@@ -58,6 +58,8 @@ _SESSION_FIELDS = {
     "allowed_tools": lambda: None,
     "max_rounds": lambda: None,
     "system_prompt_override": lambda: None,
+    # 这次任务的代码地图（repo_map.build_task_map，每条新消息开跑前重算；运行期，不持久化）
+    "task_map": lambda: "",
     # ── B03 运行记录（随会话 JSON 的 progress 持久化）──
     # 上一轮运行的记录：run_id / phase / outcome / 来源 / 证据。None = 本会话还没跑过。
     # phase 是"程序有没有收到本轮结果"，outcome 是"实际返回的 AgentResult"，两者不能互推。

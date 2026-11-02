@@ -116,7 +116,7 @@ class TestSearchFiles:
 
         result = search_files.func("TODO", path=".", file_pattern="*.py")
 
-        assert "src/main.py:1:TODO: python" in result
+        assert "src/main.py（1 处）" in result and "1: TODO: python" in result
         assert "main.ts" not in result
         assert "ignored.py" not in result
 
@@ -132,6 +132,32 @@ class TestSearchFiles:
 
     def test_rejects_invalid_regex(self, project_dir):
         assert "正则不合法" in search_files.func("[", path=".")
+
+    def test_groups_by_file_with_context_lines(self, project_dir):
+        """每处匹配带前后几行（上下文行用 `-`、匹配行用 `:`），相邻的合成一段——多数时候不用再 read_file。"""
+        (project_dir / "a.py").write_text("one\ntwo\nhit\nfour\nfive\nsix\nseven\nhit\nnine\n", encoding="utf-8")
+
+        result = search_files.func("hit", path=".", file_pattern="*.py")
+
+        assert "a.py（2 处）" in result and "分布在 1 个文件" in result
+        for line in ("    1- one", "    3: hit", "    5- five", "    6- six", "    8: hit", "    9- nine"):
+            assert line in result
+        assert "    4- four" in result and result.count("four") == 1     # 两段上下文不重复列
+
+    def test_many_hits_drop_context(self, project_dir):
+        from src.limits import SEARCH_FILES_CONTEXT_MAX_HITS
+        (project_dir / "many.py").write_text("ctx\nhit\n" * (SEARCH_FILES_CONTEXT_MAX_HITS + 1), encoding="utf-8")
+
+        result = search_files.func("hit", path=".", file_pattern="*.py")
+
+        assert "只列匹配行" in result and "- ctx" not in result
+
+    def test_context_zero_lists_only_matching_lines(self, project_dir):
+        (project_dir / "a.py").write_text("before\nhit\nafter\n", encoding="utf-8")
+
+        result = search_files.func("hit", path=".", file_pattern="*.py", context=0)
+
+        assert "2: hit" in result and "before" not in result and "只列匹配行" not in result
 
 
 class TestMemoryToolWrappers:

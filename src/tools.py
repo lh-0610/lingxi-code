@@ -25,6 +25,7 @@ from .limits import (
     READ_FILE_DEFAULT_LIMIT,
     RUN_COMMAND_MAX_OUTPUT_CHARS,
     RUN_COMMAND_TIMEOUT_S,
+    SEARCH_FILES_CONTEXT_MAX_HITS as _SEARCH_CONTEXT_MAX_HITS,
     SEARCH_FILES_MAX_RESULTS,
     SEARCH_IN_FILE_DEFAULT_LIMIT,
     SEARCH_IN_FILE_MAX_LIMIT,
@@ -978,14 +979,17 @@ def search_in_file(path: str, keyword: str, offset: int = 0, limit: int = SEARCH
 
 
 @tool
-def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_results: int = SEARCH_FILES_MAX_RESULTS) -> str:
-    """跨文件 / 跨目录用**正则**搜索（ripgrep 风格），返回 `相对路径:行号:内容`。
+def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_results: int = SEARCH_FILES_MAX_RESULTS,
+                 context: int = 2) -> str:
+    """跨文件 / 跨目录用**正则**搜索（ripgrep 风格）。结果按文件分组，每处匹配带前后几行：
+    匹配行是 `行号: 内容`，上下文行是 `行号- 内容`——多数时候看结果就够，不用再 read_file。
 
     用法：
       - `regex`：Python 正则，例如 `def\\s+\\w+\\(` / `TODO|FIXME` / `class \\w+\\(BaseModel\\)`
       - `path`：搜索目录的相对/绝对路径（默认 `.` 即项目根）
       - `file_pattern`：glob 过滤文件名，例如 `*.py` / `*.{ts,tsx}` / `test_*.py`
       - `max_results`：截断阈值（默认 50，超过会提示 "还有 N 处未列出"）
+      - `context`：每处匹配前后带几行（默认 2，0 = 只要匹配行）；匹配超过 20 处时自动只给匹配行
 
     默认忽略噪声目录：.git / node_modules / __pycache__ / .venv / venv / build / dist 等；
     单文件 > 1MB 自动跳过（避免读到二进制大文件）。
@@ -1017,7 +1021,9 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
 
     patterns = _expand_braces(file_pattern)
 
-    matches = []
+    # 每个文件：(相对路径, 全部行, 要显示的匹配行号)。上下文要到最后才知道给不给，所以先收齐
+    hit_files = []
+    shown = 0
     total = 0
     truncated = False
 
@@ -1035,22 +1041,48 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
                 continue
             try:
                 with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                    for ln, line in enumerate(f, 1):
-                        if pat.search(line):
-                            total += 1
-                            if len(matches) < max_results:
-                                rel = os.path.relpath(fpath, full).replace(os.sep, "/")
-                                matches.append(f"{rel}:{ln}:{line.rstrip()}")
-                            else:
-                                truncated = True
+                    lines = f.read().splitlines()
             except (OSError, UnicodeDecodeError):
                 continue
+            hit_lines = []
+            for ln, line in enumerate(lines, 1):
+                if pat.search(line):
+                    total += 1
+                    if shown < max_results:
+                        hit_lines.append(ln)
+                        shown += 1
+                    else:
+                        truncated = True
+            if hit_lines:
+                hit_files.append((os.path.relpath(fpath, full).replace(os.sep, "/"), lines, hit_lines))
 
-    if not matches:
+    if not hit_files:
         return f"未在 {full} 找到匹配 /{regex}/ 的内容（file_pattern={file_pattern}）"
 
-    header = f"在 {full} 下找到 {total} 处匹配 /{regex}/（file_pattern={file_pattern}）:\n"
-    body = "\n".join(matches)
+    # 匹配多时只给匹配行：每处带前后几行会把结果撑得很长，这时模型要的是"在哪"
+    try:
+        ctx = max(0, min(10, int(context)))
+    except (TypeError, ValueError):
+        ctx = 2
+    if shown > _SEARCH_CONTEXT_MAX_HITS:
+        ctx = 0
+    blocks = []
+    for rel, lines, hit_lines in hit_files:
+        block = [f"{rel}（{len(hit_lines)} 处）"]
+        hits, last = set(hit_lines), 0
+        for ln in hit_lines:
+            start, end = max(1, ln - ctx), min(len(lines), ln + ctx)
+            if last and start > last + 1:
+                block.append("    …")
+            for i in range(max(start, last + 1), end + 1):
+                block.append(f"  {i:>5}{':' if i in hits else '-'} {lines[i - 1].rstrip()}")
+            last = max(last, end)
+        blocks.append("\n".join(block))
+
+    note = "" if ctx or not context else f"；匹配超过 {_SEARCH_CONTEXT_MAX_HITS} 处，只列匹配行"
+    header = (f"在 {full} 下找到 {total} 处匹配 /{regex}/（file_pattern={file_pattern}），"
+              f"分布在 {len(hit_files)} 个文件{note}:\n")
+    body = "\n".join(blocks)
     if truncated:
         body += f"\n... [仅显示前 {max_results} 处，还有 {total - max_results} 处未列出，请缩小 path 或 file_pattern]"
     return header + body

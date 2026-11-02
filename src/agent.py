@@ -322,6 +322,40 @@ def _post_run_notify(ui, result, clean_text):
     _threading.Thread(target=_gen_title_bg, daemon=True).start()
 
 
+def _prepare_task_map(ui):
+    """每次运行开跑前按最新那条消息重算代码地图（repo_map.py），放进系统提示词。
+
+    不靠模型自觉：DeepSeek 在大仓库里一轮只读一个文件，给了 read_files / explore 也不用，
+    地图让它一开始就知道该看哪几个文件。项目小、任务和代码对不上时地图是空的，等于没开。
+    探索子代理（带自己的提示词）和知识库模式不用。"""
+    from . import config as _cfg
+    from . import session as _session
+    sess = _session.current_session()
+    sess.task_map = ""
+    if (not getattr(_cfg, "AUTO_TASK_MAP", True) or getattr(sess, "rag_mode", False)
+            or getattr(sess, "system_prompt_override", None)):
+        return
+    last_human = next((m for m in reversed(state.chat_history) if isinstance(m, HumanMessage)), None)
+    if last_human is None:
+        return
+    content = last_human.content
+    text = content if isinstance(content, str) else " ".join(
+        str(b.get("text", "")) for b in content if isinstance(b, dict) and b.get("type") == "text")
+    try:
+        from .repo_map import build_task_map
+        import time as _time
+        t0 = _time.monotonic()
+        sess.task_map = build_task_map(_session.current_project(), text)
+    except Exception as e:
+        logger.warning(f"生成代码地图失败（不影响这次运行）: {e}")
+        return
+    if sess.task_map:
+        files = sum(1 for ln in sess.task_map.splitlines()
+                    if ln and not ln.startswith((" ", "#", "（", "按")))
+        logger.info(f"代码地图：{files} 个文件，{len(sess.task_map)} 字，{_time.monotonic() - t0:.1f}s")
+        ui.show_message(f"\n🗺️ 按任务挑出 {files} 个相关文件给模型参考\n", "tool_result")
+
+
 def _agent_loop_body(ui):
     """主循环本体。返回 (AgentResult, 最终正文)——收尾由 `agent_loop` 统一负责。
 
@@ -350,6 +384,8 @@ def _agent_loop_body(ui):
             from .config import OLLAMA_BASE_URL
             logger.error(f"Ollama 服务不可用: {OLLAMA_BASE_URL}")
             return AgentResult("failed", "无法连接 Ollama 服务。"), clean_text
+
+        _prepare_task_map(ui)
 
         round_i = -1
         lost_tool_call_retried = False   # 声明要调工具却没给出可执行的调用：每轮运行只让重来一次

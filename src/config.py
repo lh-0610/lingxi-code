@@ -74,6 +74,8 @@ MODEL_CONTEXT_WINDOWS = _config.get("model_context_windows", {}) or {}
 
 # 自我校验闭环：编辑文件后自动跑静态检查（lint/语法），把错误回灌给模型自修
 AUTO_CHECK_AFTER_EDIT = _config.get("auto_check_after_edit", True)
+# 大项目里每个新任务开工前，按任务挑出相关文件、列出类 / 函数，放进系统提示词（repo_map.py）
+AUTO_TASK_MAP = bool(_config.get("auto_task_map", True))
 # 非 Python 项目可自定义检查命令，用 {file} 占位被检文件；
 # 留空 = 只对 Python 自动用 ruff（没装则退化到 py_compile 只查语法）
 CHECK_COMMAND = _config.get("check_command", "")

@@ -359,6 +359,11 @@ def get_system_prompt(web_search=None):
     if mem:
         base = base + "\n\n" + mem
 
+    # 这次任务的代码地图：每条新消息开跑前算一次，同一次运行里不变，所以放这里也能吃到缓存
+    task_map = getattr(_session.current_session(), "task_map", "")
+    if task_map:
+        base = base + "\n\n" + task_map
+
     # ⚠ 到此为止都是**跨轮稳定**的内容。Plan/Act 提示、任务计划、任务台账已经挪到
     #   get_volatile_context()，由 streaming 追加到发送历史尾部——原因见那个函数的注释。
 
