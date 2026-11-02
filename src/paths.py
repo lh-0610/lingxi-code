@@ -43,7 +43,11 @@ RESOURCE_DIR = _resource_dir()
 LOG_DIR = os.environ.get("LINGXI_LOG_DIR") or os.path.join(APP_DIR, "logs")
 MEMORY_DIR = os.path.join(APP_DIR, "chat_memory")
 MEMORY_INDEX = os.path.join(MEMORY_DIR, "index.json")
-CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+# LINGXI_CONFIG_PATH：测试把配置指到一个（通常不存在）的临时路径（scripts/conftest.py），
+# 让 src/config.py 全部走代码里的默认值——否则测试结果会随开发者本地 config.json 的
+# 模型列表/密钥/开关而变（换个人跑就挂）。正常启动不设，仍是程序目录下的 config.json。
+_CONFIG_PATH_ENV = os.environ.get("LINGXI_CONFIG_PATH")
+CONFIG_PATH = _CONFIG_PATH_ENV or os.path.join(APP_DIR, "config.json")
 ROLE_CONFIG = os.path.join(MEMORY_DIR, "role_config.json")
 MCP_DIR = os.path.join(APP_DIR, "mcp")
 
@@ -105,7 +109,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # 首次启动：APP_DIR 下没有 config.json，就从打包的 config.example.json 复制一份过去。
 # （打包后 config.example.json 在 RESOURCE_DIR/_MEIPASS；config.py 紧接着会读 CONFIG_PATH）
-if not os.path.exists(CONFIG_PATH):
+# 用 LINGXI_CONFIG_PATH 显式指定时不做这个复制（测试要的是"没有配置文件=全默认值"）。
+if not _CONFIG_PATH_ENV and not os.path.exists(CONFIG_PATH):
     _example = os.path.join(RESOURCE_DIR, "config.example.json")
     if os.path.exists(_example):
         try:

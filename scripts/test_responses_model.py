@@ -10,20 +10,27 @@
 """
 from src import models
 from src.models import MODEL_LIST, _create_llm_uncached as _create_llm, get_model_config_issues
-from src import config as _cfg
 
 
 # ── builtin 注册 ──
 
 def test_responses_type_registered_in_builtin_list(monkeypatch):
-    """responses_models 里的模型应作为 ('型号','responses','型号',True) 注册进 MODEL_LIST。"""
-    monkeypatch.setattr(_cfg, "RESPONSES_MODELS", ["deepseek-v4-flash", "deepseek-v4-pro"])
-    # 重算 builtin 列表（_build_builtin_model_list 从 config 常量读取）
+    """responses_models 里的模型应作为 ('型号','responses','型号',True) 注册进 builtin 列表。
+
+    默认配置（conftest 已隔离个人 config.json）就带 deepseek-flash；再 patch 一次
+    models.RESPONSES_MODELS 确认列表确实是**按这个常量**生成的。
+    注意必须打在 models 上：models.py 用 `from .config import RESPONSES_MODELS` 按值绑定，
+    改 src.config 的同名常量对 _build_builtin_model_list 无效。
+    """
     from src.models import _build_builtin_model_list
-    bl = _build_builtin_model_list()
-    entries = [e for e in bl if e[1] == "responses"]
-    assert entries, "responses 类型未注册进 builtin 列表"
-    assert ("deepseek-v4-flash", "responses", "deepseek-v4-flash", True) in entries
+
+    default_entries = [e for e in _build_builtin_model_list() if e[1] == "responses"]
+    assert default_entries, "responses 类型未注册进 builtin 列表"
+    assert ("deepseek-flash", "responses", "deepseek-flash", True) in default_entries
+
+    monkeypatch.setattr(models, "RESPONSES_MODELS", ["deepseek-v4-pro"])
+    entries = [e for e in models._build_builtin_model_list() if e[1] == "responses"]
+    assert entries == [("deepseek-v4-pro", "responses", "deepseek-v4-pro", True)]
 
 
 def _find_responses_index():

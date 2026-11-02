@@ -16,6 +16,16 @@ import pytest
 _TEST_LOG_DIR = tempfile.mkdtemp(prefix="lingxi-test-logs-")
 os.environ["LINGXI_LOG_DIR"] = _TEST_LOG_DIR
 
+# 2. 不读开发者本地 config.json：src/config.py 一导入就把整份配置固化成模块常量，之后测试
+#    改不动。直接读真实配置会让**测试结果随个人配置而变**——实测有人把 responses_models
+#    留空，scripts/test_responses_model.py 就挂 6 个。指到一个不存在的临时路径后，config.py
+#    的每个 _config.get(...) 都走代码里的默认值；需要特定配置的测试自己 monkeypatch 常量
+#    （或像 test_settings_nested 那样把 CONFIG_PATH patch 到自己的临时文件）。
+#    注意：不创建这个文件，paths.py 也只在未显式指定 LINGXI_CONFIG_PATH 时才从
+#    config.example.json 复制（否则默认值会被示例配置顶掉）。
+_TEST_CONFIG_DIR = tempfile.mkdtemp(prefix="lingxi-test-cfg-")
+os.environ["LINGXI_CONFIG_PATH"] = os.path.join(_TEST_CONFIG_DIR, "config.json")
+
 # 确保能 import src
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -33,6 +43,7 @@ def pytest_unconfigure(config):
     import shutil
     logging.shutdown()
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
+    shutil.rmtree(_TEST_CONFIG_DIR, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

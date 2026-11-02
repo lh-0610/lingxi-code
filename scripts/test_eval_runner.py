@@ -140,6 +140,16 @@ class TestEvaluate:
         assert not passed
 
 
+def _has_full_history(repo):
+    """仓库带不带完整历史：浅克隆（CI 默认只拉一个提交）或导出后重新 init 的副本都不带。"""
+    import subprocess
+    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=repo, capture_output=True,
+                             text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    count = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=repo, capture_output=True,
+                           text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    return shallow == "false" and count.isdigit() and int(count) > 1
+
+
 class TestCases:
     def test_shipped_cases_are_valid(self):
         """随仓库带的 case 必须结构合法、判定类型都认识、fixture 都存在。"""
@@ -154,6 +164,8 @@ class TestCases:
             if c.get("fixture_git"):      # 用本仓库的某个提交当 fixture：提交得存在
                 r = subprocess.run(["git", "cat-file", "-e", f"{c['fixture_git']}^{{commit}}"], cwd=repo,
                                    capture_output=True, stdin=subprocess.DEVNULL)
+                if r.returncode != 0 and not _has_full_history(repo):
+                    continue      # 浅克隆 / 导出副本里本来就没有那段历史，核对不了，不算 case 写错
                 assert r.returncode == 0, f"{c['id']} 的 fixture_git 提交不存在: {c['fixture_git']}"
             else:
                 assert os.path.isdir(os.path.join(fx_dir, c["fixture"])), c["fixture"]

@@ -51,6 +51,9 @@ def run_variant(label, cfg):
     with open("config.json", "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False)
     env = {**os.environ, "LINGXI_LOG_DIR": os.path.join(os.environ.get("TEMP", "."), "lx_eval_check_logs")}
+    # 本检查的核心是"按刚写下的 config.json 启动"：pytest 环境里可能带着 LINGXI_CONFIG_PATH
+    # （scripts/conftest.py 把测试配置指到临时路径），不清掉子进程就会忽略上面写的文件。
+    env.pop("LINGXI_CONFIG_PATH", None)
     r = subprocess.run([sys.executable, "-X", "utf8", "-W", "ignore", "-c", CHILD], capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=240, env=env,
                        stdin=subprocess.DEVNULL)
