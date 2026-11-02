@@ -32,6 +32,44 @@ def _finish(sess, status="completed", reason=""):
     return run_records.finalize_run(sess, sess.last_run, AgentResult(status, reason)).snapshot
 
 
+def _diff_host():
+    """结果卡「查看改动」的无窗口宿主：只装被测的方法 + 记录"开了哪些文件"的假面板。
+
+    面板本身是 Qt 控件，这里只关心它拿到的内容（哪个目录、哪些行），不测布局。
+    """
+    from src.ui.chat_window import ChatUI
+
+    class _Panel:
+        def __init__(self):
+            self.opened = {}
+
+        def open_file(self, rel_path, rows, hint=""):
+            self.opened[str(rel_path)] = list(rows)
+
+    class _Host:
+        _on_result_view_diff = ChatUI._on_result_view_diff
+        _open_file_in_panel = ChatUI._open_file_in_panel
+        # 原方法是 staticmethod，取出后已是普通函数，这里要重新包一层才不会被绑成 self
+        _unique_changed_files = staticmethod(ChatUI._unique_changed_files)
+        _RESULT_DIFF_TAB_LIMIT = ChatUI._RESULT_DIFF_TAB_LIMIT
+
+        def __init__(self):
+            self.file_panel = _Panel()
+            self.toasts = []
+            self.dialogs = []
+
+        def _settle_file_panel(self):
+            pass        # 面板停靠 / 让位是 Qt 布局的事
+
+        def _show_toast(self, text, duration=1500):
+            self.toasts.append(text)
+
+        def _show_text_dialog(self, title, text):
+            self.dialogs.append((title, text))
+
+    return _Host()
+
+
 # ── ① 看完 diff 不能留下线程绑定 ──
 
 class TestThreadBindingNotLeaked:
@@ -42,7 +80,6 @@ class TestThreadBindingNotLeaked:
         "还原"反而把主线程**永久绑死**在那个会话上；之后切会话，`get_active()` 是新的、
         `current_session()` 还是旧的，所有经会话代理的保存都会写错人。
         """
-        from src.ui.chat_window import ChatUI
         sess_a = _new_session()
         _saved(sess_a)
         sess_b = _new_session()
@@ -52,17 +89,8 @@ class TestThreadBindingNotLeaked:
         session.set_active(sess_a)
         assert session.get_bound() is None, "前置条件：主线程未绑定"
 
-        class _Host:
-            _on_result_view_diff = ChatUI._on_result_view_diff
-
-            def _show_toast(self, *a):
-                pass
-
-            def _show_text_dialog(self, *a):
-                pass
-
-        _Host()._on_result_view_diff({"work_dir": str(tmp_path), "project": str(tmp_path)})
-
+        _diff_host()._on_result_view_diff({"work_dir": str(tmp_path), "project": str(tmp_path),
+                                           "files": ["a.py"]})
         assert session.get_bound() is None, "看完 diff 之后主线程还绑着"
         session.set_active(sess_b)
         assert session.current_session() is sess_b, "切到 B 之后仍然路由到旧会话 A"
@@ -241,7 +269,6 @@ class TestWorkDir:
         import shutil
         if not shutil.which("git"):
             pytest.skip("git 未安装")
-        from src.ui.chat_window import ChatUI
         repo = tmp_path / "wt"
         repo.mkdir()
         for args in (["git", "init", "-q"],
@@ -254,20 +281,13 @@ class TestWorkDir:
                        capture_output=True, stdin=subprocess.DEVNULL)
         (repo / "a.py").write_text("x = 987654\n", encoding="utf-8")
 
-        shown = {}
-
-        class _Host:
-            _on_result_view_diff = ChatUI._on_result_view_diff
-
-            def _show_toast(self, *a):
-                shown["toast"] = a
-
-            def _show_text_dialog(self, title, text):
-                shown["text"] = text
-
-        _Host()._on_result_view_diff({"work_dir": str(repo),
-                                      "project": str(tmp_path / "main")})
-        assert "987654" in shown["text"], "diff 查到主仓库去了，隔离区的改动看不见"
+        host = _diff_host()
+        host._on_result_view_diff({"work_dir": str(repo),
+                                   "project": str(tmp_path / "main"),
+                                   "files": ["a.py"]})
+        rows = host.file_panel.opened["a.py"]
+        assert any("987654" in text for _no, _kind, text in rows), \
+            "diff 查到主仓库去了，隔离区的改动看不见"
 
 
 # ── ⑤ 证据要在工具边界进持久化记录 ──

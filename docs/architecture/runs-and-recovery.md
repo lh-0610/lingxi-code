@@ -40,7 +40,8 @@
 - **`finished` 信号带 worker 令牌**（`Session.worker_token`）：旧 worker 的迟到 finished 不能把新一轮正在用的按钮恢复成可发送；`_run_agent` 的 finally 也只在令牌仍是自己时才清运行态
 - 重绘来源：内存 `last_result` → 持久化 `last_run` 重建（`snapshot_from_loaded`）。**render_log 不能是唯一来源**，它只活在内存里，重开程序就没了
 - **显示卡片不往 chat_history 塞伪造的 AIMessage**；不新增总结模型调用。「继续任务」按钮由 B04 接上（见下一节），只在 `result_view.is_resumable` 为真时出现
-- 按钮带着**卡片自己的** `view`（含 session/work_dir/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"明确标注是**当前状态**，不冒充那一轮保存过的历史 diff
+- 按钮带着**卡片自己的** `view`（含 session/work_dir/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"看的是**当前状态**，不冒充那一轮保存过的历史 diff
+- **"查看改动"走右侧停靠的文件面板**（和任务面板「改动的文件」同一套，不开模态窗口、不把整个工作区混成一大段纯文本）：`view["files"]` 里每个文件各开一个标签页，去重后最多 `_RESULT_DIFF_TAB_LIMIT`（8）个，超出部分只用提示条报"还有 N 个没打开"；`files` 为空提示"这一轮没有记录到改动的文件"，不去 diff 整个工作区。开标签页复用 `ChatUI._open_file_in_panel(rel_path, work_dir=...)`——`work_dir` 参数就是给这里用的：任务面板那条路不传，仍按当前会话的工作区
 - **"查看改动"用 `work_dir` 不用 `project`**：worktree 里跑的那轮改动在隔离区，拿项目根去 diff 只会回一句"工作区干净"。`work_dir` **持久化在 `last_run` 上**（`begin_run` 初始化、工具边界与收尾各刷一次）——只靠"重建时按当前会话现算"是不行的，重开后 `Session.worktree` 早没了，算出来永远是主仓库。记下来只为历史查看，**不会**被恢复成当前执行用的 `Session.worktree`
 - **记录的目录不存在时禁止回退**：`_project_cwd()` 在路径不存在时会回退到**进程 cwd**，于是 `git_diff` 悄悄查了灵犀自己的目录、回一句"工作区干净"，而弹窗标题还写着那个不存在的路径。`_on_result_view_diff` 先 `os.path.isdir` 校验，失效就明说不可用
 - **临时借用线程绑定必须用 `session.get_bound()` / `restore_bound()`**，不能用 `current_session()` 存旧值：未绑定的主线程拿到的是 active，"还原"反而把主线程**永久绑死**在它身上，之后 `get_active()` 与 `current_session()` 指向不同会话，所有经代理的保存都写错人

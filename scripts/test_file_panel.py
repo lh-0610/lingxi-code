@@ -324,3 +324,105 @@ def test_task_panel_yields_to_the_file_panel_when_space_is_short(ui, qapp):
     ui.file_panel.close_all()
     _pump(qapp)
     assert ui._task_panel_docked and ui.plan_panel.isVisible()
+
+
+# ── 结果卡的「查看改动」：也是在同一个文件面板里开标签页 ────────────────
+
+def _commit_all(repo):
+    import subprocess
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True,
+                   stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=str(repo), check=True,
+                   capture_output=True, stdin=subprocess.DEVNULL)
+
+
+def _toasts(ui, monkeypatch):
+    """把提示条换成记录器：真实 toast 是浮在窗口上的 QLabel + 定时器，测试里只关心文案。"""
+    shown = []
+    monkeypatch.setattr(ui, "_show_toast", lambda text, duration=1500: shown.append(text))
+    return shown
+
+
+def test_result_card_opens_one_tab_per_changed_file(ui, qapp, monkeypatch, git_project):
+    from src import session
+    (git_project / "a.py").write_text("a = 2\n", encoding="utf-8")
+    (git_project / "b.py").write_text("b = 1\n", encoding="utf-8")
+    _commit_all(git_project)
+    (git_project / "a.py").write_text("a = 3\n", encoding="utf-8")
+    (git_project / "b.py").write_text("b = 2\n", encoding="utf-8")
+    session.get_active().project = str(git_project)
+    toasts = _toasts(ui, monkeypatch)
+
+    ui._on_result_view_diff({"work_dir": str(git_project), "project": str(git_project),
+                             "files": ["a.py", "b.py", "a.py", "src\\c.py"]})
+    _pump(qapp)
+
+    panel = ui.file_panel
+    assert panel.isVisible(), "结果卡的查看改动走右侧停靠面板，不弹模态窗口"
+    assert panel.paths() == ["a.py", "b.py", "src\\c.py"], "一个文件一个标签页，重复路径只开一个"
+    assert "a = 3" in panel._panes["a.py"].toPlainText(), "差异按这个文件的当前状态取"
+    assert toasts == [], "没超过上限就不用提示"
+
+
+def test_result_card_opens_at_most_eight_tabs_and_says_how_many_are_left(ui, qapp, monkeypatch,
+                                                                          git_project):
+    from src import session
+    session.get_active().project = str(git_project)
+    files = [f"f{i}.py" for i in range(11)]
+    for name in files:
+        (git_project / name).write_text("x = 1\n", encoding="utf-8")
+    toasts = _toasts(ui, monkeypatch)
+
+    ui._on_result_view_diff({"work_dir": str(git_project), "project": str(git_project),
+                             "files": files})
+    _pump(qapp)
+
+    assert ui.file_panel.paths() == files[:8], "最多开 8 个标签页"
+    assert toasts, "超出的文件要提示"
+    assert "3" in toasts[-1] and "8" in toasts[-1], f"要说清还剩几个没开：{toasts[-1]}"
+
+
+def test_result_card_diffs_the_runs_own_work_dir(ui, qapp, monkeypatch, git_project, tmp_path):
+    """worktree 里跑的那一轮：改动在隔离区，主会话的项目目录里根本没有它。"""
+    import subprocess
+    from src import session
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    for args in (["git", "init", "-q"],
+                 ["git", "config", "user.email", "t@example.com"],
+                 ["git", "config", "user.name", "T"]):
+        subprocess.run(args, cwd=str(wt), check=True, capture_output=True,
+                       stdin=subprocess.DEVNULL)
+    (wt / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _commit_all(wt)
+    (wt / "app.py").write_text("x = 987654\n", encoding="utf-8")
+    session.get_active().project = str(git_project)     # 主会话的工作区里改的是别的文件
+
+    ui._on_result_view_diff({"work_dir": str(wt), "project": str(git_project),
+                             "files": ["app.py"]})
+    _pump(qapp)
+
+    text = ui.file_panel._panes["app.py"].toPlainText()
+    assert "987654" in text, "拿主会话的项目目录去 diff，隔离区的改动就看不见了"
+    assert "没有差异" not in text
+
+
+def test_result_card_diff_view_is_read_only(ui, qapp, git_project):
+    """只读查看：不开标签页当"已审阅"，验证状态一个字段都不动。"""
+    from src import session
+    (git_project / "app.py").write_text("a = 2\n", encoding="utf-8")
+    sess = session.get_active()
+    sess.project = str(git_project)
+    sess.verification["dirty_files"] = ["app.py"]
+    before = {k: (list(v) if isinstance(v, list) else v)
+              for k, v in sess.verification.items() if k != "change_revision"}
+
+    ui._on_result_view_diff({"work_dir": str(git_project), "project": str(git_project),
+                             "files": ["app.py"]})
+    _pump(qapp)
+
+    assert "app.py" in ui.file_panel.paths(), "先确认真的开了标签页"
+    after = {k: (list(v) if isinstance(v, list) else v)
+             for k, v in sess.verification.items() if k != "change_revision"}
+    assert after == before, "看 diff 不能替模型记「已审阅」"
+    assert sess.verification.get("diff_reviewed") is False

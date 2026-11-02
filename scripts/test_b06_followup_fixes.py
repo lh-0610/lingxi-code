@@ -196,24 +196,45 @@ class TestWorkDirSurvivesRestart:
 
 # ── ③ 记录的目录失效时不能回退到进程 cwd ──
 
+def _diff_host():
+    """结果卡「查看改动」的无窗口宿主：只装被测的方法 + 一个记录调用次数的假文件面板。
+
+    真正的面板是 Qt 控件（布局、宽度由 ChatUI 管），这里只关心"按哪个目录取了哪些文件"。
+    """
+    from src.ui.chat_window import ChatUI
+
+    class _Panel:
+        def __init__(self):
+            self.opened = {}
+
+        def open_file(self, rel_path, rows, hint=""):
+            self.opened[str(rel_path)] = list(rows)
+
+    class _Host:
+        _on_result_view_diff = ChatUI._on_result_view_diff
+        _open_file_in_panel = ChatUI._open_file_in_panel
+        # 原方法是 staticmethod，取出后已是普通函数，这里要重新包一层才不会被绑成 self
+        _unique_changed_files = staticmethod(ChatUI._unique_changed_files)
+        _RESULT_DIFF_TAB_LIMIT = ChatUI._RESULT_DIFF_TAB_LIMIT
+
+        def __init__(self):
+            self.file_panel = _Panel()
+            self.toasts = []
+            self.dialogs = []
+
+        def _settle_file_panel(self):
+            pass        # 面板停靠 / 让位是 Qt 布局的事，这里不涉及
+
+        def _show_toast(self, text, duration=1500):
+            self.toasts.append(text)
+
+        def _show_text_dialog(self, title, text):
+            self.dialogs.append((title, text))
+
+    return _Host()
+
+
 class TestMissingWorkDir:
-    def _host(self):
-        from src.ui.chat_window import ChatUI
-
-        captured = {}
-
-        class _Host:
-            _on_result_view_diff = ChatUI._on_result_view_diff
-
-            def _show_toast(self, *a):
-                captured["toast"] = a
-
-            def _show_text_dialog(self, title, text):
-                captured["title"] = title
-                captured["text"] = text
-
-        return _Host(), captured
-
     def test_vanished_directory_is_reported_not_silently_redirected(self, isolated_memory,
                                                                     tmp_path):
         """目录没了就明说。
@@ -222,12 +243,16 @@ class TestMissingWorkDir:
         灵犀自己的目录、回一句"工作区干净"，而弹窗标题还写着那个不存在的路径。
         """
         gone = tmp_path / "moved_away"
-        host, captured = self._host()
-        host._on_result_view_diff({"work_dir": str(gone), "project": str(gone)})
+        host = _diff_host()
+        host._on_result_view_diff({"work_dir": str(gone), "project": str(gone),
+                                   "files": ["a.py"]})
 
-        assert "不可用" in captured["title"]
-        assert str(gone) in captured["text"]
-        assert "工作区干净" not in captured["text"], "不能拿别处的查询结果冒充这一轮"
+        assert host.dialogs, "目录没了要说清楚，不能什么都不显示"
+        title, text = host.dialogs[0]
+        assert "不可用" in title
+        assert str(gone) in text
+        assert "工作区干净" not in text, "不能拿别处的查询结果冒充这一轮"
+        assert host.file_panel.opened == {}, "不能退回别的目录去开标签页"
         assert session.get_bound() is None, "提前返回也不能留下线程绑定"
 
     def test_moved_worktree_does_not_read_the_process_cwd(self, isolated_memory, tmp_path):
@@ -249,10 +274,12 @@ class TestMissingWorkDir:
         shutil.move(str(original), str(tmp_path / "wt_moved"))
         assert not os.path.isdir(original)
 
-        host, captured = self._host()
-        host._on_result_view_diff({"work_dir": str(original), "project": str(original)})
-        assert "不可用" in captured["title"]
-        assert "diff --git" not in captured["text"]
+        host = _diff_host()
+        host._on_result_view_diff({"work_dir": str(original), "project": str(original),
+                                   "files": ["a.py"]})
+        assert "不可用" in host.dialogs[0][0]
+        assert "diff --git" not in host.dialogs[0][1]
+        assert host.file_panel.opened == {}
 
     def test_existing_directory_still_works(self, isolated_memory, tmp_path):
         """别把正常路径一起挡掉。"""
@@ -270,8 +297,19 @@ class TestMissingWorkDir:
                        capture_output=True, stdin=subprocess.DEVNULL)
         (repo / "a.py").write_text("x = 42\n", encoding="utf-8")
 
-        host, captured = self._host()
-        host._on_result_view_diff({"work_dir": str(repo), "project": str(repo)})
-        assert "当前状态" in captured["title"]
-        assert "x = 42" in captured["text"]
+        host = _diff_host()
+        host._on_result_view_diff({"work_dir": str(repo), "project": str(repo),
+                                   "files": ["a.py"]})
+        assert host.dialogs == [], "目录还在就不该弹说明窗口"
+        rows = host.file_panel.opened["a.py"]
+        assert any("x = 42" in text for _no, _kind, text in rows)
+        assert session.get_bound() is None
+
+    def test_no_recorded_files_is_said_out_loud(self, isolated_memory, tmp_path):
+        """这一轮没记下改动文件：明确提示，不去 diff 整个工作区。"""
+        host = _diff_host()
+        host._on_result_view_diff({"work_dir": str(tmp_path), "project": str(tmp_path),
+                                   "files": []})
+        assert host.file_panel.opened == {}
+        assert host.toasts and host.toasts[-1] == "这一轮没有记录到改动的文件"
         assert session.get_bound() is None

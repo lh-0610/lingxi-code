@@ -102,15 +102,22 @@ class RunResultMixin:
         sid = getattr(sess, "current_session_id", None) or ""
         return (snapshot.get("session_id") or "") == sid
 
+    # 结果卡一次最多开这么多文件标签页：再多就不是"看这一轮改了什么"，是把面板堆满
+    _RESULT_DIFF_TAB_LIMIT = 8
+
     def _on_result_view_diff(self, view):
-        """只读查看**当前**差异。它不是那一轮保存过的历史 diff，文案必须说清楚。"""
+        """只读查看**当前**差异：这一轮涉及的每个文件，在右侧文件面板里各开一个标签页。
+
+        和任务面板「改动的文件」同一套：不开模态窗口、不把整个工作区混成一大段纯文本，
+        一个文件一个标签页，看文件的同时对话照常能读能输入。看的是**此刻**的差异，
+        不是那一轮保存过的历史 diff。只读：不经过任何写工具，也不替模型记"已审阅"。
+        """
         # 用本轮**实际的工作目录**：子 Agent / worktree 里跑的那轮，改动在隔离区里，
         # 拿主仓库路径去 diff 会回一句"工作区干净"，而改动明明就在那儿。
         work_dir = view.get("work_dir") or view.get("project")
         if not work_dir:
             self._show_toast("该运行没有关联目录，无法查看改动")
             return
-        import os
         if not os.path.isdir(work_dir):
             # **目录没了就明说，绝不将就。** `_project_cwd()` 在路径不存在时会回退到
             # 进程 cwd，于是 git_diff 悄悄查了灵犀自己的目录、回一句"工作区干净"，
@@ -121,24 +128,34 @@ class RunResultMixin:
                 "它现在不存在了（可能被移动、删除，或隔离区已合并/丢弃）。"
                 "为避免查到无关目录的差异，这里不做回退查询。")
             return
-        from .. import tools_git
-        from .. import session as _session
-        # **存原始绑定状态，不是 current_session()**：主线程本来没绑定，
-        # 用 current_session() 存下来的是 active，"还原"时会把主线程永久绑死在它身上，
-        # 之后切会话就出现 get_active() 与 current_session() 指向不同会话的错乱。
-        prev = _session.get_bound()
-        holder = _session.Session()
-        holder.project = work_dir         # 按**卡片自己的**目录取 diff，不借前台会话推断
-        _session.bind_thread(holder)
-        try:
-            text = tools_git.git_diff.func("")
-        except Exception as e:
-            text = f"查看改动失败: {e}"
-        finally:
-            _session.restore_bound(prev)
-        self._show_text_dialog(
-            "查看改动（当前状态）",
-            f"以下是 {work_dir} 此刻的差异，**不是**该次运行保存下来的历史 diff。\n\n{text}")
+        files = self._unique_changed_files(view.get("files"))
+        if not files:
+            self._show_toast("这一轮没有记录到改动的文件")
+            return
+        opened = files[:self._RESULT_DIFF_TAB_LIMIT]
+        for rel_path in opened:
+            self._open_file_in_panel(rel_path, work_dir=work_dir)
+        self._settle_file_panel()
+        skipped = len(files) - len(opened)
+        if skipped > 0:
+            self._show_toast(
+                f"还有 {skipped} 个文件没打开：文件面板一次最多开 "
+                f"{self._RESULT_DIFF_TAB_LIMIT} 个标签页", 4000)
+
+    @staticmethod
+    def _unique_changed_files(files):
+        """这一轮涉及的文件，去重（反斜杠 / 正斜杠算同一个）并保持原顺序。
+
+        重复的路径在面板里只会切到同一个标签页，留着它会让"还有几个没打开"算错。
+        """
+        out, seen = [], set()
+        for raw in files or []:
+            key = str(raw or "").replace("\\", "/").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(str(raw))
+        return out
 
     def _on_result_view_output(self, view):
         lines = []

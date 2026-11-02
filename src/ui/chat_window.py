@@ -792,11 +792,23 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
         不开模态窗口——看文件的时候对话照常能读、能输入，几个文件也能并排切着看。
         """
+        self._open_file_in_panel(rel_path)
+        self._settle_file_panel()
+
+    def _open_file_in_panel(self, rel_path, work_dir=None):
+        """按指定目录取这个文件此刻的差异，开一个标签页（已经开着就切过去）。
+
+        work_dir 不给才用当前会话的工作区。结果卡要看**那一轮自己的**目录：
+        worktree 里跑的那轮改动在隔离区，拿主会话的项目目录取 diff 只会说"没有差异"。
+        """
         from .. import session as _session
         from ..tools_git import file_diff_lines
-        work = self._undo_workspace_for(_session.get_active())
+        work = work_dir or self._undo_workspace_for(_session.get_active())
         rows = file_diff_lines(work, rel_path)
         self.file_panel.open_file(rel_path, rows)
+
+    def _settle_file_panel(self):
+        """标签页开完之后结算面板位置：收起挡路的浮层任务面板，按空间决定显示与否。"""
         if not getattr(self, "_task_panel_docked", True) and self._task_panel_overlay_open:
             self._task_panel_overlay_open = False      # 从浮层点的：收起浮层，别挡住刚开的文件
         self._apply_task_panel_collapse()          # 有了文件面板，任务面板可能要让成浮层
