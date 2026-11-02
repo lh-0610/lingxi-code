@@ -1538,6 +1538,7 @@ class TestFreshProcess:
              str(isolated_memory.parent), sid],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=300, env=env,
+            stdin=subprocess.DEVNULL,
         )
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -1604,16 +1605,16 @@ class TestBlindPeriodDischargeThroughRealTools:
         for args in (["git", "init"],
                      ["git", "config", "user.email", "t@example.com"],
                      ["git", "config", "user.name", "T"]):
-            subprocess.run(args, cwd=str(repo), check=True, capture_output=True)
+            subprocess.run(args, cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
         (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
         # 跑 pytest 会在仓库里留下 .pytest_cache / __pycache__。不 ignore 的话，
         # 闸门复查会把它们当成"测试之后又新增的文件"，于是 diff 审阅被作废、
         # 义务反而解不开。真实项目都会 ignore 它们，这里照做。
         (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n", encoding="utf-8")
-        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         return repo
 
     def test_real_run_tests_and_clean_git_diff_discharge_the_obligation(self, isolated_memory,
@@ -1663,7 +1664,7 @@ class TestBlindPeriodDischargeThroughRealTools:
         if kind == "staged":
             (git_project / "app.py").write_text("value = 2\n", encoding="utf-8")
             subprocess.run(["git", "add", "app.py"], cwd=str(git_project), check=True,
-                           capture_output=True)
+                           capture_output=True, stdin=subprocess.DEVNULL)
         else:
             (git_project / "new_module.py").write_text("value = 1\n", encoding="utf-8")
 
@@ -1719,6 +1720,7 @@ class TestCrashBeforeFirstTool:
              str(isolated_memory.parent), sid, str(ids_file)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=300, env=env,
+            stdin=subprocess.DEVNULL,
         )
         assert proc.returncode == 23, f"子进程该以 os._exit(23) 死掉: {proc.stderr[-2000:]}"
 

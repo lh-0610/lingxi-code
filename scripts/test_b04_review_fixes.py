@@ -323,7 +323,7 @@ class TestNoProjectRealProcess:
              os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
              str(isolated_memory.parent), sid],
             cwd=str(repo), capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=300, env=env)
+            timeout=300, env=env, stdin=subprocess.DEVNULL)
         assert proc.returncode == 37, f"子进程该以 os._exit(37) 死掉: {proc.stderr[-2000:]}"
         assert (repo / "app.py").read_text(encoding="utf-8") == "x = 99\n"
         ops = _sidecar(isolated_memory, sid)["operations"]

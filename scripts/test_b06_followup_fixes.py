@@ -239,12 +239,12 @@ class TestMissingWorkDir:
         for args in (["git", "init", "-q"],
                      ["git", "config", "user.email", "t@example.com"],
                      ["git", "config", "user.name", "T"]):
-            subprocess.run(args, cwd=str(original), check=True, capture_output=True)
+            subprocess.run(args, cwd=str(original), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         (original / "a.py").write_text("x = 1\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(original), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-qm", "init"], cwd=str(original), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         (original / "a.py").write_text("x = 987654\n", encoding="utf-8")
         shutil.move(str(original), str(tmp_path / "wt_moved"))
         assert not os.path.isdir(original)
@@ -263,11 +263,11 @@ class TestMissingWorkDir:
         for args in (["git", "init", "-q"],
                      ["git", "config", "user.email", "t@example.com"],
                      ["git", "config", "user.name", "T"]):
-            subprocess.run(args, cwd=str(repo), check=True, capture_output=True)
+            subprocess.run(args, cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
-        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-qm", "init"], cwd=str(repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         (repo / "a.py").write_text("x = 42\n", encoding="utf-8")
 
         host, captured = self._host()

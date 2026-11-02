@@ -153,7 +153,7 @@ def test_fresh_interpreter_rereads_isolated_history(isolated_memory, tmp_path):
     proc = subprocess.run(
         [sys.executable, "-X", "utf8", str(runner), repo_root, str(isolated_memory.parent)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=180, env={**os.environ, "PYTHONPATH": repo_root})
+        timeout=180, env={**os.environ, "PYTHONPATH": repo_root}, stdin=subprocess.DEVNULL)
     assert proc.returncode == 0, proc.stderr[-2000:]
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
     assert payload["count"] == total

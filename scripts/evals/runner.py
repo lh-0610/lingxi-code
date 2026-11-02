@@ -61,7 +61,7 @@ def _assert_command(spec, workdir, output):
     # {checks}：隐藏检查脚本的目录。放在 fixture 外面，模型看不到也改不了
     run = spec["run"].replace("{checks}", CHECKS_DIR)
     r = subprocess.run(run, shell=True, cwd=workdir, capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", timeout=spec.get("timeout", 120))
+                       text=True, encoding="utf-8", errors="replace", timeout=spec.get("timeout", 120), stdin=subprocess.DEVNULL)
     ok = r.returncode == expected
     tail = (r.stdout or "")[-400:] + (r.stderr or "")[-400:]
     return ok, f"`{spec['run']}` 退出码 {r.returncode}（期望 {expected}）\n{tail.strip()[:400]}"

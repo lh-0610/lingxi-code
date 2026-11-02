@@ -178,7 +178,7 @@ class TestCases:
         import subprocess
         fx = os.path.join(os.path.dirname(__file__), "evals", "fixtures", "broken-calc")
         r = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=fx,
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         assert r.returncode != 0, "broken-calc fixture 居然是全绿的"
 
 

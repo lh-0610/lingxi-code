@@ -30,17 +30,17 @@ def git_repo(tmp_path):
     env = {**os.environ, "GIT_AUTHOR_NAME": "皓 梁", "GIT_AUTHOR_EMAIL": "ll1816606771@gmail.com",
            "GIT_COMMITTER_NAME": "皓 梁", "GIT_COMMITTER_EMAIL": "ll1816606771@gmail.com"}
     subprocess.run(["git", "init"], cwd=str(repo), check=True,
-                   capture_output=True, env=env)
+                   capture_output=True, env=env, stdin=subprocess.DEVNULL)
     # 禁用 GPG 签名（CI 环境可能没有 key）
     subprocess.run(["git", "config", "commit.gpgSign", "false"], cwd=str(repo),
-                   check=True, capture_output=True)
+                   check=True, capture_output=True, stdin=subprocess.DEVNULL)
     # 需要至少一个 commit 才能 worktree
     readme = repo / "README.md"
     readme.write_text("# test\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=str(repo), check=True,
-                   capture_output=True)
+                   capture_output=True, stdin=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True,
-                   capture_output=True, env=env)
+                   capture_output=True, env=env, stdin=subprocess.DEVNULL)
     return repo
 
 
@@ -269,6 +269,7 @@ class TestCreate:
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=str(git_repo), capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert ".lingxi-worktrees" not in status.stdout, \
             f"隔离目录污染了主项目 status: {status.stdout!r}"
@@ -305,15 +306,16 @@ class TestCreate:
         env = {**os.environ, "GIT_AUTHOR_NAME": "皓 梁", "GIT_AUTHOR_EMAIL": "ll1816606771@gmail.com",
                "GIT_COMMITTER_NAME": "皓 梁", "GIT_COMMITTER_EMAIL": "ll1816606771@gmail.com"}
         subprocess.run(["git", "add", "."], cwd=wt_path, check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "wt commit"], cwd=wt_path,
-                       check=True, capture_output=True, env=env)
+                       check=True, capture_output=True, env=env, stdin=subprocess.DEVNULL)
 
         info = _WORKTREES["s_commit"]
         branch = info["branch"]
         result = subprocess.run(
             ["git", "log", "--oneline", branch],
-            cwd=str(git_repo), capture_output=True, text=True
+            cwd=str(git_repo), capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert "wt commit" in result.stdout
 
@@ -375,7 +377,8 @@ class TestFinish:
         assert (git_repo / "README.md").read_text(encoding="utf-8") == "from isolated worktree\n"
         status = subprocess.run(
             ["git", "status", "--porcelain", "--", "README.md"],
-            cwd=str(git_repo), capture_output=True, text=True
+            cwd=str(git_repo), capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert status.stdout.rstrip("\r\n") == " M README.md"
 
@@ -394,7 +397,8 @@ class TestFinish:
 
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
-            cwd=str(git_repo), capture_output=True, text=True
+            cwd=str(git_repo), capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert wt_path not in result.stdout
 
@@ -436,9 +440,9 @@ class TestApplyChangesEdgeCases:
     def _commit(repo, *, msg="c"):
         env = {**os.environ, "GIT_AUTHOR_NAME": "皓 梁", "GIT_AUTHOR_EMAIL": "ll1816606771@gmail.com",
                "GIT_COMMITTER_NAME": "皓 梁", "GIT_COMMITTER_EMAIL": "ll1816606771@gmail.com"}
-        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", msg], cwd=str(repo), check=True,
-                       capture_output=True, env=env)
+                       capture_output=True, env=env, stdin=subprocess.DEVNULL)
 
     def _wt(self, git_repo, sid):
         from src.worktree import create

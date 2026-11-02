@@ -344,7 +344,7 @@ print(sess.current_session_id)
         proc = subprocess.run(
             [sys.executable, "-c", child, repo_root, str(isolated_memory.parent), mode],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=120, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            timeout=120, env={**os.environ, "PYTHONIOENCODING": "utf-8"}, stdin=subprocess.DEVNULL)
         assert proc.returncode == 0, f"子进程失败: {proc.stderr[-500:]}"
         sid = proc.stdout.strip().splitlines()[-1]
 

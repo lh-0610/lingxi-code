@@ -949,7 +949,7 @@ class TestFreshProcessRedraw:
              os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
              str(isolated_memory.parent), sid],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=300, env=env)
+            timeout=300, env=env, stdin=subprocess.DEVNULL)
         assert proc.returncode == 0, proc.stderr[-2000:]
         out = json.loads(proc.stdout.strip().splitlines()[-1])
 

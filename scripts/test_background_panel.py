@@ -148,7 +148,7 @@ def select(panel, bg_id):
 
 def spawn(script, sess):
     proc = subprocess.Popen([sys.executable, "-u", "-c", script],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0, stdin=subprocess.DEVNULL)
     return bg.start(script, proc, cwd="real-cwd", project="real-project",
                     **bg.capture_session_identity(sess)), proc
 
@@ -620,5 +620,5 @@ assert background.list_snapshots() == []
 assert background.stop(sys.argv[1])['found'] is False
 """
     result = subprocess.run([sys.executable, "-c", code, bg_id], capture_output=True,
-                            text=True, encoding="utf-8", timeout=10)
+                            text=True, encoding="utf-8", timeout=10, stdin=subprocess.DEVNULL)
     assert result.returncode == 0, result.stderr

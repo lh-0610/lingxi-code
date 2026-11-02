@@ -39,7 +39,7 @@ def _rmtree(path):
 
 def _git(cwd, *args):
     return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace").stdout.strip()
+                          text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL).stdout.strip()
 
 
 def _make_repo(root):
@@ -1566,7 +1566,7 @@ class TestRealProcessCrash:
              os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
              str(isolated_memory.parent), sid, str(repo)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=300, env=env)
+            timeout=300, env=env, stdin=subprocess.DEVNULL)
         assert proc.returncode == 31, f"子进程该以 os._exit(31) 死掉: {proc.stderr[-2000:]}"
         assert (repo / "notes.txt").read_text(encoding="utf-8") == "appended once\n"
 

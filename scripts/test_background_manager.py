@@ -53,7 +53,7 @@ def register(proc=None, **kwargs):
 
 def spawn(script):
     proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, bufsize=0)
+                            stderr=subprocess.STDOUT, bufsize=0, stdin=subprocess.DEVNULL)
     bg_id = bg.start("real child", proc, cwd=None, project=None,
                      **bg.capture_session_identity(session.current_session()))
     return bg_id, proc
@@ -84,7 +84,7 @@ assert b.list_snapshots()[0]['bg_id'] == i
 assert b.stop_all(.1)[0]['running'] is False
 """
     child = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                           timeout=10, text=True, encoding="utf-8")
+                           timeout=10, text=True, encoding="utf-8", stdin=subprocess.DEVNULL)
     assert child.returncode == 0, child.stderr
 
 
@@ -359,7 +359,7 @@ def test_zero_budget_does_not_launch_taskkill(monkeypatch):
 
 def test_manager_thread_start_failure_cleans_up_real_process(monkeypatch):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
-                            stdout=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
 
     def fail(*args, **kwargs):
         raise RuntimeError("no threads")
@@ -519,7 +519,7 @@ print(i)
     ids = []
     for _ in range(2):
         child = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                               timeout=10, text=True, encoding="utf-8")
+                               timeout=10, text=True, encoding="utf-8", stdin=subprocess.DEVNULL)
         assert child.returncode == 0, child.stderr
         ids.append(child.stdout.strip())
     assert ids[0] != ids[1]

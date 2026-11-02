@@ -182,10 +182,10 @@ def git_project(tmp_path):
     repo = tmp_path / "proj"
     repo.mkdir()
     for args in (["init"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"]):
-        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
     (repo / "app.py").write_text("a = 1\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
     return repo
 
 

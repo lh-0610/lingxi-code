@@ -98,17 +98,17 @@ def git_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), check=True,
-                   capture_output=True, encoding="utf-8")
+                   capture_output=True, encoding="utf-8", stdin=subprocess.DEVNULL)
     subprocess.run(["git", "config", "user.email", "test@example.com"],
-                   cwd=str(repo), check=True, capture_output=True)
+                   cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
     subprocess.run(["git", "config", "user.name", "Tester"],
-                   cwd=str(repo), check=True, capture_output=True)
+                   cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
     # 创建初始提交，确保 HEAD 存在（git_status 依赖 git diff-index HEAD）
     (repo / "README.md").write_text("init", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True,
-                   capture_output=True)
+                   capture_output=True, stdin=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=str(repo), check=True,
-                   capture_output=True)
+                   capture_output=True, stdin=subprocess.DEVNULL)
 
     old_project = state.current_project
     old_ui = state.ui_ref
@@ -158,7 +158,7 @@ class TestGitDiffMarksReviewed:
         v = self._fresh()
         (git_repo / "README.md").write_text("changed and staged", encoding="utf-8")
         subprocess.run(["git", "add", "README.md"], cwd=str(git_repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
 
         out = git_diff.func("")
         assert v["diff_reviewed"] is False, "没看过的改动不能算审阅过"
@@ -182,9 +182,9 @@ class TestGitDiffMarksReviewed:
         v = self._fresh()
         (git_repo / ".gitignore").write_text("build/\n", encoding="utf-8")
         subprocess.run(["git", "add", ".gitignore"], cwd=str(git_repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "ignore build"], cwd=str(git_repo),
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
         (git_repo / "build").mkdir()
         (git_repo / "build" / "out.o").write_text("junk", encoding="utf-8")
 
@@ -214,9 +214,9 @@ class TestGitDiffMarksReviewed:
         v = self._fresh()
         (git_repo / "other.py").write_text("value = 1\n", encoding="utf-8")
         subprocess.run(["git", "add", "other.py"], cwd=str(git_repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "add other"], cwd=str(git_repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         (git_repo / "README.md").write_text("changed but not looked at", encoding="utf-8")
 
         out = git_diff.func("other.py")
@@ -438,6 +438,7 @@ class TestGitWriteConfirmation:
         status = subprocess.run(
             ["git", "status", "--short"], cwd=str(git_repo),
             capture_output=True, text=True, encoding="utf-8", check=True,
+            stdin=subprocess.DEVNULL,
         ).stdout
         assert "?? blocked.txt" in status
         assert "A  blocked.txt" not in status
@@ -462,6 +463,7 @@ class TestGitWriteConfirmation:
         status = subprocess.run(
             ["git", "status", "--short"], cwd=str(git_repo),
             capture_output=True, text=True, encoding="utf-8", check=True,
+            stdin=subprocess.DEVNULL,
         ).stdout
         assert "A  allowed.txt" in status
 
@@ -470,6 +472,7 @@ class TestGitWriteConfirmation:
         subprocess.run(
             ["git", "add", "--", "user.txt"], cwd=str(git_repo),
             capture_output=True, text=True, encoding="utf-8", check=True,
+            stdin=subprocess.DEVNULL,
         )
 
         text = build_git_write_confirmation(
@@ -531,7 +534,7 @@ class TestPanelDiffHelpers:
         (git_repo / "new.py").write_text("print(1)\n", encoding="utf-8")
         assert file_diff_text(str(git_repo), "new.py").startswith("新文件")
         subprocess.run(["git", "checkout", "--", "README.md"], cwd=str(git_repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         assert "没有差异" in file_diff_text(str(git_repo), "README.md")
 
     def test_viewing_does_not_mark_the_diff_reviewed(self, git_repo):

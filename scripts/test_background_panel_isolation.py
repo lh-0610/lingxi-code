@@ -34,5 +34,6 @@ raise SystemExit(result)
         [sys.executable, "-c", code, str(tmp_path / "child-basetemp")],
         cwd=Path(__file__).resolve().parent.parent,
         env=env, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        stdin=subprocess.DEVNULL,
     )
     assert result.returncode == 0, result.stdout + result.stderr

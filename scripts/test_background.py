@@ -384,7 +384,7 @@ class TestOutputLimits:
         proc = subprocess.Popen(
             [sys.executable, "-c",
              f"import sys\nfor _ in range(20): sys.stdout.write({line_expr})\n"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0, stdin=subprocess.DEVNULL)
         bg_id = start("flooder", proc, cwd=None, project=None,
                       session_id="s", session_key="k", is_subagent=False,
                       run_id="", task_id=None)

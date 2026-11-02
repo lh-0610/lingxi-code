@@ -25,7 +25,7 @@ def main() -> int:
                "--quiet", "--report", str(report), "-r", str(ROOT / "requirements-dev.txt")]
         if LOCK.exists() and not upgrade:
             cmd += ["-c", str(LOCK)]
-        r = subprocess.run(cmd, cwd=ROOT)
+        r = subprocess.run(cmd, cwd=ROOT, stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             print("解析失败；如果是新依赖和现有锁冲突，用 --upgrade 重新解析。", file=sys.stderr)
             return r.returncode

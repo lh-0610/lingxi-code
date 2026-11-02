@@ -247,11 +247,11 @@ class TestWorkDir:
         for args in (["git", "init", "-q"],
                      ["git", "config", "user.email", "t@example.com"],
                      ["git", "config", "user.name", "T"]):
-            subprocess.run(args, cwd=str(repo), check=True, capture_output=True)
+            subprocess.run(args, cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
-        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-qm", "init"], cwd=str(repo), check=True,
-                       capture_output=True)
+                       capture_output=True, stdin=subprocess.DEVNULL)
         (repo / "a.py").write_text("x = 987654\n", encoding="utf-8")
 
         shown = {}

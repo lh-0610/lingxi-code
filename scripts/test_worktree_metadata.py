@@ -25,6 +25,7 @@ def git(repo, *args):
     return subprocess.run(
         ["git", *args], cwd=repo, capture_output=True, check=True,
         text=True, encoding="utf-8",
+        stdin=subprocess.DEVNULL,
     ).stdout.strip()
 
 

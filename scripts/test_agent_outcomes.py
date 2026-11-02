@@ -46,11 +46,11 @@ def repo(tmp_path):
     root.mkdir()
     env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=env)
-    subprocess.run(["git", "config", "commit.gpgSign", "false"], cwd=root, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=env, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "commit.gpgSign", "false"], cwd=root, check=True, stdin=subprocess.DEVNULL)
     (root / "app.py").write_text("value = 1\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
-    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True, env=env)
+    subprocess.run(["git", "add", "app.py"], cwd=root, check=True, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True, env=env, stdin=subprocess.DEVNULL)
     return root
 
 
@@ -133,9 +133,9 @@ def test_real_child_success_invalidates_parent_validation(runtime, repo, monkeyp
         verification.mark_tests(child.verification, True, root=child.worktree)
         verification.mark_diff_reviewed(child.verification, root=child.worktree)
         if committed:
-            subprocess.run(["git", "add", "app.py"], cwd=child.worktree, check=True)
+            subprocess.run(["git", "add", "app.py"], cwd=child.worktree, check=True, stdin=subprocess.DEVNULL)
             subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",
-                            "commit", "-qm", "child"], cwd=child.worktree, check=True)
+                            "commit", "-qm", "child"], cwd=child.worktree, check=True, stdin=subprocess.DEVNULL)
         return [AIMessageChunk(content="Verified")]
 
     model_stream(monkeypatch, agent, [[write_chunk()], verified_finish])

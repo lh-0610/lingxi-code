@@ -20,11 +20,11 @@ def git_repo(tmp_path):
     repo.mkdir()
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
-    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True, env=env)
-    subprocess.run(["git", "config", "commit.gpgSign", "false"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True, env=env, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "commit.gpgSign", "false"], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
     (repo / "README.md").write_text("# test\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True, env=env)
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True, env=env, stdin=subprocess.DEVNULL)
     return repo
 
 
@@ -155,9 +155,9 @@ class TestSubagentSpawn:
         def fake_loop(ui):
             cwd = Path(tools._project_cwd())
             (cwd / "feat.py").write_text("print('feat')\n", encoding="utf-8")
-            subprocess.run(["git", "add", "-A"], cwd=str(cwd), check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=str(cwd), check=True, capture_output=True, stdin=subprocess.DEVNULL)
             subprocess.run(["git", "commit", "-m", "subagent commit"], cwd=str(cwd),
-                           check=True, capture_output=True, env=env)
+                           check=True, capture_output=True, env=env, stdin=subprocess.DEVNULL)
             session.current_session().chat_history.append(AIMessage(content="done"))
             return AgentResult("completed")
 
@@ -231,8 +231,8 @@ class TestSubagentSpawn:
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         (git_repo / "same.txt").write_text("base\n", encoding="utf-8")
-        subprocess.run(["git", "add", "same.txt"], cwd=str(git_repo), check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "base"], cwd=str(git_repo), check=True, capture_output=True, env=env)
+        subprocess.run(["git", "add", "same.txt"], cwd=str(git_repo), check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=str(git_repo), check=True, capture_output=True, env=env, stdin=subprocess.DEVNULL)
 
         def fake_loop(ui):
             cwd = Path(tools._project_cwd())

@@ -561,7 +561,7 @@ class TestMaterialsAndBoundaries:
         sub_real.rename(workspace / "sub-real")
         mk = subprocess.run(["cmd", "/c", "mklink", "/J",
                              str(workspace / "sub"), str(elsewhere)],
-                            capture_output=True, text=True, errors="replace")
+                            capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL)
         if mk.returncode != 0:
             pytest.skip(f"无法创建 junction: {mk.stderr.strip()}")
         try:
@@ -629,7 +629,7 @@ class TestSessionsAndWorktrees:
         repo.mkdir()
 
         def _git(*args):
-            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, stdin=subprocess.DEVNULL)
 
         _git("init")
         _git("config", "user.email", "t@example.com")
@@ -640,7 +640,7 @@ class TestSessionsAndWorktrees:
 
         wt = tmp_path / "wt"
         subprocess.run(["git", "worktree", "add", "-b", "b11a-wt", str(wt)],
-                       cwd=repo, check=True, capture_output=True)
+                       cwd=repo, check=True, capture_output=True, stdin=subprocess.DEVNULL)
 
         sess_main = _make_saved_session(repo)
         _drive("write_file", {"path": "same.txt", "content": "main-edit\n"})
@@ -685,7 +685,7 @@ class TestGitBoundaries:
 
         def _git(*args, check=True):
             return subprocess.run(["git", *args], cwd=repo, capture_output=True,
-                                  text=True, encoding="utf-8", errors="replace", check=check)
+                                  text=True, encoding="utf-8", errors="replace", check=check, stdin=subprocess.DEVNULL)
 
         _git("init")
         _git("config", "user.email", "t@example.com")
@@ -912,7 +912,7 @@ class TestFreshInterpreter:
              bound_session.current_session_id, repo_root],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=120, cwd=tmp_path,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, stdin=subprocess.DEVNULL)
         assert proc.returncode == 0, f"子进程失败:\n{proc.stdout}\n{proc.stderr}"
         assert "CHILD-OK" in proc.stdout
         assert target.read_bytes() == original.encode("utf-8")
