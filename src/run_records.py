@@ -166,7 +166,7 @@ def new_id(prefix: str) -> str:
 # 而 sidecar 前后都没有记录，恢复分类返回空列表——连"结果未知"的线索都没有。
 # 判据是「这个工具会不会执行项目代码或用户配置的命令」，不是「它的名字听起来像不像检查」。
 SIDE_EFFECT_FREE_TOOLS = frozenset({
-    "read_file", "read_files", "explore", "list_directory", "search_in_file", "search_files",
+    "read_file", "read_files", "explore", "run_code", "list_directory", "search_in_file", "search_files",
     "code_map", "find_definition", "find_references", "find_tests", "related_files",
     "git_diff", "git_log", "git_status",
     "read_background_output", "list_background_commands",

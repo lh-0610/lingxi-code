@@ -25,7 +25,7 @@ from .tools_common import _project_cwd
 EXPLORE_TOOL_NAMES = frozenset({
     "read_file", "read_files", "search_files", "search_in_file", "list_directory",
     "find_definition", "find_references", "code_map", "related_files", "find_tests",
-    "git_log", "git_diff", "get_project_instructions",
+    "git_log", "git_diff", "get_project_instructions", "run_code",
 })
 
 # 彻底程度 → (轮次上限, 超时秒数)

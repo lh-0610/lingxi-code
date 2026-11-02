@@ -15,6 +15,11 @@
 - 跑满上限时多调一次模型（不带工具）把已查到的写成报告，而不是只交回"已达上限"；父任务停止时子代理跟着停
 - 遥控只读模式不放行：子代理能读项目里任何文件，绕得过敏感文件黑名单
 
+## 代码模式与代码地图（src/tools_code.py + repo_map.py）
+- DeepSeek 一轮只调 1.2~1.6 个工具、批量工具给了也不用，这两样不靠它自觉
+- `repo_map.build_task_map`：大项目（≥40 个源码文件）里每条新消息开跑前，按任务里的词（IDF 加权，中文切 2~4 字）和 import 关系挑最多 12 个文件，列出类 / 函数和行号，放在系统提示词末尾（`session.task_map`，本次运行内不变，吃得到缓存）。最高分 <15 不给（闲聊 / 仓库里没有的功能）
+- `run_code`：模型写一小段 Python 调只读工具（`CODE_TOOL_NAMES`），一轮做完多次读 / 搜。写工具不进程序——执行前记录、改动确认、验证追踪、Plan 拦截都挂在普通工具那条路上
+
 ## 代码导航（src/lsp_client.py + codeintel.py + tools_codemap.py）
 - `find_definition` / `find_references`：**LSP（最准，装了语言服务器）→ jedi（Python）→ 退回 search_files** 的降级链
 - `codeintel.py`：tree-sitter 符号提取 / 导入追踪（多语言），支撑 `code_map` / `related_files`

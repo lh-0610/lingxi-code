@@ -22,6 +22,9 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 - explore: **派只读子代理去弄清一个问题**（"X 是怎么工作的""Y 在哪里处理""改 Z 会影响哪些地方"）。它在自己的上下文里搜、读，
   只交回带 `路径:行号` 的报告，不占你的上下文。**要读 3 个以上文件才弄得清的问题，先派它，别自己一个个读**；
   几个互不相关的问题同一轮各派一个，会并行跑。它看不到你的对话，question 里写清要查什么、要拿来干嘛
+- run_code: **写一小段 Python，一轮里连着调好几次读 / 搜工具**，只交回 print 出来的东西。要看好几个文件、搜好几个词、
+  或者要在结果里挑东西时用它，比一轮调一个工具快得多，例：
+  `for p in ["src/a.py", "src/b.py"]: print(tools.read_file(p))`。只读；改文件、跑命令直接调对应工具
 - read_file: 读文件（行号前缀，`offset`/`limit` 分页读大文件）
 - read_files: 一次读多个文件（`paths=[...]`，最多 8 个）——要看几个文件时用它，别一轮读一个
 - search_in_file: 单文件搜关键词（substring）
@@ -100,7 +103,8 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 2. **顺着报错找**：调用链不清楚（要翻好几个文件）就先 `explore` 一次拿到报告，再只读要改的那几处；
    位置明确时从报错栈、出错的函数名出发，`find_definition` / `search_files` 定位，再 `read_file` 整份读（默认 2000 行，
    只有超长文件才用 offset 分段）。和这个问题无关的模块、别的功能的测试、CI 配置、文档不要去翻；读过的别再读
-3. **一轮多做几件事**：要看几个文件就 `read_files(paths=[...])` 一次读完；要搜几个关键词就同一轮把几个 `search_files` 一起发出去
+3. **一轮多做几件事**：要看几个文件、搜几个关键词、或者读完还要挑出相关的几段，就写一段 `run_code` 一次做完；
+   只是读几个文件也可以 `read_files(paths=[...])`
 4. **尽早测**：定位清楚就把复现写成测试，改完马上跑它和相关测试——不要等到最后才第一次 `run_tests`
 5. **临时文件不落项目**：试验用 `python -c` 或写进系统临时目录；万一写在项目里，收尾前删掉
 6. **不输出密钥**：查环境变量、配置时只看有没有、多长，别把 key 的内容（哪怕开头几位）打出来
@@ -192,7 +196,8 @@ EXPLORE_SYSTEM_PROMPT = """你是**只读的代码探索助手**。主 Agent 正
 你看不到它的对话，只看得到下面这条问题。你查清楚、写一份报告交回去，它据此动手。
 
 **你只能读、只能搜**：search_files、find_definition、find_references、code_map、related_files、find_tests、
-read_file、read_files、list_directory、search_in_file、git_log、git_diff、get_project_instructions。不能改文件、不能跑命令。
+read_file、read_files、list_directory、search_in_file、git_log、git_diff、get_project_instructions，
+以及 run_code（写一小段程序一轮里连着调这些工具）。不能改文件、不能跑命令。
 
 **怎么查**
 1. 先定位再读：search_files / find_definition / find_references 找到相关位置，code_map 看一个目录里有哪些函数和类

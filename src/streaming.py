@@ -43,7 +43,10 @@ from .images import (
 def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
     """工具调用在界面上的（显示名, 参数摘要）。实时执行和重绘历史共用，两边画出来一致。"""
     display_name = TOOL_DISPLAY_NAMES.get(name, f"🔧 {name}")
-    if name == "explore":
+    if name == "run_code":
+        code_lines = str(args.get("code") or "").strip().splitlines()
+        detail = str(args.get("description") or "").strip() or (code_lines[0][:80] if code_lines else "")
+    elif name == "explore":
         detail = f"{str(args.get('question', ''))[:80]}（{args.get('thoroughness', 'medium')}）"
     elif name == "read_files":
         detail = "、".join(str(p) for p in (args.get("paths") or []))
@@ -91,7 +94,7 @@ STREAMING_TOOLS = {"run_command"}
 
 # Plan mode 下允许调用的"只读"工具白名单。AI 若试图调其它工具会被 _execute_tool 拦
 PLAN_MODE_READONLY_TOOLS = {
-    "read_file", "read_files", "explore", "list_directory", "search_in_file", "search_files",
+    "read_file", "read_files", "explore", "run_code", "list_directory", "search_in_file", "search_files",
     "remember", "forget",  # 记笔记不该被 Plan 拦
     "update_plan",  # 列计划是 Plan 模式的核心动作
     "set_step_status",  # 更新单步状态是 Plan 模式的核心动作
@@ -1236,7 +1239,7 @@ def _stream_with_tools(ui):
 # 纯读、无副作用、无确认卡的工具——同一轮里有多个这种时可并行 invoke 提速 IO
 # （写类 / run_command / 生图 / MCP / 改状态的都不在内，保持串行，避免确认卡冲突与副作用竞争）
 PARALLEL_SAFE_TOOLS = {
-    "read_file", "read_files", "explore", "search_in_file", "search_files", "list_directory", "code_map",
+    "read_file", "read_files", "explore", "run_code", "search_in_file", "search_files", "list_directory", "code_map",
     "find_definition", "find_references",  # jedi 代码导航，纯读无副作用
     "find_tests", "related_files",  # 测试发现 / 关联文件，纯读无副作用
     "git_diff", "git_log", "git_status", "check_code", "read_background_output",

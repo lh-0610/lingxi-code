@@ -2627,6 +2627,7 @@ from .tools_codemap import code_map, find_tests, related_files  # noqa: E402
 from .tools_codemap import _extract_imports_py, _find_test_files, _module_name_for_py, _module_to_path, _score_test_candidate  # noqa: F401,E402
 from .tools_rag import search_knowledge  # noqa: E402
 from .tools_explore import explore  # noqa: E402
+from .tools_code import run_code  # noqa: E402
 
 # 导出
 ALL_TOOLS = [
@@ -2635,7 +2636,7 @@ ALL_TOOLS = [
     search_in_file, search_files,
     find_definition, find_references,
     find_tests, related_files,
-    explore,
+    explore, run_code,
     remember, forget,
     spawn_agents,
     update_plan,
@@ -2693,6 +2694,7 @@ TOOL_DISPLAY_NAMES = {
     "read_file": "📖 读取文件",
     "read_files": "📖 读取多个文件",
     "explore": "🔎 探索代码",
+    "run_code": "🧩 批量查看（程序）",
     "write_file": "✏️ 写入文件",
     "append_file": "📝 追加文件",
     "edit_file": "🪄 精确编辑",

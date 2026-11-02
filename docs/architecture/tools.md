@@ -10,6 +10,7 @@
 |------|------|
 | `read_file` | 读取文件（`offset`/`limit` 分页，行号前缀） |
 | `read_files` | 一次读多个文件（最多 8 个、总共 6 万字，超出的列出不读；遥控只读模式下每个路径都过黑名单） |
+| `run_code` | 代码模式：一小段 Python 一轮里连着调好几次只读工具，只交回 print 的内容（`tools_code.py`；执行前语法树检查——不许 import / class / 生成器 / 下划线属性 / 栈帧属性 / .format，只给基本内置函数，60 秒限时；只读、可并行、Plan 放行、遥控拦） |
 | `explore` | 派只读探索子代理弄清一个问题，只交回带 `路径:行号` 的报告（`tools_explore.py`；只读、可并行、Plan 放行、遥控拦） |
 | `write_file` | 创建/覆盖（**写盘前弹 diff 确认卡**；全量覆盖比 edit 危险） |
 | `append_file` | 追加（**弹 diff 确认卡**） |
