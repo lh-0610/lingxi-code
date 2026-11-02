@@ -225,3 +225,92 @@ def test_long_changed_file_lists_fold(ui, qapp):
     _pump(qapp)
     assert len([w for w in panel.findChildren(QWidget) if w.objectName() == "fileRow"]) == panel._FILES_MAX
     assert panel.files_more.text().startswith("另有 3 个文件")
+
+
+# ── 新计划临时打开面板（不改用户的开关）──────────────────────
+
+def _collapse_by_hand(ui, qapp):
+    """用户手动收起面板：偏好记住 collapsed=True。"""
+    ui._toggle_task_panel()
+    _pump(qapp)
+    assert not ui.plan_panel.isVisible()
+    assert _load_ui_prefs().get("task_panel_collapsed") is True
+
+
+def test_new_plan_reopens_the_collapsed_panel_without_touching_the_pref(ui, qapp):
+    from src import tools
+    _collapse_by_hand(ui, qapp)
+
+    tools.update_plan.func("[x] 读懂登录\n[~] 修复\n[ ] 补测试")
+    _pump(qapp)
+
+    assert ui.plan_panel.isVisible() and ui._task_panel_docked, "出了新计划：面板临时打开"
+    assert ui.task_panel_btn.isChecked(), "顶栏按钮跟着显示打开态"
+    assert _load_ui_prefs().get("task_panel_collapsed") is True, "临时打开不改我记住的开关"
+
+
+def test_advancing_the_same_plan_does_not_pop_again(ui, qapp):
+    from src import tools
+    _collapse_by_hand(ui, qapp)
+    tools.update_plan.func("[x] 读懂登录\n[~] 修复\n[ ] 补测试")
+    _pump(qapp)
+    assert ui.plan_panel.isVisible()
+
+    ui._toggle_task_panel()        # 我手手动关掉
+    _pump(qapp)
+    assert not ui.plan_panel.isVisible() and not ui.task_panel_btn.isChecked()
+
+    tools.set_step_status.func(2, "完成")   # 同一份计划往下推进
+    _pump(qapp)
+    assert not ui.plan_panel.isVisible(), "勾掉一步 / 换到下一步不再弹"
+    assert _load_ui_prefs().get("task_panel_collapsed") is True, "手动关掉后开关仍是收起"
+
+
+def test_manual_close_sticks_until_the_next_new_plan(ui, qapp):
+    from src import tools
+    _collapse_by_hand(ui, qapp)
+    tools.update_plan.func("[x] 读懂登录\n[~] 修复\n[ ] 补测试")
+    _pump(qapp)
+    ui._toggle_task_panel()        # 临时打开的那次被我关掉
+    _pump(qapp)
+    assert not ui.plan_panel.isVisible()
+
+    for step in (2, 3):            # 同一份计划继续推进：一直关着
+        tools.set_step_status.func(step, "完成")
+        _pump(qapp)
+        assert not ui.plan_panel.isVisible()
+
+    # 下一份新计划（步骤标题变了）才重新出现
+    tools.update_plan.func("[~] 加一步验证\n[ ] 补文档", explanation="需求追加了一项")
+    _pump(qapp)
+    assert ui.plan_panel.isVisible()
+    assert _load_ui_prefs().get("task_panel_collapsed") is True
+
+
+def test_narrow_window_does_not_auto_open_as_an_overlay(ui, qapp):
+    from src import tools
+    _collapse_by_hand(ui, qapp)
+    ui.resize(1000, 800)
+    _pump(qapp)
+    assert not ui._task_panel_docked, "窗口太窄：面板只能以浮层打开"
+
+    tools.update_plan.func("[~] 读懂登录\n[ ] 修复")
+    _pump(qapp)
+
+    assert not ui.plan_panel.isVisible(), "浮层会盖住对话，不自动弹"
+    assert not ui._task_panel_overlay_open and not ui.task_panel_btn.isChecked()
+    assert _load_ui_prefs().get("task_panel_collapsed") is True
+
+
+def test_other_rerenders_do_not_reopen_a_collapsed_panel(ui, qapp):
+    """切会话 / 换主题这类重渲染只是对齐快照，不是"收到新计划"，不能自己冒出来。"""
+    from src import session
+    _collapse_by_hand(ui, qapp)
+    # 绕过 show_plan 直接改计划（模拟切会话 / 撤销后重新渲染）：
+    # 面板内容跟着刷新，但不该把用户收起的面板自己打开
+    session.get_active().current_plan = [{"text": "别处的计划", "status": "in_progress"}]
+    ui._render_plan_panel()
+    ui._apply_theme()
+    _pump(qapp)
+    assert not ui.plan_panel.isVisible()
+

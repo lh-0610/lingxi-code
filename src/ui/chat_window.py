@@ -320,6 +320,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 共同漏斗，且都在 set_active(新会话) 之后才调——current_plan 已是新会话的计划。
         # （hasattr 守卫：本方法可能在 build_ui 建好 plan_panel 之前被调到）
         if hasattr(self, "plan_panel"):
+            # 临时打开只属于刚才那份计划：换到别的上下文就作废，回到用户记住的开关。
+            # 步骤标题快照保留——下面这次渲染会按新会话的计划对齐，切回后同一份计划
+            # 继续推进仍算"同一份"，不会重新弹出来。
+            self._task_panel_plan_open = False
             self._render_plan_panel(getattr(state, "current_plan", None) or [])
 
     def _is_hidden_bridge_message(self, msg):
@@ -603,6 +607,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 用户的开关：默认打开，选择记在界面偏好里（沿用 task_panel_collapsed 这个键）
         self._task_panel_open = not bool(prefs.get("task_panel_collapsed", False))
         self._task_panel_overlay_open = False     # 窗口放不下时临时打开的浮层，不改偏好
+        # 收到一份新计划（步骤标题变了）时临时打开停靠的面板，同样不改偏好：用户收起面板后
+        # 新计划要能自己出来，但同一份计划的推进（勾步骤、换下一步）不再弹。用户亲手关掉
+        # 这份计划即作废，直到下一份新计划。
+        self._task_panel_plan_open = False
+        self._plan_step_titles = ()               # 上一份计划（渲染过的）的步骤标题快照
         try:
             width = int(prefs.get("task_panel_width", TaskPanel.DEFAULT_WIDTH))
         except (TypeError, ValueError):
@@ -645,9 +654,30 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             return self.width() - self._sidebar_shown_width() - self._TASK_PANEL_MIN_CHAT
         return self.width() - 120
 
+    def _task_panel_wanted_open(self):
+        """放得下时该不该显示：用户的开关，或这一份新计划临时打开（窗口窄时只认浮层）。"""
+        return self._task_panel_open or self._task_panel_plan_open
+
     def _task_panel_collapsed(self):
         narrow = self._task_panel_narrow()
-        return not (self._task_panel_overlay_open if narrow else self._task_panel_open)
+        return not (self._task_panel_overlay_open if narrow else self._task_panel_wanted_open())
+
+    def _open_task_panel_for_new_plan(self, titles):
+        """收到一份步骤标题变了的新计划：临时打开停靠的面板（不改偏好）。
+
+        同一份计划的推进（勾步骤、换下一步）标题没变，不重复弹；窗口太窄、面板只能当
+        浮层盖住对话时不自动弹；用户亲手收起过就不再自己出来，直到下一份新计划。
+        """
+        # 新的一份计划：之前的"手动关掉"作废，之后的推进不再弹
+        self._task_panel_plan_open = False
+        if not titles or not hasattr(self, "plan_panel"):
+            return
+        if self._task_panel_narrow():
+            return          # 放不下：这时面板只能当浮层盖住对话，不自动弹
+        if self._task_panel_open:
+            return          # 面板本来就开着（用户没收起过）
+        self._task_panel_plan_open = True
+        self._apply_task_panel_collapse()
 
     def _apply_task_panel_collapse(self):
         """按用户的开关和窗口宽度摆放面板：放得下就停靠在右边，放不下就收起，
@@ -693,10 +723,19 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """顶栏开关。放得下时切换停靠的面板并记住选择；放不下时只开关这一次的浮层。"""
         if self._task_panel_narrow():
             self._task_panel_overlay_open = not self._task_panel_overlay_open
+        elif self._task_panel_wanted_open():
+            # 当前正显示：关掉。这一份计划临时打开的那次一并作废——用户手动关掉后
+            # 同一份计划再推进也不再自己出来，直到下一份新计划。
+            self._task_panel_plan_open = False
+            if self._task_panel_open:
+                self._task_panel_open = False
+                prefs = _load_ui_prefs()
+                prefs["task_panel_collapsed"] = True
+                _save_ui_prefs(prefs)
         else:
-            self._task_panel_open = not self._task_panel_open
+            self._task_panel_open = True
             prefs = _load_ui_prefs()
-            prefs["task_panel_collapsed"] = not self._task_panel_open
+            prefs["task_panel_collapsed"] = False
             _save_ui_prefs(prefs)
         self._apply_task_panel_collapse()
 
@@ -2088,7 +2127,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from .. import session as _session
         if sess is not _session.get_active() or items != sess.current_plan:
             return
-        self._render_plan_panel(items)
+        # 步骤标题变了 = 收到一份新计划：收起的面板临时打开（不改偏好）
+        if self._render_plan_panel(items):
+            self._open_task_panel_for_new_plan(
+                tuple((it or {}).get("text", "") for it in (items or [])))
         self.chat_area.on_plan(items)   # 当前步骤换了：消息流里插一个步骤分段
 
     def _tick_plan_spinner(self):
@@ -2100,15 +2142,25 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self.plan_panel._render_plan_rows(items)
 
     def _render_plan_panel(self, items=None):
-        """主线程 slot：渲染任务目标与计划面板（B05 三段式：要求限制、计划、执行验证）。"""
+        """主线程 slot：渲染任务目标与计划面板（B05 三段式：要求限制、计划、执行验证）。
+
+        返回这份计划的步骤标题是否与上次渲染的不同（判"是不是新的一份计划"）。
+        只有真正收到计划更新（_on_plan_update）才据此临时打开面板；切会话 / 换主题 /
+        结果卡刷新这些重渲染只是把快照对齐，不会让用户收起的面板自己冒出来。
+        """
         from .. import session as _session
         sess = _session.get_active()
         if not hasattr(self, "plan_panel"):
-            return
+            return False
         if not sess:
-            return
+            return False
+        plan = items if items is not None else (getattr(sess, "current_plan", None) or [])
+        titles = tuple((it or {}).get("text", "") for it in plan)
+        changed = titles != self._plan_step_titles
+        self._plan_step_titles = titles
         self.plan_panel.render_session(sess)
         self._apply_task_panel_collapse()
+        return changed
 
     def _on_undo_task_switch(self):
         """用户点击【撤销任务切换】。"""
@@ -2179,7 +2231,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             if save_error is not None:
                 logger.error(f"撤销任务切换后保存失败（正文已写入={outcome.body_written}）: {save_error}")
             if hasattr(self, "plan_panel"):
-                self.plan_panel.render_session(sess)
+                self._render_plan_panel()   # 步骤标题快照跟着对齐（撤销不改计划不算"新计划"）
             if save_error is None:
                 self.show_message(msg, "system")
             elif outcome.body_written:
@@ -2197,7 +2249,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self.show_message(f"撤销任务切换失败：{msg}", "error")
         # 撤销被拒（版本不符、记录已失效）时横幅也要跟着刷新，不留一个点不动的按钮
         if not success and hasattr(self, "plan_panel"):
-            self.plan_panel.render_session(sess)
+            self._render_plan_panel()
 
     def show_retry(self, error_msg):
         """线程安全：显示错误信息和重试按钮"""
