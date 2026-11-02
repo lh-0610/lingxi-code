@@ -207,7 +207,7 @@ def _diff_host():
         def __init__(self):
             self.opened = {}
 
-        def open_file(self, rel_path, rows, hint=""):
+        def open_file(self, rel_path, rows, hint="", line=0):
             self.opened[str(rel_path)] = list(rows)
 
     class _Host:

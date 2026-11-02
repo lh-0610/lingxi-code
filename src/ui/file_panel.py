@@ -76,6 +76,8 @@ class PaneView(QPlainTextEdit):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         # 只读浏览区不该抢走输入框的焦点：点了也能继续在对话里打字
         self.setFocusPolicy(Qt.NoFocus)
+        # 从回复正文的带行号链接打开时要滚到的行（0 = 不滚）；重画内容后仍然滚到这里
+        self.goto_line = 0
 
     def apply_theme(self, bg: str, fg: str):
         self.setStyleSheet(
@@ -215,20 +217,26 @@ class FilePanel(QFrame):
     def has_path(self, rel_path: str) -> bool:
         return _norm(rel_path) in self._panes
 
-    def open_file(self, rel_path: str, rows: list, hint: str = ""):
-        """开一个文件标签页；已经开着就切过去，并把内容刷成最新（不重复开）。"""
+    def open_file(self, rel_path: str, rows: list, hint: str = "", line: int = 0):
+        """开一个文件标签页；已经开着就切过去，并把内容刷成最新（不重复开）。
+
+        line > 0 时滚到那一行（回复正文里带行号的链接），0 表示停在文件开头。
+        """
         key = _norm(rel_path)
         if not key:
             return
         self._hints[key] = hint or self.DEFAULT_HINT
         if key in self._panes:
+            view = self._panes[key]
+            view.goto_line = int(line or 0)
             self._rows[key] = list(rows or [])
-            self._fill(self._panes[key], self._rows[key])
+            self._fill(view, self._rows[key])
             self.tabs.setCurrentIndex(self._tab_index(key))
             self._sync_header()
             self._show_self()
             return
         view = PaneView(self.stack)
+        view.goto_line = int(line or 0)
         view.apply_theme(self._t("mv_view_bg"), self._t("mv_text"))
         self._panes[key] = view
         self._rows[key] = list(rows or [])
@@ -332,7 +340,10 @@ class FilePanel(QFrame):
         doc = view.document()
         doc.clear()
         cursor = QTextCursor(doc)
+        target_pos = None
         for no, kind, text in rows:
+            if target_pos is None and view.goto_line and no == view.goto_line:
+                target_pos = cursor.position()     # 带行号打开：记下这一行的位置
             block = QTextBlockFormat()
             tint = _TINTED.get(kind)
             if tint:
@@ -351,7 +362,15 @@ class FilePanel(QFrame):
             cursor.insertText(text)
             cursor.insertBlock()
         cursor.setCharFormat(QTextCharFormat())
-        view.moveCursor(QTextCursor.Start)
+        if target_pos is None:
+            view.moveCursor(QTextCursor.Start)
+            view.ensureCursorVisible()
+            return
+        # 行号落到某一行：把这一行滚到可见区域上方一点，看得出上下文
+        target = QTextCursor(doc)
+        target.setPosition(target_pos)
+        view.setTextCursor(target)
+        view.centerCursor()
         view.ensureCursorVisible()
 
     # ── 拖左边缘改宽度 ──

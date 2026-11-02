@@ -110,11 +110,47 @@ def test_untracked_file_body_is_numbered_additions(git_project):
         (1, "add", "x = 1"), (2, "add", "y = 2")], "新文件正文按新增行逐行编号"
 
 
-def test_clean_file_is_a_single_note(git_project):
+def test_clean_file_shows_current_content_instead_of_one_line(git_project):
+    """和上次提交没有差异：说明一行加当前全文，逐行编号、按普通上下文行。
+
+    点回复里的文件多半是这种情况——只写一句没有差异等于什么都没看到。
+    """
     from src.tools_git import file_diff_lines
     rows = file_diff_lines(str(git_project), "app.py")
-    assert [kind for _no, kind, _text in rows] == ["note"]
-    assert "没有差异" in rows[0][2]
+    assert rows[0][1] == "note" and "没有差异" in rows[0][2]
+    assert [(no, kind, text) for no, kind, text in rows[1:]] == [
+        (1, "ctx", "a = 1")], "没有差异时也给出当前全文，按普通上下文行逐行编号"
+
+
+def _commit_file(repo, name, data: bytes):
+    import subprocess
+    (repo / name).write_bytes(data)
+    for args in (["add", name], ["commit", "-qm", name]):
+        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True,
+                       stdin=subprocess.DEVNULL)
+
+
+def test_clean_long_file_is_not_cut_at_the_diff_limit(git_project):
+    """大文件（比如 chat_window.py）全文不能按差异的 20000 字截：回复里 `xxx.py:835` 要滚得到。"""
+    from src.tools_git import file_diff_lines
+    _commit_file(git_project, "big.py", "".join(f"x_{i} = {i}\n" for i in range(3000)).encode())
+    rows = file_diff_lines(str(git_project), "big.py")
+    assert (2000, "ctx", "x_1999 = 1999") in rows
+
+
+def test_clean_huge_file_says_it_was_cut(git_project, monkeypatch):
+    from src import tools_git
+    monkeypatch.setattr(tools_git, "_FULL_TEXT_MAX_CHARS", 50)
+    _commit_file(git_project, "big.py", "".join(f"x_{i} = {i}\n" for i in range(100)).encode())
+    rows = tools_git.file_diff_lines(str(git_project), "big.py", max_chars=10)
+    assert rows[-1][1] == "note" and "文件太长" in rows[-1][2], "截断了要写明，不能看起来像文件就这么长"
+
+
+def test_clean_binary_file_is_not_shown_as_text(git_project):
+    from src.tools_git import file_diff_lines
+    _commit_file(git_project, "logo.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00binary")
+    rows = file_diff_lines(str(git_project), "logo.png")
+    assert len(rows) == 1 and rows[0][1] == "note" and "二进制" in rows[0][2]
 
 
 # ── FilePanel 本身 ─────────────────────────────────────────

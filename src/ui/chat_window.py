@@ -578,6 +578,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.chat_area.image_clicked.connect(self._show_image_dialog)   # 点击图片 → 放大遮罩
         # 命令卡上"改动了 N 个文件"里的文件名：和任务面板的改动文件一样，在文件面板里开
         self.chat_area.file_clicked.connect(self._on_task_panel_file_clicked)
+        # 回复正文里用行内代码写的项目文件路径（可带行号）：同样在文件面板里打开
+        self.chat_area.file_link_clicked.connect(self._on_file_link_clicked)
         self.chat_area.meta_provider = self._stream_meta               # 回复上方那行小字里的模式
         self.chat_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         parent_layout.addWidget(self.chat_area, 1)
@@ -795,17 +797,31 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._open_file_in_panel(rel_path)
         self._settle_file_panel()
 
-    def _open_file_in_panel(self, rel_path, work_dir=None):
+    def _on_file_link_clicked(self, href):
+        """点回复正文里的文件链接（`lingxi-file:src/ui/task_panel.py:835`）。
+
+        入口和任务面板「改动的文件」一样走文件面板；带行号的打开后滚到那一行。
+        """
+        from .markdown_render import parse_file_link
+        target = parse_file_link(href)
+        if target is None:
+            return
+        rel_path, line = target
+        self._open_file_in_panel(rel_path, line=line)
+        self._settle_file_panel()
+
+    def _open_file_in_panel(self, rel_path, work_dir=None, line: int = 0):
         """按指定目录取这个文件此刻的差异，开一个标签页（已经开着就切过去）。
 
         work_dir 不给才用当前会话的工作区。结果卡要看**那一轮自己的**目录：
         worktree 里跑的那轮改动在隔离区，拿主会话的项目目录取 diff 只会说"没有差异"。
+        line 是正文链接带的行号，打开后滚到那一行（0 表示不带行号）。
         """
         from .. import session as _session
         from ..tools_git import file_diff_lines
         work = work_dir or self._undo_workspace_for(_session.get_active())
         rows = file_diff_lines(work, rel_path)
-        self.file_panel.open_file(rel_path, rows)
+        self.file_panel.open_file(rel_path, rows, line=line)
 
     def _settle_file_panel(self):
         """标签页开完之后结算面板位置：收起挡路的浮层任务面板，按空间决定显示与否。"""

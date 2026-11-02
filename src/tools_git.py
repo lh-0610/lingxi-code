@@ -384,10 +384,26 @@ def diff_numstat(cwd: str, rel_paths: list[str]) -> dict | None:
 
 # 新文件（git 还没跟踪）没有旧版本可对比：先给一行说明，后面接当前内容
 _NEW_FILE_NOTE = "新文件（git 还没跟踪），没有旧版本可对比。当前内容："
+# 和上次提交没有差异：说明一行，后面照样给出当前内容（点回复里的文件多半是这种情况，
+# 只写一句"没有差异"等于什么都没看到）
+_NO_DIFF_NOTE = "这个文件和上次提交相比没有差异（可能改了又改回去，或改动已经提交）。当前内容："
+_NO_DIFF_PLAIN = "这个文件和上次提交相比没有差异（可能改了又改回去，或改动已经提交）。"
+_EMPTY_FILE_NOTE = _NO_DIFF_PLAIN + "文件是空的。"
+_BINARY_FILE_NOTE = _NO_DIFF_PLAIN + "这是二进制文件，不显示内容。"
+# 没有差异时给全文：差异的 20000 字上限对整个文件太小（chat_window.py 只看得到前几百行，
+# 回复里带行号的链接就滚不到），全文单独放宽；再长就截断并写明
+_FULL_TEXT_MAX_CHARS = 400_000
+_TRUNCATED_PREFIX = "... [文件太长，只显示前 "
+
+
+def _read_text(cwd: str, rel_path: str, max_chars: int) -> str:
+    """读工作区里这个文件（按行截断），读不了抛 OSError。"""
+    with open(os.path.join(cwd, rel_path), "r", encoding="utf-8", errors="replace") as f:
+        return f.read(max_chars)
 
 
 def _file_diff_raw(cwd: str, rel_path: str, max_chars: int = 20000) -> str:
-    """一个文件此刻相对上次提交的差异（只读，不记"已审阅"）。新文件给出当前内容。"""
+    """一个文件此刻相对上次提交的差异（只读，不记"已审阅"）。新文件 / 没有差异给出当前内容。"""
     if not _git_available():
         return "git 未安装或不在 PATH 中，无法查看差异。"
     if not cwd or not _is_inside_git_repo(cwd):
@@ -399,12 +415,23 @@ def _file_diff_raw(cwd: str, rel_path: str, max_chars: int = 20000) -> str:
         untracked = _git_text(cwd, ["ls-files", "--others", "--exclude-standard", "--", rel_path]) or ""
         if untracked.strip():
             try:
-                with open(os.path.join(cwd, rel_path), "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read(max_chars)
+                content = _read_text(cwd, rel_path, max_chars)
             except OSError as e:
                 return f"新文件（git 还没跟踪），读取失败：{e}"
             return _NEW_FILE_NOTE + "\n\n" + content
-        return "这个文件和上次提交相比没有差异（可能改了又改回去，或改动已经提交）。"
+        # 没有差异：点回复里的文件多半是这种情况，给出当前全文而不是只说一句"没有差异"
+        cap = max(max_chars, _FULL_TEXT_MAX_CHARS)
+        try:
+            content = _read_text(cwd, rel_path, cap + 1)
+        except OSError as e:
+            return f"{_NO_DIFF_PLAIN}读取当前内容失败：{e}"
+        if "\x00" in content:
+            return _BINARY_FILE_NOTE      # 别把乱码当正文
+        if not content.strip():
+            return _EMPTY_FILE_NOTE
+        if len(content) > cap:
+            content = content[:cap] + f"\n{_TRUNCATED_PREFIX}{cap} 字符]"
+        return _NO_DIFF_NOTE + "\n\n" + content
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n... [差异太长，只显示前 {max_chars} 字符]"
     return text
@@ -451,6 +478,9 @@ def file_diff_lines(cwd: str, rel_path: str, max_chars: int = 20000) -> list[tup
     不是 unified diff 的说明文字整段按 "note" 给出，行号 None。新文件没有 diff
     （没有旧版本），说明那行按 "note"、当前内容按 "add" 逐行编号，界面同样能按绿
     色显示——否则点一个刚建的文件只会看到一段灰字。
+
+    和上次提交**没有差异**的文件（点回复里的文件多半是这种情况）同样先给一行说明、
+    再接当前内容的逐行编号：按普通上下文行（"ctx"）显示，不是新增绿也不是删除红。
     """
     text = _file_diff_raw(cwd, rel_path, max_chars)
     if text.startswith(_NEW_FILE_NOTE):
@@ -458,6 +488,12 @@ def file_diff_lines(cwd: str, rel_path: str, max_chars: int = 20000) -> list[tup
         body = text[len(_NEW_FILE_NOTE):].lstrip("\n").splitlines()
         for no, line in enumerate(body, 1):
             rows.append((no, "add", line))
+        return rows
+    if text.startswith(_NO_DIFF_NOTE):
+        rows = [(None, "note", _NO_DIFF_NOTE)]
+        body = text[len(_NO_DIFF_NOTE):].lstrip("\n").splitlines()
+        for no, line in enumerate(body, 1):
+            rows.append((None, "note", line) if line.startswith(_TRUNCATED_PREFIX) else (no, "ctx", line))
         return rows
     if not text.startswith("diff ") and "--- " not in text.splitlines()[:3]:
         return [(None, "note", ln) for ln in text.splitlines()]

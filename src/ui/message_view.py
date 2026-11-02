@@ -357,15 +357,22 @@ def _draw_node(p, kind, c, w, info):
 # ── 块 ────────────────────────────────────────────────────────
 
 class BodyText(QLabel):
-    """正文段落。富文本，流式时是转义后的纯文本，结束后换成渲染好的 markdown。"""
+    """正文段落。富文本，流式时是转义后的纯文本，结束后换成渲染好的 markdown。
+
+    回复里的项目文件路径渲染成链接（见 markdown_render），点了发 link_clicked。
+    文字照常能选中复制——链接和选择两种交互 Qt 里可以并存。
+    """
+    link_clicked = Signal(str)     # 点了正文里的链接（原样转发 href）
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self.setWordWrap(True)
         self.setTextFormat(Qt.RichText)
-        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
         self.setStyleSheet(
             f"color:{_P['text2']}; font-family:{_SANS}; font-size:14px; background:transparent;"
         )
+        self.linkActivated.connect(self.link_clicked)
         self.setText(text)
 
 
@@ -903,6 +910,9 @@ class _Block(QWidget):
 class AssistantTurn(QWidget):
     """AI 的一段回复：顶上一行模型 / 模式 / 用时，下面依次是思考、正文、工具卡、步骤分段……
     流式期间各 show_message tag 往这里追加 / 更新块。"""
+
+    file_link_clicked = Signal(str)   # 点了正文里的文件链接（href 原样转给宿主）
+
     def __init__(self, model_name="", parent=None, *, mode="", live=False, round_=None):
         super().__init__(parent)
         self._v = QVBoxLayout(self)
@@ -943,12 +953,18 @@ class AssistantTurn(QWidget):
     def end_tool(self):
         self._cur_tool = None
 
+    def _new_body(self):
+        """新起一个正文块，并把里面的文件链接转发给宿主。"""
+        body = self._add(BodyText(""), top_gap=12)
+        body.link_clicked.connect(self.file_link_clicked)
+        return body
+
     def append_body(self, text):
         self.clear_waiting()
         self._close_think()
         self.end_tool()
         if self._cur_body is None:
-            self._cur_body = self._add(BodyText(""), top_gap=12)
+            self._cur_body = self._new_body()
         self._cur_body_text += text
         self._cur_body.setText(_esc(self._cur_body_text).replace("\n", "<br>"))
 
@@ -956,7 +972,7 @@ class AssistantTurn(QWidget):
         """流式结束:把当前正文替换成渲染好的 markdown 富文本。"""
         self._close_think()
         if self._cur_body is None:
-            self._cur_body = self._add(BodyText(""), top_gap=12)
+            self._cur_body = self._new_body()
         self._cur_body.setText(html)
         self.end_body()
 
@@ -1164,6 +1180,7 @@ class MessageView(QScrollArea):
 
     image_clicked = Signal(QPixmap)   # 点击聊天区图片 → 宿主弹放大遮罩(传全分辨率原图)
     file_clicked = Signal(str)        # 点了命令卡上改动的文件 → 宿主在文件面板里打开
+    file_link_clicked = Signal(str)   # 点了回复正文里的文件链接（href 原样转给宿主解析）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1330,6 +1347,7 @@ class MessageView(QScrollArea):
         if self._cur_assistant is None:
             r = self._round()
             self._cur_assistant = AssistantTurn(round_=r)
+            self._cur_assistant.file_link_clicked.connect(self.file_link_clicked)
             r.add(self._cur_assistant, top_gap=12)
             r.assistant_turns.append(self._cur_assistant)
         return self._cur_assistant
@@ -1362,6 +1380,7 @@ class MessageView(QScrollArea):
             except Exception:
                 mode = ""
         self._cur_assistant = AssistantTurn(model_name, mode=mode, live=live, round_=r)
+        self._cur_assistant.file_link_clicked.connect(self.file_link_clicked)
         r.add(self._cur_assistant, top_gap=12)
         r.assistant_turns.append(self._cur_assistant)
         return self._cur_assistant
