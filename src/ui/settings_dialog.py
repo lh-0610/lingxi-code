@@ -1022,9 +1022,10 @@ class SettingsDialog(QDialog):
             if sys.platform == "win32":
                 os.startfile(path)
             elif sys.platform == "darwin":
-                subprocess.run(["open", path], check=False)
+                subprocess.run(["open", path], check=False, stdin=subprocess.DEVNULL)
             else:
-                subprocess.run(["xdg-open", path], check=False)
+                subprocess.run(["xdg-open", path], check=False,
+                               stdin=subprocess.DEVNULL)
         except Exception as e:
             QMessageBox.warning(self, "打开失败", str(e))
 

@@ -55,6 +55,7 @@ def has_uncommitted_changes(project_path: str) -> bool:
             ["git", "status", "--porcelain"],
             cwd=project_path, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         return result.returncode == 0 and bool((result.stdout or "").strip())
     except Exception:
@@ -65,6 +66,7 @@ def _git_output(path: str, *args: str) -> str:
     result = subprocess.run(
         ["git", *args], cwd=path, capture_output=True, text=True,
         encoding="utf-8", errors="strict", check=True, timeout=30,
+        stdin=subprocess.DEVNULL,
     )
     return result.stdout.strip()
 
@@ -144,6 +146,7 @@ def _temporary_index(path: str):
             subprocess.run(
                 ["git", "read-tree", "HEAD"], cwd=path, env=env,
                 capture_output=True, check=True, timeout=30,
+                stdin=subprocess.DEVNULL,
             )
         yield env
 
@@ -153,10 +156,12 @@ def _worktree_changes(wt_path: str, base: str, *, include_patch: bool = False):
         subprocess.run(
             ["git", "add", "-A"], cwd=wt_path, env=env,
             capture_output=True, check=True, timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         result = subprocess.run(
             ["git", "diff", "--cached", "--no-renames", "--name-only", "-z", base, "--"],
             cwd=wt_path, env=env, capture_output=True, check=True, timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         files = [os.fsdecode(p) for p in result.stdout.split(b"\0") if p]
         patch = b""
@@ -164,6 +169,7 @@ def _worktree_changes(wt_path: str, base: str, *, include_patch: bool = False):
             patch = subprocess.run(
                 ["git", "diff", "--cached", "--no-renames", "--binary", base, "--"],
                 cwd=wt_path, env=env, capture_output=True, check=True, timeout=30,
+                stdin=subprocess.DEVNULL,
             ).stdout
         return files, patch
 
@@ -187,6 +193,7 @@ def _branch_for_worktree(project_path: str, wt_path: str) -> str | None:
             ["git", "branch", "--show-current"],
             cwd=wt_path, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
     except Exception:
         return None
@@ -199,6 +206,7 @@ def _branch_for_worktree(project_path: str, wt_path: str) -> str | None:
             ["git", "worktree", "list", "--porcelain"],
             cwd=project_path, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
     except Exception:
         return None
@@ -221,6 +229,7 @@ def is_git_repo(path) -> bool:
             ["git", "rev-parse", "--show-toplevel"],
             cwd=path, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         if r.returncode != 0:
             return False
@@ -243,6 +252,7 @@ def _ensure_worktree_excluded(project_path: str) -> None:
             ["git", "rev-parse", "--git-path", "info/exclude"],
             cwd=project_path, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         if r.returncode != 0:
             return
@@ -362,6 +372,7 @@ def create(session, project_path: str, session_id: str = None) -> str | None:
             cwd=project_path, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             check=True, timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         session.worktree = wt_path
         info = {
@@ -448,11 +459,13 @@ def _remove_worktree(wt_path: str, branch: str | None) -> None:
     subprocess.run(
         ["git", "--git-dir", common, "worktree", "remove", "--force", wt_path],
         capture_output=True, check=True, timeout=30,
+        stdin=subprocess.DEVNULL,
     )
     if branch and branch.startswith("lingxi/"):
         subprocess.run(
             ["git", "--git-dir", common, "branch", "-D", branch],
             capture_output=True, timeout=10,
+            stdin=subprocess.DEVNULL,
         )
 
 

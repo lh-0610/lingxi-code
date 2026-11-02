@@ -13,6 +13,7 @@ def _paths(root):
         result = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
             cwd=root, capture_output=True, timeout=10,
+            stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError:
         result = None

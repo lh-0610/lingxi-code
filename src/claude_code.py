@@ -34,6 +34,7 @@ def _kill_proc_tree(proc):
                 stderr=subprocess.DEVNULL,
                 timeout=5,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
             return
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

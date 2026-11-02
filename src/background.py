@@ -323,6 +323,7 @@ def _kill_proc_tree(proc, timeout=3.0):
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     timeout=min(3.0, timeout), check=False,
+                    stdin=subprocess.DEVNULL,
                 )
                 if killed.returncode == 0:
                     result["request_sent"] = True

@@ -118,7 +118,8 @@ def _uncovered_changes(cwd):
     """
     def _names(cmd):
         done = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=10)
+                              encoding="utf-8", errors="replace", timeout=10,
+                              stdin=subprocess.DEVNULL)
         if done.returncode != 0:
             raise RuntimeError((done.stderr or "").strip() or f"{' '.join(cmd)} 返回非零")
         return [line for line in (done.stdout or "").splitlines() if line.strip()]
@@ -178,6 +179,7 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
         result = subprocess.run(
             cmd, cwd=cwd,
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
 
         if result.returncode != 0:
@@ -276,6 +278,7 @@ def git_log(path: str = "", limit: int = 15) -> str:
         result = subprocess.run(
             cmd, cwd=cwd,
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
 
         if result.returncode != 0:
@@ -309,6 +312,7 @@ def _is_inside_git_repo(cwd: str) -> bool:
             ["git", "rev-parse", "--is-inside-work-tree"],
             cwd=cwd, capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=5,
+            stdin=subprocess.DEVNULL,
         )
         return r.returncode == 0
     except Exception:
@@ -335,7 +339,8 @@ def _norm_rel(path: str) -> str:
 def _git_text(cwd: str, args: list[str], timeout: float = 5) -> str | None:
     try:
         r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+                           encoding="utf-8", errors="replace", timeout=timeout,
+                           stdin=subprocess.DEVNULL)
     except Exception:
         return None
     return r.stdout if r.returncode == 0 else None
@@ -414,6 +419,7 @@ def build_git_write_confirmation(name: str, args: dict | None = None) -> str:
                     ["git", "diff", "--cached", "--name-status"],
                     cwd=cwd, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=10,
+                    stdin=subprocess.DEVNULL,
                 )
                 staged = (result.stdout or "").strip()
             except Exception:
@@ -494,6 +500,7 @@ def git_status(max_chars: int = 12000) -> str:
             ["git", "status", "--short", "--branch"],
             cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
@@ -562,6 +569,7 @@ def git_stage(paths: list[str]) -> str:
         result = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
@@ -572,6 +580,7 @@ def git_stage(paths: list[str]) -> str:
             ["git", "diff", "--cached", "--name-status"],
             cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         cached_output = (cached.stdout or "").strip()
 
@@ -608,6 +617,7 @@ def git_unstage(paths: list[str]) -> str:
         result = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             # 降级
@@ -615,6 +625,7 @@ def git_unstage(paths: list[str]) -> str:
             result = subprocess.run(
                 cmd, cwd=cwd, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=30,
+                stdin=subprocess.DEVNULL,
             )
             if result.returncode != 0:
                 stderr = (result.stderr or "").strip()
@@ -625,6 +636,7 @@ def git_unstage(paths: list[str]) -> str:
             ["git", "diff", "--cached", "--name-status"],
             cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         cached_output = (cached.stdout or "").strip()
 
@@ -663,6 +675,7 @@ def git_commit(message: str) -> str:
             ["git", "diff", "--cached", "--quiet"],
             cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         if diff_cached.returncode == 0:
             # returncode=0 表示暂存区和 HEAD 一样 → 没有暂存内容
@@ -674,6 +687,7 @@ def git_commit(message: str) -> str:
             ["git", "status", "--short"],
             cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         if status_result.returncode == 0:
             status_lines = (status_result.stdout or "").strip().splitlines()
@@ -699,6 +713,7 @@ def git_commit(message: str) -> str:
             ["git", "diff", "--cached", "--name-only"],
             cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         staged_files = [f for f in (staged_names.stdout or "").strip().splitlines() if f.strip()]
 
@@ -707,6 +722,7 @@ def git_commit(message: str) -> str:
         result = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
@@ -724,6 +740,7 @@ def git_commit(message: str) -> str:
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=5,
+            stdin=subprocess.DEVNULL,
         )
         commit_hash = (hash_result.stdout or "").strip() or "unknown"
 

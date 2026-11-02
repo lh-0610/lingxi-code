@@ -1969,6 +1969,7 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
         result = subprocess.run(
             cmd, cwd=run_cwd,
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
         elapsed = time.time() - t0
     except FileNotFoundError:
@@ -2175,7 +2176,8 @@ def _run_type_check(full_path: str, cwd):
 
     try:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=90)
+                           encoding="utf-8", errors="replace", timeout=90,
+                           stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, None, _meta("timeout", None, "类型检查超时（>90s）")
     except Exception as e:
@@ -2226,6 +2228,7 @@ def _run_check_subprocess(cmd, cwd, use_shell, checker):
         r = subprocess.run(
             cmd, cwd=cwd, shell=use_shell, capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=60,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return None, None, _meta("timeout", None, "检查超时（>60s）")

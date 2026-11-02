@@ -27,7 +27,8 @@ def _git(root, *args):
     """在 root 下跑一条 git 命令，返回 (输出, 错误)。任何失败都给错误原因，不抛。"""
     try:
         done = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=_GIT_TIMEOUT)
+                              encoding="utf-8", errors="replace", timeout=_GIT_TIMEOUT,
+                              stdin=subprocess.DEVNULL)
     except FileNotFoundError:
         return None, "git 不可用"
     except subprocess.TimeoutExpired:
