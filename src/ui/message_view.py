@@ -174,13 +174,22 @@ class _ElidedLabel(QLabel):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self._full = ""
+        self.setObjectName("elidedLabel")
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setMinimumWidth(0)
         self.set_full(text)
 
+    def setStyleSheet(self, css: str):
+        # 悬停提示按"所属控件"的样式表级联：不带选择器的 background:transparent 会让提示框
+        # 在 Windows 上变成黑底，字体也跟着成了等宽。套上只匹配自己的选择器，提示框回到主题样式。
+        if css and "{" not in css:
+            css = f"QLabel#elidedLabel {{ {css} }}"
+        super().setStyleSheet(css)
+
     def set_full(self, text: str):
         self._full = " ".join((text or "").split())
-        self.setToolTip(self._full if len(self._full) > 40 else "")
+        # 包成富文本：Qt 只给富文本提示自动换行，长命令不会拉成一整行盖住下面的输出
+        self.setToolTip(f"<p>{_esc(self._full)}</p>" if len(self._full) > 40 else "")
         self._apply()
 
     def full(self) -> str:

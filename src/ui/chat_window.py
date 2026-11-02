@@ -1200,6 +1200,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.send_btn.setObjectName("sendBtn")
         self.send_btn.setCursor(Qt.PointingHandCursor)
         self.send_btn.setAccessibleName("发送")
+        # 不接键盘焦点：点过它以后焦点会一直停在上面，生成中它是停止键，
+        # 之后在窗口里按一下空格（比如想翻页）就把正在跑的任务停了
+        self.send_btn.setFocusPolicy(Qt.NoFocus)
         self.send_btn.clicked.connect(self._on_send_click)
         self._composer_bottom.addWidget(self.send_btn)
         # 初始化样式

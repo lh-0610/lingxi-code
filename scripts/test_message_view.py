@@ -497,3 +497,37 @@ class TestReplyMeta:
         back = memory._dict_to_msg(data)
         assert back.additional_kwargs.get("lingxi_model") == "deepseek-v4-flash"
         assert "lingxi_model" not in memory._msg_to_dict(AIMessage(content="old"))
+
+
+class TestToolCardTooltip:
+    def test_long_command_tooltip_uses_theme_colors_and_wraps(self, qt_app):
+        """工具卡上长命令的悬停提示：跟主题配色（不是 Windows 默认黑底）、不用等宽字体、会换行。
+
+        回归：命令那一栏的样式不带选择器，background:transparent 顺着级联到提示框，
+        提示框在 Windows 上画成黑底，还是一整行盖住下面的输出。
+        """
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QToolTip
+        from src.ui.message_view import _MONO, _P, _ElidedLabel
+        from src.ui.theme import THEMES, build_tooltip_qss
+        qt_app.setStyleSheet(build_tooltip_qss("light"))
+        label = _ElidedLabel()
+        label.setStyleSheet(f"color:{_P['text_sec']}; font-family:{_MONO}; font-size:12px; background:transparent;")
+        cmd = "python -m pytest " + " ".join(f"scripts/test_module_{i}.py" for i in range(12)) + " -q 2>&1"
+        label.set_full(cmd)
+        label.resize(300, 20)
+        label.show()
+        _pump(qt_app)
+        try:
+            QToolTip.showText(QPoint(100, 100), label.toolTip(), label)
+            _pump(qt_app)
+            tip = next(w for w in qt_app.topLevelWidgets()
+                       if w.metaObject().className() == "QTipLabel" and w.isVisible())
+            img = tip.grab().toImage()
+            assert img.pixelColor(3, img.height() // 2).name() == THEMES["light"]["tooltip_bg"]
+            assert "Mono" not in tip.font().family()
+            assert tip.wordWrap(), "长命令自动换行，不拉成一整行"
+        finally:
+            QToolTip.hideText()
+            label.close()
+            qt_app.setStyleSheet("")

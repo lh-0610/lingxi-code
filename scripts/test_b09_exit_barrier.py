@@ -238,6 +238,16 @@ def _make_saved_session(sess):
 # 核心：停止后发送要等旧 worker 真正退出
 # ══════════════════════════════════════════════════════════════
 
+class TestSendButtonFocus:
+
+    def test_send_button_never_takes_keyboard_focus(self, ui):
+        """发送键生成中就是停止键。它要是接键盘焦点，点过一次后焦点就停在上面，
+        之后在窗口里按空格（比如想翻页）就把正在跑的任务停了——实际发生过。
+        offscreen 下窗口激活 / 点击给焦点不可靠，所以直接断言焦点策略。"""
+        from PySide6.QtCore import Qt
+        assert ui.send_btn.focusPolicy() == Qt.NoFocus
+
+
 class TestSendWaitsForWorkerExit:
 
     def test_send_after_stop_waits_then_starts_exactly_once(self, ui, qapp, fake_loop):

@@ -43,6 +43,9 @@ from .. import task_state as _ts
 from .fonts import MONO_CSS
 from .theme import color as _theme_color
 
+# 面板里每条要求只显示这么多字，超出的加"…"，全文放进悬停提示
+_REQUEST_PREVIEW_CHARS = 120
+
 _REQUEST_SOURCE_NOTES = {   # 画的时候按当前主题上色
     "legacy_unknown": "；来源未确认",
     "missing": "；原文已不在历史中",
@@ -280,7 +283,7 @@ class TaskPanel(QFrame):
     step_clicked = Signal(int, str)  # 点了计划里的第 n 步（步号, 步骤名）：ChatUI 在消息流里定位
     file_clicked = Signal(str)       # 点了改动文件（相对路径）：ChatUI 打开它的差异
 
-    _FILES_MAX = 8                   # 改动文件最多列几个，其余折成"另有 N 个"
+    _FILES_MAX = 8                   # 改动文件默认列几个，其余折起来，点「展开全部」就地列出
 
     def __init__(self, parent: QWidget, theme_lookup: Callable[[str], str]):
         super().__init__(parent)
@@ -492,7 +495,10 @@ class TaskPanel(QFrame):
         files_lay.addWidget(self.files_body)
         self.files_more = QLabel(self.files_frame)
         self.files_more.setObjectName("filesMore")
+        self.files_more.setCursor(Qt.PointingHandCursor)
+        self.files_more.mousePressEvent = lambda _e: self._toggle_files_expanded()
         files_lay.addWidget(self.files_more)
+        self._files_expanded = False
         self.files_frame.setVisible(False)
         self.content_layout.addWidget(self.files_frame)
 
@@ -551,7 +557,8 @@ class TaskPanel(QFrame):
             # 悬停底色用浅主题色：面板底色和 mv_header_bg 是同一个灰，用它悬停看不出变化
             f"QWidget#planRow:hover, QWidget#fileRow:hover {{ background: {self._t('mv_indigo_soft')}; }}"
             f"QLabel#fileName {{ font-family: {MONO_CSS}; font-size: 12px; color: {text}; }}"
-            f"QLabel#filesCount, QLabel#filesMore {{ font-size: 12px; color: {self._t('mv_text_sec')}; }}"
+            f"QLabel#filesCount {{ font-size: 12px; color: {self._t('mv_text_sec')}; }}"
+            f"QLabel#filesMore {{ font-size: 12px; color: {accent}; padding: 2px 4px; }}"
             f"QFrame#secFrame {{ background: transparent; border: none; border-top: 1px solid {line}; }}"
             f"QFrame#switchBanner {{ background: {self._t('mv_indigo_soft')}; border: none; border-radius: 8px; }}"
             f"QLabel {{ color: {text}; background: transparent; }}"
@@ -670,9 +677,10 @@ class TaskPanel(QFrame):
                 rows = []
         self.files_frame.setVisible(bool(rows))
         theme = self._t("mv_ok")
-        if (rows, theme) == getattr(self, "_files_drawn", None):
+        drawn = (rows, theme, self._files_expanded)
+        if drawn == getattr(self, "_files_drawn", None):
             return          # 每 2 秒刷新一次：内容没变就不重建（重建会让悬停的那一行闪一下）
-        self._files_drawn = (rows, theme)
+        self._files_drawn = drawn
         while self.files_rows_lay.count():
             w = self.files_rows_lay.takeAt(0).widget()
             if w is not None:
@@ -682,7 +690,8 @@ class TaskPanel(QFrame):
             return
         self.files_count.setText(f"{len(rows)} 个")
         ok, bad, muted = self._t("mv_ok"), self._t("mv_bad"), self._t("mv_muted")
-        for path, added, removed, is_new in rows[:self._FILES_MAX]:
+        shown = rows if self._files_expanded else rows[:self._FILES_MAX]
+        for path, added, removed, is_new in shown:
             row = QWidget(self.files_body)
             row.setObjectName("fileRow")
             row.setAttribute(Qt.WA_StyledBackground, True)
@@ -710,8 +719,15 @@ class TaskPanel(QFrame):
             lay.addWidget(stat, 0)
             self.files_rows_lay.addWidget(row)
         extra = len(rows) - self._FILES_MAX
-        self.files_more.setText(f"另有 {extra} 个文件，见结果卡的「查看改动」" if extra > 0 else "")
+        if extra > 0:
+            self.files_more.setText("收起" if self._files_expanded else f"展开全部（还有 {extra} 个）")
         self.files_more.setVisible(extra > 0)
+
+    def _toggle_files_expanded(self):
+        """「展开全部 / 收起」：就地列出全部改动文件（不再指向结果卡——任务还在跑时它还没出来）。"""
+        self._files_expanded = not self._files_expanded
+        if self._evidence_sess is not None:
+            self._render_files(self._evidence_sess)
 
     def _on_undo_click(self):
         if self.on_undo_request:
@@ -830,9 +846,15 @@ class TaskPanel(QFrame):
         req_items = _ts.task_requests(sess, task) if task else []
 
         req_lines = []
+        req_full = []           # 有被截短的：悬停提示里给全文
         for it in req_items:
             prefix = "原始要求" if it.get("is_initial") else "补充要求"
-            txt = html.escape(it.get("text", "")[:120])
+            full = it.get("text", "")
+            short = full
+            if len(full) > _REQUEST_PREVIEW_CHARS:
+                short = full[:_REQUEST_PREVIEW_CHARS].rstrip() + "…"
+            req_full.append(f"<b>{prefix}</b>：" + html.escape(full).replace("\n", "<br>"))
+            txt = html.escape(short)
             mid = html.escape(it.get("id", ""))
             # 来源如实标注：旧会话里说不清是谁写的，原文不在历史里的，都不能画得和用户原话一样
             note = _REQUEST_SOURCE_NOTES.get(it.get("kind"), "")
@@ -843,6 +865,8 @@ class TaskPanel(QFrame):
         if not req_lines:
             req_lines.append(f"<span style='color:{muted};'>暂无关联的用户需求来源</span>")
         self.requests_label.setText("<br>".join(req_lines))
+        truncated = any(len(it.get("text", "")) > _REQUEST_PREVIEW_CHARS for it in req_items)
+        self.requests_label.setToolTip("<p>" + "<br><br>".join(req_full) + "</p>" if truncated else "")
 
         constraints = (task.get("pinned_constraints") or []) if task else []
         if constraints:

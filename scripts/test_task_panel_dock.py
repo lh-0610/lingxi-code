@@ -223,8 +223,23 @@ def test_long_changed_file_lists_fold(ui, qapp):
     from src import session
     panel.render_session(session.get_active())
     _pump(qapp)
-    assert len([w for w in panel.findChildren(QWidget) if w.objectName() == "fileRow"]) == panel._FILES_MAX
-    assert panel.files_more.text().startswith("另有 3 个文件")
+    def file_rows():
+        return [w for w in panel.findChildren(QWidget) if w.objectName() == "fileRow"]
+
+    assert len(file_rows()) == panel._FILES_MAX
+    assert panel.files_more.text() == "展开全部（还有 3 个）"
+
+    # 就地展开全部；之后每 2 秒的刷新不能把它收回去
+    QTest.mouseClick(panel.files_more, Qt.LeftButton)
+    _pump(qapp)
+    assert len(file_rows()) == 11 and panel.files_more.text() == "收起"
+    panel._refresh_evidence()
+    _pump(qapp)
+    assert len(file_rows()) == 11
+
+    QTest.mouseClick(panel.files_more, Qt.LeftButton)
+    _pump(qapp)
+    assert len(file_rows()) == panel._FILES_MAX
 
 
 # ── 新计划临时打开面板（不改用户的开关）──────────────────────

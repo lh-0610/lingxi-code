@@ -351,6 +351,36 @@ def test_panel_without_evidence_is_not_green(sess, app):
     assert "没有验证证据" in text
 
 
+def test_panel_long_request_is_marked_cut_with_full_text_on_hover(sess, app):
+    """要求太长只显示开头：要有"…"，不能像在半个单词处断掉；全文在悬停提示里。"""
+    from src.ui.task_panel import TaskPanel, _REQUEST_PREVIEW_CHARS
+    long_req = "改 scripts/ 下的测试" + "x" * _REQUEST_PREVIEW_CHARS + " 结尾在这里"
+    user(sess, long_req)
+    plan()
+    panel = TaskPanel(None, lambda key: "#eeeeee")
+    try:
+        panel.render_session(sess)
+        shown = panel.requests_label.text()
+        tip = panel.requests_label.toolTip()
+    finally:
+        panel.close()
+    assert "…" in shown and "结尾在这里" not in shown
+    assert "结尾在这里" in tip
+
+
+def test_panel_short_request_has_no_ellipsis_or_tooltip(sess, app):
+    from src.ui.task_panel import TaskPanel
+    user(sess, "改个短的")
+    plan()
+    panel = TaskPanel(None, lambda key: "#eeeeee")
+    try:
+        panel.render_session(sess)
+        assert "改个短的" in panel.requests_label.text() and "…" not in panel.requests_label.text()
+        assert panel.requests_label.toolTip() == ""
+    finally:
+        panel.close()
+
+
 def test_panel_blind_period_is_shown(sess, app):
     user(sess, "A")
     plan()
