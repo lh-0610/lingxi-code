@@ -22,6 +22,11 @@ _CODE_SPAN = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", re.DOTALL)
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _BOLD_OPEN = "\x01B\x02"     # 控制字符做占位，不会和正常文本冲突
 _BOLD_CLOSE = "\x01E\x02"
+_FENCE = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+_INLINE_CODE = re.compile(r"`[^`\n]*`")
+_CODE_MARK = re.compile(r"\x01C(\d+)\x02")    # 行内代码的占位：\x01C<序号>\x02
+# 列表项：- / + / 1. / 1)（* 开头的不算：单个 * 在正文里一律是字面量，见 _protect_literal_asterisks）
+_LIST_ITEM = re.compile(r"^ {0,3}(?:[-+]|\d{1,3}[.)])\s+\S")
 
 # ── 行内代码里的项目文件路径 → 可点链接 ──────────────────────────
 # 自定义 scheme：正文里点了它由 MessageView 转给 ChatUI，在右边文件面板里打开。
@@ -121,13 +126,78 @@ def _protect_literal_asterisks(md_text):
     代码块和行内代码里的 * 原样不动。
 
     以前对整段文本做替换，代码里的 `p, *rest = xs` 会显示成 `p, \\*rest = xs`。
+
+    行内代码先换成不含 * 的占位再找加粗：以前按代码切段后逐段找，`**` 包着行内代码时
+    （**`src/x.py`**，DeepSeek 常这么写）开头和结尾的 `**` 落在两段里配不上对，
+    就被当成字面星号原样露出来。代码块仍按段隔开，不让加粗跨过整块代码去配对。
     """
-    parts = _CODE_SPAN.split(md_text)
-    for i in range(0, len(parts), 2):
-        seg = _BOLD.sub(lambda m: f"{_BOLD_OPEN}{m.group(1)}{_BOLD_CLOSE}", parts[i])
-        seg = seg.replace("*", r"\*")
-        parts[i] = seg.replace(_BOLD_OPEN, "**").replace(_BOLD_CLOSE, "**")
-    return "".join(parts)
+    chunks = _FENCE.split(md_text)
+    for i in range(0, len(chunks), 2):      # 奇数位是代码块，原样不动
+        codes = []
+
+        def _stash(m):
+            codes.append(m.group(0))
+            return f"\x01C{len(codes) - 1}\x02"
+
+        seg = _INLINE_CODE.sub(_stash, chunks[i])
+        seg = _BOLD.sub(lambda m: f"{_BOLD_OPEN}{m.group(1)}{_BOLD_CLOSE}", seg)
+        seg = seg.replace("*", r"\*").replace(_BOLD_OPEN, "**").replace(_BOLD_CLOSE, "**")
+        chunks[i] = _CODE_MARK.sub(lambda m: codes[int(m.group(1))], seg)
+    return "".join(chunks)
+
+
+_LIST_TAG = re.compile(r"<(/?)(ul|ol|li)\b[^>]*>")
+
+
+def _flatten_lists(html):
+    """把 <ul>/<ol>/<li> 摊平成段落，每项前面写上 "• " 或 "1. "，嵌套的往里缩一点。
+
+    以前直接把列表标签删掉，项目符号和序号也一起没了，"第 1 步、第 2 步"只剩几行字。
+    """
+    # 松散列表（项之间有空行）的 <li> 里还会套一层 <p>：拆掉，不然符号单独占一行
+    html = re.sub(r"<li>\s*<p>", "<li>", html)
+    html = re.sub(r"</p>\s*</li>", "</li>", html)
+    out, pos, stack = [], 0, []      # stack 里每层是 [列表类型, 已有几项]
+    for m in _LIST_TAG.finditer(html):
+        out.append(html[pos:m.start()])
+        pos = m.end()
+        closing, tag = m.group(1) == "/", m.group(2)
+        if tag in ("ul", "ol"):
+            if closing:
+                if stack:
+                    stack.pop()
+            else:
+                stack.append([tag, 0])
+        elif closing:
+            out.append("</p>")
+        else:
+            kind, n = stack[-1] if stack else ("ul", 0)
+            if stack:
+                stack[-1][1] += 1
+            marker = f"{n + 1}. " if kind == "ol" else "• "
+            indent = 18 * max(0, len(stack) - 1)
+            out.append(f'<p style="margin:2px 0 2px {indent}px;">{marker}')
+    out.append(html[pos:])
+    return "".join(out)
+
+
+def _blank_line_before_lists(md_text):
+    """列表紧跟在一行文字下面（中间没空行）时补一个空行，否则 markdown 不认它是列表。
+
+    DeepSeek 常写"……如下：\\n- 第一项\\n- 第二项"，原样渲染出来每行开头都是一个 "- "。
+    前一行本身是列表项、或是缩进的续行时不补（那是同一个列表）；代码块里不动。
+    """
+    chunks = _FENCE.split(md_text)
+    for i in range(0, len(chunks), 2):
+        out, prev = [], ""
+        for line in chunks[i].split("\n"):
+            if (_LIST_ITEM.match(line) and prev.strip() and not _LIST_ITEM.match(prev)
+                    and not prev.startswith((" ", "\t"))):
+                out.append("")
+            out.append(line)
+            prev = line
+        chunks[i] = "\n".join(out)
+    return "".join(chunks)
 
 
 class MarkdownRenderMixin:
@@ -158,17 +228,15 @@ class MarkdownRenderMixin:
         # 空行没了，整篇会被当成一个块：表格后面的标题 / 列表会被表格扩展整行吞成单元格。
         # 段落间距交给下面的 <p style="margin:6px 0"> 处理即可。
 
+        md_text = _blank_line_before_lists(md_text)
         md_text = _protect_literal_asterisks(md_text)
         # 行内代码里的项目文件路径 → 可点链接（代码块里的不处理，只认真实存在的文件）
         md_text = _linkify_file_paths(md_text, _link_root())
 
         html = markdown.markdown(md_text, extensions=['tables', 'fenced_code', 'nl2br'])
 
-        # 去掉 <ul>/<ol>/<li> 列表标签，保留纯文本换行
-        html = _re.sub(r'</?ul[^>]*>', '', html)
-        html = _re.sub(r'</?ol[^>]*>', '', html)
-        html = _re.sub(r'<li[^>]*>', '<p style="margin:2px 0;">', html)
-        html = html.replace('</li>', '</p>')
+        # 列表摊平成段落（QLabel 自带的列表缩进不好看），但要留下项目符号 / 序号
+        html = _flatten_lists(html)
         # 去掉 <em>/<i> 斜体标签，避免动作描述*...* 与正常对话字体不一样
         html = _re.sub(r'</?em[^>]*>', '', html)
         html = _re.sub(r'</?i[^>]*>', '', html)
