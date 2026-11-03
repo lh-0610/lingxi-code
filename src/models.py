@@ -16,6 +16,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
 from . import state
+from . import reasoning as _reasoning
 from .config import (
     OLLAMA_BASE_URL,
     CLOUD_API_KEY,
@@ -307,6 +308,34 @@ def check_ollama():
         return False
 
 
+# ── 思考强度（reasoning effort）──
+# 会话存的是档位（off/low/high/max，见 reasoning.py），这里负责"这个模型能表达哪些档位"
+# 和"实际发什么参数"。界面的档位菜单按 supported_efforts() 显示。
+
+def supported_efforts(mtype, model_id="", supports_think=True):
+    """这种模型类型（自定义模型还要看协议）支持哪些档位；不支持思考返回空元组。
+
+    - responses（含自定义 protocol=responses）：("off", "low", "high", "max")
+    - 只能开关、不分档的（ollama）：("off", "on")
+    - 不支持思考的（anthropic / mimo / gemini / deepseek / cloud / claude-code 等）：()
+    """
+    protocol = None
+    if mtype == "custom":
+        cm = _lookup_custom_model(model_id) or {}
+        protocol = (cm.get("protocol") or "openai").lower()
+    return _reasoning.supported_efforts(
+        mtype, protocol=protocol, supports_thinking=supports_think)
+
+
+def supported_efforts_for(model_index):
+    """按 MODEL_LIST 下标取支持档位（界面菜单用）。下标无效时返回空元组。"""
+    try:
+        _, mtype, model_id, supports_think = MODEL_LIST[model_index]
+    except (IndexError, TypeError):
+        return ()
+    return supported_efforts(mtype, model_id, supports_think)
+
+
 def _max_tokens_for(mtype, model_id):
     """按模型给安全的输出额度上限(max_tokens)。
 
@@ -375,21 +404,36 @@ def context_window_for(mtype: str, model_id: str) -> int:
     return _FALLBACK_CONTEXT_WINDOW
 
 
-def _create_llm(model_index=None, reasoning=None):
-    """根据选择创建 LLM 实例"""
+def _effort_action(mtype, model_id, supports_think, reasoning=None, effort=None):
+    """把（旧布尔 reasoning / 新档位 effort）折算成实际动作。
+
+    返回 "off" / "on" / "low" / "high" / "max" / None（该模型不支持思考，忽略这个字段）。
+    effort 优先；只给 reasoning 时按旧语义映射（True→high、False→off）；都没给则取当前会话档位。
+    """
+    if effort is None:
+        effort = state.reasoning_effort if reasoning is None else ("high" if reasoning else "off")
+    return _reasoning.effective(effort, supported_efforts(mtype, model_id, supports_think))
+
+
+def _create_llm(model_index=None, reasoning=None, effort=None):
+    """根据选择创建 LLM 实例
+
+    reasoning：旧的布尔思考开关（True/False），保留给视觉桥接、标题生成等只关心开关的调用点；
+    effort：思考档位（off/low/high/max）。两者都给时以 effort 为准。
+    """
     if model_index is None:
         model_index = state.current_model_index
-    if reasoning is None:
-        reasoning = state.reasoning_enabled
 
     name, mtype, model_id, supports_think = MODEL_LIST[model_index]
+    action = _effort_action(mtype, model_id, supports_think, reasoning, effort)
 
     # 长超时：深度思考阶段服务端可能数分钟不发 SSE，默认超时容易被中间代理切断
     LONG_TIMEOUT = 1800  # 30 分钟
 
     if mtype == "ollama":
         kwargs = {"model": model_id, "base_url": OLLAMA_BASE_URL}
-        if supports_think and reasoning:
+        # 本地模型只有布尔的 reasoning；off 以外一律按"开"
+        if action in ("on", "low", "high", "max"):
             kwargs["reasoning"] = True
         return ChatOllama(**kwargs)
     elif mtype == "anthropic":
@@ -439,11 +483,14 @@ def _create_llm(model_index=None, reasoning=None):
             "output_version": "responses/v1",
             "timeout": LONG_TIMEOUT,
         }
-        # Responses API 的思考模式由 reasoning.effort 控制（none 关 / low~max 开，
-        # 默认开启）。与灵犀顶栏「思考」开关联动：关掉思考时显式 reasoning={"effort": "none"}
-        # 关闭服务端思考（否则 DeepSeek 默认思考会每个请求白耗 reasoning token）。
-        if supports_think and not reasoning:
+        # Responses API 的思考模式由 reasoning.effort 控制（none 关 / low~max 开）。
+        # 按会话档位显式下发：off → none（DeepSeek 默认思考，不下发就会每个请求白耗
+        # reasoning token），low/high/max 原样发；"on" 只在只支持开关的类型里出现，
+        # 这里不会走到（responses 的档位集合是 off/low/high/max）。
+        if action == "off":
             kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
+        elif action in ("low", "high", "max"):
+            kwargs["extra_body"] = {"reasoning": {"effort": action}}
         return ChatOpenAI(**kwargs)
     elif mtype == "custom":
         # 用户自定义模型：从 CUSTOM_MODELS 反查完整配置，按 protocol 选 SDK
@@ -470,9 +517,11 @@ def _create_llm(model_index=None, reasoning=None):
             }
             if base_url:
                 ckwargs["base_url"] = base_url
-            # 思考开关联动同上：关闭思考时显式 reasoning.effort=none（仅当声明支持思考）
-            if supports_think and not reasoning:
+            # 思考档位同上：off → none，low/high/max 原样发（仅当该模型支持思考）
+            if action == "off":
                 ckwargs["extra_body"] = {"reasoning": {"effort": "none"}}
+            elif action in ("low", "high", "max"):
+                ckwargs["extra_body"] = {"reasoning": {"effort": action}}
             return ChatOpenAI(**ckwargs)
         # 默认 OpenAI 兼容协议（适配大多数第三方 API：OpenAI / 月之暗面 /
         # 火山引擎 / 智谱 / 硅基流动 / 自部署 vLLM 等都走这个）
@@ -497,14 +546,17 @@ def _create_llm(model_index=None, reasoning=None):
 _create_llm_uncached = _create_llm
 
 
-def _create_llm(model_index=None, reasoning=None):
-    """Create or reuse a LangChain LLM instance for the selected model."""
+def _create_llm(model_index=None, reasoning=None, effort=None):
+    """Create or reuse a LangChain LLM instance for the selected model.
+
+    缓存键包含实际生效的思考动作（off/on/low/high/max/None），所以切档位会拿到另一个实例，
+    不会复用旧档位的 llm。
+    """
     if model_index is None:
         model_index = state.current_model_index
-    if reasoning is None:
-        reasoning = state.reasoning_enabled
     _, mtype, model_id, supports_think = MODEL_LIST[model_index]
-    effective_reasoning = bool(reasoning and supports_think)
+    # 没显式给 effort 时才回落会话档位（给了 reasoning 布尔的老调用点照旧按开关算）
+    action = _effort_action(mtype, model_id, supports_think, reasoning, effort)
     custom = _lookup_custom_model(model_id) if mtype == "custom" else None
     custom_key = None
     if custom:
@@ -513,9 +565,10 @@ def _create_llm(model_index=None, reasoning=None):
             custom.get("api_key", ""),
             custom.get("base_url", ""),
         )
-    key = (model_index, mtype, model_id, effective_reasoning, custom_key)
+    key = (model_index, mtype, model_id, action, custom_key)
     if key not in _LLM_CACHE:
-        _LLM_CACHE[key] = _create_llm_uncached(model_index=model_index, reasoning=reasoning)
+        _LLM_CACHE[key] = _create_llm_uncached(
+            model_index=model_index, reasoning=reasoning, effort=effort)
     return _LLM_CACHE[key]
 
 

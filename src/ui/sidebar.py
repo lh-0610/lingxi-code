@@ -574,7 +574,7 @@ class SidebarMixin:
             # 历史会话不持久化 model → 继承当前会话的 model/mode 作起点（之后随该会话独立）
             target.current_model_index = _prev.current_model_index
             target.agent_mode = _prev.agent_mode
-            target.reasoning_enabled = _prev.reasoning_enabled
+            target.reasoning_effort = _prev.reasoning_effort
             target.rag_mode = _prev.rag_mode
             if not agent.load_session(session_id, session=target):
                 return
@@ -751,7 +751,7 @@ class SidebarMixin:
         new_sess.agent_mode = _prev.agent_mode
         from .prefs import inherited_permission_mode
         new_sess.permission_mode = inherited_permission_mode(_prev)
-        new_sess.reasoning_enabled = _prev.reasoning_enabled
+        new_sess.reasoning_effort = _prev.reasoning_effort
         new_sess.rag_mode = False      # 切项目 = 编码工作区，绝不继承 rag_mode（防混合会话）
         _session.register(new_sess)
         _session.set_active(new_sess)  # 先激活，get_system_prompt 才按新会话（code + 新项目）生成

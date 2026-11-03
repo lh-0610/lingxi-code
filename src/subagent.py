@@ -146,7 +146,8 @@ def spawn(tasks: list[str], project_root: str, parent_ui=None) -> list[dict]:
         child.is_subagent = True
         child.agent_mode = "act"
         child.current_model_index = parent_sess.current_model_index
-        child.reasoning_enabled = parent_sess.reasoning_enabled
+        # 继承思考档位（不是布尔的 开/关）：子代理和父会话保持同一强度
+        child.reasoning_effort = parent_sess.reasoning_effort
         child.project = project_root
         _session.bind_thread(child)
         try:

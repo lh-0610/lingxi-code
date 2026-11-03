@@ -804,6 +804,9 @@ def _save_session_locked(*, session=None, started=None):
     permission_mode = _normalize_permission(getattr(sess, "permission_mode", "manual"))
     if permission_mode == "bypass":
         permission_mode = "manual"
+    # 思考强度跟着会话走：重开/"切回"时恢复用户当时选的档位。手改坏的值收成默认档。
+    from .reasoning import normalize as _normalize_effort
+    reasoning_effort = _normalize_effort(getattr(sess, "reasoning_effort", None))
 
     if session_kind == "rag":
         sess.project = None            # 清理可能残留的 project；rag 不锚代码项目
@@ -852,6 +855,8 @@ def _save_session_locked(*, session=None, started=None):
         # Plan/Act 跟着会话走：重开时恢复原模式，别让"正在规划"的会话静默变回可动手
         "agent_mode": agent_mode,
         "permission_mode": permission_mode,
+        # 思考强度（off/low/high/max）。旧程序读不懂这个键会原样带过去（下面的未知键透传）。
+        "reasoning_effort": reasoning_effort,
         "schema_version": _SCHEMA_VERSION,
         "progress": {
             "version": _PROGRESS_VERSION,
@@ -1219,6 +1224,13 @@ def load_session(session_id, *, session=None):
     from .permission_modes import normalize as _normalize_permission
     _perm = _normalize_permission(data.get("permission_mode"))
     tgt.permission_mode = "manual" if _perm == "bypass" else _perm
+    # 思考强度：新会话文件直接读 reasoning_effort；更老的会话只有布尔 reasoning_enabled，
+    # 按它推断（True → high，False → off）。两个都没有 → 默认档（与旧版默认"开"一致）。
+    from .reasoning import legacy_to_effort, normalize as _normalize_effort
+    _effort = data.get("reasoning_effort")
+    if _effort is None:
+        _effort = legacy_to_effort(data.get("reasoning_enabled", True))
+    tgt.reasoning_effort = _normalize_effort(_effort)
     tgt.worktree = None
 
     # 清掉 sidecar 里**已经有匹配回执**的残留记录：它们的结果确实已经落盘，只是上次

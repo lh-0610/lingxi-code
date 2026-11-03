@@ -3,11 +3,12 @@
 历史上这里集中持有所有运行期可变全局，避免模块间循环 import。多会话并发重构后
 分成两类：
 
-- **全局共享**（所有会话共用）：llm / llm_with_tools / current_model_index /
-  reasoning_enabled / ui_ref / current_project / agent_mode 等，仍是本模块的普通
-  变量。
+- **全局共享**（所有会话共用）：llm / llm_with_tools / ui_ref / current_project 等，
+  仍是本模块的普通变量。思考是会话级字段 reasoning_effort（见 reasoning.py），
+  reasoning_enabled 是它的派生视图。
 - **会话级**（每个会话一份）：chat_history / stop_flag / session_token_usage /
-  compaction / current_plan / shell_cwd / 会话 id·title / remote_session 等，真身
+  compaction / current_plan / shell_cwd / 会话 id·title / remote_session /
+  current_model_index / agent_mode / reasoning_effort 等，真身
   在 session.Session；本模块通过文件末尾的代理把 `state.X` 读写转发到"当前线程
   的当前会话"（session.current_session()），所以现有 state.X / agent.X 代码无需改动。
 
@@ -45,9 +46,10 @@ telegram_stop: bool = False
 # 注：知识库(RAG)模式 rag_mode 是**会话级**（session._SESSION_FIELDS）——前台切知识库
 # 不会改变后台编码会话的工具绑定/拦截。state.rag_mode 经代理落到当前线程的当前会话。
 
-# 注：current_model_index / agent_mode / reasoning_enabled 已改为**会话级**
-# （在 session._SESSION_FIELDS）——切会话时 模型 / Plan-Act / 思考 跟随该会话。
-# 这几个 state.X 的读写经文件末尾的代理落到"当前线程的当前会话"。
+# 注：current_model_index / agent_mode 已改为**会话级**（在 session._SESSION_FIELDS）——
+# 切会话时 模型 / Plan-Act 跟随该会话。思考则是会话级的 reasoning_effort（见 reasoning.py），
+# reasoning_enabled 由它派生（下面的 property）。这几个 state.X 的读写经文件末尾的代理
+# 落到"当前线程的当前会话"。
 
 
 # ══════════════════════════════════════
@@ -204,6 +206,20 @@ def _make_session_prop(_name):
 
 for _field in _session._SESSION_FIELDS:
     setattr(_StateModule, _field, _make_session_prop(_field))
+
+
+# reasoning_enabled 不再是存储字段（会话存的是 reasoning_effort），但大量老代码仍按布尔
+# 读写 state.reasoning_enabled。转发到 Session 上同名的派生 property（开→high、关→off）。
+def _reasoning_enabled_getter(self):
+    return _session.current_session().reasoning_enabled
+
+
+def _reasoning_enabled_setter(self, value):
+    _session.current_session().reasoning_enabled = value
+
+
+_StateModule.reasoning_enabled = property(_reasoning_enabled_getter,
+                                          _reasoning_enabled_setter)
 
 _proxy = _StateModule(__name__)
 # 把本模块现有的全局变量 / 常量 / 函数 / dunder 搬到代理实例。会话级字段不在

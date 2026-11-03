@@ -94,8 +94,8 @@ def explore(question: str, thoroughness: str = "medium") -> str:
     child.is_subagent = True
     child.agent_mode = "act"
     child.current_model_index = parent.current_model_index
-    # quick 只是定位，不值得开思考
-    child.reasoning_enabled = parent.reasoning_enabled and depth != "quick"
+    # quick 只是定位，不值得开思考；其余档位原样继承父会话
+    child.reasoning_effort = "off" if depth == "quick" else parent.reasoning_effort
     child.project = project_root
     child.worktree = project_root       # 子代理沙箱以它为界：只能读项目里的文件
     child.allowed_tools = set(EXPLORE_TOOL_NAMES)

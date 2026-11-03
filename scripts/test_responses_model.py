@@ -3,7 +3,7 @@
 覆盖 models.py 的 responses 分支：
 - builtin 列表里注册了 responses 类型
 - _create_llm 对 responses 返回带 output_version="responses/v1" 的 ChatOpenAI
-- 思考开关联动：关闭时注入 reasoning.effort=none，开启时不注入
+- 思考开关联动：关闭时注入 reasoning.effort=none，开启时按档位注入 low/high/max
 - custom_models 的 protocol="responses" 分支
 - get_model_config_issues 对 responses 校验 key
 - _wrap_system_for_cache 对 responses 走纯字符串 system（非 Anthropic 缓存块）
@@ -65,15 +65,18 @@ def test_create_llm_responses_thinking_off_injects_reasoning(monkeypatch):
     assert extra.get("reasoning", {}).get("effort") == "none", f"关闭思考应带 effort=none，实际 {extra}"
 
 
-def test_create_llm_responses_thinking_on_no_reasoning_injection(monkeypatch):
-    """responses 开启思考时不应注入 reasoning.effort（让服务端默认思考）。"""
+def test_create_llm_responses_thinking_on_sends_effort(monkeypatch):
+    """responses 开启思考时按档位显式发 reasoning.effort（分档后不再"什么都不发"）。
+
+    旧的布尔接口 reasoning=True 等价于 high 档；具体各档位见 test_reasoning_effort.py。
+    """
     idx = _find_responses_index()
     assert idx >= 0
     monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
     monkeypatch.setattr(models, "RESPONSES_BASE_URL", "https://api.deepseek.com")
     llm = _create_llm(model_index=idx, reasoning=True)
     extra = llm.extra_body or {}
-    assert "reasoning" not in extra, f"开启思考不应注入 reasoning，实际 {extra}"
+    assert extra.get("reasoning", {}).get("effort") == "high", f"开启思考应带 effort=high，实际 {extra}"
 
 
 def test_create_llm_custom_responses_protocol(monkeypatch):

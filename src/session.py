@@ -19,6 +19,8 @@ state.py 的全局字段（行为与重构前完全等价）。
 import threading
 import uuid
 
+from . import reasoning as _reasoning
+
 
 # 会话级字段名 → 默认值工厂。state.py 的代理 property 依赖这份清单（单一事实源）。
 # 用工厂（callable）而非字面量，避免可变默认值（list/dict）被多个会话共享同一对象。
@@ -47,7 +49,9 @@ _SESSION_FIELDS = {
     # 执行时的放行规则（manual / accept_edits / auto / bypass，见 permission_modes.py）；
     # "计划"仍由 agent_mode=plan 表示
     "permission_mode": lambda: "manual",
-    "reasoning_enabled": lambda: True,
+    # 思考强度（off / low / high / max，见 reasoning.py）。旧的布尔 reasoning_enabled
+    # 不再是存储字段，而是由它派生的视图（见下面的 property），随会话一起落盘。
+    "reasoning_effort": lambda: _reasoning.DEFAULT,
     # 知识库(RAG)模式 —— 会话级：前台切知识库不影响正在后台跑的编码会话的工具绑定/拦截
     "rag_mode": lambda: False,
     # 验证状态（会话级）：编码任务完成闸门——确保 AI 在声称"已完成"前先验证。
@@ -118,6 +122,17 @@ class Session:
         "last_run_save_failed",
         "background_owner_id",
     )
+
+    # 旧的布尔开关保留为派生视图（不是存储字段）：读 = 档位不是 off；写 = 开→high、关→off。
+    # 现有读它的代码（顶栏勾选、子代理继承、_create_llm 的回落…）因此无需改动。
+    @property
+    def reasoning_enabled(self):
+        return _reasoning.enabled(self.reasoning_effort)
+
+    @reasoning_enabled.setter
+    def reasoning_enabled(self, value):
+        # 只接受布尔：handle 一条旧调用 `reasoning_enabled = parent.x and depth != "quick"`。
+        self.reasoning_effort = "high" if value else "off"
 
     def __init__(self):
         for name, factory in _SESSION_FIELDS.items():

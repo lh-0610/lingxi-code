@@ -23,6 +23,8 @@ from .models import (
     MODEL_LIST,
     check_ollama,
     _create_llm,
+    _effort_action,                 # noqa: F401  内部：缓存键按实际档位动作区分
+    supported_efforts_for,          # noqa: F401  facade 出口 → 思考档位菜单（下个任务）
     get_model_config_issues,        # noqa: F401  facade 出口 → chat_window
     has_usable_model,               # noqa: F401  facade 出口 → chat_window 首次上手引导
     current_model_supports_vision,  # noqa: F401  facade 出口 → chat_window 视觉桥接
@@ -88,7 +90,10 @@ def resolve_bound_llm(session):
     """
     mi = session.current_model_index
     _, mtype, model_id, supports_think = MODEL_LIST[mi]
-    effective_reasoning = bool(session.reasoning_enabled and supports_think)
+    # 实际生效的思考动作（off/on/low/high/max/None）。档位不同 → 缓存条目不同，
+    # 切档位后下一条消息自动换上按新档位建的 llm。
+    action = _effort_action(mtype, model_id, supports_think,
+                            effort=getattr(session, "reasoning_effort", None))
     # 知识库(RAG)模式绑不同工具集（只有 search_knowledge），故进缓存键。
     # 读【目标会话】的 rag_mode（会话级）——前台切知识库不影响后台编码会话的绑定；
     # streaming 每轮都调这里，切模式后下一条消息自动换绑定。
@@ -96,10 +101,10 @@ def resolve_bound_llm(session):
     # 只读探索子代理只绑它能用的读/搜工具（模型看不到写工具就不会去调），同样进缓存键
     allowed = getattr(session, "allowed_tools", None)
     allowed_key = tuple(sorted(allowed)) if allowed else None
-    key = (mi, mtype, model_id, effective_reasoning, rag, allowed_key)
+    key = (mi, mtype, model_id, action, rag, allowed_key)
     if key not in _BOUND_LLM_CACHE:
         try:
-            llm = _create_llm(mi, effective_reasoning)
+            llm = _create_llm(mi, effort=getattr(session, "reasoning_effort", None))
         except Exception as e:
             # 建不出来基本就是配置没填全（典型：key 空 → OpenAIError('Missing credentials')）。
             # 启动期那次创建已由 _activate_llm 吞掉、只记日志；真正发消息走到这里才该告诉
@@ -148,10 +153,27 @@ def switch_model(index):
 
 
 def set_reasoning(enabled):
-    """切换思考模式"""
-    state.reasoning_enabled = enabled
+    """切换思考开关（旧的布尔接口，保留兼容）。
+
+    开 → 档位升到默认档 high（原本已是某档位的保持不动，不清掉用户的选择）；
+    关 → off。界面下一版改用 set_reasoning_effort 直接选档。
+    """
+    from .reasoning import normalize as _normalize_effort
+    if enabled:
+        current = _normalize_effort(getattr(state, "reasoning_effort", None))
+        state.reasoning_effort = current if current != "off" else "high"
+    else:
+        state.reasoning_effort = "off"
     _activate_llm()
-    logger.info(f"思考模式: {'开启' if enabled else '关闭'}")
+    logger.info(f"思考: {state.reasoning_effort}")
+
+
+def set_reasoning_effort(effort):
+    """按档位切换思考强度（off / low / high / max）。"""
+    from .reasoning import normalize as _normalize_effort
+    state.reasoning_effort = _normalize_effort(effort)
+    _activate_llm()
+    logger.info(f"思考: {state.reasoning_effort}")
 
 
 # ══════════════════════════════════════

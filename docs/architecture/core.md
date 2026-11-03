@@ -31,7 +31,7 @@
 - `state.ui_ref = self` 在 ChatUI 启动时设置，让 worker 线程的 tools 能找到主窗口弹确认框
 
 ## 多会话并发（src/session.py + state.py 代理）
-- **会话级状态收进 `Session` 对象**：`chat_history / stop_flag / session_token_usage / compaction / current_plan / task_ledger / shell_cwd / current_model_index / agent_mode / reasoning_enabled / verification / worktree / project / role_snapshot` 等都是会话级（每会话一份），见 `session.py:_SESSION_FIELDS`
+- **会话级状态收进 `Session` 对象**：`chat_history / stop_flag / session_token_usage / compaction / current_plan / task_ledger / shell_cwd / current_model_index / agent_mode / reasoning_effort / verification / worktree / project / role_snapshot` 等都是会话级（每会话一份），见 `session.py:_SESSION_FIELDS`。旧的布尔 `reasoning_enabled` 不再是存储字段，而是 `reasoning_effort`（off/low/high/max，见 `reasoning.py`）的派生视图——读 = 不是 off，写 = 开→high、关→off
 - **`state.py` 用 `ModuleType` property 代理**：`state.chat_history` 等读写自动落到「当前线程的当前会话」，所以几十处 `state.X` 老代码无需改动。**真正全局**的（`llm` / `ui_ref` / `current_project` 等）仍是 state.py 的普通变量
 - **线程路由**（`session.current_session()`）：worker 线程进 `agent_loop` 时 `bind_thread(sess)` 把自己绑到该会话 → 该线程所有 `state.X` 都落到这个会话；主线程（UI）/ 未绑定线程 → `get_active()`（前台显示的会话）。这就是「后台会话边跑、前台切到别的会话」不互串的根基
 - **注册表** `session.sessions`（key→Session）：`register` / `rekey`（存盘拿到 id 后把临时 `_new_N` 换成 id）/ `drop`

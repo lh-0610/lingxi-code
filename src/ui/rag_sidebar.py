@@ -205,7 +205,7 @@ class RagSidebarMixin:
         s.agent_mode = _prev.agent_mode
         from .prefs import inherited_permission_mode
         s.permission_mode = inherited_permission_mode(_prev)
-        s.reasoning_enabled = _prev.reasoning_enabled
+        s.reasoning_effort = _prev.reasoning_effort
         if kind == "rag":
             s.rag_mode = True
             s.project = None                       # 与代码项目彻底解耦，不继承
