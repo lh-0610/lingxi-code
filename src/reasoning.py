@@ -18,6 +18,9 @@ EFFORTS = ("off", "low", "high", "max")
 BOOLEAN_EFFORTS = ("off", "on")
 DEFAULT = "high"
 
+# 界面上的档位名（输入框底栏的模型按钮和它的"思考强度"子菜单）。只能开关的模型用 关 / 开。
+LABELS = {"off": "关", "on": "开", "low": "低", "high": "高", "max": "最高"}
+
 # 手改坏的值 / 别家叫法 → 归一化。medium 归到 high：分档只有四档，且 high 是默认。
 _ALIASES = {
     "none": "off",

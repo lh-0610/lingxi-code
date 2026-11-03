@@ -88,7 +88,7 @@ def test_narrow_window_opens_it_as_an_overlay(ui, qapp):
     ui._toggle_task_panel()
     _pump(qapp)
     host = panel.parentWidget()
-    header = ui.model_combo.parentWidget()
+    header = ui._header_bar
     header_bottom = header.mapTo(host, QPoint(0, header.height())).y()
     assert panel.isVisible() and ui.task_panel_btn.isChecked()
     assert panel.geometry().right() == host.width() - 1, "浮层贴在窗口最右边"

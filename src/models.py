@@ -270,6 +270,45 @@ def has_usable_model() -> bool:
     return False
 
 
+def model_ready(model_index) -> bool:
+    """这个模型现在能不能直接用：填好 key 的云模型，或不需要 key 的本地 / CLI 模型。
+
+    判据与 `get_model_config_issues` 同源（没有配置问题 = 能用），不另维护一份条件。
+    """
+    return not get_model_config_issues(model_index)
+
+
+def partition_models() -> tuple[list[int], list[int]]:
+    """把 MODEL_LIST 分成 (能直接用的, 还缺配置的) 两组下标，各自保持原顺序。
+
+    界面菜单据此分成"模型"和「更多模型 ›」两段；索引是 MODEL_LIST 下标，
+    切换模型 / 查档位都用它，不依赖两段里的相对位置。
+    """
+    ready, needs_config = [], []
+    for i in range(len(MODEL_LIST)):
+        (ready if model_ready(i) else needs_config).append(i)
+    return ready, needs_config
+
+
+# 菜单里每个模型下面那行灰字：它属于哪类后端（用户认模型名，未必认类型名）
+_MODEL_TYPE_LABELS = {
+    "claude-code": "本机 Claude Code CLI",
+    "mimo": "MiMo",
+    "ollama": "本地 Ollama 模型",
+    "cloud": "通义千问",
+    "anthropic": "Anthropic",
+    "gemini": "Google Gemini",
+    "deepseek": "DeepSeek",
+    "responses": "Responses API",
+    "custom": "自定义模型",
+}
+
+
+def model_type_label(mtype) -> str:
+    """模型类型的界面说明；认不出的类型就说"模型"，不显示内部类型名。"""
+    return _MODEL_TYPE_LABELS.get(str(mtype or ""), "模型")
+
+
 _LLM_CACHE = {}
 
 

@@ -469,18 +469,11 @@ class TestPrecheck:
         from src import agent as _agent
         from src.ui.header import HeaderMixin
 
-        class _Btn:
-            def setEnabled(self, *_):
-                pass
-
-            def setChecked(self, *_):
-                pass
-
         class _Header:
             _on_model_changed = HeaderMixin._on_model_changed
 
-            def __init__(self):
-                self.think_btn = _Btn()
+            def _refresh_model_btn(self):
+                self.refreshed = True
 
             def _show_current_model_config_warning(self):
                 pass
@@ -492,8 +485,10 @@ class TestPrecheck:
         monkeypatch.setattr(_agent, "set_reasoning", lambda enabled: None)
         active = session.get_active()
         assert active.model_user_choice is False, "新会话 / 重开的会话还没人选过"
-        _Header()._on_model_changed(_api_models()[1])
+        host = _Header()
+        host._on_model_changed(_api_models()[1])
         assert active.model_user_choice is True
+        assert host.refreshed is True, "底栏的模型按钮跟着换成新模型"
 
     def test_same_id_on_another_backend_counts_as_missing(self, isolated_memory, repo,
                                                           no_config_issues):

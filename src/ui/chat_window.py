@@ -223,10 +223,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if hasattr(self, "empty_state"):
             self._refresh_empty_state_layout()
             self._position_empty_state()
-        if hasattr(self, "model_combo"):
-            self._style_model_combo()
-        if hasattr(self, "think_btn"):
-            self._style_think_btn()
+        if hasattr(self, "model_btn"):
+            self._refresh_model_btn()      # 底栏模型按钮的文字色 / 模型名跟着主题走
         if hasattr(self, "task_panel_btn"):
             self._style_task_panel_btn()
         # 段控（计划|执行）样式走全局 QSS，setStyleSheet 重建即生效，无需单独刷
@@ -737,7 +735,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         host = self.plan_panel.parentWidget()
         if host is None:
             return
-        header = self.model_combo.parentWidget() if hasattr(self, "model_combo") else None
+        header = getattr(self, "_header_bar", None)
         top = header.mapTo(host, QPoint(0, header.height())).y() if header is not None else 0
         width = min(self.plan_panel.width(), max(self.plan_panel.MIN_WIDTH, host.width() - 120))
         self.plan_panel.setFixedWidth(width)
@@ -1242,6 +1240,16 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 之后在窗口里按一下空格（比如想翻页）就把正在跑的任务停了
         self.send_btn.setFocusPolicy(Qt.NoFocus)
         self.send_btn.clicked.connect(self._on_send_click)
+        # 模型按钮（模型名 · 思考强度）：原顶栏的模型下拉 + 「思考」开关合并到这里，
+        # 在模式按钮左边，点开菜单向上弹（见 _show_model_menu）
+        self.model_btn = QPushButton()
+        self.model_btn.setObjectName("modelBtn")
+        self.model_btn.setCursor(Qt.PointingHandCursor)
+        self.model_btn.setFocusPolicy(Qt.NoFocus)    # 和发送键 / 模式键一样，不留键盘焦点
+        self.model_btn.setFixedHeight(32)
+        self.model_btn.clicked.connect(self._show_model_menu)
+        self._composer_bottom.addWidget(self.model_btn)
+        self._refresh_model_btn()
         # 模式按钮（五种权限模式，原来顶栏的「计划 / 执行」）：在发送键左边，点开菜单向上弹
         self.mode_btn = QPushButton()
         self.mode_btn.setObjectName("modeBtn")
@@ -1759,6 +1767,247 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         anchor = self.img_btn.mapToGlobal(QPoint(0, 0))
         menu.exec(anchor - QPoint(0, menu.sizeHint().height() + 6))
         menu.deleteLater()   # 每次点 + 都新建一个菜单，用完删掉，不留在窗口上
+
+    # ── 模型（输入框底栏的模型按钮：模型 + 思考强度合在一个菜单里）──
+
+    # 按钮文字的宽度上限（像素）：再长就省略，别把模式键和发送键挤出底栏
+    _MODEL_BTN_MAX_TEXT = 320
+
+    def _refresh_model_btn(self):
+        """按钮上写「模型名 · 思考强度」（不支持思考的模型只写模型名）。
+
+        档位取【该模型实际能表达的动作】而不是会话里存的原始值：只能开关的本地模型
+        存的是 low/high 之类的通用档位，界面上应当显示「开」。
+        """
+        from .. import models as _models
+        from .. import reasoning as _reasoning
+        from .. import session as _session
+        sess = _session.get_active()
+        count = len(_models.MODEL_LIST)
+        idx = int(getattr(sess, "current_model_index", 0) or 0)
+        if idx < 0 or idx >= count:
+            idx = 0
+        name = _models.MODEL_LIST[idx][0]
+        supported = _models.supported_efforts_for(idx)
+        action = _reasoning.effective(sess.reasoning_effort, supported) if supported else None
+        text = f"{name} · {_reasoning.LABELS.get(action, '')}" if action else name
+        # 模型名可能很长：底栏的宽度要让给模式键和发送键，超出的用省略号
+        metrics = self.model_btn.fontMetrics()
+        text = metrics.elidedText(text, Qt.ElideRight, self._MODEL_BTN_MAX_TEXT)
+        self.model_btn.setText(text)
+        tip = f"模型：{name}（点击切换）"
+        if supported:
+            tip += f"\n思考强度：{_reasoning.LABELS.get(action, '')}"
+        self.model_btn.setToolTip(tip)
+        self.model_btn.setAccessibleName(f"模型：{name}")
+        self.model_btn.setStyleSheet(
+            f"QPushButton#modelBtn {{ background: transparent; border: none; border-radius: 6px;"
+            f" padding: 0 10px; font-size: 13px; color: {self._t('mv_text_sec')}; }}"
+            f"QPushButton#modelBtn:hover {{ background: {self._t('mv_header_bg')};"
+            f" color: {self._t('mv_text')}; }}")
+
+    _EFFORT_DESCS = {
+        "off": "不输出推理过程",
+        "on": "开启思考（这个模型只能开关）",
+        "low": "少量推理，更快",
+        "high": "默认档位",
+        "max": "尽量多推理，更慢",
+    }
+
+    def _show_model_menu(self):
+        """点模型按钮：上面是现在能用的模型（当前打勾、带数字键），
+        中间是「思考强度 ›」，最下面是「更多模型 ›」（还没配 Key 的）。
+        样式与模式菜单一致；菜单从按钮正上方弹出。"""
+        self._open_model_menu(anchor=self.model_btn, numbered=True)
+
+    def _open_model_menu(self, anchor, numbered=True):
+        """在 anchor 按钮正上方弹出模型菜单。"""
+        from PySide6.QtWidgets import QLabel, QWidgetAction
+        from .. import models as _models
+        from .. import session as _session
+        from .widgets import DescribedMenuItem, NumberedMenu
+        sess = _session.get_active()
+        count = len(_models.MODEL_LIST)
+        try:
+            current = int(getattr(sess, "current_model_index", 0) or 0)
+        except (TypeError, ValueError):
+            current = 0
+        if current < 0 or current >= count:
+            current = 0
+        ready, needs_config = _models.partition_models()
+
+        menu = NumberedMenu(self)
+        menu.setObjectName("modelMenu")
+        head = QWidgetAction(menu)
+        title = QLabel("模型")
+        title.setStyleSheet(f"color: {self._t('mv_text_sec')}; font-size: 12px;"
+                            " padding: 6px 10px 2px 10px; background: transparent;")
+        head.setDefaultWidget(title)
+        head.setEnabled(False)
+        menu.addAction(head)
+
+        if not ready:
+            empty = QWidgetAction(menu)
+            hint = QLabel("还没有配置好的模型，去设置里填 API Key")
+            hint.setStyleSheet(f"color: {self._t('mv_text_sec')}; font-size: 12px;"
+                               " padding: 6px 10px 8px 10px; background: transparent;")
+            empty.setDefaultWidget(hint)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+        for pos, idx in enumerate(ready):
+            name, mtype, _model_id, _think = _models.MODEL_LIST[idx]
+            desc = _models.model_type_label(mtype)
+            act = DescribedMenuItem.add_to(
+                menu, None, name, desc, lambda i=idx: self._choose_model(i),
+                text=self._t("mv_text"), sub=self._t("mv_text_sec"),
+                hover=self._t("mv_header_bg"),
+                trailing=str(pos + 1) if numbered and pos < 9 else "",
+                checked=(idx == current), accent=self._t("mv_indigo"))
+            if numbered and pos < 9:
+                menu.numbered.append(act)
+
+        if ready or needs_config:
+            menu.addSeparator()
+        # 模型不支持思考时干脆没有这一项（不是灰掉——灰掉会让人以为是配置问题）
+        if _models.supported_efforts_for(current):
+            self._add_submenu_item(
+                menu, "思考强度", self._effort_summary(current),
+                lambda: self._open_effort_menu(anchor))
+        if needs_config:
+            self._add_submenu_item(
+                menu, "更多模型", f"{len(needs_config)} 个还没配置好",
+                lambda: self._open_more_models_menu(anchor))
+
+        menu.setStyleSheet(
+            f"QMenu#modelMenu {{ background: {self._t('mv_card_bg')};"
+            f" border: 1px solid {self._t('mv_chip_border')}; border-radius: 10px; padding: 4px; }}")
+        size = menu.sizeHint()
+        point = anchor.mapToGlobal(QPoint(anchor.width(), 0))
+        menu.exec(point - QPoint(size.width(), size.height() + 6))
+        menu.deleteLater()
+
+    def _add_submenu_item(self, menu, name, desc, slot):
+        """菜单底部那种「标题 + 说明 + ›」的项：点它打开对应的子菜单。
+
+        子菜单延到下一个事件循环再弹：这一下点击还在主菜单的 exec() 里，
+        直接嵌套 exec 会叠出第二层事件循环，主菜单收起时才不好收场。
+        """
+        from .widgets import DescribedMenuItem
+
+        def _later():
+            QTimer.singleShot(0, self, slot)
+
+        return DescribedMenuItem.add_to(
+            menu, None, name, desc, _later,
+            text=self._t("mv_text"), sub=self._t("mv_text_sec"),
+            hover=self._t("mv_header_bg"), trailing="›", accent=self._t("mv_indigo"))
+
+    def _effort_summary(self, model_index) -> str:
+        """「思考强度」那一行的说明：模型不支持思考时说清原因，不显示假档位。"""
+        from .. import models as _models
+        from .. import reasoning as _reasoning
+        from .. import session as _session
+        supported = _models.supported_efforts_for(model_index)
+        if not supported:
+            return "这个模型不支持思考"
+        action = _reasoning.effective(_session.get_active().reasoning_effort, supported)
+        return f"当前：{_reasoning.LABELS.get(action, '')}"
+
+    def _open_effort_menu(self, anchor=None):
+        """「思考强度」子菜单：档位按 models.supported_efforts_for(当前模型下标) 显示。
+
+        当前档位打勾；选了调 agent.set_reasoning_effort。模型不支持思考时没有这一项。
+        """
+        from PySide6.QtWidgets import QLabel, QWidgetAction
+        from .. import models as _models
+        from .. import reasoning as _reasoning
+        from .. import session as _session
+        from .widgets import DescribedMenuItem, NumberedMenu
+        sess = _session.get_active()
+        idx = int(getattr(sess, "current_model_index", 0) or 0)
+        supported = _models.supported_efforts_for(idx)
+        if not supported:
+            return
+        current = _reasoning.effective(sess.reasoning_effort, supported)
+        if current is None:
+            current = "off"
+        menu = NumberedMenu(self)
+        menu.setObjectName("effortMenu")
+        head = QWidgetAction(menu)
+        title = QLabel("思考强度")
+        title.setStyleSheet(f"color: {self._t('mv_text_sec')}; font-size: 12px;"
+                            " padding: 6px 10px 2px 10px; background: transparent;")
+        head.setDefaultWidget(title)
+        head.setEnabled(False)
+        menu.addAction(head)
+        for pos, effort in enumerate(supported):
+            act = DescribedMenuItem.add_to(
+                menu, None, _reasoning.LABELS.get(effort, effort),
+                self._EFFORT_DESCS.get(effort, ""),
+                lambda e=effort: self._choose_effort(e),
+                text=self._t("mv_text"), sub=self._t("mv_text_sec"),
+                hover=self._t("mv_header_bg"),
+                trailing=str(pos + 1) if pos < 9 else "",
+                checked=(effort == current), accent=self._t("mv_indigo"))
+            if pos < 9:
+                menu.numbered.append(act)
+        menu.setStyleSheet(
+            f"QMenu#effortMenu {{ background: {self._t('mv_card_bg')};"
+            f" border: 1px solid {self._t('mv_chip_border')}; border-radius: 10px; padding: 4px; }}")
+        self._exec_above(menu, anchor or self.model_btn)
+
+    def _open_more_models_menu(self, anchor=None):
+        """「更多模型」子菜单：还没配 Key 的模型，选了提示去设置里补上。"""
+        from PySide6.QtWidgets import QLabel, QWidgetAction
+        from .. import models as _models
+        from .widgets import DescribedMenuItem, NumberedMenu
+        _ready, needs_config = _models.partition_models()
+        menu = NumberedMenu(self)
+        menu.setObjectName("moreModelsMenu")
+        head = QWidgetAction(menu)
+        title = QLabel("更多模型")
+        title.setStyleSheet(f"color: {self._t('mv_text_sec')}; font-size: 12px;"
+                            " padding: 6px 10px 2px 10px; background: transparent;")
+        head.setDefaultWidget(title)
+        head.setEnabled(False)
+        menu.addAction(head)
+        for idx in needs_config:
+            name, mtype, _model_id, _think = _models.MODEL_LIST[idx]
+            issues = _models.get_model_config_issues(idx)
+            desc = issues[0].rstrip("。") if issues else "还需要在设置里补上配置"
+            DescribedMenuItem.add_to(
+                menu, None, name, desc, lambda i=idx: self._explain_model_config(i),
+                text=self._t("mv_text"), sub=self._t("mv_text_sec"),
+                hover=self._t("mv_header_bg"))
+        menu.setStyleSheet(
+            f"QMenu#moreModelsMenu {{ background: {self._t('mv_card_bg')};"
+            f" border: 1px solid {self._t('mv_chip_border')}; border-radius: 10px; padding: 4px; }}")
+        self._exec_above(menu, anchor or self.model_btn)
+
+    @staticmethod
+    def _exec_above(menu, anchor):
+        """子菜单也向上弹：右边缘对齐 anchor 的右边缘，底边留 6px 间隙。"""
+        size = menu.sizeHint()
+        point = anchor.mapToGlobal(QPoint(anchor.width(), 0))
+        menu.exec(point - QPoint(size.width(), size.height() + 6))
+        menu.deleteLater()
+
+    def _choose_model(self, index):
+        """菜单里选了一个能用的模型：走原下拉框同一条路（停止 / 切换 / 标记 / 提示）。"""
+        self._on_model_changed(index)
+
+    def _choose_effort(self, effort):
+        """选思考档位：只改当前会话的档位并重建 llm，不动模型。"""
+        agent.set_reasoning_effort(effort)
+        self._refresh_model_btn()
+
+    def _explain_model_config(self, index):
+        """选了还没配好的模型：不切换，只说清缺什么、去哪里补。"""
+        from .. import models as _models
+        issues = _models.get_model_config_issues(index)
+        name = _models.MODEL_LIST[index][0]
+        text = issues[0] if issues else f"{name} 还需要在设置里补上配置。"
+        self._show_toast(f"{text.rstrip('。')}。在 设置 → 模型 里填好后就能选它。", 6000)
 
     # ── 权限模式（输入框底栏的"模式"按钮；规则见 permission_modes.py）──
 

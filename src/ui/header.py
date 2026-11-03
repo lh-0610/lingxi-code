@@ -2,7 +2,8 @@
 
 抽出来的整块顶栏 + 散落各处的按钮样式代码：
 
-- 顶栏构造：模型选择 / Plan-Act 切换 / 撤销 / 思考 / 角色卡 / 主题切换
+- 顶栏构造：撤销 / 隔离 / 角色卡 / 搜索 / 主题切换 / 任务面板
+  （模型选择与思考强度已挪到输入框底栏的模型按钮，见 chat_window._show_model_menu）
 - 顶栏响应式：窗口窄到一定宽度时按钮压缩成"图标 + 短词"或纯图标
 - 按钮样式：所有 `_style_*_btn` 都在这里（含输入区的 img/mic/tts 按钮）
 - 角色卡 UI：加载 / 清除 / 状态恢复
@@ -16,12 +17,11 @@ import os
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QMenu, QMessageBox,
-    QPushButton, QSizePolicy, QWidget,
+    QFileDialog, QHBoxLayout, QLabel, QMenu, QMessageBox,
+    QPushButton, QWidget,
 )
 
 from .. import agent
-from .. import state
 from ..paths import logger
 from ._base import BASE_DIR
 from .helpers import _make_upload_icon
@@ -33,12 +33,14 @@ class HeaderMixin:
     # ── 顶栏构造 ──
 
     def _build_header(self, parent_layout):
-        """顶栏（设计稿 A5）：左边侧栏开关 + 模型；右边一排不带边框的图标按钮——
-        撤销、隔离、计划 | 执行、思考、角色、搜索、深浅色、任务面板。
+        """顶栏（设计稿 A5）：左边侧栏开关；右边一排不带边框的图标按钮——
+        撤销、隔离、角色、搜索、深浅色、任务面板。模型和思考强度在输入框底栏
+        （chat_window 的 model_btn），顶栏不再放这两样。
         样式在 theme.py 的 #header 段，按钮只设 class / on 属性和按状态现画的图标。"""
         header = QWidget()
         header.setObjectName("header")
         header.setFixedHeight(56)
+        self._header_bar = header        # 折叠档位按【顶栏自己的宽度】判断（见 _refresh_header_compactness）
         layout = QHBoxLayout(header)
         layout.setContentsMargins(12, 0, 14, 0)
         layout.setSpacing(6)
@@ -62,22 +64,8 @@ class HeaderMixin:
         self.header_brand.setVisible(brand_visible)
         self.header_brand_dot.setVisible(brand_visible)
 
-        # 模型选择下拉框
-        self.model_combo = QComboBox()
-        self.model_combo.setCursor(Qt.PointingHandCursor)
-        for name, _, _, _ in agent.MODEL_LIST:
-            self.model_combo.addItem(name)
-        # 跟启动时解析的默认模型（agent 里按 default_model_id 设的 current_model_index）
-        # 同步，而不是写死 0（0 是 Claude Code）。在 connect 之前设，不触发回调。
-        self.model_combo.setCurrentIndex(agent.current_model_index)
-        # 关键:不让下拉框横向膨胀。QComboBox 默认会被 layout 拉伸去填满可用空间(实测能涨到
-        # 640px),把后面的 addStretch 吃光、一路顶到撤销按钮 → 顶栏看起来"挤在一起/被挡"。
-        # Maximum 策略让它停在 sizeHint(内容宽,受 stylesheet min-width 托底),多余空间归 stretch。
-        self.model_combo.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        self._style_model_combo()
-        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
-        layout.addWidget(self.model_combo)
-
+        # 模型选择与思考强度已挪到输入框底栏的模型按钮（chat_window 的 model_btn /
+        # _show_model_menu）——顶栏不放模型下拉和"思考"开关，左侧只留侧栏开关。
         layout.addStretch()
 
         # 撤销按钮：用 file_history 的写前备份复原 AI 最近一次文件修改。无可撤销记录时按钮禁用
@@ -95,15 +83,6 @@ class HeaderMixin:
 
         # 计划 / 执行 已挪到输入框底栏的"模式"菜单（五种权限模式，见 permission_modes.py）。
         # 注：「编码/知识库」模式入口和知识库管理控件在左侧栏（rag_sidebar.py），顶栏不放
-
-        # 思考模式开关
-        self.think_btn = self._header_button("思考", "ghost", "思考模式：让模型显式输出推理过程")
-        self.think_btn.setCheckable(True)
-        self.think_btn.setChecked(True)
-        self.think_btn.toggled.connect(lambda _: self._style_think_btn())
-        self.think_btn.clicked.connect(self._toggle_thinking)
-        self._style_think_btn()
-        layout.addWidget(self.think_btn)
 
         # 角色卡按钮
         self.role_btn = self._header_button("默认助手", "ghost")
@@ -163,7 +142,6 @@ class HeaderMixin:
         specs = (
             ("sidebar_toggle_btn", "panel-left.svg"),
             ("undo_btn", "undo-2.svg"),
-            ("think_btn", "lightbulb.svg"),
             ("role_btn", "user.svg"),
             ("search_btn", "search.svg"),
             ("theme_btn", "moon.svg" if self.theme == "light" else "sun.svg"),
@@ -183,14 +161,13 @@ class HeaderMixin:
 
     # ── 顶栏响应式 ──
 
-    # 顶栏宽度（像素）到这以下就收一档：先把撤销 / 隔离 / 思考的文字收起只留图标，再收角色名。
-    # 按各档实际要的宽度定（含按钮间距和左右边距），收完最窄一档约 590px——
-    # 任务面板停靠时对话栏至少留 592（chat_window._TASK_PANEL_MIN_CHAT），顶栏不会比这更窄。
-    _HEADER_FULL_WIDTH = 800
-    _HEADER_COMPACT_WIDTH = 690
-    # 模型框各档的总宽（QSS 的 min-width 只管文字区，左右内边距另算 38px）
-    _MODEL_COMBO_WIDTHS = ((180, 260), (150, 210), (120, 170))
-    _MODEL_COMBO_PADDING = 38
+    # 顶栏宽度（像素）到这以下就收一档：先把撤销 / 隔离的文字收起只留图标，再收角色名。
+    # 模型下拉框和"思考"开关挪到输入框底栏后，左侧只剩侧栏开关、右侧少一个按钮，
+    # 各档实际要的宽度相应收窄（原 800 / 690，其中约 250px 是模型框、40px 是思考按钮）。
+    # 收完最窄一档约 350px——顶栏不再是最宽的那一项，任务面板停靠的下限仍是
+    # chat_window._TASK_PANEL_MIN_CHAT（592，留给对话正文与输入框）。
+    _HEADER_FULL_WIDTH = 560
+    _HEADER_COMPACT_WIDTH = 430
 
     def _refresh_header_compactness(self):
         """顶栏变窄时先收文字、留图标，按钮之间不会互相压住。
@@ -198,20 +175,16 @@ class HeaderMixin:
         用【顶栏自己的宽度】判断，不用整窗宽度：侧栏和任务面板开着时，顶栏的可用宽度
         比窗口窄得多，按整窗算会判成"宽"而不折叠，按钮挤成一团。"""
         w = self.width()
-        _hdr = self.model_combo.parentWidget() if hasattr(self, "model_combo") else None
+        _hdr = getattr(self, "_header_bar", None)
         if _hdr is not None and _hdr.width() > 0:
             w = _hdr.width()
         if w >= self._HEADER_FULL_WIDTH:
             level = 0   # 图标 + 文字
         elif w >= self._HEADER_COMPACT_WIDTH:
-            level = 1   # 撤销 / 隔离 / 思考只留图标
+            level = 1   # 撤销 / 隔离只留图标
         else:
             level = 2   # 角色名也收起
 
-        if hasattr(self, "think_btn"):
-            self.think_btn.setText("" if level else "思考")
-            state_word = "开" if self.think_btn.isChecked() else "关"
-            self.think_btn.setToolTip(f"思考模式（{state_word}）：让模型显式输出推理过程")
         if hasattr(self, "undo_btn"):
             self.undo_btn.setText("" if level else "撤销")
         if hasattr(self, "isolation_btn"):
@@ -223,39 +196,30 @@ class HeaderMixin:
             short = name if len(name) <= limit else name[:limit] + "…"
             self.role_btn.setText("" if level == 2 else short)
             self.role_btn.setToolTip(f"角色卡：{name}（点击加载或清除）")
-        # model_combo 宽度按档位约束。关键是 setMaximumWidth 硬上限:QComboBox 的 sizeHint
-        # 取【下拉列表里最长的模型名】,会把框撑到 ~350px(哪怕当前选中的是短名),挤占右侧
-        # 按钮。设硬上限后超长当前项用省略号显示,框不再当空间黑洞。
-        if hasattr(self, "model_combo"):
-            self._header_level = level
-            min_w, max_w = self._MODEL_COMBO_WIDTHS[level]
-            ss = self.model_combo.styleSheet()
-            import re as _re
-            ss = _re.sub(r"min-width:\s*\d+px;", f"min-width: {min_w - self._MODEL_COMBO_PADDING}px;", ss)
-            self.model_combo.setStyleSheet(ss)
-            self.model_combo.setMaximumWidth(max_w)
+        self._header_level = level
 
     # ── 顶栏按钮交互 ──
 
     def _on_model_changed(self, index):
+        """用户亲手切换模型（输入框底栏的模型菜单调这里）。
+
+        原顶栏下拉框的行为逐条保留：生成中先把这一轮停掉、切当前的模型、
+        标记 `model_user_choice`（「继续任务」据此不再改回记录里的模型）、
+        不支持思考的模型把档位归 off，最后补一次配置缺项提示。
+        切会话的同步不走这里（那条路只重画按钮），不会误标成"用户选的"。
+        """
         from .. import session as _session
-        if _session.get_active().is_generating:
+        sess = _session.get_active()
+        if sess.is_generating:
             self._force_stop_generation()
         agent.switch_model(index)
-        # 用户亲手选的模型：「继续任务」的预检据此不再改回上一轮记录的模型（B04）。
-        # 切会话时的顶栏同步走 blockSignals，不经过这里，所以不会误标。
-        _session.get_active().model_user_choice = True
-        # 根据模型是否支持思考，更新开关状态
+        sess.model_user_choice = True
+        # 这个模型不支持思考：档位归 off，免得之后切到支持思考的模型时带着旧档位
         _, _, _, supports_think = agent.MODEL_LIST[index]
-        self.think_btn.setEnabled(supports_think)
         if not supports_think:
-            self.think_btn.setChecked(False)
             agent.set_reasoning(False)
+        self._refresh_model_btn()
         self._show_current_model_config_warning()
-
-    def _toggle_thinking(self):
-        enabled = self.think_btn.isChecked()
-        agent.set_reasoning(enabled)
 
     def _on_undo_click(self):
         """撤销按钮（B11a）：只撤当前会话、当前实际工作区里最近一次有完整记录的
@@ -383,20 +347,16 @@ class HeaderMixin:
         self._show_toast("；".join(parts), 6000)
 
     def _sync_header_from_session(self):
-        """切会话后把顶栏（模型下拉 / Plan-Act / 思考 / 隔离）同步到当前会话的状态。
-        model/mode/思考 现在是会话级——切到哪个会话，顶栏就显示那个会话的选择。
-        setCurrentIndex 会触发 _on_model_changed（含 force_stop），切会话时必须 blockSignals 屏蔽。"""
+        """切会话后把顶栏（模型 / 模式 / 隔离）同步到当前会话的状态。
+
+        model / mode / 思考强度都是会话级——切到哪个会话，底栏的模型按钮就显示那个
+        会话自己的模型和档位。这里只重画按钮、不经过 `_on_model_changed`，
+        所以不会误标成"用户亲手选的模型"，也不会触发停止/重建 llm。"""
         from .. import session as _session
         from .. import state as _state
         sess = _session.get_active()
-        if hasattr(self, "model_combo"):
-            self.model_combo.blockSignals(True)
-            self.model_combo.setCurrentIndex(sess.current_model_index)
-            self.model_combo.blockSignals(False)
-            _, _, _, supports_think = agent.MODEL_LIST[sess.current_model_index]
-            if hasattr(self, "think_btn"):
-                self.think_btn.setEnabled(supports_think)
-                self.think_btn.setChecked(bool(sess.reasoning_enabled and supports_think))
+        if hasattr(self, "model_btn"):
+            self._refresh_model_btn()
         if hasattr(self, "mode_btn"):
             self._refresh_mode_btn()       # 输入框底栏的模式按钮显示这个会话自己的模式
         # 侧栏「编码/知识库」入口跟随该会话的 session_kind（逻辑在 rag_sidebar.py）
@@ -427,7 +387,7 @@ class HeaderMixin:
         else:
             self._style_role_btn(active=False)
         # 让窗口窄的时候角色名也跟着截断
-        if hasattr(self, "model_combo"):  # 主 UI 已构造完
+        if hasattr(self, "_header_bar"):  # 主 UI 已构造完
             self._refresh_header_compactness()
 
     def _load_role_card(self):
@@ -528,28 +488,6 @@ class HeaderMixin:
     # 按钮样式（顶栏 + 输入区）
     # ══════════════════════════════════════
 
-    def _style_model_combo(self):
-        arrow_path = os.path.join(BASE_DIR, "icons", "chevron_down.svg").replace("\\", "/")
-        # 设计稿 A5：30px 高的小卡片（白底细边），名字后面一个小箭头
-        self.model_combo.setStyleSheet(
-            f"QComboBox {{ background: {self._t('mv_card_bg')}; border: 1px solid {self._t('mv_chip_border')}; "
-            f"border-radius: 8px; padding: 0 28px 0 10px; min-height: 28px; max-height: 28px; "
-            f"font-size: 13px; color: {self._t('mv_text')}; "
-            f"min-width: {self._MODEL_COMBO_WIDTHS[getattr(self, '_header_level', 0)][0] - self._MODEL_COMBO_PADDING}px; }}"
-            f"QComboBox:hover {{ border-color: {self._t('mv_chip_hover')}; }}"
-            f"QComboBox::drop-down {{ border: none; width: 24px; subcontrol-origin: padding; subcontrol-position: center right; }}"
-            f"QComboBox::down-arrow {{ image: url({arrow_path}); width: 14px; height: 14px; margin-right: 8px; }}"
-            f"QComboBox QAbstractItemView {{ background: {self._t('combo_view_bg')}; border: 1px solid {self._t('combo_view_border')}; "
-            f"color: {self._t('combo_view_text')}; selection-background-color: {self._t('combo_view_sel_bg')}; "
-            f"selection-color: {self._t('combo_view_sel_text')}; padding: 4px; outline: 0; }}"
-        )
-
-    def _style_think_btn(self):
-        """开 / 关的底色由 QSS :checked 管；这里只重画图标颜色、刷新提示里的开关状态。"""
-        self.think_btn.setIcon(self._svg_icon("lightbulb.svg", self._header_icon_color(self.think_btn)))
-        state_word = "开" if self.think_btn.isChecked() else "关"
-        self.think_btn.setToolTip(f"思考模式（{state_word}）：让模型显式输出推理过程")
-
     def _style_task_panel_btn(self):
         self.task_panel_btn.setIcon(
             self._svg_icon("panel-right.svg", self._header_icon_color(self.task_panel_btn)))
@@ -606,7 +544,7 @@ class HeaderMixin:
                 "隔离模式：AI 在独立 worktree 目录操作，不影响主项目\n需项目已启用版本控制"
             )
         # 文字按当前窗口宽度刷新（UI 已构造完才调，避免构造期半成品）
-        if hasattr(self, "model_combo"):
+        if hasattr(self, "_header_bar"):
             self._refresh_header_compactness()
 
     def _toggle_isolation(self):
@@ -652,7 +590,7 @@ class HeaderMixin:
         """加载了角色卡时按钮"开着"（浅主题色底），默认助手时是普通的次要色。"""
         self._set_on(self.role_btn, active)
         self.role_btn.setIcon(self._svg_icon("user.svg", self._header_icon_color(self.role_btn)))
-        if hasattr(self, "model_combo"):
+        if hasattr(self, "_header_bar"):
             self._refresh_header_compactness()   # 按钮上的角色名由它按顶栏宽度写
 
     def _style_settings_btn(self):
