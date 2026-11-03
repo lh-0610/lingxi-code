@@ -166,16 +166,49 @@ class TestGitDiffMarksReviewed:
         assert "已暂存的修改" in out and "README.md" in out
         assert "git_diff(staged=True)" in out, "要告诉模型去哪儿补看"
 
-    def test_untracked_only_does_not_count(self, git_repo):
-        """第三组：只有未跟踪的新文件。默认 diff 同样看不见。"""
+    def test_untracked_files_are_shown_and_count(self, git_repo):
+        """第三组：只有未跟踪的新文件。默认 `git diff` 看不见，所以把它们整份附上——给模型看过了，才算审阅。"""
         v = self._fresh()
         (git_repo / "new_module.py").write_text("value = 1\n", encoding="utf-8")
 
         out = git_diff.func("")
-        assert v["diff_reviewed"] is False
         assert "工作区干净，没有未提交改动" not in out
-        assert "未跟踪的新文件" in out and "new_module.py" in out
-        assert "git_status" in out
+        assert "new_module.py" in out and "+value = 1" in out
+        assert v["diff_reviewed"] is True
+
+    def test_new_file_by_path_is_shown_and_counts(self, git_repo):
+        """按文件逐个审阅时查一个新文件：以前回"工作区干净"、也不算看过，新建文件的任务义务永远解不开。"""
+        v = self._fresh()
+        (git_repo / "pkg").mkdir()
+        (git_repo / "pkg" / "fresh.py").write_text("x = 2\n", encoding="utf-8")
+
+        out = git_diff.func("pkg/fresh.py")
+        assert "工作区干净" not in out and "+x = 2" in out
+        assert v["diff_reviewed"] is True
+
+    def test_too_many_new_files_are_not_all_counted(self, git_repo, monkeypatch):
+        """新文件太多只附上前几个：没附上的照旧算没看过，并说清去哪儿看。"""
+        from src import tools_git
+        monkeypatch.setattr(tools_git, "_NEW_FILES_MAX", 1)
+        v = self._fresh()
+        (git_repo / "a_new.py").write_text("a = 1\n", encoding="utf-8")
+        (git_repo / "b_new.py").write_text("b = 1\n", encoding="utf-8")
+
+        out = git_diff.func("")
+        assert "+a = 1" in out and "b_new.py" in out and "+b = 1" not in out
+        assert v["diff_reviewed"] is False
+
+    def test_staged_and_new_files_still_ask_for_staged(self, git_repo):
+        """新文件看过了，但暂存区的改动默认 diff 仍看不见：不能因为附上了新文件就整体放行。"""
+        v = self._fresh()
+        (git_repo / "README.md").write_text("changed and staged", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=str(git_repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        (git_repo / "new_module.py").write_text("value = 1\n", encoding="utf-8")
+
+        out = git_diff.func("")
+        assert "+value = 1" in out and "git_diff(staged=True)" in out
+        assert v["diff_reviewed"] is False
 
     def test_gitignored_files_do_not_block_discharge(self, git_repo):
         """被 ignore 的构建产物/缓存不算"没审阅的改动"，否则义务又解不开了。"""

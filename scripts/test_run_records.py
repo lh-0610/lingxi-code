@@ -1646,13 +1646,33 @@ class TestBlindPeriodDischargeThroughRealTools:
             "不能因为 diff 是空的就永远卡住")
         assert sess.verification["diff_reviewed"] is True
 
-    @pytest.mark.parametrize("kind", ["staged", "untracked"])
+    def test_new_files_shown_in_the_diff_do_discharge(self, isolated_memory, git_project):
+        """未跟踪的新文件：默认 `git diff` 看不见，git_diff 现在把它整份附上——露过面了，才能结清。"""
+        from src import tools, tools_git
+        sess = _new_session()
+        _saved(sess)
+        sess.project = str(git_project)
+        session.bind_thread(sess)
+        session.set_active(sess)
+        (git_project / "new_module.py").write_text("value = 1\n", encoding="utf-8")
+
+        run_records.begin_run(sess)
+        verification.mark_blind_period(sess.verification, str(git_project), "枚举超时")
+        assert tools.run_tests.func("") and sess.verification["tests_passed"] is True
+
+        out = tools_git.git_diff.func("")
+        assert "+value = 1" in out and "工作区干净" not in out
+        assert sess.verification["diff_reviewed"] is True
+        assert verification.get_verification_gaps(sess.verification) == []
+
+    @pytest.mark.parametrize("kind", ["staged"])
     def test_changes_invisible_to_default_diff_do_not_discharge(self, isolated_memory,
                                                                 git_project, kind):
-        """默认 diff 看不见的改动不能放行：已暂存的修改、未跟踪的新文件。
+        """默认 diff 看不见的改动不能放行：已暂存的修改。
 
-        两者都会让 `git_diff()` 返回空。早先这被当成"整个项目干净"，义务清空、
-        任务按 completed 收尾——而那些文件从头到尾没在任何 diff 里露过面。
+        它会让 `git_diff()` 返回空。早先这被当成"整个项目干净"，义务清空、
+        任务按 completed 收尾——而那份改动从头到尾没在任何 diff 里露过面。
+        （未跟踪的新文件现在会被 git_diff 整份附上，见上一条。）
         """
         from src import tools, tools_git
         sess = _new_session()

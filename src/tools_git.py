@@ -135,13 +135,44 @@ def _uncovered_changes(cwd):
     return staged_files, untracked, ""
 
 
+# git_diff 一次最多把这么多个未跟踪的新文件整份附上，再多的只列名字、不算看过
+_NEW_FILES_MAX = 10
+
+
+def _untracked_as_diff(cwd, path, max_chars):
+    """范围内（path 为空 = 整个项目）未跟踪的新文件，写成"整文件新增"的 diff。
+
+    返回 (文本, 已整份给出的文件, 范围内全部新文件)。被 .gitignore 忽略的不算。
+    """
+    listing = _git_text(cwd, ["ls-files", "--others", "--exclude-standard", "--", path or "."])
+    files = [f for f in (listing or "").splitlines() if f.strip()]
+    parts, shown = [], []
+    for rel in files[:_NEW_FILES_MAX]:
+        head = f"diff --git a/{rel} b/{rel}\nnew file (git 还没跟踪)\n--- /dev/null\n+++ b/{rel}"
+        try:
+            content = _read_text(cwd, rel, max_chars)
+        except OSError as e:
+            parts.append(f"{head}\n（读取失败：{e}）")
+            continue
+        if "\x00" in content:
+            parts.append(f"{head}\n（二进制文件，不显示内容）")
+        else:
+            parts.append(head + "".join(f"\n+{ln}" for ln in content.splitlines()))
+        shown.append(rel)
+    if len(files) > _NEW_FILES_MAX:
+        rest = files[_NEW_FILES_MAX:]
+        parts.append(f"（还有 {len(rest)} 个未跟踪的新文件没附上：{', '.join(rest[:_UNCOVERED_SAMPLE])}"
+                     " —— 用 git_diff(path=...) 逐个看）")
+    return ("\n".join(parts) + "\n") if parts else "", shown, files
+
+
 def _describe_uncovered(staged_files, untracked):
     """告诉模型：没暂存的改动确实没有，但还有它没看过的东西，以及去哪儿看。"""
     parts = ["工作区没有**未暂存**的改动，但默认 diff 看不到下面这些，"
              "因此还不能认为整个项目已经审阅过："]
     for label, files, how in (
         ("已暂存的修改", staged_files, "用 git_diff(staged=True) 查看"),
-        ("未跟踪的新文件", untracked, "用 git_status 查看"),
+        ("未跟踪的新文件", untracked, "用 git_diff(path=...) 逐个查看"),
     ):
         if not files:
             continue
@@ -188,7 +219,12 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
                 return _review_without_git(path, max_chars, "当前项目不是 git 仓库，")
             return f"git diff 执行出错: {stderr or '未知错误'}"
 
-        output = result.stdout or ""
+        tracked = result.stdout or ""
+        # 未跟踪的新文件 `git diff` 一个字都看不见：把范围内的新文件按"整文件新增"附在后面。
+        # 以前只能靠 git_status 看见文件名，带 path 查一个新文件还会回"工作区干净"——
+        # 新建了文件的任务按文件逐个审阅时，这份义务永远解不开（C1 为此调了 16 次 git_diff）。
+        new_text, new_shown, new_all = ("", [], []) if staged else _untracked_as_diff(cwd, path, max_chars)
+        output = tracked + (("\n" if tracked and not tracked.endswith("\n") else "") + new_text if new_text else "")
         empty = not output.strip()
 
         # 标记 diff 已审查（验证状态）。**必须在"空 diff"提前返回之前**：
@@ -204,7 +240,8 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
         # 执行失败（git 缺失 / 非仓库 / 非零退出 / 超时 / 异常）一律走不到这里，不放行。
         uncovered_note = ""
         covered = _resolve_path(path) if path else cwd
-        if not empty:
+        new_left_out = [f for f in new_all if f not in new_shown]
+        if tracked.strip() or (path and new_text and not new_left_out):
             _mark_reviewed(covered)
         elif not path and not staged:
             # 默认 `git diff` **只看已跟踪文件的未暂存改动**——已 `git add` 的修改和
@@ -216,9 +253,12 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
             staged_files, untracked, probe_error = _uncovered_changes(cwd)
             if probe_error:
                 # 核对失败 = 不知道干不干净。不知道就不放行（与追踪枚举失败同一取舍）。
-                return ("工作区没有未暂存的改动，但无法核对暂存区和未跟踪文件"
+                return ((output + "\n\n" if output.strip() else "")
+                        + "工作区没有未暂存的改动，但无法核对暂存区和未跟踪文件"
                         f"（{probe_error}），因此不能确认整个项目干净。"
                         "请用 git_status 手动确认后再判断是否完成。")
+            # 上面已经整份给出的新文件算看过了；没给出的（太多被截掉的）照旧算没覆盖
+            untracked = [f for f in untracked if f not in new_shown]
             if staged_files or untracked:
                 uncovered_note = _describe_uncovered(staged_files, untracked)
             else:
@@ -230,6 +270,8 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
             if uncovered_note:
                 return uncovered_note
             return "工作区干净，没有未提交改动。"
+        if uncovered_note:
+            output = output.rstrip("\n") + "\n\n" + uncovered_note
 
         if len(output) > max_chars:
             output = (

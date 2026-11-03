@@ -521,9 +521,10 @@ def gaps_from_state(v: dict) -> list[str]:
         if missing:
             where = _describe_places(v.get("diff_roots") or []) or "（没有记录查看范围）"
             gaps.append(f"git_diff 查看的是 {where}，没有覆盖 {_describe_places(missing)}——"
-                        "那里的改动还没看过。git_diff 在项目目录里执行：目录不在当前项目里、"
-                        "或属于另一个 Git 工作区（隔离区 / 子模块 / 嵌套仓库）时，需要把它作为项目"
-                        "打开后再查看；在那之前这一项保持未验证。")
+                        "那里的改动还没看过。在项目里的话，用 git_diff(path=那个文件或目录) 补看"
+                        "（新建的文件也会整份给出）；目录不在当前项目里、或属于另一个 Git 工作区"
+                        "（隔离区 / 子模块 / 嵌套仓库）时，需要把它作为项目打开后再查看，"
+                        "在那之前这一项保持未验证。")
 
     return gaps
 
