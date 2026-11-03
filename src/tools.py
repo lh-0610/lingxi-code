@@ -1982,7 +1982,7 @@ def _record_run_evidence(**fields):
 @tool
 def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
     """跑 pytest 测试，返回精炼结果：通过/失败数 + 每个失败用例的位置和错误摘要。
-    path: 测试路径/文件（相对项目根，空 = pytest 自动发现）。k: pytest -k 过滤表达式。
+    path: 测试路径/文件（相对项目根，空 = pytest 自动发现）；多个用空格隔开。k: pytest -k 过滤表达式。
     比 run_command 跑 pytest 省事——直接给你哪些挂了、错在哪，便于定位修复。"""
     # ── 构建命令：<解释器> -m pytest（frozen 下 sys.executable=exe 不能用，见 _resolve_python） ──
     cmd = [_resolve_python(), "-m", "pytest", "--tb=short", "-q"]
@@ -1992,15 +1992,20 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
         return reject
 
     # ── path 安全校验：_resolve_path + commonpath 防逃逸（同 code_map） ──
+    # 可以给多个路径（空格隔开）：模型常写 "a.py b.py"，整串当成一个路径交给 pytest 会找不到、
+    # 退出码 4，结果卡还会把它记成一次失败。整串本身就是存在的路径（目录名带空格）时不拆。
     if path:
-        resolved = _resolve_path(path)
-        root = _project_cwd()
-        try:
-            if os.path.commonpath([os.path.realpath(resolved), os.path.realpath(root)]) != os.path.realpath(root):
+        root = os.path.realpath(_project_cwd())
+        parts = [path] if os.path.exists(_resolve_path(path)) else path.split()
+        for part in parts:
+            resolved = _resolve_path(part)
+            try:
+                inside = os.path.commonpath([os.path.realpath(resolved), root]) == root
+            except ValueError:
+                inside = False
+            if not inside:
                 return "失败：路径超出项目范围，不允许（不能用 .. 逃出项目根）"
-        except ValueError:
-            return "失败：路径超出项目范围，不允许（不能用 .. 逃出项目根）"
-        cmd.append(resolved)
+            cmd.append(resolved)
 
     if k:
         cmd.extend(["-k", k])
@@ -2074,10 +2079,14 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
     # ── 标记验证状态：测试已执行 ──
     # pytest 退出码 5 = "没收集到任何用例"。它既不是通过也不是失败：一个测试都没跑，
     # 说 "已执行检查通过" 会让用户以为代码被测过了。
+    # 退出码 4 = pytest 用法错误（参数 / 路径不对）：同样一个测试都没跑，不能记成"测试失败"。
     if result.returncode == 0:
         _status, _reason = "passed", ""
     elif result.returncode == 5:
         _status, _reason = "not_run", "没有收集到任何测试用例"
+    elif result.returncode == 4:
+        _status, _reason = "not_run", "pytest 用法错误（参数或路径不对），测试没有跑"
+        summary = f"{_reason}（退出码 4）。\n\n" + summary
     else:
         _status, _reason = "failed", ""
     _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,

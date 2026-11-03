@@ -95,6 +95,36 @@ class TestReadFile:
         tools.run_tests.func()
         assert seen.get("QT_QPA_PLATFORM") == "windows"
 
+    def test_run_tests_takes_several_paths(self, project_dir, monkeypatch):
+        """模型常写 path="a.py b.py"：整串当一个路径 pytest 会找不到（退出码 4），要拆开传。"""
+        import subprocess
+        from src import tools
+        (project_dir / "a_test.py").write_text("", encoding="utf-8")
+        (project_dir / "b_test.py").write_text("", encoding="utf-8")
+        seen = []
+
+        def fake_run(cmd, **kwargs):
+            seen.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="2 passed in 0.01s", stderr="")
+
+        monkeypatch.setattr(tools.subprocess, "run", fake_run)
+        tools.run_tests.func("a_test.py b_test.py")
+        assert [p for p in seen[-1] if p.endswith("_test.py")] == [
+            str(project_dir / "a_test.py"), str(project_dir / "b_test.py")]
+
+        assert "超出项目范围" in tools.run_tests.func("a_test.py ../outside_test.py")
+
+    def test_pytest_usage_error_is_not_a_test_failure(self, project_dir, monkeypatch):
+        """退出码 4（参数或路径不对）一个测试都没跑：记"未执行"，不能记成测试失败。"""
+        import subprocess
+        from src import session, tools
+        monkeypatch.setattr(tools.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(
+            cmd, 4, stdout="ERROR: file or directory not found: nope.py", stderr=""))
+        out = tools.run_tests.func("nope.py")
+        assert "用法错误" in out
+        record = session.get_verification()["evidence"][-1]
+        assert record["status"] == "not_run" and record["exit_code"] == 4
+
 
 class TestWriteTools:
     def test_write_file_creates_parent_directories(self, project_dir, monkeypatch):
