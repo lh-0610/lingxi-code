@@ -502,16 +502,23 @@ _SCRIPT_BLOCK_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.S | re.I
 _SCRIPT_LANG_RE = re.compile(r"""\blang\s*=\s*["']?(tsx|ts|typescript)\b""", re.I)
 
 
-def _symbols_sfc(content: str) -> list[dict]:
-    out: list[dict] = []
+def script_blocks(content: str) -> list[tuple[str, int, str]]:
+    """单文件组件里的 <script> 块：[(语言, 块之前的行数, 代码)]，语言按 lang="ts" / "tsx" 认，默认 JS。"""
+    out = []
     for m in _SCRIPT_BLOCK_RE.finditer(content):
         lang_m = _SCRIPT_LANG_RE.search(m.group(1))
         lang = "javascript" if not lang_m else ("tsx" if lang_m.group(1).lower() == "tsx" else "typescript")
+        out.append((lang, content.count("\n", 0, m.start(2)), m.group(2)))
+    return out
+
+
+def _symbols_sfc(content: str) -> list[dict]:
+    out: list[dict] = []
+    for lang, offset, code in script_blocks(content):
         parser = _get_parser(lang)
         if parser is None:
             continue
-        offset = content.count("\n", 0, m.start(2))
-        source = m.group(2).encode("utf-8")
+        source = code.encode("utf-8")
         try:
             syms = _symbols_js(parser.parse(source).root_node, source)
         except Exception:

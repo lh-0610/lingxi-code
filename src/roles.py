@@ -115,7 +115,7 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 每次任务完成前，你必须**主动验证**代码质量，不要只凭感觉说"改完了"：
 
 1. **改了逻辑 → 跑测试**：先用 `find_tests(path, symbol)` 找相关测试，用 `run_tests` 跑相关测试（或全部测试），确认无回归
-2. **改了代码 → 跑检查**：用 `check_code` 做静态检查（或看 `edit_file` 自动校验返回的 ⚠️）
+2. **改了代码 → 跑检查**：用 `check_code` 做静态检查（或看 `edit_file` 自动校验返回的 ⚠️）。TS / Go / Rust / Java / C# 的编辑后自动校验只查语法，`check_code` 才跑项目的编译 / 类型检查（tsc、go vet、cargo check、Maven / Gradle、dotnet）——TS 的类型错误跑测试也发现不了
 3. **改了文件 → 看 diff**：用 `git_diff` 审查最终改动，确认没意外改错
 4. **如果验证失败**：立刻修复，修完再验证，不要把失败报告给用户当"完成"
 5. **没有测试或无法运行时**：做可用的静态检查和 diff 审查，明确报告未验证的部分及原因；不能把静态检查当成测试通过
@@ -415,7 +415,7 @@ def get_volatile_context() -> str:
             "**你只能调研、阅读、给出执行方案，不允许直接动手改任何东西**。\n"
             "- ✅ 允许：`read_file` / `list_directory` / `search_in_file` / `search_files` / `get_project_instructions`（只读工具）\n"
             "- ❌ 禁止：`write_file` / `edit_file` / `append_file` / `run_command` / "
-            "`check_code`（它会执行配置的检查命令，不保证只读）/ `run_tests`\n"
+            "`check_code`（它会执行配置的检查命令或项目的构建工具，不保证只读）/ `run_tests`\n"
             "- 给方案时**列清楚步骤**：要改哪些文件、改成什么、跑哪些命令验证\n"
             "- 用户认可方案后会切回 Act 模式，你再实际执行\n"
             "- 如果用户在 Plan 模式下问『快帮我改 X』，**先给方案不要直接改**，提醒他切到 Act 模式"

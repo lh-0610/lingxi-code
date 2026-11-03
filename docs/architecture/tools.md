@@ -31,7 +31,7 @@
 | `run_tests` | 跑 pytest（`_resolve_python()` 选解释器：项目 venv → 开发期 sys.executable → PATH；精炼失败定位 + 总耗时；`encoding=utf-8` 防 GBK 崩） |
 | `git_diff` / `git_log` / `git_status` | 只读 git（看改动/历史/状态；commonpath 越界防护；Plan 只读放行） |
 | `git_stage` / `git_unstage` / `git_commit` | git 写操作（暂存/取消暂存/本地提交，**无 push**）；**执行前强制弹确认卡**（按危险操作处理、不给"记住"选项）；路径白名单防注入，commit 不自动暂存、校验信息非空 |
-| `check_code` | 静态检查单文件（lint/语法）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`），其它语言用 config 的 `check_command`；不弹确认；**Plan 模式拦截**（见下） |
+| `check_code` | 静态检查（lint/语法/类型/编译）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`）+ mypy；其它语言用 config 的 `check_command`，没配就跑项目的编译 / 类型检查（`static_checks.py`）；不弹确认；**Plan 模式拦截**（见下） |
 | `apply_patch` | 多文件补丁（Codex 风格 `*** Begin Patch`）：统一校验、确认后，暂存新内容和原文件备份再写入。写入失败回滚，回滚受阻保留备份并报告；审批期间目标变化拒绝覆盖。不承诺崩溃时跨文件原子性。写工具、Plan/遥控自动拦 |
 | `search_knowledge` | 知识库语义检索（`query` + `scope` 分域，默认 all 各域按配额取；只读、Plan 放行、不弹确认；`kb_dir` 未配置/索引未建/索引锚不一致都返回明确提示而非空结果） |
 | `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、二进制拒绝、无需 key；网站自己拒绝（401/403/429/451/5xx、超时、连接失败）且有 DeepSeek key 时改用 DeepSeek Fetch API 再读一次，被我们 SSRF 检查拦下的和 404 绝不转给第三方；解码依次信响应头 charset → 页面 meta charset → 能完整按 UTF-8 解开 → GB18030（响应头没写 charset 时 requests 给 ISO-8859-1，中文页曾经整页乱码）；HTML 只留正文——去掉导航 / 页眉页脚 / 侧栏 / 维基目录和引用角标，优先取 main / article，表格按行转成「列 | 列」；请求头中文优先，User-Agent 如实写灵犀，冒充 Chrome 实测无益反而被部分站拒）；`web_search` 用 DeepSeek / Tavily / 博查。DeepSeek 是它自家的 Search API（`/v1/tools/search`，和模型共用 `deepseek_api_key`，按成功请求计费、失败和空结果不收；时间范围用查询语法 `after:日期`，查询限 128 字；深度搜索时带 `need_content` 直接拿正文），实测中文结果最好、每次不到 1 秒、都带发布时间，英文会混进其它语言。（`web_search_provider`：auto = 中文先 DeepSeek → 博查 → Tavily，其余先 Tavily → DeepSeek → 博查，没配 key 的跳过；一个出错（超时 / 4xx / 额度用完 / 业务错误码）换下一个；deepseek / tavily / bocha = 只用它、不偷偷换。博查只接普通 Web Search，不接带大模型总结的 AI Search——总结由灵犀自己的模型做；time_range→freshness，news 没给范围按一周。深度搜索开关 `web_search_deep`：并发读前 3 个结果的原文（`_fetch_text`，与 fetch_url 同一套 SSRF/正文提取），按问题词（英文按词、中文按相邻两字）覆盖度挑 3 段，其余结果只留一句话；评测里每次结果更小更准，但模型照样多次追问，总 token 不一定更省，所以默认关。设置 → 高级 → 网络搜索 改这几项即时生效；可选 topic=news、time_range=day/week/month/year，depth=advanced 时段落挑得更准但每次多花一份额度，说明里要求先 basic；开 include_answer 把直接答案放最前；Tavily 的 content 是用 [...] 隔开的几段相关原文，按段保留、每段限 350 字、清掉引用标记——整条硬截会把后几段相关内容砍掉）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
@@ -50,7 +50,11 @@
 - **打包(frozen)安全**：`sys.executable` 在打包后 = `灵犀Code.exe`（不是 python.exe），所以 `sys.executable -m ruff/py_compile/pytest` 在产物里都跑不了。故 frozen 下不走 `sys.executable -m`：
     - check_code 的 ruff 用随包/系统二进制，语法检查用**内置 `compile()`（进程内、不起子进程）**
     - `run_tests` 用 `_resolve_python()` 选解释器：**项目内 venv（.venv/venv/env）→ 开发期 sys.executable → 系统 PATH 的 python**（frozen 下跳过 sys.executable）。顺带让它在真实项目里用对环境（项目自己的 venv + 依赖）而非应用的 Python
-- 其它语言读 config `check_command`（`{file}` 占位，shell 执行）；可用 `auto_check_after_edit` 关掉自动触发
+- 其它语言：配了 config `check_command`（`{file}` 占位，shell 执行）就用它；没配走 `src/static_checks.py`，两层可信度不同：
+    - **编辑后：tree-sitter 语法提示**（`syntax_hints`）——只报这次编辑**新出现**的解析错误（和改前内容按说明文字比，行号会移动），**只提示、不记成检查没通过**。在真实代码上量过：Java / JS 0% 误报、TS 约 6%（.d.ts 的 `import("…")` 类型、JSX 属性 URL 里的 `&`）、C / C++ 七成文件报错、Kotlin 接口里的抽象方法也报；记成失败会把完成闸门卡在解析器的毛病上。C / C++ / Kotlin / Swift 等不查，.d.ts 不查
+    - **check_code：项目自己的编译 / 类型检查**（`detect` + `run`）——tsc --noEmit（找 node_modules/typescript 用 node 直接跑，不用 npx；Vite 那种 `"files": []` + references 的总配置改用 include 覆盖了这个文件的子配置；`--incremental false` 不留 .tsbuildinfo）、vue-tsc、go vet、cargo check、Maven / Gradle 编译（项目自带 mvnw / gradlew 优先，测试源码用 test-compile / testClasses）、dotnet build；JS / PHP / Ruby 用 node --check / php -l / ruby -c 单文件查。权威结果，记验证证据。**只有这次改过的文件（`code_dirty_files` + 目标文件）里的错误算没通过**，别的文件里的照实列出"可能原来就有"但不拦；退出码非零却没有具体到文件的错误（依赖下载失败之类）记 error，不算没通过
+    - 编译检查慢（tsc、cargo、mvn 动辄十几秒），不在每次编辑后跑；提示词要求改完 TS / Go / Rust / Java / C# 调一次 check_code（TS 的类型错误跑测试也发现不了）
+- 可用 `auto_check_after_edit` 关掉自动触发
 - 开关：config `auto_check_after_edit`（默认 true）；只检**刚改的那个文件**（快），防失控靠现有 agent loop 上限 + 模型没错就停
 - `check_code` 工具是手动复查入口（同一套 `_run_code_check`）；编辑后自动触发不需要模型记得调它
 - **Plan 模式禁用 `check_code`**（不在 `PLAN_MODE_READONLY_TOOLS` 里）：配了 config 的 `check_command` 之后它就执行那条命令，那是用户配的任意命令，无法保证只读。**不限于非 Python 项目**——`_run_code_check` 先判 `check_command`、再判扩展名，配了之后 Python 文件同样走它。名字像"检查"不代表只读——判据与 B03 的执行前记录同一条：**会不会执行项目代码或用户配置的命令**。拦截点在 `streaming._execute_tool` 的 Plan 闸，在 `invoke` 和执行前记录**之前**，拦住的是子进程有没有起来；光靠提示词劝模型别调不算拦截

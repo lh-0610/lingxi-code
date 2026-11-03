@@ -306,7 +306,7 @@ def write_file(path: str, content: str) -> str:
         if not ok:
             return note
         _mark_current_dirty(full)
-        return f"成功写入文件: {full}{note}" + _auto_check_suffix(full)
+        return f"成功写入文件: {full}{note}" + _auto_check_suffix(full, old_content or None)
     except Exception as e:
         return f"写入失败: {e}"
 
@@ -337,7 +337,7 @@ def append_file(path: str, content: str) -> str:
         if not ok:
             return note
         _mark_current_dirty(full)
-        return f"成功追加到文件: {full}{note}" + _auto_check_suffix(full)
+        return f"成功追加到文件: {full}{note}" + _auto_check_suffix(full, old_content or None)
     except Exception as e:
         return f"追加失败: {e}"
 
@@ -653,7 +653,7 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     count = len(spans)
     primary_line = line_nos[0] if line_nos else "?"
     level_hint = f"（{match_desc}）" if "L1" not in match_desc else ""
-    suffix = _auto_check_suffix(full)
+    suffix = _auto_check_suffix(full, content)
     if count == 1:
         return f"成功编辑 {full}（第 {primary_line} 行附近替换 1 处）{level_hint}{note}" + suffix
     else:
@@ -2487,9 +2487,14 @@ def _py_syntax_check(full_path):
         return f"{os.path.basename(full_path)}: 语法检查失败: {e}"
 
 
-def _auto_check_suffix(full_path: str) -> str:
+def _auto_check_suffix(full_path: str, before: str | None = None) -> str:
     """编辑/写入成功后自动校验，返回追加到工具结果的提示串。
-    无问题 / 不支持的语言 / 开关关闭 → 返回 ""（不打扰）。"""
+    无问题 / 不支持的语言 / 开关关闭 → 返回 ""（不打扰）。
+
+    before：改之前的文件内容（新建文件为 None）。非 Python 语言没有配 check_command 时，用它比出
+    这次编辑**新出现**的语法错误（static_checks.syntax_hints，tree-sitter）——只提示、不记成检查没通过：
+    解析器偶尔不认合法的新写法，记成失败会把完成闸门卡死。编译 / 类型检查慢（tsc、cargo、mvn
+    动辄十几秒），不在每次编辑后跑，由 check_code 做。"""
     from .config import AUTO_CHECK_AFTER_EDIT
     if not AUTO_CHECK_AFTER_EDIT:
         return ""
@@ -2505,9 +2510,21 @@ def _auto_check_suffix(full_path: str) -> str:
         ".kt", ".kts", ".vue", ".svelte",
     }:
         _mark_current_check(full_path, None, "")
-    if not checker or not issues:
+    if not checker:
+        return _syntax_hint_suffix(full_path, before)
+    if not issues:
         return ""
     return f"\n\n⚠️ 自动校验（{checker}）发现问题，请修复后再继续：\n{issues}"
+
+
+def _syntax_hint_suffix(full_path: str, before: str | None) -> str:
+    from . import static_checks
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            after = f.read()
+    except OSError:
+        return ""
+    return static_checks.syntax_hints(full_path, before, after)
 
 
 def _parse_patch(content: str):
@@ -2794,6 +2811,11 @@ def apply_patch(patch: str) -> str:
             _mark_current_check(resolved, not bool(issues) if checker else None, checker or "")
             if issues:
                 check_warnings.append(f"{path}:\n{issues}")
+            elif not checker:
+                raw = originals.get(resolved)
+                hint = _syntax_hint_suffix(resolved, raw.decode("utf-8", "replace") if raw else None)
+                if hint:
+                    check_warnings.append(f"{path}:{hint.strip()}")
 
     # ── 组装结果 ──
     parts = [f"Patch 已应用: {added_files} 个新增, {modified_files} 个修改, {deleted_files} 个删除"]
@@ -2804,10 +2826,15 @@ def apply_patch(patch: str) -> str:
 
 @tool
 def check_code(path: str) -> str:
-    """静态检查单个代码文件（lint/语法/类型），返回问题列表。Python 用 ruff（F/E9 正确性）
+    """静态检查代码文件（lint/语法/类型/编译），返回问题列表。Python 用 ruff（F/E9 正确性）
     + mypy 类型检查（抓参数数量/签名/未定义名等"用错 API"的错;没装则相应跳过）；
-    其它语言用 config 的 check_command（{file} 占位）。
-    path: 要检查的文件（相对项目根）。注：编辑文件后已会自动校验，这个用于手动复查。"""
+    TypeScript 用项目的 tsc --noEmit（Vue 用 vue-tsc），Go 用 go vet，Rust 用 cargo check，
+    Java / Kotlin 用 Maven / Gradle 编译，C# 用 dotnet build，JS / PHP / Ruby 查语法；
+    config 里配了 check_command（{file} 占位）就用它。编译类检查查整个项目，只有这次改过的
+    文件里的错误算没通过。
+    path: 要检查的文件（相对项目根）。改完 TS / Go / Rust / Java / C# 后调一次：编辑后的
+    自动校验只查语法，类型错误、调用签名不对要靠这一步（JS 测试框架不做类型检查，TS 的类型错误
+    跑测试也发现不了）。"""
     if not path:
         return "请指定要检查的文件 path。"
     resolved = _resolve_path(path)
@@ -2819,6 +2846,9 @@ def check_code(path: str) -> str:
         return "失败：路径超出项目范围，不允许（不能用 .. 逃出项目根）"
     if not os.path.exists(resolved):
         return f"文件不存在: {resolved}"
+    from .config import CHECK_COMMAND
+    if not CHECK_COMMAND and os.path.splitext(resolved)[1].lower() not in (".py", ".pyi"):
+        return _check_with_project_tools(resolved)
     issues, checker, _ = _run_code_check(resolved)
     if checker is None:
         ext = os.path.splitext(resolved)[1] or "（无扩展名）"
@@ -2838,6 +2868,58 @@ def check_code(path: str) -> str:
     parts.append("\n".join(repair_entries))
     parts.append("[/REPAIR_INFO]")
     return "\n".join(parts)
+
+
+def _check_with_project_tools(resolved: str) -> str:
+    """check_code 的非 Python 分支：项目自己的编译 / 类型检查（static_checks），记进验证证据。
+    只有这次改过的文件里的错误算没通过；别的文件里原来就有的错误照实说，但不拦着交差。"""
+    from . import static_checks
+    root = _project_cwd()
+    ext = os.path.splitext(resolved)[1] or "（无扩展名）"
+    try:
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            syntax = static_checks.syntax_errors(f.read(), resolved)
+    except OSError:
+        syntax = []
+    syntax_note = ""
+    if syntax:
+        syntax_note = ("\n语法提示（tree-sitter，可能是解析器不认的写法，仅供参考）：\n"
+                       + "\n".join(f"  第 {ln} 行：{msg}" for ln, msg in syntax[:8]))
+    checker, reason = static_checks.detect(resolved, root)
+    if checker is None:
+        _mark_current_check(resolved, None, "")
+        return (f"没有可用的检查器（编译 / 类型检查）：{reason}。" + (syntax_note or "")
+                + "\n类型错误只能靠测试发现；也可以在 config.json 配 check_command（用 {file} 占位）。")
+
+    changed = []
+    try:
+        for rel in _session.get_verification().get("code_dirty_files") or []:
+            changed.append(rel if os.path.isabs(rel) else os.path.join(root, rel))
+    except Exception:
+        pass
+    started = _evidence_now()
+    result = static_checks.run(checker, resolved, changed, root)
+    _record_run_evidence(
+        kind="check", path=_norm_vpath(resolved), checker=checker.name, argv=list(checker.argv),
+        command="", cwd=checker.cwd, started_at=started, duration_ms=result.duration_ms,
+        exit_code=result.exit_code, status=result.status,
+        reason=result.note if result.status not in ("passed", "failed") else "",
+        summary=_first_lines(result.issues or result.note))
+    note = f"\n{result.note}" if result.note else ""
+    if result.status == "passed":
+        _mark_current_check(resolved, True, checker.name)
+        return f"✓ {checker.name} 检查通过，这次改过的文件没有错误。{note}{syntax_note}"
+    if result.status != "failed":
+        _mark_current_check(resolved, None, "")
+        return f"{checker.name} 没能完成检查（{result.status}）。{note}{syntax_note}"
+    for path in result.error_files:
+        _mark_current_check(path, False, checker.name)
+    if static_checks.same_file_key(resolved) not in {static_checks.same_file_key(p) for p in result.error_files}:
+        _mark_current_check(resolved, True, checker.name)
+    repair = [f"status=failed|checker={checker.name}"] + [
+        f"issue: {line.strip()}" for line in result.issues.splitlines()[:10]]
+    return "\n".join([f"{checker.name} 检查发现问题：\n{result.issues}{note}",
+                      "\n[REPAIR_INFO]", "\n".join(repair), "[/REPAIR_INFO]"])
 
 
 # ══════════════════════════════════════

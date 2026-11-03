@@ -104,8 +104,9 @@ PLAN_MODE_READONLY_TOOLS = {
     "git_diff", "git_log", "git_status",  # 只读 git：只看 diff/log/status，绝不碰 commit/add/push
     # 注意 `check_code` **不在**这份白名单里：配了 config 的 `check_command` 之后它就执行
     # 那条命令，那是用户配的任意命令，无法保证只读（`_run_code_check` 先判 check_command、
-    # 再判扩展名，所以 Python 文件同样走它，不限于非 Python 项目）。名字听起来像"检查"
-    # 不代表它只读——同理 `run_tests` 起的是项目自己的测试代码，也不在这里。
+    # 再判扩展名，所以 Python 文件同样走它，不限于非 Python 项目）；非 Python 文件跑项目自己的
+    # 构建工具（cargo check 会跑 build.rs，Maven / Gradle 会跑构建脚本，都是项目代码）。名字听起来
+    # 像"检查"不代表它只读——同理 `run_tests` 起的是项目自己的测试代码，也不在这里。
     "fetch_url",  # 抓取网页只读
     "web_search",  # 网络搜索只读
     "search_knowledge",  # 知识库语义检索只读
@@ -121,7 +122,8 @@ PLAN_MODE_READONLY_TOOLS = {
 _PLAN_REJECT_NOTES = {
     "check_code": (
         "Plan 模式只进行调研；执行代码检查请切换到 Act 模式。"
-        "（配置了 check_command 时它就执行那条命令——任何文件都走，不限于非 Python 项目——"
+        "（配置了 check_command 时它就执行那条命令——任何文件都走，不限于非 Python 项目；"
+        "其它语言跑项目的构建工具（cargo / Maven / Gradle 会执行项目的构建脚本）——"
         "属于执行命令、不保证只读。）"
         "不要自行改模式，也不要改用别的工具跑等价的检查命令——"
         "把需要做哪些检查写进方案里，由用户切到 Act 后再执行。"
