@@ -366,7 +366,7 @@ pyinstaller lingxi.spec
 
 ## License
 
-仅供学习和个人使用。
+[MIT](LICENSE)：可以自由使用、修改和分发（包括商用），保留版权声明即可。
 
 ## 致谢
 
