@@ -5,6 +5,7 @@
 - `_execute_tool`: 执行单个工具调用，把结果回写到 chat_history
 """
 import os
+import queue as _queue
 import re
 import time
 import threading as _threading
@@ -239,18 +240,88 @@ def _sanitize_tool_pairs(messages):
     return out
 
 
+_STOP_POLL_S = 0.2   # 等模型 / 等重试时多久看一次停止标志
+
+
+def _stoppable_stream(llm_with_tools, messages):
+    """在旁路线程里拉流，本线程每 _STOP_POLL_S 秒看一次停止标志。
+
+    模型迟迟不回 chunk 时（服务端卡住，请求超时是 30 分钟），worker 卡在网络读上，
+    停止标志要等下一个 chunk 到了才看得到：停止后转圈一直走秒，旧 worker 不退，
+    下一条消息排队 15 秒就放弃。拉流放到旁路线程后，停止时 worker 立刻返回；
+    旁路线程等到下一个 chunk 或请求结束，自己关掉连接退出，拿到的东西都丢掉。
+    """
+    from . import paths as _paths, session as _session
+    sess = _session.current_session()
+    data_root = _paths.get_data_dir()
+    inbox = _queue.Queue()
+    abandoned = _threading.Event()
+
+    def _pump():
+        # 和 worker 绑同一个会话和数据根：模型调用里读到的 state 得是这条会话的
+        _session.bind_thread(sess)
+        _paths.set_data_dir(data_root)
+        gen = None
+        try:
+            gen = llm_with_tools.stream(messages)
+            for chunk in gen:
+                if abandoned.is_set():
+                    break
+                inbox.put(("chunk", chunk))
+            inbox.put(("end", None))
+        except BaseException as exc:
+            inbox.put(("error", exc))
+        finally:
+            close = getattr(gen, "close", None)
+            if close is not None:
+                try:
+                    close()   # 生成器收尾时关掉 HTTP 响应
+                except Exception:
+                    pass
+            _paths.set_data_dir(None)
+            _session.unbind_thread()
+
+    _threading.Thread(target=_pump, name="llm-stream", daemon=True).start()
+    try:
+        while True:
+            try:
+                kind, item = inbox.get(timeout=_STOP_POLL_S)
+            except _queue.Empty:
+                if state.stop_flag:
+                    return
+                continue
+            if kind == "chunk":
+                yield item
+            elif kind == "error":
+                raise item
+            else:
+                return
+    finally:
+        abandoned.set()
+
+
+def _sleep_unless_stopped(delay: float) -> bool:
+    """退避等待，期间停止了就提前返回 False。"""
+    for _ in range(max(1, int(delay / _STOP_POLL_S))):
+        if state.stop_flag:
+            return False
+        time.sleep(min(_STOP_POLL_S, delay))
+    return not state.stop_flag
+
+
 def _stream_chunks_with_retry(llm_with_tools, messages, ui=None):
     """流式请求；开始吐 chunk 之前的失败按**错误类别**决定怎么办（见 llm_errors）。
 
     已经吐过 chunk 就直接抛：此时 UI 上已经显示了半截回复，重试会让内容重复。
     上下文溢出转成 ContextOverflowError 抛出，由 agent 主循环压缩后重发——在这里
     原样退避重试是纯粹的浪费，必然再溢出。
+    停止时（等模型或等重试期间）不吐 chunk 直接结束，和收到 chunk 后再停一样处理。
     """
     from .llm_errors import ContextOverflowError, CONTEXT_OVERFLOW, classify, retry_plan
     for attempt in range(STREAM_RETRY_ATTEMPTS):
         yielded = False
         try:
-            for chunk in llm_with_tools.stream(messages):
+            for chunk in _stoppable_stream(llm_with_tools, messages):
                 yielded = True
                 yield chunk
             return
@@ -278,7 +349,8 @@ def _stream_chunks_with_retry(llm_with_tools, messages, ui=None):
                     ui.show_message(f"\n⚠️ {reason}，{delay:.1f}s 后自动重试...\n", "tool_result")
                 except Exception:
                     pass
-            time.sleep(delay)
+            if not _sleep_unless_stopped(delay):
+                return
 
 
 _CJK_CHARS = re.compile(r"[　-鿿가-힯＀-￯]")

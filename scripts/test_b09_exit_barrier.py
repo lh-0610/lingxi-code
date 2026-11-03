@@ -283,6 +283,29 @@ class TestSendWaitsForWorkerExit:
         assert _history_texts(sess).count("second") == 1
         assert ui._pending_run_for(sess) is None
 
+    def test_stop_clears_the_waiting_indicator_at_once(self, ui, qapp, monkeypatch):
+        """模型一直不回第一个 chunk 时点停止：「等待响应 N 秒」当场消失，
+        不等 worker 收到下一个 chunk（它会一直走秒，看着像还在等）。"""
+        release = threading.Event()
+
+        def _waiting_loop(ui_, *, resume=None):
+            ui_.show_message("等待响应...\n", "thinking_indicator")
+            release.wait(10)
+            return AgentResult("cancelled")
+
+        monkeypatch.setattr(agent, "agent_loop", _waiting_loop)
+        _type(ui, "hi")
+        ui._on_send_click()
+
+        def _waiting():
+            turn = ui.chat_area._cur_assistant
+            return turn is not None and turn._waiting is not None
+
+        assert _wait_until(qapp, _waiting)
+        ui._on_send_click()                     # 点停止
+        assert not _waiting()
+        release.set()
+
     def test_enter_while_generating_queues_for_next_round(self, ui, qapp, fake_loop,
                                                           monkeypatch):
         """B09b：仍正常生成时按 Enter 提交 → 进队列（不启动第二轮、不进历史）；

@@ -256,3 +256,70 @@ class TestStreamRetry:
         with pytest.raises(RuntimeError, match="late failure"):
             list(streaming._stream_chunks_with_retry(FakeLlm(), []))
         assert len(attempts) == 1
+
+
+class TestStopWhileWaiting:
+    """模型迟迟不回 chunk 时停止：worker 不能卡在网络读上等下一个 chunk。"""
+
+    def test_stop_returns_without_waiting_for_the_first_chunk(self):
+        import threading
+        import time
+        from src import state
+
+        started, release, closed = threading.Event(), threading.Event(), threading.Event()
+
+        class HangingLlm:
+            def stream(self, _messages):
+                try:
+                    started.set()
+                    release.wait(10)      # 服务端一直不回
+                    yield "too late"
+                finally:
+                    closed.set()
+
+        threading.Timer(0.3, lambda: setattr(state, "stop_flag", True)).start()
+        t0 = time.monotonic()
+        assert list(streaming._stream_chunks_with_retry(HangingLlm(), [])) == []
+        assert started.is_set()
+        assert time.monotonic() - t0 < 2, "停止后应在一次轮询内返回，不等模型"
+
+        release.set()   # 模型终于回了：旁路线程丢掉这个 chunk、关掉生成器
+        assert closed.wait(3)
+
+    def test_model_call_sees_the_worker_session(self):
+        from src import session
+
+        seen = []
+
+        class FakeLlm:
+            def stream(self, _messages):
+                seen.append(session.current_session())
+                yield "ok"
+
+        mine = session.Session()
+        session.bind_thread(mine)
+        try:
+            assert list(streaming._stream_chunks_with_retry(FakeLlm(), [])) == ["ok"]
+        finally:
+            session.unbind_thread()
+        assert seen == [mine]
+
+    def test_stop_during_retry_backoff_gives_up(self, monkeypatch):
+        from src import state
+
+        attempts = []
+
+        class FlakyLlm:
+            def stream(self, _messages):
+                attempts.append("called")
+                raise RuntimeError("temporary")
+                yield
+
+        def _sleep(_seconds):
+            state.stop_flag = True    # 等重试的时候用户点了停止
+
+        monkeypatch.setattr(streaming, "STREAM_RETRY_ATTEMPTS", 3)
+        monkeypatch.setattr(streaming.time, "sleep", _sleep)
+
+        assert list(streaming._stream_chunks_with_retry(FlakyLlm(), [])) == []
+        assert len(attempts) == 1, "停了就不再重试"

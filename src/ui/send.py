@@ -44,6 +44,9 @@ class SendMixin:
         if sess.thread is thread:
             sess.thread = None
         self._ai_reply_start = None
+        # 「等待响应 N 秒」自己走秒，原本要等 worker 收到下一个 chunk 才清；停了就不再等了
+        if hasattr(self, "chat_area"):
+            self.chat_area.remove_waiting()
         # 对齐 _on_finished 的按钮恢复（输入框有内容则 enabled）。
         self._update_btn_state("enabled" if self._has_input else "disabled")
         return True
