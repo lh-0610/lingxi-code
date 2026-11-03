@@ -89,14 +89,10 @@ def test_tracking_failure_stays_unverified(project_dir, monkeypatch):
 def test_missing_pytest_leaves_explicit_gap(project_dir, monkeypatch):
     monkeypatch.setattr(config, "AUTO_CHECK_AFTER_EDIT", False)
     tools.write_file.func("app.py", "value = 2\n")
-    original = subprocess.run
-
     def missing_pytest(args, **kwargs):
-        if isinstance(args, list) and "pytest" in args:
-            return subprocess.CompletedProcess(args, 1, stdout="", stderr="No module named pytest")
-        return original(args, **kwargs)
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="No module named pytest")
 
-    monkeypatch.setattr(tools.subprocess, "run", missing_pytest)
+    monkeypatch.setattr(tools, "_run_test_process", missing_pytest)
     tools.run_tests.func()
     v = session.get_verification()
     verification.mark_diff_reviewed(v)

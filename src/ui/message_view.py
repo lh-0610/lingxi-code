@@ -503,6 +503,7 @@ class ToolCallCard(QFrame):
     _OUT_MAX_LINES = 16      # 展开后输出框最多这么高，更多的在框里滚动
     _OUT_MAX_BLOCKS = 4000   # 输出框最多保留的行数（长命令的流式输出），更早的丢弃
     _FILES_MAX_LINKS = 6     # "改动了 N 个文件"那一行最多列几个文件名，全部的在悬停提示里
+    CLOCK_AFTER_S = 2        # 跑了这么久还没结束，头部才出「运行中 N 秒」：快的工具不闪一下
 
     file_clicked = Signal(str)   # 点了"改动了 N 个文件"里的文件名（项目相对路径）
 
@@ -541,6 +542,16 @@ class ToolCallCard(QFrame):
         self._count.setStyleSheet(f"color:{_P['muted']}; font-size:12px; background:transparent;")
         self._count.setVisible(False)
         h.addWidget(self._count, 0, Qt.AlignVCenter)
+        # 工具还在跑：转圈 + 「运行中 N 秒」。没有流式输出的工具（跑全量测试要 9 分钟）
+        # 原本整段时间卡片上一动不动，看着像卡死了
+        self._hlay = h
+        self._t0 = None
+        self._clock_timer = None
+        self._spinner = None       # 显示走秒时才建，跑完就删（转圈自带 50ms 的定时器）
+        self._clock = QLabel()
+        self._clock.setStyleSheet(f"color:{_P['muted']}; font-size:12px; background:transparent;")
+        self._clock.setVisible(False)
+        h.addWidget(self._clock, 0, Qt.AlignVCenter)
         self._toggle_btn = _FlatButton("展开")
         self._toggle_btn.clicked.connect(self.toggle)
         self._toggle_btn.setVisible(False)
@@ -659,6 +670,43 @@ class ToolCallCard(QFrame):
 
     def changed_files_text(self) -> str:
         return self._files.text() if self._files.isVisibleTo(self) else ""
+
+    def start_clock(self):
+        """工具开始执行（只有实时运行才走秒，重绘历史不走）。"""
+        self._t0 = time.monotonic()
+        self._clock_timer = QTimer(self)
+        self._clock_timer.timeout.connect(self._tick_clock)
+        self._clock_timer.start(1000)
+
+    def stop_clock(self):
+        """工具结束或用户停止：去掉转圈；走过秒的留下总用时。"""
+        if self._clock_timer is None:
+            return
+        self._clock_timer.stop()
+        self._clock_timer = None
+        if self._spinner is not None:
+            self._spinner.setParent(None)
+            self._spinner.deleteLater()
+            self._spinner = None
+        if not self._clock.isHidden():
+            self._clock.setText(f"用时 {_fmt_secs(time.monotonic() - self._t0)}")
+
+    def is_running(self) -> bool:
+        return self._clock_timer is not None
+
+    def clock_text(self) -> str:
+        return "" if self._clock.isHidden() else self._clock.text()
+
+    def _tick_clock(self):
+        secs = time.monotonic() - self._t0
+        if secs < self.CLOCK_AFTER_S:
+            return
+        if self._spinner is None:
+            from .widgets import LoadingSpinner
+            self._spinner = LoadingSpinner(size=12, color=_P["indigo"])
+            self._hlay.insertWidget(self._hlay.indexOf(self._clock), self._spinner, 0, Qt.AlignVCenter)
+            self._clock.setVisible(True)
+        self._clock.setText(f"运行中 {_fmt_secs(secs)}")
 
     def output_text(self) -> str:
         return self._out.toPlainText()
@@ -963,6 +1011,7 @@ class AssistantTurn(QWidget):
         self._v.setContentsMargins(0, 0, 0, 0)
         self._v.setSpacing(0)
         self._round = round_
+        self._live = live
         self.meta = None
         if model_name or mode or live:
             self.meta = MetaLine(model_name, mode, live)
@@ -995,7 +1044,12 @@ class AssistantTurn(QWidget):
         self._cur_body_text = ""
 
     def end_tool(self):
+        self.stop_tool_clock()
         self._cur_tool = None
+
+    def stop_tool_clock(self):
+        if self._cur_tool is not None:
+            self._cur_tool.stop_clock()
 
     def _new_body(self):
         """新起一个正文块，并把里面的文件链接转发给宿主。"""
@@ -1024,6 +1078,7 @@ class AssistantTurn(QWidget):
         self.clear_waiting()
         self.end_body()
         self._close_think()
+        self.stop_tool_clock()   # Claude Code 模式工具结果之后不发 reset_ai_reply：又开始思考，工具就跑完了
         self._cur_think_text = ""
         self._cur_think = self._add(ThinkingChip(0, ""), top_gap=12, node="dot", process=True, dy=13)
         self._cur_think.set_live(True)
@@ -1047,10 +1102,13 @@ class AssistantTurn(QWidget):
         self.clear_waiting()
         self.end_body()
         self._close_think()
+        self.end_tool()        # 上一张卡（Claude Code 模式不发 reset_ai_reply）不再走秒
         # 步骤类工具用橙星，其余按工具种类取图标
         if icon_svg is None and any(k in name for k in ("步骤", "step")):
             icon_svg, icon_color = SVG_STAR, _P["orange"]
         card = ToolCallCard(name, code_text, icon_svg, icon_color)
+        if self._live:
+            card.start_clock()
         self._cur_tool = self._add(card, top_gap=10, node="tool", process=True, dy=card.header_center)
         return self._cur_tool
 
@@ -1546,6 +1604,11 @@ class MessageView(QScrollArea):
     def remove_waiting(self):
         if self._cur_assistant is not None:
             self._cur_assistant.clear_waiting()
+
+    def stop_tool_clock(self):
+        """用户点了停止：当前工具卡不再显示「运行中」（不等工具真的返回）。"""
+        if self._cur_assistant is not None:
+            self._cur_assistant.stop_tool_clock()
 
     def update_waiting(self, text: str):
         """心跳报的阶段（等待响应 / 模型思考中 / 正在生成工具调用）；没有指示器就不管。"""

@@ -112,7 +112,7 @@ class TestReadFile:
             seen.update(kwargs.get("env") or {})
             return subprocess.CompletedProcess(cmd, 0, stdout="1 passed in 0.01s", stderr="")
 
-        monkeypatch.setattr(tools.subprocess, "run", fake_run)
+        monkeypatch.setattr(tools, "_run_test_process", fake_run)
         monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
         tools.run_tests.func()
         assert seen.get("QT_QPA_PLATFORM") == "offscreen"
@@ -133,7 +133,7 @@ class TestReadFile:
             seen.append(cmd)
             return subprocess.CompletedProcess(cmd, 0, stdout="2 passed in 0.01s", stderr="")
 
-        monkeypatch.setattr(tools.subprocess, "run", fake_run)
+        monkeypatch.setattr(tools, "_run_test_process", fake_run)
         tools.run_tests.func("a_test.py b_test.py")
         assert [p for p in seen[-1] if p.endswith("_test.py")] == [
             str(project_dir / "a_test.py"), str(project_dir / "b_test.py")]
@@ -144,12 +144,120 @@ class TestReadFile:
         """退出码 4（参数或路径不对）一个测试都没跑：记"未执行"，不能记成测试失败。"""
         import subprocess
         from src import session, tools
-        monkeypatch.setattr(tools.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(
+        monkeypatch.setattr(tools, "_run_test_process", lambda cmd, **k: subprocess.CompletedProcess(
             cmd, 4, stdout="ERROR: file or directory not found: nope.py", stderr=""))
         out = tools.run_tests.func("nope.py")
         assert "用法错误" in out
         record = session.get_verification()["evidence"][-1]
         assert record["status"] == "not_run" and record["exit_code"] == 4
+
+    @staticmethod
+    def _clean_registry():
+        from src import background as bg
+        bg.stop_all(wait_timeout=3)
+        with bg._LOCK:
+            bg._tasks.clear()
+
+    def test_stop_kills_a_long_test_run(self, project_dir):
+        """全量测试一跑好几分钟：期间点停止要马上停（以前 subprocess.run 一直阻塞到跑完）。"""
+        import sys
+        import threading
+        import time
+        import pytest
+        from src import tools
+        threading.Timer(0.5, lambda: setattr(state, "stop_flag", True)).start()
+        t0 = time.monotonic()
+        try:
+            with pytest.raises(tools._TestsStopped):
+                tools._run_test_process([sys.executable, "-c", "import time; time.sleep(30)"],
+                                        cwd=str(project_dir), env=None, timeout=60)
+            assert time.monotonic() - t0 < 10, "停止后要很快返回，不等进程跑完"
+        finally:
+            self._clean_registry()
+
+    def test_test_run_still_times_out(self, project_dir):
+        """超时也是经后台管理器停的进程，但要报超时，不能当成用户停止。"""
+        import subprocess
+        import sys
+        import time
+        import pytest
+        from src import tools
+        t0 = time.monotonic()
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                tools._run_test_process([sys.executable, "-c", "import time; time.sleep(30)"],
+                                        cwd=str(project_dir), env=None, timeout=1)
+            assert time.monotonic() - t0 < 10
+        finally:
+            self._clean_registry()
+
+    def test_test_run_shows_in_the_background_panel_with_its_output(self, project_dir):
+        """跑着的测试原来在后台任务面板里找不到：要登记进去，带命令、实时输出和退出码。"""
+        import os
+        import sys
+        from src import background as bg
+        from src import session, tools
+        script ="print('collected 2 items'); print('.. [100%]'); import sys; print('warn', file=sys.stderr)"
+        try:
+            done = tools._run_test_process([sys.executable, "-c", script],
+                                           cwd=str(project_dir), env=None, timeout=60)
+            assert done.returncode == 0 and "collected 2 items" in done.stdout
+            assert "warn" in done.stderr, "摘要要的完整 stdout / stderr 照旧分开拿到"
+            [snap] = bg.list_snapshots()
+            assert snap["command"].startswith(os.path.basename(sys.executable) + " -c")
+            assert snap["running"] is False
+            assert snap["exit_code"] == 0 and snap["output_complete"]
+            assert "collected 2 items\n" in snap["output_tail"] and "warn\n" in snap["output_tail"]
+            assert snap["owner_id"] == session.current_session().background_owner_id
+        finally:
+            self._clean_registry()
+
+    def test_stopping_it_in_the_panel_stops_only_the_tests(self, project_dir):
+        """面板里点「停止此任务」：这次测试算用户停止，但不停整轮对话（停止标志不动）。"""
+        import sys
+        import threading
+        import time
+        import pytest
+        from src import background as bg
+        from src import tools
+
+        def _stop_when_listed():
+            for _ in range(100):
+                snaps = bg.list_snapshots()
+                if snaps:
+                    bg.stop(snaps[0]["bg_id"])
+                    return
+                time.sleep(0.05)
+
+        threading.Thread(target=_stop_when_listed, daemon=True).start()
+        try:
+            with pytest.raises(tools._TestsStopped):
+                tools._run_test_process([sys.executable, "-c", "import time; time.sleep(30)"],
+                                        cwd=str(project_dir), env=None, timeout=60)
+            assert not state.stop_flag
+        finally:
+            self._clean_registry()
+
+    def test_stopped_run_is_recorded_as_not_finished(self, project_dir, monkeypatch):
+        """停下来的测试既不算通过也不算失败：如实记"没跑完"。"""
+        from src import session, tools
+
+        def _stopped(cmd, **k):
+            raise tools._TestsStopped()
+
+        monkeypatch.setattr(tools, "_run_test_process", _stopped)
+        out = tools.run_tests.func()
+        assert "用户停止了测试" in out
+        v = session.get_verification()
+        assert v["tests_passed"] is None
+        assert v["evidence"][-1]["status"] == "cancelled"
+
+    def test_card_summary_says_what_is_tested(self):
+        """只给了 timeout 时卡片头部原本只剩一个「900」。"""
+        from src.streaming import describe_tool_call
+        assert describe_tool_call("run_tests", {"timeout": 900})[1] == "全部"
+        assert describe_tool_call("run_tests", {"path": "scripts/test_a.py", "k": "login"})[1] == \
+            "scripts/test_a.py，筛选 login"
 
 
 class TestWriteTools:

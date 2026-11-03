@@ -136,7 +136,7 @@ class TestEvidenceFromRealExecution:
         def _boom(*a, **k):
             raise FileNotFoundError("python not found")
 
-        monkeypatch.setattr(subprocess, "run", _boom)
+        monkeypatch.setattr(tools, "_run_test_process", _boom)
         tools.run_tests.func("")
         record = _only(tool_session.verification["evidence"], "tests")
         assert record["status"] == "not_run"
@@ -147,7 +147,7 @@ class TestEvidenceFromRealExecution:
         def _slow(*a, **k):
             raise subprocess.TimeoutExpired(cmd="pytest", timeout=1)
 
-        monkeypatch.setattr(subprocess, "run", _slow)
+        monkeypatch.setattr(tools, "_run_test_process", _slow)
         tools.run_tests.func("", timeout=1)
         record = _only(tool_session.verification["evidence"], "tests")
         assert record["status"] == "timeout"

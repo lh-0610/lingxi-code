@@ -143,7 +143,7 @@ def test_run_tests_runs_the_detected_tool_and_counts(project_dir, monkeypatch, w
         seen.update(argv=argv, cwd=kwargs.get("cwd"), env=kwargs.get("env") or {})
         return subprocess.CompletedProcess(argv, 0, stdout="Tests  3 passed (3)\n", stderr="")
 
-    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(tools, "_run_test_process", fake_run)
     out = tools.run_tests.func("")
     v = session.get_verification()
     assert seen["argv"][1] == "test" and seen["env"].get("CI") == "true", "jest / vitest 别进 watch 模式"
@@ -153,7 +153,7 @@ def test_run_tests_runs_the_detected_tool_and_counts(project_dir, monkeypatch, w
 
 def test_run_tests_failure_is_a_failure(project_dir, monkeypatch, which):
     (project_dir / "go.mod").write_text("module x", encoding="utf-8")
-    monkeypatch.setattr(tools.subprocess, "run", lambda argv, **k: subprocess.CompletedProcess(
+    monkeypatch.setattr(tools, "_run_test_process", lambda argv, **k: subprocess.CompletedProcess(
         argv, 1, stdout="--- FAIL: TestLogin (0.00s)\nFAIL\n", stderr=""))
     out = tools.run_tests.func("")
     assert "没通过" in out and "--- FAIL: TestLogin" in out

@@ -1316,22 +1316,21 @@ class TestExecuteToolWiring:
 
         marker = isolated_memory / f"{sid}.inflight.json"
         seen = {}
-        real_run = subprocess.run
+        from src import tools
+        real_run = tools._run_test_process
 
         class _Crash(BaseException):
             """用 BaseException 模拟进程消失：不会被工具的 except Exception 兜住。"""
 
-        def _run_then_crash(cmd, *a, **kw):
-            if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd:
-                seen["marker_before"] = marker.exists()
-                _done = real_run(cmd, *a, **kw)
-                seen["exit"] = _done.returncode
-                seen["cmd"] = cmd
-                seen["out"] = (_done.stdout or "")[-1500:] + (_done.stderr or "")[-500:]
-                raise _Crash("结果保存前进程消失")
-            return real_run(cmd, *a, **kw)
+        def _run_then_crash(cmd, **kw):
+            seen["marker_before"] = marker.exists()
+            _done = real_run(cmd, **kw)
+            seen["exit"] = _done.returncode
+            seen["cmd"] = cmd
+            seen["out"] = (_done.stdout or "")[-1500:] + (_done.stderr or "")[-500:]
+            raise _Crash("结果保存前进程消失")
 
-        monkeypatch.setattr(subprocess, "run", _run_then_crash)
+        monkeypatch.setattr(tools, "_run_test_process", _run_then_crash)
         with pytest.raises(_Crash):
             streaming._execute_tool({"name": "run_tests", "args": {"path": test_file.name},
                                      "id": "c-run-tests"}, _UI())

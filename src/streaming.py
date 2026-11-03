@@ -57,6 +57,11 @@ def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
         detail = args.get("path", ".")
     elif name == "run_command":
         detail = args.get("command", "")
+    elif name == "run_tests":
+        # 原来走通用的参数 JSON：只给了 timeout 时头部就剩一个「900」，看不出跑的是什么
+        detail = str(args.get("path") or "").strip() or "全部"
+        if str(args.get("k") or "").strip():
+            detail += f"，筛选 {str(args['k']).strip()}"
     elif name == "search_in_file":
         detail = f"{args.get('path', '')} → '{args.get('keyword', '')}'"
     else:

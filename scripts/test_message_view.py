@@ -560,6 +560,72 @@ class TestWaitingIndicator:
         mv.close()
 
 
+class TestToolCardClock:
+    """工具还在跑：卡片头部走秒。没有流式输出的工具（全量测试 9 分钟）原本一动不动，像卡死了。"""
+
+    @staticmethod
+    def _running_card(mv, tag="🧪 跑测试", detail="全部"):
+        from src.ui.message_view import ToolCallCard
+        mv.handle(f"\n{tag}", "tool_tag")
+        mv.handle(f"  {detail}\n", "tool_detail")
+        return mv.findChildren(ToolCallCard)[-1]
+
+    @staticmethod
+    def _age(card, secs):
+        card._t0 -= secs
+        card._tick_clock()
+
+    def test_long_tool_shows_elapsed_then_keeps_the_total(self, qt_app):
+        mv = _view()
+        _round_with_reply(mv)
+        card = self._running_card(mv)
+        assert card.is_running()
+        card._tick_clock()
+        assert card.clock_text() == "", "刚开始不显示，快的工具不闪一下"
+        self._age(card, 125)
+        assert card.clock_text() == "运行中 2 分 05 秒"
+        assert card._spinner is not None
+        mv.handle("", "reset_ai_reply")             # 工具返回
+        assert not card.is_running() and card._spinner is None
+        assert card.clock_text().startswith("用时 2 分")
+        mv.close()
+
+    def test_quick_tool_shows_no_clock(self, qt_app):
+        from src.ui.message_view import ToolCallCard
+        mv = _view()
+        _round_with_reply(mv)
+        _tool(mv, "📖 读取文件", "src/login.py", "def login(): ...\n")
+        card = mv.findChildren(ToolCallCard)[0]
+        assert not card.is_running() and card.clock_text() == ""
+        mv.close()
+
+    def test_redrawn_history_does_not_tick(self, qt_app):
+        mv = _view()
+        mv.replaying = True
+        _round_with_reply(mv)
+        card = self._running_card(mv)
+        assert not card.is_running(), "重绘历史时工具早就跑完了"
+        mv.close()
+
+    def test_stop_freezes_the_clock_without_waiting_for_the_tool(self, qt_app):
+        mv = _view()
+        _round_with_reply(mv)
+        card = self._running_card(mv)
+        self._age(card, 30)
+        mv.stop_tool_clock()
+        assert not card.is_running() and card.clock_text().startswith("用时 30 秒")
+        mv.close()
+
+    def test_next_tool_ends_the_previous_clock(self, qt_app):
+        """Claude Code 模式工具结果之后不发 reset_ai_reply：下一张卡出来，上一张就别再走了。"""
+        mv = _view()
+        _round_with_reply(mv)
+        first = self._running_card(mv, "🔧 Bash  ls")
+        second = self._running_card(mv, "🔧 Read  a.py")
+        assert not first.is_running() and second.is_running()
+        mv.close()
+
+
 class TestToolCardTooltip:
     def test_long_command_tooltip_uses_theme_colors_and_wraps(self, qt_app):
         """工具卡上长命令的悬停提示：跟主题配色（不是 Windows 默认黑底）、不用等宽字体、会换行。

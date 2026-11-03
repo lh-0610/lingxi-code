@@ -2030,6 +2030,108 @@ def _record_run_evidence(**fields):
         return None
 
 
+class _TestsStopped(Exception):
+    """跑测试期间用户点了停止（停止键，或后台任务面板里停这一条），测试进程树已经杀掉。"""
+
+
+_TEST_STOP_POLL_S = 0.2   # 跑测试时多久看一次停止标志
+
+
+def _run_test_process(argv, *, cwd, env, timeout):
+    """跑测试进程，等同 subprocess.run(capture_output=True)，另外两件事：
+
+    - 跑的时候每 _TEST_STOP_POLL_S 秒看一次停止标志。subprocess.run 会一直阻塞到进程退出：
+      全量测试一跑就是几分钟，期间点停止什么都不会发生，worker 还占着这条会话；
+    - 登记进后台任务面板：看得到命令、走秒和实时输出，能单独停这一条（对话照常往下走）。
+      原来跑着的测试只在对话里有一张一动不动的卡片，面板里找不到。
+
+    超时抛 subprocess.TimeoutExpired（和 run 一样），用户停止抛 _TestsStopped。"""
+    import threading
+    proc = subprocess.Popen(
+        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        text=True, encoding="utf-8", errors="replace", env=env,
+    )
+    bg_id = _register_test_process(argv, proc, cwd)
+    out: list[str] = []
+    err: list[str] = []
+    readers = [threading.Thread(target=_pump_test_output, args=(pipe, sink, bg_id), daemon=True)
+               for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
+    for reader in readers:
+        reader.start()
+    deadline = time.time() + timeout
+    stopped = timed_out = False
+    while proc.poll() is None:
+        if getattr(state, "stop_flag", False):
+            stopped = True
+        elif time.time() >= deadline:
+            timed_out = True
+        else:
+            time.sleep(_TEST_STOP_POLL_S)
+            continue
+        if bg_id is not None:
+            _bg.stop(bg_id, wait_timeout=5.0)
+        else:
+            _kill_proc_tree(proc)
+        break
+    for reader in readers:
+        reader.join(5)        # 杀不干净的孙进程可能还拿着管道：最多等几秒，不为收尾卡住
+    if bg_id is not None:
+        snap = _bg.get_snapshot(bg_id)
+        stopped = stopped or bool(not timed_out and snap and snap.get("stop_requested"))
+        _bg.finish_output(bg_id)
+    if stopped:
+        raise _TestsStopped()
+    if timed_out:
+        raise subprocess.TimeoutExpired(argv, timeout)
+    return subprocess.CompletedProcess(argv, proc.returncode, "".join(out), "".join(err))
+
+
+def _register_test_process(argv, proc, cwd):
+    """登记进后台任务注册表，返回 bg_id；登记不上（应用正在退出等）返回 None，测试照跑。"""
+    try:
+        sess = _session.current_session()
+        project = sess.project
+        if project is _session._UNSET:
+            project = state.current_project
+        # 面板的命令列很窄：解释器的完整路径占满一列，看不出跑的是 pytest
+        label = subprocess.list2cmdline([os.path.basename(argv[0]), *argv[1:]])
+        return _bg.start(label, proc, cwd=cwd, project=project,
+                         spawn_reader=False, external_output=True,
+                         **_bg.capture_session_identity(sess))
+    except _bg.BackgroundStartError as exc:
+        return exc.bg_id      # 登记上了但随即被停（应用正在退出）：照样按它的停止状态收尾
+    except Exception as exc:
+        logger.debug(f"跑测试没登记进后台任务面板（照常跑）: {exc}")
+        return None
+
+
+def _pump_test_output(pipe, sink, bg_id):
+    """读一个管道：完整输出留给摘要，同时一行行喂给后台任务面板。"""
+    try:
+        for line in pipe:
+            sink.append(line)
+            if bg_id is not None:
+                _bg.append_output(bg_id, line)
+    except (OSError, ValueError):
+        pass                  # 进程被杀、管道被关
+    finally:
+        with contextlib.suppress(Exception):
+            pipe.close()
+
+
+def _tests_stopped(checker, argv, cwd, started, t0) -> str:
+    """用户停止了测试：如实记下"没跑完"，这次不算通过也不算失败。"""
+    why = "用户停止了测试，没有跑完"
+    _record_run_evidence(kind="tests", checker=checker, argv=argv, cwd=cwd,
+                         started_at=started, t0=t0, exit_code=None, status="cancelled",
+                         summary=why, reason="用户停止")
+    with contextlib.suppress(Exception):
+        _v_mark_tests(_session.get_verification(), None, why)
+    # 在面板里停这一条时对话还会往下走：模型看到"没结果"的第一反应是再跑一遍
+    return (f"{why}（跑了 {time.time() - t0:.0f} 秒），没有结果。是用户主动停的："
+            "别马上重跑同一批测试，先说明情况、问用户下一步。")
+
+
 @tool
 def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
     """跑项目的测试，返回精炼结果：通过/失败 + 失败的位置和摘要。
@@ -2083,13 +2185,13 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
     # 测试不该在用户桌面上弹窗口：Qt 起不来时还会弹一个模态错误框，点掉之前测试进程一直卡着
     test_env = {**os.environ}
     test_env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    # 后台任务面板里的实时输出：管道下 pytest 默认整块缓冲，跑完前面板里什么都看不到
+    test_env.setdefault("PYTHONUNBUFFERED", "1")
     try:
-        result = subprocess.run(
-            cmd, cwd=run_cwd,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-            stdin=subprocess.DEVNULL, env=test_env,
-        )
+        result = _run_test_process(cmd, cwd=run_cwd, env=test_env, timeout=timeout)
         elapsed = time.time() - t0
+    except _TestsStopped:
+        return _tests_stopped("pytest", cmd, run_cwd, started, t0)
     except FileNotFoundError:
         _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,
                              started_at=started, t0=t0, exit_code=None, status="not_run",
@@ -2181,11 +2283,9 @@ def _run_other_tests(runner, timeout: int) -> str:
     env = {**os.environ, "CI": "true"}
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     try:
-        result = subprocess.run(
-            runner.argv, cwd=runner.cwd,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-            stdin=subprocess.DEVNULL, env=env,
-        )
+        result = _run_test_process(runner.argv, cwd=runner.cwd, env=env, timeout=timeout)
+    except _TestsStopped:
+        return _tests_stopped(runner.name, runner.argv, runner.cwd, started, t0)
     except FileNotFoundError:
         why = f"{runner.name} 找不到可执行文件"
         _record_run_evidence(kind="tests", checker=runner.name, argv=runner.argv, cwd=runner.cwd,
@@ -2875,7 +2975,6 @@ def _check_with_project_tools(resolved: str) -> str:
     只有这次改过的文件里的错误算没通过；别的文件里原来就有的错误照实说，但不拦着交差。"""
     from . import static_checks
     root = _project_cwd()
-    ext = os.path.splitext(resolved)[1] or "（无扩展名）"
     try:
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
             syntax = static_checks.syntax_errors(f.read(), resolved)

@@ -191,8 +191,11 @@ def _monitor(task):
 
 
 def start(command, proc, *, cwd, project, session_id, session_key,
-          is_subagent, run_id, task_id, owner_id=None, spawn_reader=True):
-    """接管刚创建的 Popen；调用方必须在 Popen 前冻结归属。"""
+          is_subagent, run_id, task_id, owner_id=None, spawn_reader=True, external_output=False):
+    """接管刚创建的 Popen；调用方必须在 Popen 前冻结归属。
+
+    external_output=True（配 spawn_reader=False）：管道由调用方自己读（前台跑测试要完整输出
+    做摘要），读到的行用 append_output 喂进来，进程退出后调 finish_output。"""
     with _LOCK:
         _counter[0] += 1
         # 历史工具消息仍可能提到旧 bg_id；重启后不能让 bg1 指向另一个进程。
@@ -232,10 +235,31 @@ def start(command, proc, *, cwd, project, session_id, session_key,
                 except Exception:
                     pass
             raise BackgroundStartError(bg_id, exc) from exc
-    else:
+    elif not external_output:
         task.reader_done.set()
     logger.info(f"后台命令已启动 [{bg_id}]: {command}")
     return bg_id
+
+
+def append_output(bg_id, text):
+    """external_output 的任务：调用方读到一行就喂一行，面板里照样看得到实时输出。"""
+    with _LOCK:
+        task = _tasks.get(bg_id)
+        if task is not None:
+            _append_output_locked(task, text)
+
+
+def finish_output(bg_id):
+    """external_output 的任务读完了：输出标记完整，并当场核对退出。
+
+    没有 _monitor 线程盯着，不在这里核对的话要等下次有人取快照才记退出时间，用时会多算。"""
+    with _LOCK:
+        task = _tasks.get(bg_id)
+        if task is None:
+            return
+        _confirm_exit_locked(task)
+        task.reader_done.set()
+        _evict_ended_locked()
 
 
 def _evict_ended_locked():
