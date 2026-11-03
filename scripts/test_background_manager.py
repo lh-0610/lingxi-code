@@ -359,7 +359,8 @@ def test_zero_budget_does_not_launch_taskkill(monkeypatch):
 
 def test_manager_thread_start_failure_cleans_up_real_process(monkeypatch):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
-                            stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL)
 
     def fail(*args, **kwargs):
         raise RuntimeError("no threads")
