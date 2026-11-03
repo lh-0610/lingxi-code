@@ -77,6 +77,7 @@ src/                     # 主代码
     queue_panel.py       # 输入队列面板（B09b）：排队 N 条 / 暂停横幅 / 编号列表 / 已发送折叠，只画不判
     task_panel.py        # 停靠在窗口右侧的任务面板与限制编辑对话框（B05）：要求/计划/执行状态/验证证据，可撤销横幅，硬预算校验
     file_panel.py        # 停靠在对话区右侧的文件面板：点改动的文件 / 点正文里的文件路径开标签页（同一个文件不重复开），顶部路径、正文带行号、新增绿/删除红，带行号打开时滚到那一行，只画不判（差异由 ChatUI 用 tools_git.file_diff_lines 取好交进来）
+    syntax_highlight.py  # 文件面板的语法高亮：tree-sitter 划出每行的「哪一段是哪一类」，只回字符范围不碰 Qt / 主题；Python / JS / TS / TSX 用单语言包的 highlights.scm，其余语言按节点类型名分类，认不出语言 / 没语法库 / 太大就返回空（照原样显示）
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理；行内代码里的项目文件路径在这里变成 lingxi-file: 链接（只认真实存在的文件，代码块不处理）
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开）

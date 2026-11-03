@@ -5,7 +5,9 @@
 - 一个文件一个标签页，同一个文件再点只是切过去，不会重复开；标签上有 ×，面板自己也有
   一个关闭按钮，关到没有标签时面板自动收起（对话区恢复原来的宽度）；
 - 顶部一行是当前文件的完整路径，正文按行显示、带行号（新文件一侧的行号）；diff 里新增的
-  行标绿、删除的行标红，hunk 头和 diff 头另给色调；**不做语法高亮**；
+  行标绿、删除的行标红，hunk 头和 diff 头另给色调；代码行再做一层语法高亮（关键字、字符串、
+  注释、数字、函数 / 类名分开上色，见 ui/syntax_highlight.py）——整行底色保留，颜色只叠在
+  文字上；认不出语言、没装语法库或文件太大时就不高亮，照原样显示；
 - 配色全部现取当前主题（亮色 / 暗色），不用模块级常量——切主题时要能跟着变；
 - 左边缘可以拖动改宽度（和任务面板同一套手感），宽度由 ChatUI 记进界面偏好。
 
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import syntax_highlight
 from .fonts import CAPTION, MONO_CSS, mono_font
 
 # 每一类行的前景色主题键：新增绿、删除红，其余走常规文字色
@@ -113,6 +116,7 @@ class FilePanel(QFrame):
         self._panes: dict[str, PaneView] = {}   # 归一化路径 → 正文
         self._rows: dict[str, list] = {}        # 归一化路径 → 交进来的逐行差异（切主题要重画）
         self._hints: dict[str, str] = {}        # 归一化路径 → 内容说明（diff / 新文件 / 无差异）
+        self._spans: dict[str, dict] = {}       # 归一化路径 → {行下标: 高亮范围}（切主题不用重解析）
         self._build_ui()
         self.apply_theme()
 
@@ -267,6 +271,7 @@ class FilePanel(QFrame):
             return
         view = self._panes.pop(key, None)
         self._rows.pop(key, None)
+        self._spans.pop(key, None)
         self._hints.pop(key, None)
         self.tabs.removeTab(index)
         if view is not None:
@@ -282,6 +287,7 @@ class FilePanel(QFrame):
         for key in list(self._panes):
             view = self._panes.pop(key)
             self._rows.pop(key, None)
+            self._spans.pop(key, None)
             self.stack.removeWidget(view)
             view.deleteLater()
         self._hints.clear()
@@ -326,13 +332,57 @@ class FilePanel(QFrame):
         self.path_label.setToolTip(key)
 
     # ── 正文 ──
+    def _spans_for(self, key: str, rows: list) -> dict:
+        """这个文件的语法高亮范围；内容换了才重新解析（切主题只重画、不再解析一遍）。
+
+        返回 {行下标: [(起, 止, 类别)]}，空字典表示这一份内容不高亮（语言认不出 / 没装
+        语法库 / 文件太大）。
+        """
+        cached = self._spans.get(key)
+        if cached is not None and cached[0] is rows:
+            return cached[1]
+        spans = syntax_highlight.highlight_rows(rows, key) if key else {}
+        self._spans[key] = (rows, spans)
+        return spans
+
+    def _insert_highlighted(self, cursor: QTextCursor, text: str, runs: list,
+                            base: QColor, cache: dict):
+        """按 [(起, 止, 类别)] 把一行文字分段插入：没有范围的片段用 base（正文 / 新增 / 删除色）。"""
+        base_fmt = QTextCharFormat()
+        base_fmt.setForeground(base)
+        pos = 0
+        length = len(text)
+        for start, end, category in runs:
+            start = max(pos, min(length, start))
+            end = max(start, min(length, end))
+            if start > pos:
+                cursor.setCharFormat(base_fmt)
+                cursor.insertText(text[pos:start])
+            if end > start:
+                color = cache.get(category)
+                if color is None:
+                    color = cache[category] = QColor(self._t(syntax_highlight.token_for(category)))
+                fmt = QTextCharFormat()
+                fmt.setForeground(color)
+                cursor.setCharFormat(fmt)
+                cursor.insertText(text[start:end])
+            pos = end
+        if pos < length:
+            cursor.setCharFormat(base_fmt)
+            cursor.insertText(text[pos:])
+
     def _fill(self, view: PaneView, rows: list):
         """把 [(行号, 种类, 文本)] 画进正文：等宽、带行号、按种类上色。
 
         行号宽度按最大行号定（最少 3 位），没有行号的行（删除行、hunk 头）留空位，
         正文左边因此始终对齐。
+
+        能高亮的行（新增 / 删除 / 上下文）文字改用语法色，整行底色和行号色调不变；
+        没被语法覆盖的部分仍按行种类上色（新增绿、删除红），和以前一样。
         """
-        rows = list(rows or [])
+        rows = rows or []          # 不复制：_spans_for 靠对象身份判断内容有没有换
+        spans = self._spans_for(self._path_of(view), rows)
+        span_colors: dict[str, QColor] = {}
         bg = self._t("mv_view_bg")
         numbers = [no for no, _kind, _text in rows if isinstance(no, int)]
         width = max(3, len(str(max(numbers)))) if numbers else 0
@@ -341,7 +391,7 @@ class FilePanel(QFrame):
         doc.clear()
         cursor = QTextCursor(doc)
         target_pos = None
-        for no, kind, text in rows:
+        for index, (no, kind, text) in enumerate(rows):
             if target_pos is None and view.goto_line and no == view.goto_line:
                 target_pos = cursor.position()     # 带行号打开：记下这一行的位置
             block = QTextBlockFormat()
@@ -356,10 +406,9 @@ class FilePanel(QFrame):
                 cursor.setCharFormat(num_fmt)
                 cursor.insertText((str(no).rjust(width) if isinstance(no, int) else " " * width)
                                   + " │ ")
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(self._t(_ROW_COLOR.get(kind, "mv_text"))))
-            cursor.setCharFormat(fmt)
-            cursor.insertText(text)
+            runs = spans.get(index) or []
+            row_fg = QColor(self._t(_ROW_COLOR.get(kind, "mv_text")))
+            self._insert_highlighted(cursor, text, runs, row_fg, span_colors)
             cursor.insertBlock()
         cursor.setCharFormat(QTextCharFormat())
         if target_pos is None:

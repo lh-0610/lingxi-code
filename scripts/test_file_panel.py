@@ -250,10 +250,11 @@ def _colors(block: QTextBlock) -> list:
 
 def test_theme_lookup_is_read_live(qapp, keep):
     panel = _panel(qapp, keep)
-    panel.open_file("a.py", [(1, "add", "+x")])
+    # 真实的 unified diff 一定带 hunk 头；没有 hunk 头的 add 行是「新文件正文」，不剥首字符
+    panel.open_file("a.py", [(None, "hunk", "@@ -0,0 +1 @@"), (1, "add", "+x")])
     panel.theme_lookup = lambda k: THEMES["dark"][k]
     panel.apply_theme()
-    block = panel._panes["a.py"].document().begin()
+    block = panel._panes["a.py"].document().begin().next()
     assert THEMES["dark"]["mv_ok"] in _colors(block), "切到暗色：正文按新主题重画"
 
 

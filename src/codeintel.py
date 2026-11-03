@@ -124,6 +124,23 @@ def get_language_for_path(path: str) -> Optional[str]:
     return None
 
 
+def parser_for_path(path: str):
+    """路径对应的 (解析器, 语言名)；认不出扩展名或没装语法库时返回 (None, None)。
+
+    给只需要「解析这棵语法树」的调用方用（文件面板的语法高亮）：解析器按语言缓存复用，
+    语言对象的加载规则和 extract_symbols 完全一致，不重复实现一遍语言表。
+    """
+    try:
+        lang = get_language_for_path(path)
+        if not lang:
+            return None, None
+        parser = _get_parser(lang)
+    except Exception:  # tree-sitter 装了一半（有 language pack 没有核心包）之类
+        log.debug("parser_for_path failed for %s", path, exc_info=True)
+        return None, None
+    return (parser, lang) if parser is not None else (None, None)
+
+
 def _load_language(name: str):
     """语言对象；官方单语言包已在导入时加载，其余从 language pack 按需取。加载不了返回 None。"""
     lang = _ts_languages.get(name)
@@ -491,6 +508,27 @@ def _symbols_generic(root, source: bytes) -> list[dict]:
                 stack.extend((child, depth + 1, kind in _TYPE_KINDS) for child in reversed(node.children))
             continue
         stack.extend((child, depth, in_type) for child in reversed(node.children))
+    return out
+
+
+def definition_marks(root, source: bytes, max_marks: int = 5000) -> list[tuple]:
+    """定义节点的**名字**范围：[(start_byte, end_byte, "function" | "type")]。
+
+    给语法高亮用（文件面板没有 highlights.scm 的语言靠它给函数 / 类名上色）。节点类型的判断
+    直接用 _generic_kind / _def_name_node——定义长什么样只在这里定一次，别处不再重复。
+    """
+    out: list[tuple] = []
+    stack = list(root.children)
+    while stack and len(out) < max_marks:
+        node = stack.pop()
+        kind = _generic_kind(node)
+        if kind:
+            name_node = _def_name_node(node)
+            if name_node is not None and name_node.end_byte > name_node.start_byte:
+                out.append((name_node.start_byte, name_node.end_byte,
+                            "type" if kind in _CONTAINER_KINDS | {"struct", "enum", "trait", "type"}
+                            else "function"))
+        stack.extend(node.children)
     return out
 
 
