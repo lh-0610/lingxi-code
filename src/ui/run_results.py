@@ -279,7 +279,8 @@ class RunResultMixin:
             # 按记录的稳定标识找回原模型，顶栏跟着显示实际要用的那一个。
             sess.current_model_index = pre.model_index
             self._sync_header_from_session()
-        mode = "Plan 模式（只调研，不改动）" if sess.agent_mode == "plan" else "Act 模式"
+        from .. import permission_modes as _pm
+        mode = _pm.label(_pm.current(sess), long=True)
         self._append_html(f"\n继续任务 · 使用模型「{pre.model_label}」· {mode}\n", "tool_result")
         resume = {"expected_run_id": view.get("run_id") or "", "notes": list(pre.notes)}
         _session.register(sess)

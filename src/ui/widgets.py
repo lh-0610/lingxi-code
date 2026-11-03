@@ -220,9 +220,13 @@ class _FileItemDelegate(QStyledItemDelegate):
 
 class DescribedMenuItem(QWidget):
     """菜单里带一行说明的项：图标 + 标题 + 灰色说明（设计稿里 + 菜单的样子）。
-    点一下、或键盘移过来按 Enter / 空格就触发；QMenu 本身的 QAction 画不了两行字。"""
+    点一下、或键盘移过来按 Enter / 空格就触发；QMenu 本身的 QAction 画不了两行字。
 
-    def __init__(self, icon, title, desc, *, text, sub, hover, parent=None):
+    icon 可以不给（模式菜单没有图标）；trailing 是右边的灰字（数字键提示），
+    checked 时右边再打一个勾（当前选中的那一项）。"""
+
+    def __init__(self, icon, title, desc, *, text, sub, hover, trailing="", checked=False,
+                 accent=None, parent=None):
         super().__init__(parent)
         self.setObjectName("describedItem")
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -234,15 +238,18 @@ class DescribedMenuItem(QWidget):
             "#describedItem { background: transparent; border-radius: 8px; }"
             f"#describedItem:hover, #describedItem:focus {{ background: {hover}; }}"
             f"QLabel#itemTitle {{ color: {text}; font-size: 13px; background: transparent; }}"
-            f"QLabel#itemDesc {{ color: {sub}; font-size: 12px; background: transparent; }}")
+            f"QLabel#itemDesc {{ color: {sub}; font-size: 12px; background: transparent; }}"
+            f"QLabel#itemTrailing {{ color: {sub}; font-size: 13px; background: transparent; }}"
+            f"QLabel#itemCheck {{ color: {accent or text}; font-size: 15px; background: transparent; }}")
         row = QHBoxLayout(self)
         row.setContentsMargins(10, 8, 16, 8)
         row.setSpacing(10)
-        ic = QLabel()
-        ic.setFixedSize(16, 16)
-        ic.setPixmap(icon.pixmap(16, 16))
-        ic.setStyleSheet("background: transparent;")
-        row.addWidget(ic, 0, Qt.AlignTop)
+        if icon is not None:
+            ic = QLabel()
+            ic.setFixedSize(16, 16)
+            ic.setPixmap(icon.pixmap(16, 16))
+            ic.setStyleSheet("background: transparent;")
+            row.addWidget(ic, 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(2)
@@ -253,13 +260,23 @@ class DescribedMenuItem(QWidget):
         col.addWidget(t)
         col.addWidget(d)
         row.addLayout(col, 1)
+        if checked:
+            mark = QLabel("✓")
+            mark.setObjectName("itemCheck")
+            row.addWidget(mark, 0, Qt.AlignVCenter)
+        if trailing:
+            num = QLabel(trailing)
+            num.setObjectName("itemTrailing")
+            num.setFixedWidth(14)
+            num.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(num, 0, Qt.AlignVCenter)
         self.action = None
 
     @staticmethod
-    def add_to(menu, icon, title, desc, slot, **colors):
+    def add_to(menu, icon, title, desc, slot, **options):
         from PySide6.QtWidgets import QWidgetAction
         act = QWidgetAction(menu)
-        item = DescribedMenuItem(icon, title, desc, **colors)
+        item = DescribedMenuItem(icon, title, desc, **options)
         item.action = act
         act.setDefaultWidget(item)
         act.triggered.connect(lambda _=False: slot())
@@ -282,6 +299,26 @@ class DescribedMenuItem(QWidget):
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
             self._fire()
+            return
+        super().keyPressEvent(event)
+
+
+class NumberedMenu(QMenu):
+    """菜单打开时按数字键直接选第 N 项（输入框底栏的模式菜单，和 Claude Code 一样）。
+
+    numbered 里按顺序登记能用数字选的 QAction。焦点在某一项上时按键先到那一项，
+    它不处理数字键，事件会冒泡到菜单这里。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.numbered = []
+
+    def keyPressEvent(self, event):
+        n = event.key() - Qt.Key_1
+        if 0 <= n < min(len(self.numbered), 9) and not (event.modifiers() & ~Qt.KeypadModifier):
+            act = self.numbered[n]
+            self.close()
+            act.trigger()
             return
         super().keyPressEvent(event)
 

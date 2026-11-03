@@ -93,29 +93,7 @@ class HeaderMixin:
         self.isolation_btn.setVisible(False)  # 无项目时隐藏
         layout.addWidget(self.isolation_btn)
 
-        # 计划 / 执行 段控（执行=Act 默认；计划=Plan 时 AI 只调研不动手）。
-        # 两个 checkable 按钮装进 #modeSeg 容器，选中态由 QSS :checked 驱动（见 theme.py）。
-        self.mode_seg = QWidget()
-        self.mode_seg.setObjectName("modeSeg")
-        # 关键:纯 QWidget 在 QHBoxLayout 里竖向默认 Preferred 会被拉伸填满顶栏高,
-        # 变成一个高灰块（QPushButton 竖向 Fixed 不会）。设 Fixed + 居中 → 收成和兄弟钮齐平的小药丸。
-        self.mode_seg.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        _seg_lay = QHBoxLayout(self.mode_seg)
-        _seg_lay.setContentsMargins(2, 2, 2, 2)
-        _seg_lay.setSpacing(2)
-        self.plan_btn = QPushButton("计划")
-        self.act_btn = QPushButton("执行")
-        for _b in (self.plan_btn, self.act_btn):
-            _b.setCheckable(True)
-            _b.setCursor(Qt.PointingHandCursor)
-            _b.setProperty("class", "segBtn")
-            _seg_lay.addWidget(_b)
-        self.act_btn.setChecked(True)
-        self.plan_btn.setToolTip("计划模式：AI 只调研给方案，不动手改东西")
-        self.act_btn.setToolTip("执行模式：AI 可直接执行工具、改文件")
-        self.plan_btn.clicked.connect(lambda: self._set_agent_mode("plan"))
-        self.act_btn.clicked.connect(lambda: self._set_agent_mode("act"))
-        layout.addWidget(self.mode_seg, 0, Qt.AlignVCenter)
+        # 计划 / 执行 已挪到输入框底栏的"模式"菜单（五种权限模式，见 permission_modes.py）。
         # 注：「编码/知识库」模式入口和知识库管理控件在左侧栏（rag_sidebar.py），顶栏不放
 
         # 思考模式开关
@@ -404,18 +382,6 @@ class HeaderMixin:
                 parts.append(f"撤销结果保存失败：{book['save_error'][:120]}")
         self._show_toast("；".join(parts), 6000)
 
-    def _set_agent_mode(self, mode):
-        """段控点击：设置 state.agent_mode + 同步两个段按钮的选中态。"""
-        state.agent_mode = mode
-        if hasattr(self, "plan_btn"):
-            self.plan_btn.setChecked(mode == "plan")
-            self.act_btn.setChecked(mode == "act")
-        # 提示用户切换效果（一闪即过的 toast）
-        if mode == "plan":
-            self._show_toast("已切到计划模式：AI 只给方案不动手")
-        else:
-            self._show_toast("已切到执行模式：AI 可直接执行工具")
-
     def _sync_header_from_session(self):
         """切会话后把顶栏（模型下拉 / Plan-Act / 思考 / 隔离）同步到当前会话的状态。
         model/mode/思考 现在是会话级——切到哪个会话，顶栏就显示那个会话的选择。
@@ -431,16 +397,15 @@ class HeaderMixin:
             if hasattr(self, "think_btn"):
                 self.think_btn.setEnabled(supports_think)
                 self.think_btn.setChecked(bool(sess.reasoning_enabled and supports_think))
-        if hasattr(self, "plan_btn"):
-            self.plan_btn.setChecked(sess.agent_mode == "plan")
-            self.act_btn.setChecked(sess.agent_mode != "plan")
+        if hasattr(self, "mode_btn"):
+            self._refresh_mode_btn()       # 输入框底栏的模式按钮显示这个会话自己的模式
         # 侧栏「编码/知识库」入口跟随该会话的 session_kind（逻辑在 rag_sidebar.py）
         if hasattr(self, "_sync_rag_sidebar_from_session"):
             self._sync_rag_sidebar_from_session()
         # 知识库工作区是纯只读检索问答：隐藏编码专属控件（Plan/Act、撤销、角色卡）。
         # 项目/隔离由 _refresh_project_indicator 处理；模型/思考/主题保留。
         is_rag = getattr(sess, "session_kind", "code") == "rag"
-        for _attr in ("mode_seg", "undo_btn", "role_btn"):
+        for _attr in ("mode_btn", "undo_btn", "role_btn"):
             _w = getattr(self, _attr, None)
             if _w is not None:
                 _w.setVisible(not is_rag)

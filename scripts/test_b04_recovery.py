@@ -996,9 +996,9 @@ class TestResumableView:
         assert "上次停止：用户停止" in lines
         assert "计划进度：模型记录为 1 / 3" in lines
         assert "下一步：检查现场后继续「修复并验证」" in lines
-        assert "上次使用：某模型 · Act 模式" in lines
+        assert "上次使用：某模型 · 手动模式" in lines     # 旧快照没记放行规则：那时一律每次都问
         plan_view = result_view.describe(_snapshot(agent_mode="plan"))
-        assert any("Plan 模式" in line for line in result_view.resume_lines(plan_view))
+        assert any("计划模式（只调研，不改动）" in line for line in result_view.resume_lines(plan_view))
 
     def test_snapshot_carries_model_plan_and_mode(self, isolated_memory, repo):
         sess = _code_session(repo)

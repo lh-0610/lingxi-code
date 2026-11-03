@@ -911,6 +911,7 @@ class ConfirmBarsMixin:
         返回 (allowed, feedback)：allowed 为是否允许；feedback 是用户附带的
         文字反馈（允许时也可附反馈；拒绝时反馈用于告知 AI 如何调整）。
         """
+        from .. import permission_modes as _pm
         from .. import session as _session
         _sess = _session.current_session()      # 发起确认的会话（worker 线程绑的）
         # 危险命令必须每次确认，永不被白名单绕过
@@ -918,6 +919,10 @@ class ConfirmBarsMixin:
             command.startswith("将执行 Git 写操作")
             or self._is_destructive_command(command)
         )
+        # 权限模式（输入框底栏的"模式"菜单）：自动放行普通命令，跳过权限确认全部放行
+        if _pm.allows_command(_pm.current(_sess),
+                              risky=is_destructive or command.startswith("将调用 MCP 工具")):
+            return True, ""
         if not is_destructive:
             base = self._extract_base_command(command)
             if base and base in _sess.command_prefix_allowlist:
@@ -980,9 +985,13 @@ class ConfirmBarsMixin:
 
         done.wait() 无限等待，由用户点击按钮或关窗 _release 唤醒。
         """
+        from .. import permission_modes as _pm
         from .. import session as _session
         _sess = _session.current_session()      # 发起编辑确认的会话（worker 线程绑的）
         if path and path in _sess.edit_path_allowlist:
+            return True, ""
+        # 权限模式：接受编辑 / 自动 / 跳过权限确认 下写文件不用问（撤销记录照样在写之前建好）
+        if _pm.allows_edit(_pm.current(_sess)):
             return True, ""
 
         result = {"_session": _sess}   # 携带发起会话（同 confirm_command）

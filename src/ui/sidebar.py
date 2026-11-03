@@ -749,6 +749,8 @@ class SidebarMixin:
         new_sess = _session.Session()  # 默认 session_kind="code"
         new_sess.current_model_index = _prev.current_model_index
         new_sess.agent_mode = _prev.agent_mode
+        from .prefs import inherited_permission_mode
+        new_sess.permission_mode = inherited_permission_mode(_prev)
         new_sess.reasoning_enabled = _prev.reasoning_enabled
         new_sess.rag_mode = False      # 切项目 = 编码工作区，绝不继承 rag_mode（防混合会话）
         _session.register(new_sess)

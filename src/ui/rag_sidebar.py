@@ -203,6 +203,8 @@ class RagSidebarMixin:
         s.session_kind = kind
         s.current_model_index = _prev.current_model_index
         s.agent_mode = _prev.agent_mode
+        from .prefs import inherited_permission_mode
+        s.permission_mode = inherited_permission_mode(_prev)
         s.reasoning_enabled = _prev.reasoning_enabled
         if kind == "rag":
             s.rag_mode = True

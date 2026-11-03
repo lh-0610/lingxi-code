@@ -44,6 +44,9 @@ _SESSION_FIELDS = {
     # 在某会话改 model 只影响它。默认值会被启动 / 新建会话的"继承当前"覆盖。
     "current_model_index": lambda: 0,
     "agent_mode": lambda: "act",
+    # 执行时的放行规则（manual / accept_edits / auto / bypass，见 permission_modes.py）；
+    # "计划"仍由 agent_mode=plan 表示
+    "permission_mode": lambda: "manual",
     "reasoning_enabled": lambda: True,
     # 知识库(RAG)模式 —— 会话级：前台切知识库不影响正在后台跑的编码会话的工具绑定/拦截
     "rag_mode": lambda: False,

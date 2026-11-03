@@ -31,3 +31,10 @@ def _save_ui_prefs(prefs):
             json.dump(prefs, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def inherited_permission_mode(prev_sess):
+    """新会话的放行规则：沿用上一个会话的；"跳过权限确认"不往下传，退回上次记住的模式。"""
+    from ..permission_modes import default_for_new_session
+    return default_for_new_session(getattr(prev_sess, "permission_mode", "manual"),
+                                   _load_ui_prefs().get("permission_mode"))

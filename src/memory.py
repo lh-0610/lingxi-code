@@ -799,6 +799,11 @@ def _save_session_locked(*, session=None, started=None):
     agent_mode = getattr(sess, "agent_mode", "act")
     if agent_mode not in ("plan", "act"):
         agent_mode = "act"
+    # "跳过权限确认"不落盘（存成手动）：重开程序后不该有会话悄悄停在"什么都不问"的状态
+    from .permission_modes import normalize as _normalize_permission
+    permission_mode = _normalize_permission(getattr(sess, "permission_mode", "manual"))
+    if permission_mode == "bypass":
+        permission_mode = "manual"
 
     if session_kind == "rag":
         sess.project = None            # 清理可能残留的 project；rag 不锚代码项目
@@ -846,6 +851,7 @@ def _save_session_locked(*, session=None, started=None):
         "rag_kb_dir": rag_kb_dir,
         # Plan/Act 跟着会话走：重开时恢复原模式，别让"正在规划"的会话静默变回可动手
         "agent_mode": agent_mode,
+        "permission_mode": permission_mode,
         "schema_version": _SCHEMA_VERSION,
         "progress": {
             "version": _PROGRESS_VERSION,
@@ -1209,6 +1215,10 @@ def load_session(session_id, *, session=None):
     tgt.project = _proj
     tgt.rag_mode = (_kind == "rag")
     tgt.agent_mode = _mode
+    # 旧会话没有这个字段 → 手动（和以前每次都问一致）；bypass 本来就不落盘，读到了也按手动
+    from .permission_modes import normalize as _normalize_permission
+    _perm = _normalize_permission(data.get("permission_mode"))
+    tgt.permission_mode = "manual" if _perm == "bypass" else _perm
     tgt.worktree = None
 
     # 清掉 sidecar 里**已经有匹配回执**的残留记录：它们的结果确实已经落盘，只是上次

@@ -648,6 +648,12 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
                           snapshot=snapshot)
 
 
+def _permission_mode(sess) -> str:
+    """这一轮执行时的放行规则（计划模式另由 agent_mode 记）。"""
+    from .permission_modes import normalize
+    return normalize(getattr(sess, "permission_mode", "manual"))
+
+
 def build_result_snapshot(sess, run, *, save=None, source="live"):
     """给结果卡用的**不可变快照**：把这一轮的事实从会话状态里彻底拷出来。
 
@@ -685,6 +691,7 @@ def build_result_snapshot(sess, run, *, save=None, source="live"):
         "model": dict(run["model"]) if isinstance(run.get("model"), dict) else None,
         "plan": _plan_summary(getattr(sess, "current_plan", None)),
         "agent_mode": getattr(sess, "agent_mode", "act") or "act",
+        "permission_mode": _permission_mode(sess),
         # 展示来源：live=本轮刚跑完；restored=从磁盘重绘。后者不该显示成"刚刚发生"。
         "display_source": source,
         "saved": None if save is None else bool(getattr(save, "fully_saved", False)),

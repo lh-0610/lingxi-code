@@ -21,6 +21,7 @@ src/                     # 主代码
   models.py              # BUILTIN_MODEL_LIST + 自定义模型合并 → MODEL_LIST；_create_llm 工厂（带缓存）+ 视觉探测 + get_model_config_issues
   agent.py               # facade（__getattr__ 代理 state）+ agent_loop 主循环 + resolve_bound_llm（按会话 model 分发/bind_tools 缓存）+ 启动拉起 MCP
   streaming.py           # 全流式：_prepare_stream_history / _handle_stream_chunk / _stream_with_tools + 重试退避 + _execute_tool + 三级历史管理（截断/淘汰/压缩）
+  permission_modes.py    # 五种权限模式（自动/手动/接受编辑/计划/跳过权限确认）各放行什么 + 模式名；判定在 confirm_bars 开头
   verification.py        # 编码任务**完成闸门** + 自动修复循环（标记 dirty/check/test 状态；check_repair_allowed 封顶修复轮次）
   tools.py               # 内置 @tool 聚合器（read/write/edit/run_command/search/test/patch/plan/find_* 等）+ build_all_tools/get_tool_map（含 MCP）
   tools_common.py        # 工具共享底座（_project_cwd / _resolve_path / 子 Agent 沙箱 / 验证状态标记 / shell cwd）—— 不 import tools，避免循环
@@ -77,7 +78,7 @@ src/                     # 主代码
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理；行内代码里的项目文件路径在这里变成 lingxi-file: 链接（只认真实存在的文件，代码块不处理）
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开）
     sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组）+ 项目添加/切换/移除
-    header.py            # HeaderMixin：顶栏（模型/撤销/隔离/计划|执行/思考/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描
+    header.py            # HeaderMixin：顶栏（模型/撤销/隔离/思考/角色/搜索/深浅色/任务面板；计划|执行已挪到输入框底栏的模式按钮，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描
     debug_inspector.py   # F12 调试弹窗（请求/响应/usage 可视化）
     theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
     widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / CloseConfirmDialog / FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）

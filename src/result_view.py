@@ -283,6 +283,7 @@ def describe(snapshot, *, live_run_id=None):
         # 上一轮记录的模型。继续前会按它找回；找不到就要求重新选，不静默换后端。
         "model_label": str(model.get("name") or model.get("id") or ""),
         "agent_mode": snapshot.get("agent_mode") or "act",
+        "permission_mode": snapshot.get("permission_mode") or "",
     }
 
 
@@ -324,7 +325,8 @@ def resume_lines(view):
         lines.append("下一步：检查现场后继续")
     # 只说"上次用的是什么"：卡片是纯数据，不知道那个模型现在还在不在配置里。
     # 实际用哪个模型由点击后的预检决定并当场显示，找不到就要求重选——卡片不替它打包票。
-    mode = "Plan 模式（只调研，不改动）" if view.get("agent_mode") == "plan" else "Act 模式"
+    from .permission_modes import label, snapshot_mode
+    mode = label(snapshot_mode(view), long=True)
     model = view.get("model_label") or "未记录"
     lines.append(f"上次使用：{model} · {mode}")
     return lines

@@ -117,6 +117,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 并记住"只影响发起确认的那个会话，不再作为 ChatUI 全局属性跨会话共享/泄漏。
 
         self._build_ui()
+        # 启动时的会话用上次选的模式（跳过权限确认从不记成默认，见 _choose_mode）
+        from .. import permission_modes as _pm
+        from .. import session as _session
+        _pm.apply(_session.get_active(), _pm.default_for_new_session(
+            _load_ui_prefs().get("permission_mode"), "manual"))
+        self._refresh_mode_btn()
         self._refresh_session_list()
         self._restore_role_card_ui()
         self._show_empty_state()
@@ -230,6 +236,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._restore_role_card_ui()
         if hasattr(self, "img_btn"):
             self._style_img_btn()
+        if hasattr(self, "mode_btn"):
+            self._refresh_mode_btn()
         if hasattr(self, "scroll_bottom_btn"):
             self._style_scroll_bottom_btn()
         if hasattr(self, "plan_panel"):
@@ -601,9 +609,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         sb.rangeChanged.connect(self._on_scroll_changed)
 
     def _stream_meta(self):
+        from .. import permission_modes as _pm
         from .. import session as _session
-        mode = getattr(_session.get_active(), "agent_mode", "act")
-        return {"mode": "计划模式" if mode == "plan" else "执行模式"}
+        return {"mode": _pm.label(_pm.current(_session.get_active()))}
 
     # 面板停靠后，对话栏（含顶栏）至少要留这么宽，否则改成浮层——顶栏最窄一档约 590
     _TASK_PANEL_MIN_CHAT = 592
@@ -1234,6 +1242,15 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 之后在窗口里按一下空格（比如想翻页）就把正在跑的任务停了
         self.send_btn.setFocusPolicy(Qt.NoFocus)
         self.send_btn.clicked.connect(self._on_send_click)
+        # 模式按钮（五种权限模式，原来顶栏的「计划 / 执行」）：在发送键左边，点开菜单向上弹
+        self.mode_btn = QPushButton()
+        self.mode_btn.setObjectName("modeBtn")
+        self.mode_btn.setCursor(Qt.PointingHandCursor)
+        self.mode_btn.setFocusPolicy(Qt.NoFocus)     # 和发送键一样，不留键盘焦点
+        self.mode_btn.setFixedHeight(32)
+        self.mode_btn.clicked.connect(self._show_mode_menu)
+        self._composer_bottom.addWidget(self.mode_btn)
+        self._refresh_mode_btn()
         self._composer_bottom.addWidget(self.send_btn)
         # 初始化样式
         self._update_btn_state("disabled")
@@ -1742,6 +1759,82 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         anchor = self.img_btn.mapToGlobal(QPoint(0, 0))
         menu.exec(anchor - QPoint(0, menu.sizeHint().height() + 6))
         menu.deleteLater()   # 每次点 + 都新建一个菜单，用完删掉，不留在窗口上
+
+    # ── 权限模式（输入框底栏的"模式"按钮；规则见 permission_modes.py）──
+
+    def _refresh_mode_btn(self):
+        """按钮上写当前会话的模式；跳过权限确认用警示色，一眼看得出"现在什么都不问"。"""
+        from .. import permission_modes as _pm
+        from .. import session as _session
+        mode = _pm.current(_session.get_active())
+        self.mode_btn.setText(_pm.name(mode))
+        self.mode_btn.setToolTip(f"模式：{_pm.name(mode)}（点击切换）")
+        self.mode_btn.setAccessibleName(f"模式：{_pm.name(mode)}")
+        color = self._t("mv_orange") if mode == "bypass" else self._t("mv_text_sec")
+        self.mode_btn.setStyleSheet(
+            f"QPushButton#modeBtn {{ background: transparent; border: none; border-radius: 6px;"
+            f" padding: 0 10px; font-size: 13px; color: {color}; }}"
+            f"QPushButton#modeBtn:hover {{ background: {self._t('mv_header_bg')}; color: {self._t('mv_text')}; }}")
+
+    def _show_mode_menu(self):
+        """点模式按钮：五种模式，当前的打勾，右边是数字键，菜单打开时按数字直接选。"""
+        from PySide6.QtWidgets import QWidgetAction
+        from .. import permission_modes as _pm
+        from .. import session as _session
+        from .widgets import DescribedMenuItem, NumberedMenu
+        current = _pm.current(_session.get_active())
+        menu = NumberedMenu(self)
+        menu.setObjectName("modeMenu")
+        title = QLabel("模式")
+        title.setStyleSheet(f"color: {self._t('mv_text_sec')}; font-size: 12px; padding: 6px 10px 2px 10px;"
+                            " background: transparent;")
+        head = QWidgetAction(menu)
+        head.setDefaultWidget(title)
+        head.setEnabled(False)
+        menu.addAction(head)
+        for i, (mode, name, desc) in enumerate(_pm.MODES, 1):
+            act = DescribedMenuItem.add_to(
+                menu, None, name, desc, lambda m=mode: self._choose_mode(m),
+                text=self._t("mv_text"), sub=self._t("mv_text_sec"), hover=self._t("mv_header_bg"),
+                trailing=str(i), checked=(mode == current), accent=self._t("mv_indigo"))
+            menu.numbered.append(act)
+        menu.setStyleSheet(
+            f"QMenu#modeMenu {{ background: {self._t('mv_card_bg')}; border: 1px solid {self._t('mv_chip_border')}; "
+            f"border-radius: 10px; padding: 4px; }}")
+        # 输入框在窗口底部：菜单从按钮正上方弹出，右边和按钮对齐
+        size = menu.sizeHint()
+        anchor = self.mode_btn.mapToGlobal(QPoint(self.mode_btn.width(), 0))
+        menu.exec(anchor - QPoint(size.width(), size.height() + 6))
+        menu.deleteLater()
+
+    def _choose_mode(self, mode):
+        from .. import permission_modes as _pm
+        from .. import session as _session
+        sess = _session.get_active()
+        if mode == "bypass" and _pm.current(sess) != "bypass" and not self._confirm_bypass_mode():
+            return
+        _pm.apply(sess, mode)
+        if mode in _pm.EXEC_MODES and mode != "bypass":
+            # 记成新会话的默认放行规则；跳过权限确认不记（新会话退回上一次的非跳过模式），
+            # 计划也不记（它是 agent_mode，新会话照旧沿用上一个会话的）
+            prefs = _load_ui_prefs()
+            prefs["permission_mode"] = mode
+            _save_ui_prefs(prefs)
+        self._refresh_mode_btn()
+        self._show_toast(f"已切到「{_pm.name(mode)}」：{_pm.describe(mode)}", 3000)
+
+    def _confirm_bypass_mode(self) -> bool:
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("跳过权限确认")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("切换后，这个会话里 AI 改文件、执行任何命令都不再问你，包括删除文件、"
+                    "Git 提交和推送、调用 MCP 工具。\n\n只建议在你信得过、能随时撤回的项目里用。"
+                    "这个模式不会被记住：重开程序或新建会话会回到原来的模式。")
+        ok = box.addButton("仍要切换", QMessageBox.AcceptRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is ok
 
     def _add_pending_image(self, path):
         try:

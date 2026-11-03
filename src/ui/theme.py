@@ -995,30 +995,6 @@ QPushButton[class="historyItemDone"]:hover {{
     background: {p['mv_indigo_soft']};
 }}
 
-/* 计划|执行 段控：浅灰底的一条，选中的那段是白底主题色字 */
-#modeSeg {{
-    background: {p['mv_header_bg']};
-    border: none;
-    border-radius: 8px;
-}}
-#modeSeg QPushButton[class="segBtn"] {{
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    padding: 0 10px;
-    min-height: 26px;
-    max-height: 26px;
-    font-size: 13px;
-    color: {p['mv_text_sec']};
-}}
-#modeSeg QPushButton[class="segBtn"]:hover {{
-    color: {p['mv_text']};
-}}
-#modeSeg QPushButton[class="segBtn"]:checked {{
-    background: {p['mv_card_bg']};
-    color: {p['mv_indigo']};
-    font-weight: 600;
-}}
 #headerTitle {{
     font-family: {UI_CSS};
     font-size: 16px;
