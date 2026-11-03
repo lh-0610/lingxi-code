@@ -499,6 +499,67 @@ class TestReplyMeta:
         assert "lingxi_model" not in memory._msg_to_dict(AIMessage(content="old"))
 
 
+class TestWaitingIndicator:
+    """一直没收到 chunk 时提示服务商可能在排队；思考中 / 生成工具调用阶段 chunk 在来，不提示。"""
+
+    @staticmethod
+    def _waiting(mv):
+        from src.ui.message_view import WaitingIndicator
+        found = mv.findChildren(WaitingIndicator)
+        assert len(found) == 1
+        return found[0]
+
+    @staticmethod
+    def _wait_seconds(ind, seconds):
+        for _ in range(seconds):
+            ind._bump()
+
+    def test_queue_hint_shows_only_after_a_long_silence(self, qt_app):
+        from src.ui.message_view import QUEUE_HINT_AFTER_S
+        mv = _view()
+        _round_with_reply(mv)
+        mv.handle("等待响应...\n", "thinking_indicator")
+        ind = self._waiting(mv)
+        assert ind._lbl.text() == "等待响应 0 秒" and not ind.hint_visible()
+        self._wait_seconds(ind, QUEUE_HINT_AFTER_S - 1)
+        assert not ind.hint_visible()
+        self._wait_seconds(ind, 1)
+        assert ind.hint_visible(), "这么久一个 chunk 都没有，多半是服务商在排队"
+        mv.close()
+
+    def test_hint_goes_away_once_chunks_start_coming(self, qt_app):
+        from src.ui.message_view import QUEUE_HINT_AFTER_S
+        mv = _view()
+        _round_with_reply(mv)
+        mv.handle("等待响应...\n", "thinking_indicator")
+        ind = self._waiting(mv)
+        self._wait_seconds(ind, QUEUE_HINT_AFTER_S + 5)
+        mv.update_waiting(f"模型思考中... ({QUEUE_HINT_AFTER_S + 5}s)\n")
+        assert ind._lbl.text() == f"模型思考中 {QUEUE_HINT_AFTER_S + 5} 秒"
+        assert not ind.hint_visible()
+        mv.close()
+
+    def test_long_tool_call_generation_is_not_called_a_queue(self, qt_app):
+        """生成大文件的 write_file 参数要几十秒，这时模型一直在出东西，不是排队。"""
+        from src.ui.message_view import QUEUE_HINT_AFTER_S
+        mv = _view()
+        _round_with_reply(mv)
+        mv.handle("🔧 正在生成工具调用 write_file... (0s)\n", "thinking_indicator")
+        ind = self._waiting(mv)
+        assert ind._lbl.text() == "正在生成工具调用 write_file 0 秒"
+        self._wait_seconds(ind, QUEUE_HINT_AFTER_S * 2)
+        assert not ind.hint_visible()
+        mv.close()
+
+    def test_update_without_an_indicator_does_nothing(self, qt_app):
+        from src.ui.message_view import WaitingIndicator
+        mv = _view()
+        _round_with_reply(mv)
+        mv.update_waiting("等待响应... (3s)\n")      # 心跳晚到一拍：指示器已经清掉了
+        assert mv.findChildren(WaitingIndicator) == []
+        mv.close()
+
+
 class TestToolCardTooltip:
     def test_long_command_tooltip_uses_theme_colors_and_wraps(self, qt_app):
         """工具卡上长命令的悬停提示：跟主题配色（不是 Windows 默认黑底）、不用等宽字体、会换行。

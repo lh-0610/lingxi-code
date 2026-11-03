@@ -801,27 +801,71 @@ class StepHeader(QWidget):
         QTimer.singleShot(ms, self, lambda: self.setStyleSheet(""))
 
 
+_WAITING_LABEL = "等待响应"
+# 一个 chunk 都没收到超过这么久，多半是服务商在排队（DeepSeek 高峰期会让请求排到 10 分钟）
+QUEUE_HINT_AFTER_S = 30
+QUEUE_HINT = "服务商可能在排队，高峰期常见。可以先停止，过会儿再继续。"
+
+
+def waiting_phase(text: str) -> tuple[str, bool]:
+    """streaming 发来的指示器整句 → (标签, 是不是还没收到任何东西)。
+
+    整句形如「等待响应... (12s)」「模型思考中... (12s)」「🔧 正在生成工具调用 write_file... (3s)」，
+    秒数由指示器自己走，这里只取前面的标签。只有「等待响应」才可能是服务商在排队：
+    后两种说明 chunk 已经在来了，只是还没有正文。
+    """
+    label = strip_leading_emoji((text or "").strip())
+    label = re.sub(r"(\.\.\.|…)?\s*(\(\d+s\))?$", "", label).strip() or _WAITING_LABEL
+    return label, label == _WAITING_LABEL
+
+
 class WaitingIndicator(QWidget):
-    """等待模型响应：转圈 + 「等待响应 N 秒」（自走秒表）。"""
-    def __init__(self, start_elapsed: int = 0, parent=None):
+    """等待模型响应：转圈 + 「等待响应 N 秒」（自走秒表）。
+
+    一直没收到 chunk 超过 QUEUE_HINT_AFTER_S 秒，下面多一行说服务商可能在排队——
+    不然看着像灵犀卡了。思考中 / 生成工具调用阶段 chunk 一直在来，不提示。
+    """
+    def __init__(self, start_elapsed: int = 0, parent=None, text: str = ""):
         super().__init__(parent)
         self._elapsed = start_elapsed
-        h = QHBoxLayout(self)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(8)
+        self._label, self._may_queue = waiting_phase(text)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
         from .widgets import LoadingSpinner
-        h.addWidget(LoadingSpinner(size=14, color=_P["indigo"]), 0, Qt.AlignVCenter)
+        row.addWidget(LoadingSpinner(size=14, color=_P["indigo"]), 0, Qt.AlignVCenter)
         self._lbl = QLabel()
         self._lbl.setStyleSheet(f"color:{_P['text_sec']}; font-size:13px; background:transparent;")
-        h.addWidget(self._lbl, 0, Qt.AlignVCenter)
-        h.addStretch(1)
+        row.addWidget(self._lbl, 0, Qt.AlignVCenter)
+        row.addStretch(1)
+        v.addLayout(row)
+        self._hint = QLabel(QUEUE_HINT)
+        self._hint.setWordWrap(True)
+        self._hint.setContentsMargins(22, 0, 0, 0)   # 和上面的文字对齐（转圈 14 + 间距 8）
+        self._hint.setStyleSheet(f"color:{_P['text_sec']}; font-size:12px; background:transparent;")
+        self._hint.hide()
+        v.addWidget(self._hint)
         self._tick()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._bump)
         self._timer.start(1000)
 
+    def set_phase(self, text: str):
+        """后台心跳每秒报一次当前阶段；从「等待响应」进到「模型思考中」就收起排队提示。"""
+        label, may_queue = waiting_phase(text)
+        if (label, may_queue) != (self._label, self._may_queue):
+            self._label, self._may_queue = label, may_queue
+            self._tick()
+
+    def hint_visible(self) -> bool:
+        return not self._hint.isHidden()
+
     def _tick(self):
-        self._lbl.setText(f"等待响应 {self._elapsed} 秒")
+        self._lbl.setText(f"{self._label} {self._elapsed} 秒")
+        self._hint.setVisible(self._may_queue and self._elapsed >= QUEUE_HINT_AFTER_S)
 
     def _bump(self):
         self._elapsed += 1
@@ -1062,9 +1106,13 @@ class AssistantTurn(QWidget):
             if st and st != hdr.status:
                 hdr.set_status(st)
 
-    def show_waiting(self):
+    def show_waiting(self, text: str = ""):
         self.clear_waiting()
-        self._waiting = self._add(WaitingIndicator(0), top_gap=14)
+        self._waiting = self._add(WaitingIndicator(0, text=text), top_gap=14)
+
+    def update_waiting(self, text: str):
+        if self._waiting is not None:
+            self._waiting.set_phase(text)
 
     def clear_waiting(self):
         if self._waiting is not None:
@@ -1468,7 +1516,7 @@ class MessageView(QScrollArea):
         elif tag == "think_collapse":
             self._assistant().think_collapse()
         elif tag == "thinking_indicator":
-            self._assistant().show_waiting()
+            self._assistant().show_waiting(text)
         elif tag == "tool_tag":
             # 拒绝/错误类(⚠️/⛔/🔒)是独立提示,不建工具卡;其余是真工具调用 → 建卡
             if any(w in text for w in ("⚠️", "⛔", "🔒", "未知工具")):
@@ -1498,6 +1546,11 @@ class MessageView(QScrollArea):
     def remove_waiting(self):
         if self._cur_assistant is not None:
             self._cur_assistant.clear_waiting()
+
+    def update_waiting(self, text: str):
+        """心跳报的阶段（等待响应 / 模型思考中 / 正在生成工具调用）；没有指示器就不管。"""
+        if self._cur_assistant is not None:
+            self._cur_assistant.update_waiting(text)
 
     def show_retry(self, error_msg, on_retry=None):
         """错误 + 重试按钮块。"""

@@ -50,4 +50,5 @@
 - **错误分类**（`llm_errors.classify`）：原来所有异常一视同仁地退避重试，对三类是错的——**上下文溢出**重试必然再溢出；**鉴权失败**等再久 key 也不会变对；**限流**服务端通常在 `Retry-After` 里给了确切秒数，盲目 2^n 要么继续撞墙要么白等。分类不 import 任何 provider SDK（各家异常类型不同、自定义模型协议还是用户配的），改用三层判据：状态码 → 异常类名 → 消息特征词，认不出一律退化成 UNKNOWN（= 保持原行为），宁可漏判不可误判
 - **溢出恢复**：provider 报超窗 → `_stream_chunks_with_retry` 抛 `ContextOverflowError` → 主循环把会话的 `overflow_squeeze` +1（`_current_history_budget` 按 1/2^n 收紧、8k 地板）→ 压缩后重发，封顶 `_MAX_OVERFLOW_RETRIES=3`。**不在成功后清零**：溢出说明对该模型窗口的估算偏乐观，这个教训该在本会话内保持，否则每轮都要重新撞一次墙
 - **停止不等网络**：`_stoppable_stream` 在旁路线程里拉流，worker 每 0.2s 看一次停止标志。原来 worker 直接迭代 `llm.stream()`，模型迟迟不回 chunk 时卡在网络读上（请求超时 30 分钟），停止后转圈一直走秒、旧 worker 不退，下一条消息排队 15 秒就放弃。旁路线程和 worker 绑同一会话与数据根，停止后它等到下一个 chunk 或请求结束自己关连接退出；重试退避也按停止标志提前结束。界面侧 `_force_stop_generation` 当场清掉「等待响应」指示器
+- **排队提示**：DeepSeek 高峰期会让请求排队最多 10 分钟，期间只发 SSE 注释 `: keep-alive`（实测 `/responses` 和 `/chat/completions` 都是每 12 秒一次，SDK 不产出 chunk）。`WaitingIndicator` 按心跳报的阶段区分「等待响应」（一个 chunk 都没有）/「模型思考中」/「正在生成工具调用 X」，只有前者满 30 秒才在下面加一行「服务商可能在排队」。原来三种阶段界面上都显示「等待响应」，长的 write_file 参数生成会被误认成卡住
 - 子 Agent 递归深度天然封顶：`spawn_agents` 里 `is_subagent` 的会话不许再派生

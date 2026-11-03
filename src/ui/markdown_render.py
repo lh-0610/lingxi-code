@@ -351,5 +351,5 @@ class MarkdownRenderMixin:
         self.chat_area.remove_waiting()
 
     def _update_thinking(self, text):
-        """更新等待指示器——WaitingIndicator 自带秒表自走,这里无需原地刷,no-op。"""
-        return
+        """更新等待指示器的阶段——秒数 WaitingIndicator 自己走，这里只换标签、收放排队提示。"""
+        self.chat_area.update_waiting(text)
