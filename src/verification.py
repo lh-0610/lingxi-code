@@ -477,7 +477,8 @@ def gaps_from_state(v: dict) -> list[str]:
                      if has_code_changes else "存在未被观察到的工作区写入")
             gaps.append(
                 f"{_what}{_blind_note}但尚未运行测试。"
-                "请先调用 run_tests 验证改动不会引入回归。"
+                "请先调用 run_tests 验证改动不会引入回归（它会自动认 pytest / npm / Maven / Gradle / "
+                "go / cargo / dotnet；认不出的项目用 run_command 跑它自己的测试命令，结果同样算数）。"
             )
         elif v["tests_passed"] is False:
             gaps.append("测试未通过（有失败用例），请先修复测试再声称任务完成。")

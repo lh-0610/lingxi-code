@@ -22,6 +22,7 @@ src/                     # 主代码
   agent.py               # facade（__getattr__ 代理 state）+ agent_loop 主循环 + resolve_bound_llm（按会话 model 分发/bind_tools 缓存）+ 启动拉起 MCP
   streaming.py           # 全流式：_prepare_stream_history / _handle_stream_chunk / _stream_with_tools + 重试退避 + _execute_tool + 三级历史管理（截断/淘汰/压缩）
   permission_modes.py    # 五种权限模式（自动/手动/接受编辑/计划/跳过权限确认）各放行什么 + 模式名；判定在 confirm_bars 开头
+  test_runners.py        # 认项目的测试工具（pytest / npm·pnpm·yarn / Maven / Gradle / go / cargo / dotnet）+ 认出 run_command 里跑的测试命令（退出码算测试结果）
   verification.py        # 编码任务**完成闸门** + 自动修复循环（标记 dirty/check/test 状态；check_repair_allowed 封顶修复轮次）
   tools.py               # 内置 @tool 聚合器（read/write/edit/run_command/search/test/patch/plan/find_* 等）+ build_all_tools/get_tool_map（含 MCP）
   tools_common.py        # 工具共享底座（_project_cwd / _resolve_path / 子 Agent 沙箱 / 验证状态标记 / shell cwd）—— 不 import tools，避免循环

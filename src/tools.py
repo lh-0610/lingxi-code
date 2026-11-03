@@ -962,6 +962,10 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
         except Exception:
             pass
 
+    # 跑的是测试命令（npm test / mvn test / go test ……）的话，退出码记成测试结果
+    with contextlib.suppress(Exception):
+        _record_command_test_result(command, run_cwd, proc.returncode, output, start)
+
     return f"退出码: {proc.returncode}\n{output}"
 
 
@@ -1991,11 +1995,14 @@ def _record_run_evidence(**fields):
 
 @tool
 def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
-    """跑 pytest 测试，返回精炼结果：通过/失败数 + 每个失败用例的位置和错误摘要。
-    path: 测试路径/文件（相对项目根，空 = pytest 自动发现）；多个用空格隔开。k: pytest -k 过滤表达式。
-    比 run_command 跑 pytest 省事——直接给你哪些挂了、错在哪，便于定位修复。"""
-    # ── 构建命令：<解释器> -m pytest（frozen 下 sys.executable=exe 不能用，见 _resolve_python） ──
-    cmd = [_resolve_python(), "-m", "pytest", "--tb=short", "-q"]
+    """跑项目的测试，返回精炼结果：通过/失败 + 失败的位置和摘要。
+    自动认测试工具：Python 用 pytest；package.json 里有 test 脚本用 npm / pnpm / yarn test；
+    pom.xml / build.gradle 用 Maven / Gradle（优先项目自带的 mvnw / gradlew）；go.mod 用 go test；
+    Cargo.toml 用 cargo test；.sln / .csproj 用 dotnet test。
+    path: 测试路径/文件（相对项目根，空 = 跑全部）；多个用空格隔开。k: 按名字筛用例
+    （pytest -k / jest·vitest -t / mvn -Dtest / gradle --tests / go test -run / cargo test 过滤 / dotnet --filter）。
+    认不出的项目用 run_command 跑它自己的测试命令——常见测试命令的结果同样算数。"""
+    from . import test_runners as _tr
     run_cwd = _shell_cwd()
     reject = _subagent_command_rejection("pytest", run_cwd)
     if reject:
@@ -2004,6 +2011,7 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
     # ── path 安全校验：_resolve_path + commonpath 防逃逸（同 code_map） ──
     # 可以给多个路径（空格隔开）：模型常写 "a.py b.py"，整串当成一个路径交给 pytest 会找不到、
     # 退出码 4，结果卡还会把它记成一次失败。整串本身就是存在的路径（目录名带空格）时不拆。
+    paths = []
     if path:
         root = os.path.realpath(_project_cwd())
         parts = [path] if os.path.exists(_resolve_path(path)) else path.split()
@@ -2015,10 +2023,20 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
                 inside = False
             if not inside:
                 return "失败：路径超出项目范围，不允许（不能用 .. 逃出项目根）"
-            cmd.append(resolved)
+            paths.append(resolved)
 
-    if k:
-        cmd.extend(["-k", k])
+    # ── 认测试工具（frozen 下 sys.executable=exe 不能用，pytest 的解释器见 _resolve_python）──
+    runner, why = _tr.detect(run_cwd, _project_cwd(), paths, k, python=_resolve_python())
+    if runner is None:
+        _record_run_evidence(kind="tests", checker="tests", argv=None, cwd=run_cwd,
+                             started_at=_evidence_now(), t0=time.time(), exit_code=None,
+                             status="not_run", summary=why, reason=why)
+        with contextlib.suppress(Exception):
+            _v_mark_tests(_session.get_verification(), None, why)
+        return f"没有跑测试：{why}。"
+    if runner.name != "pytest":
+        return _run_other_tests(runner, timeout)
+    cmd = runner.argv
 
     # ── 执行 ──
     # 每条退出路径都要留一条**真实**证据：跑没跑起来、退了什么码、花了多久。
@@ -2111,6 +2129,86 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
             _v_mark_tests(_session.get_verification(), result.returncode == 0, root=run_cwd)
 
     return summary
+
+
+def _run_other_tests(runner, timeout: int) -> str:
+    """跑 pytest 以外的测试工具（npm / maven / gradle / go / cargo / dotnet）。
+
+    结论只看退出码：0 = 通过，其余 = 没通过。各家的输出格式五花八门，这里不逐家解析计数，
+    只把"一共几个、挂了几个"那几行摘到前面，再附上输出末尾——失败在哪模型自己看得懂。
+    """
+    from . import test_runners as _tr
+    started = _evidence_now()
+    t0 = time.time()
+    # CI=true：jest / vitest 等在交互终端里会进 watch 模式一直不退出
+    env = {**os.environ, "CI": "true"}
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        result = subprocess.run(
+            runner.argv, cwd=runner.cwd,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            stdin=subprocess.DEVNULL, env=env,
+        )
+    except FileNotFoundError:
+        why = f"{runner.name} 找不到可执行文件"
+        _record_run_evidence(kind="tests", checker=runner.name, argv=runner.argv, cwd=runner.cwd,
+                             started_at=started, t0=t0, exit_code=None, status="not_run",
+                             summary=why, reason=why)
+        with contextlib.suppress(Exception):
+            _v_mark_tests(_session.get_verification(), None, why)
+        return f"没有跑测试：{why}。"
+    except subprocess.TimeoutExpired:
+        why = f"测试超时（>{timeout}s）"
+        _record_run_evidence(kind="tests", checker=runner.name, argv=runner.argv, cwd=runner.cwd,
+                             started_at=started, t0=t0, exit_code=None, status="timeout",
+                             summary=why, reason="超时被终止")
+        with contextlib.suppress(Exception):
+            _v_mark_tests(_session.get_verification(), None, why)
+        return f"{why}，可能有用例卡住，请检查或增大 timeout。"
+    except Exception as e:
+        _record_run_evidence(kind="tests", checker=runner.name, argv=runner.argv, cwd=runner.cwd,
+                             started_at=started, t0=t0, exit_code=None, status="error",
+                             summary=f"运行 {runner.name} 失败: {e}", reason=str(e))
+        with contextlib.suppress(Exception):
+            _v_mark_tests(_session.get_verification(), None, f"运行 {runner.name} 失败: {e}")
+        return f"运行 {runner.name} 失败: {e}"
+
+    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    summary = _tr.summarize(runner.name, output, result.returncode, time.time() - t0)
+    if len(summary) > 6000:
+        summary = summary[:6000] + "\n... [输出已截断，超过 6000 字]"
+    passed = result.returncode == 0
+    _record_run_evidence(kind="tests", checker=runner.name, argv=runner.argv, cwd=runner.cwd,
+                         started_at=started, t0=t0, exit_code=result.returncode,
+                         status="passed" if passed else "failed", summary=_first_lines(summary))
+    with contextlib.suppress(Exception):
+        _v_mark_tests(_session.get_verification(), passed, root=runner.cwd)
+    return summary
+
+
+def _record_command_test_result(command: str, cwd: str, returncode: int, output: str, t0: float) -> None:
+    """run_command 跑的若是一次测试（pytest / npm test / mvn test / go test ……），它的退出码
+    同样算测试结果：以前只认 run_tests，模型自己跑 `mvn test` 通过了也不算，
+    非 Python 项目的任务因此永远停在"尚未运行测试"。"""
+    from . import test_runners as _tr
+    hit = _tr.recognize(command, cwd)
+    if hit is None:
+        return
+    name, where = hit
+    if name == "pytest" and returncode in (4, 5):
+        status, passed = "not_run", None
+        reason = "没有收集到任何测试用例" if returncode == 5 else "pytest 用法错误（参数或路径不对），测试没有跑"
+    else:
+        status, passed, reason = ("passed" if returncode == 0 else "failed"), returncode == 0, ""
+    _record_run_evidence(kind="tests", checker=name, argv=None, command=command, cwd=where,
+                         started_at=_evidence_now(), t0=t0, exit_code=returncode, status=status,
+                         summary=_first_lines(_tr.summarize(name, output, returncode, time.time() - t0)),
+                         reason=reason)
+    with contextlib.suppress(Exception):
+        if passed is None:
+            _v_mark_tests(_session.get_verification(), None, reason)
+        else:
+            _v_mark_tests(_session.get_verification(), passed, root=where)
 
 
 # ══════════════════════════════════════
