@@ -122,13 +122,24 @@ class TestAppendVolatile:
         assert "步骤" in out[-1].content
         assert out[0].content == "sys" and out[1].content == "干活"   # 原消息原样
 
-    def test_noop_when_empty(self, sess):
+    def test_always_appends_even_when_empty(self, sess):
+        """没有运行态也追加一条固定内容：尾部这条 user 消息一会儿有一会儿没有，DeepSeek 对前面
+        思考内容的处理就会变（只保留最后一条 user 消息之后的思考），计划建好那一轮前缀缓存
+        从用户原话之后全部失效。所以从第一轮起就一直有，前缀才稳定。"""
         from src.streaming import _append_volatile_context
         sess.agent_mode = "act"
         sess.current_plan = []
         sess.task_ledger = {"files": {}, "commands": []}
         msgs = self._msgs()
-        assert len(_append_volatile_context(msgs)) == len(msgs)
+        empty = _append_volatile_context(msgs)
+        assert len(empty) == len(msgs) + 1
+        assert empty[-1].__class__.__name__ == "HumanMessage"
+        assert "system-reminder" in empty[-1].content
+        assert _append_volatile_context(msgs)[-1].content == empty[-1].content, "空的时候内容固定"
+
+        sess.current_plan = [{"text": "步骤", "status": "pending"}]
+        planned = _append_volatile_context(msgs)
+        assert planned[:-1] == empty[:-1], "有了计划只换掉最后一条，前面一字不变"
 
     def test_safe_after_tool_message(self, sess):
         """历史以 ToolMessage 结尾（工具刚跑完）时追加 user 消息是合法的，
@@ -150,15 +161,16 @@ class TestAppendVolatile:
         assert len(msgs) == 2
 
     def test_render_failure_does_not_break_the_turn(self, sess, monkeypatch):
-        """运行态渲染失败只能跳过这一块，不能让整轮请求发不出去。"""
+        """运行态渲染失败不能让整轮请求发不出去：退回那条固定内容，结构照旧（前缀缓存也不断）。"""
         import src.roles as _roles
-        from src.streaming import _append_volatile_context
+        from src.streaming import _EMPTY_VOLATILE, _append_volatile_context
 
         def _boom():
             raise RuntimeError("渲染炸了")
         monkeypatch.setattr(_roles, "get_volatile_context", _boom)
         msgs = self._msgs()
-        assert _append_volatile_context(msgs) == msgs
+        out = _append_volatile_context(msgs)
+        assert out[:-1] == msgs and out[-1].content == _EMPTY_VOLATILE
 
 
 class TestCacheBlockActuallyStable:

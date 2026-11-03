@@ -23,6 +23,7 @@ from .tools_common import (  # 共享底座（拆包：路径/项目根/子 Agen
 from .limits import (
     BG_TOOL_OUTPUT_CHARS,
     READ_FILE_DEFAULT_LIMIT,
+    READ_FILE_MAX_CHARS,
     RUN_COMMAND_MAX_OUTPUT_CHARS,
     RUN_COMMAND_TIMEOUT_S,
     SEARCH_FILES_CONTEXT_MAX_HITS as _SEARCH_CONTEXT_MAX_HITS,
@@ -43,7 +44,9 @@ def read_file(path: str, offset: int = 1, limit: int = READ_FILE_DEFAULT_LIMIT) 
     参数：
       path: 文件路径（绝对或相对项目根）
       offset: 起始行号（**从 1 开始**），默认 1
-      limit: 最多读取的行数，默认 2000；文件更长时末尾会提示用 offset 接着读
+      limit: 最多读取的行数，默认 2000；文件更长时末尾会提示用 offset 接着读。
+        一次最多返回约 3 万字，超出的同样提示用 offset 接着读——大文件先用 search_files
+        或代码地图找到行号，再读那一段
 
     返回格式（类 `cat -n`）：
         1: import os
@@ -73,7 +76,8 @@ def _read_many(paths, offset, limit):
         if used >= _READ_MANY_MAX_CHARS:
             parts.append(f"### {p}\n（这次批量读取已满 {_READ_MANY_MAX_CHARS} 字，这个文件没读：单独读，或缩小 limit）")
             continue
-        body = _read_one(p, offset, limit)
+        # 每个文件都按剩下的预算截：以前只在读之前查总量，第一个文件再大也整个读进来
+        body = _read_one(p, offset, limit, max_chars=min(READ_FILE_MAX_CHARS, _READ_MANY_MAX_CHARS - used))
         parts.append(f"### {p}\n{body}")
         used += len(body)
     if extra:
@@ -81,7 +85,7 @@ def _read_many(paths, offset, limit):
     return "\n\n".join(parts)
 
 
-def _read_one(path, offset, limit):
+def _read_one(path, offset, limit, max_chars=READ_FILE_MAX_CHARS):
     try:
         full = _resolve_path(path)
         reject = _subagent_path_rejection(full, "文件")
@@ -106,13 +110,18 @@ def _read_one(path, offset, limit):
 
     start = offset - 1
     end = min(start + limit, total)
-    lines = all_lines[start:end]
 
     # 行号宽度按总行数算（5 位足够 99999 行）
     width = max(4, len(str(end)))
-    rendered = "\n".join(
-        f"{(start + i + 1):>{width}}: {ln.rstrip()}" for i, ln in enumerate(lines)
-    )
+    out, size, cut_by_size = [], 0, False
+    for i in range(start, end):
+        row = f"{(i + 1):>{width}}: {all_lines[i].rstrip()}"
+        if out and size + len(row) + 1 > max_chars:
+            end, cut_by_size = i, True       # 字数到顶：按行截，至少给一行
+            break
+        out.append(row)
+        size += len(row) + 1
+    rendered = "\n".join(out)
 
     if end >= total and offset == 1:
         footer = f"\n[完整文件，共 {total} 行]"
@@ -120,8 +129,9 @@ def _read_one(path, offset, limit):
         footer = f"\n[显示第 {offset}-{end} 行 / 共 {total} 行（已读到末尾）]"
     else:
         remaining = total - end
+        why = f"（一次最多读约 {max_chars} 字）" if cut_by_size else ""
         footer = (
-            f"\n[显示第 {offset}-{end} 行 / 共 {total} 行，"
+            f"\n[显示第 {offset}-{end} 行 / 共 {total} 行{why}，"
             f"还有 {remaining} 行未读——继续读用 offset={end + 1}]"
         )
     return rendered + footer

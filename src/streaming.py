@@ -765,10 +765,16 @@ def _append_volatile_context(messages):
         text = get_volatile_context()
     except Exception as e:      # 运行态渲染失败绝不能让整轮请求发不出去
         logger.warning(f"渲染易变上下文失败（本轮跳过）: {e}")
-        return messages
-    if not text:
-        return messages
-    return list(messages) + [HumanMessage(content=text)]
+        text = ""
+    # 没有运行态也照样追加一条（内容固定）：尾部有没有这条 user 消息，会改变 DeepSeek 对前面
+    # 历史的处理——思考模式下它只保留"最后一条 user 消息之后"的思考内容。以前计划一建好
+    # 尾部才冒出这条消息，前十几轮累积的思考被整段丢掉，前缀缓存从用户原话之后全部失效
+    # （任务七、八各白付一次 5 万 / 8 万 token 的未命中），计划建好之前每轮还在重复发这些思考。
+    return list(messages) + [HumanMessage(content=text or _EMPTY_VOLATILE)]
+
+
+# 没有运行态时追加的固定内容（见 _append_volatile_context）
+_EMPTY_VOLATILE = "<system-reminder>\n当前会话暂无计划和待验证事项。\n</system-reminder>"
 
 
 def _prepare_stream_history(ui):

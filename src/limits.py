@@ -37,6 +37,10 @@ TOOL_RESULT_HARD_CAP_TAIL = 6_000      # 保留结尾字符数
 STREAM_RETRY_ATTEMPTS = 3
 
 READ_FILE_DEFAULT_LIMIT = 2000
+# 一次读文件最多返回这么多字（按行截，末尾提示用 offset 接着读）。读进来的内容每轮都要重发：
+# 任务八一次 read_files 把 markdown_render.py 整个读进来约 2.6 万 token，之后九十多轮每轮都带着它。
+# 3 万字约是灵犀代码的四五百行，够看一段完整的实现；要看别处用 offset 跳过去。
+READ_FILE_MAX_CHARS = 30_000
 SEARCH_IN_FILE_DEFAULT_LIMIT = 50
 SEARCH_IN_FILE_MAX_LIMIT = 200
 SEARCH_FILES_MAX_RESULTS = 50

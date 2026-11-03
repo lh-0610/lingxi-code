@@ -67,6 +67,32 @@ class TestReadFile:
 
         assert "### next.txt" in result and "没读" in result and "tail" not in result
 
+    def test_one_read_is_capped_by_size_and_says_where_to_continue(self, project_dir, monkeypatch):
+        """读进来的内容之后每轮都要重发：一次读太多就按行截，告诉模型从哪行接着读。"""
+        from src import tools
+        monkeypatch.setattr(tools, "READ_FILE_MAX_CHARS", 100)
+        monkeypatch.setattr(tools._read_one, "__defaults__", (100,))
+        (project_dir / "big.py").write_text("".join(f"value_{i} = {i}\n" for i in range(50)), encoding="utf-8")
+
+        result = read_file.func("big.py")
+
+        assert "value_0 = 0" in result and "value_49" not in result
+        assert "一次最多读约 100 字" in result and "继续读用 offset=" in result
+        shown = [ln for ln in result.splitlines() if ": value_" in ln]
+        assert f"offset={len(shown) + 1}" in result, "从第一行没给的地方接着读"
+
+    def test_read_files_caps_the_first_file_too(self, project_dir, monkeypatch):
+        """以前只在读下一个文件之前查总字数，第一个文件再大也整个读进来。"""
+        from src import tools
+        monkeypatch.setattr(tools, "_READ_MANY_MAX_CHARS", 120)
+        (project_dir / "big.py").write_text("".join(f"value_{i} = {i}\n" for i in range(50)), encoding="utf-8")
+        (project_dir / "small.py").write_text("x = 1\n", encoding="utf-8")
+
+        result = read_files.func(["big.py", "small.py"])
+
+        assert "value_49" not in result and "继续读用 offset=" in result
+        assert "### small.py" in result and "没读" in result
+
     def test_run_command_description_names_the_shell(self):
         """模型调用 run_command 时看的是工具说明：shell 和工作目录要写在这里。"""
         import os
