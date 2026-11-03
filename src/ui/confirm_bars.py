@@ -38,6 +38,12 @@ _pending_remote_confirms: dict = {}
 _pending_lock = threading.Lock()
 _confirm_counter = [0]
 
+def _trustable_path(path) -> bool:
+    """能不能"信任对此文件的修改"：得是真实文件。apply_patch 的确认用占位名 "(patch)"——
+    一次可能改好几个文件，信任它等于以后所有补丁、改任何文件都不再问。"""
+    p = (path or "").strip()
+    return bool(p) and not (p.startswith("(") and p.endswith(")"))
+
 
 def _new_confirm_id() -> str:
     with _pending_lock:   # 多会话并发确认时 counter 自增不原子会撞 id，覆盖彼此的 pending 条目
@@ -199,6 +205,7 @@ class ConfirmBarsMixin:
         self._command_confirm_done_event = None
         # 当前请求是否危险命令（决定第 2 行显示与否）
         self._command_confirm_destructive = False
+        self._command_confirm_remember_key = None
 
         # 装事件过滤器接 1 / 2 / 3 / Esc 键
         bar.installEventFilter(self)
@@ -475,15 +482,17 @@ class ConfirmBarsMixin:
 
         self._command_confirm_result_holder = result_holder
         self._command_confirm_done_event = done_event
-        self._command_confirm_destructive = (
-            command.startswith("将执行 Git 写操作")
-            or self._is_destructive_command(command)
-        )
+        # 危险与否、什么类型由 confirm_command 判好传进来（按调用方给的 kind），卡片不再
+        # 从文案里重新猜；没带这些键的旧调用退回按命令内容判断
+        from .. import permission_modes as _pm
+        holder = result_holder if isinstance(result_holder, dict) else {}
+        kind = holder.get("kind", _pm.KIND_COMMAND)
+        self._command_confirm_destructive = bool(holder.get(
+            "destructive", self._is_destructive_command(command)))
+        self._command_confirm_remember_key = holder.get("remember_key")
 
-        # 检测是不是 MCP / JSON dump 类的消息，用 <pre> 纯文本渲染，不走 shell 高亮
-        is_mcp = command.startswith("将调用 MCP") or command.startswith("将调用 mcp_")
-        is_gitwrite = command.startswith("将执行 Git 写操作")
-        if is_mcp or is_gitwrite:
+        # MCP / Git 写 / 派子 Agent 的说明是 JSON 或成段文字，用 <pre> 纯文本渲染，不走 shell 高亮
+        if kind != _pm.KIND_COMMAND:
             import html as _html
             body_html = (
                 f'<pre style="font-family: {MONO_CSS}; '
@@ -500,13 +509,16 @@ class ConfirmBarsMixin:
             )
         self.command_confirm_text.setHtml(body_html)
 
-        # 标题 / 描述 / 徽章按命令类型设
-        if is_mcp:
+        # 标题 / 描述 / 徽章按操作类型设
+        if kind == _pm.KIND_MCP:
             self._cmd_confirm_title.setText("确认调用外部工具")
             self._cmd_confirm_desc.setText("灵犀想调用一个 MCP 外部工具，确认后执行。")
-        elif is_gitwrite:
+        elif kind == _pm.KIND_GIT_WRITE:
             self._cmd_confirm_title.setText("确认 Git 写操作")
             self._cmd_confirm_desc.setText("灵犀想执行下面的 Git 写操作，确认后执行。")
+        elif kind == _pm.KIND_SPAWN:
+            self._cmd_confirm_title.setText("确认派出并行子 Agent")
+            self._cmd_confirm_desc.setText("子 Agent 改文件、执行命令都不会再逐条问你，做完后改动会合并回项目。")
         else:
             self._cmd_confirm_title.setText("确认执行命令")
             self._cmd_confirm_desc.setText("灵犀想运行下面的命令，确认后执行。")
@@ -561,7 +573,11 @@ class ConfirmBarsMixin:
                 origin.stop_flag = True
 
         if allow and remember and not self._command_confirm_destructive and origin is not None:
-            base = self._extract_base_command(self.command_confirm_text.toPlainText())
+            # 记什么由 confirm_command 定好（shell 命令记 base 命令，MCP 记工具名）；
+            # 没带这个键的旧调用退回从卡片文字取第一个词
+            base = getattr(self, "_command_confirm_remember_key", None)
+            if base is None:
+                base = self._extract_base_command(self.command_confirm_text.toPlainText())
             if base:
                 origin.command_prefix_allowlist.add(base)
                 logger_log = getattr(self, "_logger", None)  # 不强依赖；只是 best-effort
@@ -579,6 +595,7 @@ class ConfirmBarsMixin:
         self.command_confirm_bar.setVisible(False)
         self.command_confirm_text.clear()
         self._command_confirm_destructive = False
+        self._command_confirm_remember_key = None
 
     def _release_pending_confirm(self):
         """关窗 / 退出时唤醒任何挂在 confirm_command 上的 worker，避免无限挂起。
@@ -812,6 +829,8 @@ class ConfirmBarsMixin:
         self._edit_confirm_result_holder = result_holder
         self._edit_confirm_done_event = done_event
         self._edit_confirm_path = path
+        # 补丁一次可能改好几个文件，确认卡上只有一个占位名"(patch)"：不给"信任此文件"
+        self._edit_trust_btn.setVisible(_trustable_path(path))
 
         import html as _html_mod
         self.edit_confirm_path.setTextFormat(Qt.RichText)
@@ -840,7 +859,7 @@ class ConfirmBarsMixin:
                 origin.stop_flag = True
         if allow and remember and origin is not None:
             p = self._edit_confirm_path
-            if p:
+            if _trustable_path(p):
                 origin.edit_path_allowlist.add(p)
         self._edit_confirm_result_holder["allow"] = allow
         self._edit_confirm_result_holder["feedback"] = feedback
@@ -881,6 +900,7 @@ class ConfirmBarsMixin:
         self._command_confirm_result_holder = None
         self._command_confirm_done_event = None
         self._command_confirm_destructive = False
+        self._command_confirm_remember_key = None
         if hasattr(self, "edit_confirm_bar"):
             self.edit_confirm_bar.setVisible(False)
             self.edit_confirm_diff.clear()
@@ -893,13 +913,18 @@ class ConfirmBarsMixin:
     # worker 线程同步等待入口
     # ══════════════════════════════════════
 
-    def confirm_command(self, command: str) -> tuple[bool, str]:
+    def confirm_command(self, command: str, kind: str = "command", tool: str = "") -> tuple[bool, str]:
         """从 worker 线程同步等待用户在主线程的内联确认条上选择。
 
+        kind 由调用方明说是什么操作（permission_modes.KIND_*）：shell 命令 / Git 写 / MCP 工具 /
+        派子 Agent。判定按类型来，不从文案开头去猜。tool 是 MCP 工具名（"记住"只记这一个工具）。
+
         放行优先级：
-          1. 命令被"危险"判定 → 永不绕过，必须弹卡片
-          2. base 命令在前缀白名单 → 直接放行（"信任所有 git 类"那种）
-          3. 精确字符串命中旧版白名单 → 放行（向后兼容）
+          1. Git 写、派子 Agent、或命令被"危险"判定 → 永不绕过白名单，必须弹卡片
+             （只有"跳过权限确认"模式放行）
+          2. 记住过的同类操作 → 直接放行（shell 命令按 base 命令，如"信任所有 git 类"；
+             MCP 按工具名）
+          3. 精确字符串命中旧版白名单 → 放行（向后兼容，仅 shell 命令）
           4. 其它 → 弹卡片让用户选
 
         手机遥控模式（remote_session + REMOTE_TELEGRAM_CONFIRM）下，
@@ -914,23 +939,23 @@ class ConfirmBarsMixin:
         from .. import permission_modes as _pm
         from .. import session as _session
         _sess = _session.current_session()      # 发起确认的会话（worker 线程绑的）
-        # 危险命令必须每次确认，永不被白名单绕过
-        is_destructive = (
-            command.startswith("将执行 Git 写操作")
-            or self._is_destructive_command(command)
-        )
+        # 危险操作必须每次确认，永不被白名单绕过
+        is_destructive = kind in _pm.ALWAYS_ASK_KINDS or (
+            kind == _pm.KIND_COMMAND and self._is_destructive_command(command))
         # 权限模式（输入框底栏的"模式"菜单）：自动放行普通命令，跳过权限确认全部放行
-        if _pm.allows_command(_pm.current(_sess),
-                              risky=is_destructive or command.startswith("将调用 MCP 工具")):
+        if _pm.allows_command(_pm.current(_sess), risky=is_destructive or kind == _pm.KIND_MCP):
             return True, ""
-        if not is_destructive:
-            base = self._extract_base_command(command)
-            if base and base in _sess.command_prefix_allowlist:
-                return True, ""
-            if self._normalize_command(command) in _sess.command_allowlist:
-                return True, ""
+        remember_key = "" if is_destructive else self._remember_key(command, kind, tool)
+        if remember_key and remember_key in _sess.command_prefix_allowlist:
+            return True, ""
+        if (not is_destructive and kind == _pm.KIND_COMMAND
+                and self._normalize_command(command) in _sess.command_allowlist):
+            return True, ""
 
-        result = {"_session": _sess}   # 携带发起会话：主线程槽据此判断是否后台、并把"记住"加对会话
+        # 携带发起会话（主线程槽据此判断是否后台、把"记住"加对会话），以及卡片要的判定结果——
+        # 卡片不再自己从文案里重新猜一遍"危险不危险"
+        result = {"_session": _sess, "kind": kind, "destructive": is_destructive,
+                  "remember_key": remember_key}
         done = threading.Event()
 
         # --- 手机 Telegram 遥控确认（与 PC 卡片竞争，先点先到） ---
@@ -957,11 +982,9 @@ class ConfirmBarsMixin:
         self.bridge.confirm_request.emit(command, result, done)
         done.wait()
 
-        # 手机端点了"记住同类"——补加前缀白名单（PC 路径已在 _resolve_command_confirm 里加过）
-        if result.get("allow") and result.get("remember") and not is_destructive:
-            base = self._extract_base_command(command)
-            if base:
-                _sess.command_prefix_allowlist.add(base)
+        # 手机端点了"记住同类"——补加白名单（PC 路径已在 _resolve_command_confirm 里加过）
+        if result.get("allow") and result.get("remember") and remember_key:
+            _sess.command_prefix_allowlist.add(remember_key)
 
         # 清理远程注册表（如果远程那边还没触发）
         if remote_cid:
@@ -988,7 +1011,7 @@ class ConfirmBarsMixin:
         from .. import permission_modes as _pm
         from .. import session as _session
         _sess = _session.current_session()      # 发起编辑确认的会话（worker 线程绑的）
-        if path and path in _sess.edit_path_allowlist:
+        if _trustable_path(path) and path in _sess.edit_path_allowlist:
             return True, ""
         # 权限模式：接受编辑 / 自动 / 跳过权限确认 下写文件不用问（撤销记录照样在写之前建好）
         if _pm.allows_edit(_pm.current(_sess)):
@@ -1048,6 +1071,16 @@ class ConfirmBarsMixin:
         """允许列表用的命令规范化：去首尾空白 + 折叠中间连续空格，便于"相同命令"匹配。"""
         return " ".join((command or "").split())
 
+    def _remember_key(self, command: str, kind: str, tool: str) -> str:
+        """"记住同类"记的是什么：shell 命令记 base 命令（git / python …）；MCP 记 "mcp:工具名"
+        ——以前从文案取第一个词，记住一个 MCP 工具等于以后所有 MCP 工具都不再问。"""
+        from .. import permission_modes as _pm
+        if kind == _pm.KIND_COMMAND:
+            return self._extract_base_command(command)
+        if kind == _pm.KIND_MCP and tool:
+            return f"mcp:{tool}"
+        return ""
+
     @staticmethod
     def _extract_base_command(command: str) -> str:
         """从命令字符串里抽出 base（第一个 token），用作前缀白名单的 key。
@@ -1087,6 +1120,17 @@ class ConfirmBarsMixin:
             r'\brm\b(?=.*(?:\s|^)(?:-\w*r\w*|-\w*f\w*|--recursive|--force)\b)',
             r'\bdel\s+(?:/[sfqa]\b|/[sfqa]\s)',          # del /s /f /q
             r'\brmdir\s+(?:/s|/q)',
+            r'\brd\s+(?:/s|/q)',                         # rd /s /q 是 rmdir 的简写
+            r'\berase\s+(?:/[sfq]\b|/[sfq]\s)',
+            # git 里丢数据、改写历史的那几条（"自动"模式靠这份清单拦，漏了就不问直接跑）：
+            r'\bgit\s+clean\b(?=.*\s(?:-\w*f|--force))',  # 删掉所有没进 git 的文件
+            r'\bgit\s+reset\b(?=.*--hard)',
+            r'\bgit\s+checkout\b(?=.*\s(?:--(?:\s|$)|\.(?:\s|$)|-f\b|--force))',  # 丢弃工作区改动
+            r'\bgit\s+restore\b',
+            r'\bgit\s+push\b(?=.*\s(?:--force|-f\b|--force-with-lease|--delete|-d\b|\+\S))',
+            r'\bgit\s+branch\b(?=.*\s-d\b)',             # 命令已转小写：-D 和 -d 一起拦
+            r'\bgit\s+stash\s+(?:drop|clear)\b',
+            r'\bgit\s+(?:filter-branch|filter-repo|update-ref\s+-d)\b',
             r'\bremove-item\b.*-(?:recurse|force)',
             r'\bformat\s+[a-z]:',                        # format C:
             r'\bmkfs\b',

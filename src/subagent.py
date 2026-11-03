@@ -66,7 +66,7 @@ class HeadlessUI:
     def show_plan(self, items):
         self._append(str(items), "plan")
 
-    def confirm_command(self, command: str) -> tuple[bool, str]:
+    def confirm_command(self, command: str, kind: str = "command", tool: str = "") -> tuple[bool, str]:
         self._append(command, "confirm_command")
         return True, ""
 

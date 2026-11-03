@@ -47,6 +47,24 @@ class TestCheckCode:
         r = check_code.func("x.rs")
         assert "check_command" in r and "问题" in r
 
+    def test_file_placeholder_is_quoted(self, project_dir, monkeypatch):
+        """{file} 以前原样替换进 shell 命令：带空格就跑错文件，带 & 还能拼出另一条命令。"""
+        monkeypatch.setattr(config, "CHECK_COMMAND",
+                            'python -c "import sys; print(sys.argv[1:]); sys.exit(1)" {file}')
+        (project_dir / "my file & x.rs").write_text("fn main(){}", encoding="utf-8")
+        r = check_code.func("my file & x.rs")
+        assert "my file & x.rs" in r, "整个路径作为一个参数传进去，& 没有被当成命令分隔"
+
+    def test_placeholder_helper(self):
+        from src.tools import _fill_file_placeholder
+        import os
+        quoted = _fill_file_placeholder("lint {file}", "a b.rs")
+        assert quoted in ('lint "a b.rs"', "lint 'a b.rs'")
+        assert _fill_file_placeholder('lint "{file}"', "a.rs") == _fill_file_placeholder("lint {file}", "a.rs"), \
+            "用户自己加过引号的不重复加"
+        if os.name == "nt":
+            assert _fill_file_placeholder("lint {file}", "100%x.rs") is None, "cmd 里 % 引号挡不住"
+
     def test_py_compile_inprocess_fallback(self, project_dir, monkeypatch):
         # 强制无 ruff（模拟打包后 sys.executable=exe 且系统无 ruff 二进制）→ 走内置 compile() 进程内查语法。
         # 这条进程内兜底正是打包(frozen)后唯一可靠的语法检查路径，必须覆盖。

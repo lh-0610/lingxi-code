@@ -137,6 +137,17 @@ def _read_one(path, offset, limit, max_chars=READ_FILE_MAX_CHARS):
     return rendered + footer
 
 
+def _no_ui_refusal(what: str) -> str:
+    """没有确认界面、又不是子 Agent 时：默认拒绝，返回给模型的说明；显式打开了
+    state.headless_auto_approve（测试这类明确的无界面环境）才放行，返回空串。
+
+    以前 ui_ref 为 None 就直接放行——哪条路径意外没挂上界面，就等于什么都不问。"""
+    if getattr(state, "headless_auto_approve", False):
+        return ""
+    return (f"已拒绝：现在没有确认界面，不能{what}。"
+            "无界面运行需要显式打开 state.headless_auto_approve。")
+
+
 def _confirm_file_write(full: str, old_content: str, new_content: str):
     """写盘前的 diff 确认（写盘类工具共用）。
 
@@ -158,7 +169,8 @@ def _confirm_file_write(full: str, old_content: str, new_content: str):
         pass
     ui = getattr(state, "ui_ref", None)
     if ui is None:
-        return True, None
+        refusal = _no_ui_refusal("写文件")
+        return (False, refusal) if refusal else (True, None)
     import difflib as _difflib
     base = os.path.basename(full)
     diff_text = "".join(_difflib.unified_diff(
@@ -797,13 +809,17 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
         return f"目录不存在: {cd_target}"
 
     # ── 用户确认（同原逻辑）──
+    # 子 Agent 不逐条问（派出之前已经问过用户，见 spawn_agents）；其余没有界面的一律拒绝，
+    # 除非显式打开了无界面放行（state.headless_auto_approve）
     try:
-        if getattr(_session.current_session(), "is_subagent", False):
-            ui = None
-        else:
-            ui = getattr(state, "ui_ref", None)
+        is_sub = bool(getattr(_session.current_session(), "is_subagent", False))
     except Exception:
-        ui = getattr(state, "ui_ref", None)
+        is_sub = False
+    ui = None if is_sub else getattr(state, "ui_ref", None)
+    if ui is None and not is_sub:
+        refusal = _no_ui_refusal("执行命令")
+        if refusal:
+            return refusal
     if ui is not None:
         try:
             allowed, user_feedback = ui.confirm_command(command)
@@ -1298,8 +1314,29 @@ def spawn_agents(tasks: list[str]) -> str:
     if not project_root or not os.path.isdir(project_root):
         return "无法确定主项目根目录，不能派生并行子 Agent。"
 
+    # 先问用户：子 Agent 改文件、跑命令都不再逐条确认，做完改动直接合并回项目。以前派之前
+    # 也不问，"手动"模式下模型派个子 Agent 就绕开了全部确认。只有"跳过权限确认"模式放行
+    # （判定在 confirm_bars.confirm_command，按危险操作对待、不给"记住"）。
+    ui = getattr(state, "ui_ref", None)
+    if ui is None:
+        refusal = _no_ui_refusal("派出子 Agent")
+        if refusal:
+            return refusal
+    else:
+        from .permission_modes import KIND_SPAWN, SPAWN_AGENTS_PREFIX
+        listed = "\n".join(f"{i}. {str(t).strip()}" for i, t in enumerate(tasks, 1) if str(t).strip())
+        allowed, feedback = ui.confirm_command(
+            f"{SPAWN_AGENTS_PREFIX}（{len([t for t in tasks if str(t).strip()])} 个）：\n{listed}\n\n"
+            "它们会在各自的隔离区里改文件、执行命令，不再逐条问你；做完后改动会自动合并回项目。",
+            kind=KIND_SPAWN)
+        if not allowed:
+            msg = "已拒绝：用户不允许派出并行子 Agent。"
+            if feedback:
+                msg += f"\n用户补充说明：{feedback}"
+            return msg
+
     from . import subagent
-    results = subagent.spawn(tasks, project_root, getattr(state, "ui_ref", None))
+    results = subagent.spawn(tasks, project_root, ui)
     lines = ["并行子 Agent 汇总："]
     for idx, r in enumerate(results, 1):
         files = ", ".join(r.get("files_changed") or []) or "无"
@@ -2262,10 +2299,14 @@ def _run_code_check(full_path: str, *, record: bool = True):
                 _record_run_evidence(kind="check", path=_norm_vpath(full_path), **meta)
         return issues, checker, metas
 
-    # 其它语言：用户自定义命令（shell 执行，{file} 占位）
+    # 其它语言：用户自定义命令（shell 执行，{file} 占位；路径加引号，见 _fill_file_placeholder）
     if CHECK_COMMAND:
-        issues, checker, meta = _run_check_subprocess(
-            CHECK_COMMAND.replace("{file}", full_path), cwd, True, "check_command")
+        command = _fill_file_placeholder(CHECK_COMMAND, full_path)
+        if command is None:
+            # 当成"没有可用检查器"，不记成检查没通过（那会把完成闸门卡在一个和代码无关的原因上）
+            logger.warning(f"文件路径里有 shell 不能安全引用的字符，跳过 check_command: {full_path}")
+            return _finish(None, None, [])
+        issues, checker, meta = _run_check_subprocess(command, cwd, True, "check_command")
         return _finish(issues, checker, [meta] if meta else [])
 
     if ext not in (".py", ".pyi"):
@@ -2370,6 +2411,27 @@ def _run_type_check(full_path: str, cwd):
         return "", "mypy", _meta("passed", r.returncode)
     issues = "\n".join(kept[:15])
     return issues, "mypy", _meta("failed", r.returncode, summary=_first_lines(issues))
+
+
+# cmd.exe 里双引号挡不住的：% 照样展开环境变量，" 会提前结束引号（Windows 文件名本来就不许有 "）
+_CMD_UNQUOTABLE = re.compile(r'["%\r\n]')
+
+
+def _fill_file_placeholder(template: str, path: str):
+    """把检查命令里的 {file} 换成**加了引号**的路径；路径里有引号挡不住的字符时返回 None。
+
+    以前直接把路径原样替换进去再交给 shell：文件名带空格就跑错文件，带 & 之类的字符还能
+    拼出另一条命令。用户自己在配置里写了 "{file}" / '{file}' 的，先去掉那层引号再统一加。
+    """
+    if os.name == "nt":
+        if _CMD_UNQUOTABLE.search(path or ""):
+            return None
+        quoted = f'"{path}"'
+    else:
+        import shlex
+        quoted = shlex.quote(path)
+    template = re.sub(r"([\"'])\{file\}\1", "{file}", template or "")
+    return template.replace("{file}", quoted)
 
 
 def _run_check_subprocess(cmd, cwd, use_shell, checker):

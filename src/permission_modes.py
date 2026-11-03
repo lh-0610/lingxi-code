@@ -20,6 +20,18 @@
 PLAN = "plan"
 DEFAULT = "manual"
 
+# 确认的"操作类型"：confirm_command(text, kind=...) 由调用方明说是什么操作，放行判定按类型来，
+# 不再从确认文案的开头几个字去猜（文案一改，判定就会悄悄失效）。
+KIND_COMMAND = "command"            # run_command 的 shell 命令：危险与否按命令内容判断
+KIND_GIT_WRITE = "git_write"        # git_commit / git_push 等写工具：每次都问、不给"记住"
+KIND_MCP = "mcp"                    # MCP 工具：自动模式也要问；"记住"只记这一个工具
+KIND_SPAWN = "spawn_agents"         # 派子 Agent：子 Agent 改文件、跑命令都不再逐条问，
+                                    # 做完直接合并回项目——每次都问、不给"记住"
+ALWAYS_ASK_KINDS = (KIND_GIT_WRITE, KIND_SPAWN)
+
+# 派子 Agent 确认卡上的标题
+SPAWN_AGENTS_PREFIX = "将派出并行子 Agent"
+
 # (取值, 名字, 一句话说明)。菜单按这个顺序列，数字键 1-5 依次对应
 MODES = (
     ("auto", "自动", "由灵犀按规则判断，危险命令、Git 写操作和 MCP 工具仍会询问"),

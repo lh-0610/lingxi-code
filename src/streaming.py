@@ -1476,15 +1476,19 @@ def _execute_tool(tc, ui, _preinvoked=None):
             logger.warning(f"无确认界面，拒绝 Git 写工具: {name}")
             return
         if _ui is not None:
+            from .permission_modes import KIND_GIT_WRITE, KIND_MCP
             if name in _git_write_tools:
                 _msg = build_git_write_confirmation(name, args)
+                _kind = KIND_GIT_WRITE
             else:
                 _display = TOOL_DISPLAY_NAMES.get(name, name)
                 _msg = (
                     f"将调用 MCP 工具 {_display}，参数:\n"
                     + _pretty_args(args)
                 )
-            allowed, user_feedback = _ui.confirm_command(_msg)
+                _kind = KIND_MCP
+            # 操作类型明说（放行判定按类型，不从文案开头去猜）；MCP 的"记住"只记这一个工具
+            allowed, user_feedback = _ui.confirm_command(_msg, kind=_kind, tool=name)
             if not allowed:
                 _reject_msg = f"已拒绝：用户不允许执行工具 `{name}`。"
                 if user_feedback:

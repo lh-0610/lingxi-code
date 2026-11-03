@@ -36,6 +36,13 @@ import src.mcp_client as _mcp_client  # noqa: E402
 
 _mcp_client.init_mcp = lambda: []
 
+# 3. 测试大多不挂界面（state.ui_ref = None）。正常程序没有界面时一律拒绝改文件 / 跑命令
+#    （fail-closed），测试是明确的无界面环境、自己在临时目录里，显式打开放行。
+#    要测"没界面就拒绝"的用例自己 monkeypatch 回 False。
+import src.state as _state  # noqa: E402
+
+_state.headless_auto_approve = True
+
 
 def pytest_unconfigure(config):
     """跑完关掉日志文件再删临时目录（Windows 上开着的文件删不掉）。"""

@@ -36,9 +36,14 @@ llm_with_tools = None
 current_project = None
 
 # 主 ChatUI 实例引用。tools.py 在 worker 线程里执行命令时，需要通过它弹
-# 确认框（必须走 UI 主线程）。None 表示当前是 CLI / 测试环境，无 UI，
-# 此时 run_command 会默认放行，不阻塞。
+# 确认框（必须走 UI 主线程）。None 表示没有界面（测试 / 无界面运行）。
 ui_ref = None
+
+# 没有确认界面时要不要放行改文件、跑命令、派子 Agent。默认 False = 一律拒绝（fail-closed）：
+# 以前 ui_ref 为 None 就直接放行，哪条路径意外没挂上界面，就等于什么都不问。
+# 只有测试（scripts/conftest.py）这类明确无界面、自己负责隔离的地方才显式打开；
+# 子 Agent 不靠它——它们的放行在派出之前已经问过用户（tools.spawn_agents）。
+headless_auto_approve: bool = False
 
 # Telegram 遥控：回复完成后是否自动发 Telegram 通知（可由命令开关）
 telegram_stop: bool = False
