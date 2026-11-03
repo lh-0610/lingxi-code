@@ -59,11 +59,20 @@ except Exception:
 # tree-sitter 多语言代码分析（可选）：PyInstaller 静态分析抓不到懒导入的语言模块；
 # tree-sitter-javascript / tree-sitter-typescript 等带 .so / .dll 二进制 + 数据文件。
 # 没装时 collect_* 返回空，不影响打包。
+# tree-sitter-language-pack 0.x 带 170 种语言（解压 178MB），按名字懒加载（import_module），
+# 只带常用的这些（约 +27MB）；没带的语言在代码地图里退回通用正则（src/codeintel.py）。
+# Python / JS / TS 用上面的官方单语言包，不从这里带。C# / YAML 是它依赖的独立包，静态分析能抓到。
+_TS_PACK_LANGUAGES = ['java', 'kotlin', 'scala', 'groovy', 'go', 'rust', 'c', 'cpp', 'php', 'ruby',
+                      'swift', 'dart', 'lua', 'bash', 'powershell']
 try:
     _ts_hiddenimports = collect_submodules('tree_sitter')
     _ts_datas = (collect_data_files('tree_sitter_python')
                  + collect_data_files('tree_sitter_javascript')
                  + collect_data_files('tree_sitter_typescript'))
+    import importlib.util as _ilu
+    if _ilu.find_spec('tree_sitter_language_pack') is not None:
+        _ts_hiddenimports += ['tree_sitter_language_pack', 'tree_sitter_language_pack.bindings'] + [
+            f'tree_sitter_language_pack.bindings.{lang}' for lang in _TS_PACK_LANGUAGES]
 except Exception:
     _ts_hiddenimports = []
     _ts_datas = []

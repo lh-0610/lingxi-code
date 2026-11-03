@@ -60,7 +60,7 @@ class TestGetLanguage:
         assert codeintel.get_language_for_path(path) == expected
 
     def test_unknown_ext_returns_none(self):
-        assert codeintel.get_language_for_path("foo.rb") is None
+        assert codeintel.get_language_for_path("foo.xyz") is None
 
     def test_no_ext_returns_none(self):
         assert codeintel.get_language_for_path("Makefile") is None
@@ -342,7 +342,77 @@ class TestNoTreeSitterFallback:
     """即使 tree-sitter 未安装，extract_symbols/imports 应返回空列表，不抛异常。"""
 
     def test_extract_symbols_unsupported_ext(self):
-        assert codeintel.extract_symbols("fn main() {}", "main.rs") == []
+        assert codeintel.extract_symbols("fn main() {}", "main.xyz") == []
 
     def test_extract_imports_unsupported_ext(self):
-        assert codeintel.extract_imports("use std::io;", "main.rs") == []
+        assert codeintel.extract_imports("use std::io;", "main.xyz") == []
+
+    def test_imports_only_for_python_and_js(self):
+        """其余语言的模块路径规则各不相同，related_files 改看引用图；别拿 JS 的遍历去套 Rust 的语法树。"""
+        assert codeintel.extract_imports("use std::io;\nfn main() {}", "main.rs") == []
+
+
+# ---------------------------------------------------------------------------
+# 其余语言：language pack + 通用遍历（按节点类型名认定义）
+# ---------------------------------------------------------------------------
+
+requires_pack = pytest.mark.skipif(codeintel._ts_pack is None, reason="tree-sitter-language-pack not installed")
+
+
+def _outline(code, path):
+    return [(s["kind"], s["name"], s["depth"]) for s in codeintel.file_symbols(code, path)]
+
+
+@requires_pack
+@pytest.mark.parametrize("path, code, expected", [
+    ("UserService.java",
+     "package a;\n@Service\npublic class UserService {\n  public UserService() {}\n"
+     "  public User login(String n) { return null; }\n  enum Color { RED }\n}\n",
+     [("class", "UserService", 0), ("method", "UserService", 1), ("method", "login", 1), ("enum", "Color", 1)]),
+    ("user.go",
+     "package m\ntype User struct { Name string }\ntype Repo interface { Get() }\n"
+     "func (u *User) Login() error { return nil }\nfunc NewUser() *User { return nil }\n",
+     [("struct", "User", 0), ("interface", "Repo", 0), ("method", "Login", 0), ("function", "NewUser", 0)]),
+    ("lib.rs",
+     "struct S { a: i32 }\ntrait T { fn f(&self); }\nimpl T for S { fn f(&self) {} }\nfn main() {}\n",
+     [("struct", "S", 0), ("trait", "T", 0), ("method", "f", 1), ("impl", "S", 0), ("method", "f", 1),
+      ("function", "main", 0)]),
+    ("foo.cpp",
+     "namespace ns {\nclass Foo {\n  int qux() { return 1; }\n};\n}\nint *mk(int a) { return 0; }\nstruct P p;\n",
+     [("namespace", "ns", 0), ("class", "Foo", 1), ("method", "qux", 2), ("function", "mk", 0)]),
+    ("A.cs", "namespace N { public class A { public A() {} public void M() {} } enum E { X, Y } }",
+     [("namespace", "N", 0), ("class", "A", 1), ("method", "A", 2), ("method", "M", 2), ("enum", "E", 1)]),
+    ("a.kt", "class A {\n  fun foo(): Int = 1\n}\nobject C { fun q() {} }\nfun top() {}\n",
+     [("class", "A", 0), ("method", "foo", 1), ("class", "C", 0), ("method", "q", 1), ("function", "top", 0)]),
+    ("a.php", "<?php\nnamespace App;\nuse Foo\\Bar;\nclass A { public function m() {} }\nfunction f() {}\n",
+     [("namespace", "App", 0), ("class", "A", 0), ("method", "m", 1), ("function", "f", 0)]),
+    ("a.rb", "module M\n  class A\n    def m; end\n  end\nend\n",
+     [("namespace", "M", 0), ("class", "A", 1), ("method", "m", 2)]),
+    ("a.swift", "struct S { func n() {} }\nprotocol P { func p() }\nextension S { func e() {} }\n",
+     [("struct", "S", 0), ("method", "n", 1), ("interface", "P", 0), ("method", "p", 1),
+      ("impl", "S", 0), ("method", "e", 1)]),
+])
+def test_generic_walker_outlines_other_languages(path, code, expected):
+    """构造函数不能被当成 struct（con-struct-or），PHP 的 use、C 的 struct P p; 不是定义。"""
+    assert _outline(code, path) == expected
+
+
+@requires_ts
+def test_vue_script_block_lines_point_into_the_file():
+    code = ("<template>\n  <div/>\n</template>\n<script setup lang=\"ts\">\n"
+            "interface Props { a: number }\nfunction onLogin() {}\n</script>\n")
+    syms = codeintel.file_symbols(code, "Login.vue")
+    assert [(s["kind"], s["name"], s["line"]) for s in syms] == [("interface", "Props", 5), ("function", "onLogin", 6)]
+
+
+def test_regex_fallback_for_languages_without_a_grammar():
+    code = "defmodule My.App do\n  def run(x), do: x\n  defp helper, do: 1\nend\n"
+    assert [(s["kind"], s["name"]) for s in codeintel.regex_symbols(code)] == [
+        ("namespace", "My.App"), ("function", "run"), ("function", "helper")]
+    assert [s["name"] for s in codeintel.regex_symbols("func (r *Repo) Find() {}\n")] == ["Find"]
+
+
+@requires_ts
+def test_python_does_not_fall_back_to_regex():
+    """Python 有语法库时信语法树：正则会把文档字符串里 "class of …" 这种话也当成定义。"""
+    assert codeintel.file_symbols('"""\nclass of things\n"""\nx = 1\n', "a.py") == []

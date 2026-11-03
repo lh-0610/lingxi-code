@@ -17,12 +17,15 @@
 
 ## 代码模式与代码地图（src/tools_code.py + repo_map.py）
 - DeepSeek 一轮只调 1.2~1.6 个工具、批量工具给了也不用，这两样不靠它自觉
-- `repo_map.build_task_map`：大项目（≥40 个源码文件）里每条新消息开跑前，按任务里的词（IDF 加权，中文切 2~4 字）和 import 关系挑最多 12 个文件，列出类 / 函数和行号，放在系统提示词末尾（`session.task_map`，本次运行内不变，吃得到缓存）。最高分 <15 不给（闲聊 / 仓库里没有的功能）
+- `repo_map.build_task_map`：大项目（≥30 个源码文件，任何语言）里每条新消息开跑前，按任务里的词（IDF 加权，中文切 2~4 字）和引用图挑最多 12 个文件，列出类 / 函数和行号，放在系统提示词末尾（`session.task_map`）。最高分 <15（任务词在代码里对不上）时改给项目概览：压缩过的三层目录树 + PageRank 挑的核心文件；消息短于 6 字什么都不给
+- 同一会话尽量不换地图（`agent._prepare_task_map`）：地图变了系统提示词就变，整段历史按未命中计费。新消息算不出地图（"继续"）留旧的；算出了不同的，只在对话 ≤ 8000 token 时换
+- `code_graph.py`：A 文件里出现 B 文件定义的类 / 函数名就记 A→B（不解析 import，所有语言通用）；方法名权重 0.2、定义在 >6 个文件的名字不算、太弱的边丢掉。git 仓库按 `git ls-files` 列文件（跳过 .gitignore）
 - `run_code`：模型写一小段 Python 调只读工具（`CODE_TOOL_NAMES`），一轮做完多次读 / 搜。写工具不进程序——执行前记录、改动确认、验证追踪、Plan 拦截都挂在普通工具那条路上
 
 ## 代码导航（src/lsp_client.py + codeintel.py + tools_codemap.py）
 - `find_definition` / `find_references`：**LSP（最准，装了语言服务器）→ jedi（Python）→ 退回 search_files** 的降级链
-- `codeintel.py`：tree-sitter 符号提取 / 导入追踪（多语言），支撑 `code_map` / `related_files`
+- `codeintel.py`：tree-sitter 符号提取 / 导入追踪，支撑 `code_map` / `related_files` / 代码地图。Python / JS / TS 用官方单语言包和专门遍历；其余语言用 tree-sitter-language-pack 0.x（语法预编译在 wheel 里；1.x 运行时联网下载，不用）+ 通用遍历（按节点类型名认定义）；没有语法库的退回通用正则。Vue / Svelte 只解析 `<script>`
+- `related_files`：Python / JS / TS 按 import 语句；其余语言按引用图给"它用到的 / 用到它的"
 - 这些都是只读工具，进 `PLAN_MODE_READONLY_TOOLS`、不弹确认
 
 ## 持久化（memory.py 并发安全）

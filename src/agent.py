@@ -344,18 +344,27 @@ def _post_run_notify(ui, result, clean_text):
     _threading.Thread(target=_gen_title_bg, daemon=True).start()
 
 
+# 已有地图时，对话超过这么多 token 就不再换地图：地图在系统提示词里，换一次整段历史的缓存都作废
+# （未命中比命中贵 50 倍，10 万 token 的历史在高峰约 ¥0.2），比一张更贴切的地图省下的几轮贵
+_TASK_MAP_SWAP_MAX_TOKENS = 8000
+
+
 def _prepare_task_map(ui):
-    """每次运行开跑前按最新那条消息重算代码地图（repo_map.py），放进系统提示词。
+    """每次运行开跑前按最新那条消息算代码地图（repo_map.py），放进系统提示词。
 
     不靠模型自觉：DeepSeek 在大仓库里一轮只读一个文件，给了 read_files / explore 也不用，
-    地图让它一开始就知道该看哪几个文件。项目小、任务和代码对不上时地图是空的，等于没开。
-    探索子代理（带自己的提示词）和知识库模式不用。"""
+    地图让它一开始就知道该看哪几个文件。项目小时地图是空的，等于没开。
+    探索子代理（带自己的提示词）和知识库模式不用。
+
+    同一个会话里尽量不换地图：地图变了，系统提示词就变了，DeepSeek 前缀缓存从头断，整段历史按
+    未命中计费。所以新消息算不出地图（"继续""好的"）就留着旧的；算出了不同的地图，只在对话还短时
+    换。以前每条消息都重算，点一下"继续任务"就把地图清空、整段历史的缓存跟着作废。"""
     from . import config as _cfg
     from . import session as _session
     sess = _session.current_session()
-    sess.task_map = ""
     if (not getattr(_cfg, "AUTO_TASK_MAP", True) or getattr(sess, "rag_mode", False)
             or getattr(sess, "system_prompt_override", None)):
+        sess.task_map = ""
         return
     last_human = next((m for m in reversed(state.chat_history) if isinstance(m, HumanMessage)), None)
     if last_human is None:
@@ -364,17 +373,30 @@ def _prepare_task_map(ui):
     text = content if isinstance(content, str) else " ".join(
         str(b.get("text", "")) for b in content if isinstance(b, dict) and b.get("type") == "text")
     try:
-        from .repo_map import build_task_map
+        from . import repo_map
         import time as _time
         t0 = _time.monotonic()
-        sess.task_map = build_task_map(_session.current_project(), text)
+        new_map = repo_map.build_task_map(_session.current_project(), text)
     except Exception as e:
         logger.warning(f"生成代码地图失败（不影响这次运行）: {e}")
         return
-    if sess.task_map:
-        files = sum(1 for ln in sess.task_map.splitlines()
-                    if ln and not ln.startswith((" ", "#", "（", "按")))
-        logger.info(f"代码地图：{files} 个文件，{len(sess.task_map)} 字，{_time.monotonic() - t0:.1f}s")
+    old_map = sess.task_map
+    if not new_map or new_map == old_map:
+        return
+    if old_map:
+        from .streaming import _estimate_tokens
+        history_tokens = _estimate_tokens(
+            [m for m in state.chat_history if not isinstance(m, SystemMessage)])
+        if history_tokens > _TASK_MAP_SWAP_MAX_TOKENS:
+            logger.info(f"代码地图：对话已约 {history_tokens} token，沿用原来的地图（换了会断缓存）")
+            return
+    sess.task_map = new_map
+    files = repo_map.listed_files(new_map)
+    logger.info(f"代码地图：{files} 个文件，{len(new_map)} 字，{_time.monotonic() - t0:.1f}s")
+    if repo_map.is_overview(new_map):
+        ui.show_message(f"\n任务里的词在代码里没对上，给模型一份项目概览（目录结构和 {files} 个核心文件）\n",
+                        "tool_result")
+    else:
         ui.show_message(f"\n按任务挑出 {files} 个相关文件给模型参考\n", "tool_result")
 
 

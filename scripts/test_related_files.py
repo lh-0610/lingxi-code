@@ -461,3 +461,24 @@ class TestRelatedFiles:
 # ── 独立运行 ────────────────────────────────────────────────────────
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestRelatedFilesByNames:
+    """Java / Go / Rust 这类没有 import 解析的语言：按引用图（用到了谁定义的类 / 函数名）给上下游。"""
+
+    def test_java_neighbours(self, project_dir):
+        from src.tools import related_files
+        (project_dir / "Order.java").write_text("public class Order {\n  Long id;\n}\n", encoding="utf-8")
+        (project_dir / "OrderService.java").write_text(
+            "public class OrderService {\n  public Order findOrder(Long id) { return new Order(); }\n}\n",
+            encoding="utf-8")
+        (project_dir / "OrderController.java").write_text(
+            "public class OrderController {\n  OrderService orderService;\n"
+            "  Order detail(Long id) { return orderService.findOrder(id); }\n}\n", encoding="utf-8")
+        (project_dir / "Unrelated.java").write_text("public class Unrelated {}\n", encoding="utf-8")
+        out = _norm(related_files.func("OrderService.java"))
+        uses = out.split("它用到的项目内文件", 1)[1].split("\n\n", 1)[0]
+        used_by = out.split("用到它的项目内文件", 1)[1].split("\n\n", 1)[0]
+        assert "Order.java" in uses and "OrderController" not in uses
+        assert "OrderController.java" in used_by
+        assert "Unrelated" not in out

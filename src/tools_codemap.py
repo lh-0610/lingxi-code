@@ -18,9 +18,10 @@ from .tools_common import (
 @tool
 def code_map(path: str = "", max_chars: int = 8000) -> str:
     """列出项目（或指定子目录）每个源码文件的类/函数清单（带行号），用于快速定位
-    "某功能/类在哪个文件"，省去逐个 read_file 摸索。
+    "某功能/类在哪个文件"，省去逐个 read_file 摸索。各种语言都认（Java、Go、Rust、C/C++、C#、
+    Kotlin、PHP、Ruby、Swift、Vue……）。
     path: 相对项目根的子目录，空 = 整个项目。只读、安全。"""
-    import re as _re
+    from . import code_graph, codeintel
 
     # ── 路径起点 ──
     base = _resolve_path(path) if path else _project_cwd()
@@ -34,72 +35,25 @@ def code_map(path: str = "", max_chars: int = 8000) -> str:
     if not os.path.isdir(base):
         return f"失败：目录不存在 {base}"
 
-    # ── 优先用 tree-sitter（多语言、更准确）；不可用/失败时静默回退 regex ──
-    try:
-        from .codeintel import code_map_ts
-        ts_result = code_map_ts(base, max_chars)
-        if ts_result is not None:
-            return ts_result
-    except Exception:
-        pass  # codeintel 模块不可用，回退 regex
-
-    # ── 回退：按扩展名定义正则 ──
-    _py_re = _re.compile(r'^(?P<indent>\s*)(?P<kw>async\s+def|def|class)\s+(?P<name>\w+)')
-    _js_re = _re.compile(r'^(?P<indent>\s*)(?:export\s+)?(?:async\s+)?(?P<kw>function|class)\s+(?P<name>\w+)')
-    _EXT_MAP = {
-        ".py": _py_re,
-        ".js": _js_re, ".ts": _js_re, ".jsx": _js_re, ".tsx": _js_re,
-    }
-    _exts = set(_EXT_MAP.keys())
-
-    # ── os.walk：复用 search_files 的噪声目录忽略集合 ──
-    files_to_scan = []
-    for root, dirs, filenames in os.walk(base):
-        dirs[:] = [d for d in dirs if d not in _SEARCH_IGNORE_DIRS and not d.startswith(".")]
-        for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in _exts:
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                if os.path.getsize(fpath) > _SEARCH_MAX_FILE_SIZE:
-                    continue
-            except OSError:
-                continue
-            files_to_scan.append((fpath, ext))
-
-    files_to_scan.sort()
-
-    # ── 逐文件正则提取符号 ──
+    # ── 逐文件抽类 / 函数：tree-sitter，没有语法库的语言退回通用正则（codeintel.file_symbols）。
+    #    git 仓库按 git ls-files 列文件，跳过 .gitignore 里的目录 ──
     output_lines = []
-    for fpath, ext in files_to_scan:
+    for fpath, rel in code_graph.project_files(base, codeintel.SOURCE_EXTENSIONS):
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+                text = f.read()
         except OSError:
             continue
-
-        pat = _EXT_MAP[ext]
-        symbols = []
-        for i, line in enumerate(lines, 1):
-            m = pat.match(line)
-            if m:
-                indent = m.group("indent")
-                keyword = m.group("kw").strip()
-                name = m.group("name")
-                symbols.append((indent, i, keyword, name))
+        symbols = code_graph.file_symbols(fpath, text)
         if not symbols:
             continue
-
-        rel = os.path.relpath(fpath, base).replace(os.sep, "/")
         output_lines.append(rel)
-        for indent, lineno, keyword, name in symbols:
-            level = len(indent) // 2 if indent else 0
-            prefix = "  " * level
-            output_lines.append(f"  L{lineno:<5d} {prefix}{keyword} {name}")
+        for sym in symbols:
+            prefix = "  " * min(sym.get("depth", 0), 4)
+            output_lines.append(f"  L{sym['line']:<5d} {prefix}{sym['kind']} {sym['name']}")
 
     if not output_lines:
-        return f"在 {base} 下未找到可扫描的源文件（.py/.js/.ts/.jsx/.tsx）"
+        return f"在 {base} 下未找到可扫描的源文件"
 
     result = "\n".join(output_lines)
     if len(result) > max_chars:
@@ -114,6 +68,10 @@ def code_map(path: str = "", max_chars: int = 8000) -> str:
 # ══════════════════════════════════════
 # find_tests / related_files 辅助函数
 # ══════════════════════════════════════
+
+
+# related_files 能按 import 语句解析路径的扩展名（Python 单独处理）
+_IMPORT_RESOLVABLE_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
 
 
 def _is_noise_dir(name: str) -> bool:
@@ -479,9 +437,18 @@ def related_files(path: str, max_results: int = 30) -> str:
     is_py = full.endswith(".py")
     source_dir = os.path.dirname(full)
     target_stem = os.path.splitext(os.path.basename(full))[0]
+    # Python / JS / TS 按 import 语句找；其余语言（Java、Go、Rust、C#……）的模块路径规则各不相同，
+    # 改看引用图：它用到了哪些文件定义的类 / 函数名、哪些文件用到了它定义的
+    by_names = not is_py and not full.lower().endswith(_IMPORT_RESOLVABLE_EXTS)
 
     # 1. 解析目标文件的 imports
-    if is_py:
+    if by_names:
+        from . import code_graph
+        texts, syms = code_graph.scan(root)
+        edges = code_graph.build_graph(texts, code_graph.defs_of(syms))
+        target_module = ""
+        imported_files, reverse_importers = code_graph.neighbors(edges, rel_target)
+    elif is_py:
         target_module = _module_name_for_py(full, root)
         imports = _extract_imports_py(full, target_module)
         imported_files = []
@@ -503,10 +470,13 @@ def related_files(path: str, max_results: int = 30) -> str:
     imported_files = [f for f in imported_files if f not in seen and not seen.add(f)]
 
     # 2. 反向导入：扫描项目源文件，找谁 import 了 target
-    reverse_importers = []
-    if is_py:
+    if by_names:
+        all_files = []           # 引用图里已经有了
+    elif is_py:
+        reverse_importers = []
         all_files = list(_iter_project_files(root, (".py",)))
     else:
+        reverse_importers = []
         exts = (".ts", ".tsx", ".js", ".jsx", ".py")
         all_files = list(_iter_project_files(root, exts))
 
@@ -545,14 +515,16 @@ def related_files(path: str, max_results: int = 30) -> str:
 
     # 它导入的项目内文件
     if imported_files:
-        lines.append("它导入的项目内文件:")
+        lines.append("它用到的项目内文件（按类 / 函数名引用，越靠前用得越多）:" if by_names
+                     else "它导入的项目内文件:")
         for f in imported_files[:max_results]:
             lines.append(f"- {f}")
         lines.append("")
 
     # 导入它的项目内文件
     if reverse_importers:
-        lines.append("导入它的项目内文件:")
+        lines.append("用到它的项目内文件（按类 / 函数名引用，越靠前用得越多）:" if by_names
+                     else "导入它的项目内文件:")
         for f in reverse_importers[:max_results]:
             lines.append(f"- {f}")
         lines.append("")

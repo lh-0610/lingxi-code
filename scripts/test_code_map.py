@@ -121,3 +121,13 @@ class TestCodeMap:
         (project_dir / "async_mod.py").write_text("async def fetch_data():\n    pass\n", encoding="utf-8")
         out = code_map.func("")
         assert "fetch_data" in out
+
+    def test_other_languages(self, project_dir):
+        """不止 py / js：Java、Go、Rust 都列出类 / 函数；没有语法库的语言走通用正则。"""
+        (project_dir / "Shop.java").write_text(
+            "public class Shop {\n  public void checkout() {}\n}\n", encoding="utf-8")
+        (project_dir / "main.go").write_text("package main\nfunc ServeOrders() {}\n", encoding="utf-8")
+        (project_dir / "lib.rs").write_text("pub struct Cart;\nfn total() -> i32 { 0 }\n", encoding="utf-8")
+        out = code_map.func("")
+        for name in ("Shop", "checkout", "ServeOrders", "Cart", "total"):
+            assert name in out

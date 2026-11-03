@@ -44,7 +44,8 @@ src/                     # 主代码
     store.py             # Chroma 向量库：hash 当 doc ID（增量复用 + 天然去重）+ staging 改名式事务提交
     retriever.py         # 检索：索引锚校验（fail-closed）+ 相似度阈值 + 分域配额轮转合并
     rerank.py            # 可选 cross-encoder 重排（gte-rerank-v2），失败回退向量顺序
-  codeintel.py           # 代码智能（tree-sitter 符号提取 / 导入追踪，多语言）
+  codeintel.py           # 代码智能（tree-sitter 符号提取 / 导入追踪；各语言通用，没语法库的退回正则）
+  code_graph.py          # 文件之间的引用图（A 用到 B 定义的名字）+ PageRank，供代码地图 / related_files
   lsp_client.py          # find_definition/find_references 的后端：LSP → jedi → 降级链
   subagent.py            # 并行子 Agent（spawn_agents 实现：各自在隔离 worktree 跑、合并改动；HeadlessUI 内部协议）
   worktree.py            # git worktree 隔离区（创建/完成/清理；子 Agent 沙箱根）
