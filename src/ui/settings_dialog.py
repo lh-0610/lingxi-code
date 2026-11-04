@@ -1006,12 +1006,17 @@ class SettingsDialog(QDialog):
             import sys
             from PySide6.QtCore import QProcess
             from PySide6.QtWidgets import QApplication
+            from .. import single_instance
+            # 先让出单实例的名字：新进程起来时旧的还没退，不让出的话它会以为已经开着一个，自己退掉
+            single_instance.release()
             try:
                 args = [] if getattr(sys, "frozen", False) else list(sys.argv)
                 if QProcess.startDetached(sys.executable, args):
                     QApplication.quit()
+                    return
             except Exception:
                 pass  # 重启失败 → 维持现状，用户手动重启即可
+            single_instance.reacquire()
 
     def _open_path(self, path):
         import subprocess

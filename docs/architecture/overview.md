@@ -5,7 +5,7 @@
 ## 项目结构
 
 ```
-main.py                  # 入口：高 DPI 配置 + 启动 Qt + 创建 ChatUI + 系统托盘
+main.py                  # 入口：高 DPI 配置 + 启动 Qt + 单实例检查（在加载界面之前）+ 创建 ChatUI + 系统托盘
 icon.ico
 config.json              # API 密钥 / 路径配置（已 .gitignore）
 config.example.json
@@ -63,7 +63,8 @@ src/                     # 主代码
   images.py              # 图片输入格式归一化（视觉/多模态，Anthropic/OpenAI/Gemini 协议差异）
   debug_log.py           # F12 调试：请求/响应 record 环形缓冲 + Qt Signal
   claude_code.py         # 通过 subprocess 调本地 Claude Code CLI（permission-mode 映射 Plan/Act；--append-system-prompt-file + stdin 避 32K 命令行）
-  floating.py            # 系统托盘 create_tray（关窗收进托盘 + 单击唤起 + 退出前确认 + _restore_window 保留最大化）
+  floating.py            # 系统托盘 create_tray（关窗收进托盘 + 单击唤起 + 退出前确认 + _restore_window 保留最大化）；show_window 托盘和单实例共用
+  single_instance.py     # 只开一个：临时目录锁文件（QLockFile）定谁是那一个，本地服务传「把窗口拿出来」；名字按数据目录区分，源码版和安装版可同时开；设置里重启前先 release()
 
   ui/                    # UI 包（chat_window.py 用 mixin 拆分）
     __init__.py          # 导出 ChatUI / SettingsDialog

@@ -24,6 +24,13 @@ def _restore_window(win):
     win.show()  # show() 按当前 windowState 显示，最大化/全屏都不动
 
 
+def show_window(win):
+    """把主窗口拿到最前面：托盘点击、再次点桌面图标（单实例）都走这里。"""
+    _restore_window(win)
+    win.raise_()
+    win.activateWindow()
+
+
 def create_tray(app, chat_window, icon_path=None):
     """创建系统托盘图标，主聊天窗口关闭后由托盘维持后台。双击 / 「打开对话」唤起窗口。"""
     tray = QSystemTrayIcon(app)
@@ -34,9 +41,7 @@ def create_tray(app, chat_window, icon_path=None):
     tray.setToolTip("灵犀（点击打开窗口，右键 → 退出）")
 
     def _show_chat():
-        _restore_window(chat_window)
-        chat_window.raise_()
-        chat_window.activateWindow()
+        show_window(chat_window)
 
     # parent=chat_window 让 menu 生命周期跟主窗口绑定，否则函数返回后 menu 被 GC，托盘右键就没反应
     menu = QMenu(chat_window)
