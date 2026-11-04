@@ -10,11 +10,11 @@
 |------|------|
 | `read_file` | 读取文件（`offset`/`limit` 分页，行号前缀） |
 | `read_files` | 一次读多个文件（最多 8 个、总共 6 万字，超出的列出不读；遥控只读模式下每个路径都过黑名单） |
-| `run_code` | 代码模式：一小段 Python 一轮里连着调好几次只读工具，只交回 print 的内容（`tools_code.py`；执行前语法树检查——不许 import / class / 生成器 / 下划线属性 / 栈帧属性 / .format，只给基本内置函数，60 秒限时；只读、可并行、Plan 放行、遥控拦） |
+| `run_code` | 代码模式：一小段 Python 一轮里连着调好几次只读工具，只交回 print 的内容（`tools_code.py`；执行前语法树检查——不许 import / class / 生成器 / 下划线属性 / 栈帧属性 / .format，只给基本内置函数，60 秒限时；只读、可并行、Plan 放行、遥控拦）。`re` 直接可用（也可以写 `import re`），给的是只有正则函数和标志的精简版——完整模块挂着 enum / functools，顺着 `re.enum.sys` 能摸到整个运行环境；别的 import 被拒时指向 `run_command` 的 stdin（日志里 11 次 import 被拒，5 次是 re）。没有的 `tools.xxx`、`open` 报错时说清该用什么 |
 | `explore` | 派只读探索子代理弄清一个问题，只交回带 `路径:行号` 的报告（`tools_explore.py`；只读、可并行、Plan 放行、遥控拦） |
 | `write_file` | 创建/覆盖（**写盘前弹 diff 确认卡**；全量覆盖比 edit 危险） |
 | `append_file` | 追加（**弹 diff 确认卡**） |
-| `edit_file` | 精确字符串替换（比 write_file 安全省 token；**弹 diff 预览卡** + 路径白名单） |
+| `edit_file` | 精确字符串替换（比 write_file 安全省 token；**弹 diff 预览卡** + 路径白名单）；成功后回显改完的那一段（带行号、前后各 2 行，超过 16 行只露头尾）——以前只回"第 N 行附近替换 1 处"，模型常再读一遍确认 |
 | `list_directory` | 列目录 |
 | `run_command` | 执行命令（默认 300s 超时、可传 `timeout`；屏蔽交互式，**执行前弹内联确认卡**；cwd = 项目根；流式输出 + taskkill 杀进程树；**`background=True` 转后台**跑 dev server/长服务，立即返回 bg_id；**`stdin` 交给命令标准输入**：多行脚本用 `command="python -"` 加代码一次跑完，不用拼 `python -c`、不在项目里写临时脚本——文件面板语法高亮那次 87 轮里有 25 条 `python -c` 在试库的用法。确认卡在命令下面列出整段输入，危险判定和子 Agent 沙箱检查也扫它；「记住」和 python 命令共用（信任所有 python 类），旧版精确白名单不覆盖带 stdin 的调用；不能和 background 一起用） |
 | `read_background_output` / `list_background_commands` / `stop_background_command` | 管理本会话后台命令（read·list 进 `PLAN_MODE_READONLY_TOOLS`、不弹确认）；通过 `background.py` 获取快照/请求停止，停止后保留结果，失败可重试；应用退出时 `stop_all_background` 统一有界清理 |

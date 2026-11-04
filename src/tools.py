@@ -654,10 +654,45 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     primary_line = line_nos[0] if line_nos else "?"
     level_hint = f"（{match_desc}）" if "L1" not in match_desc else ""
     suffix = _auto_check_suffix(full, content)
+    echo = _edit_echo(new_content, spans, new_texts)
     if count == 1:
-        return f"成功编辑 {full}（第 {primary_line} 行附近替换 1 处）{level_hint}{note}" + suffix
+        return f"成功编辑 {full}（第 {primary_line} 行附近替换 1 处）{level_hint}{note}" + echo + suffix
     else:
-        return f"成功编辑 {full}（替换全部 {count} 处出现，第一处在第 {primary_line} 行）{level_hint}{note}" + suffix
+        return (f"成功编辑 {full}（替换全部 {count} 处出现，第一处在第 {primary_line} 行）{level_hint}{note}"
+                + echo + suffix)
+
+
+_EDIT_ECHO_CONTEXT = 2       # 回显改动时前后多带几行
+_EDIT_ECHO_MAX_LINES = 16    # 改动本身超过这么多行时只露头尾
+
+
+def _edit_echo(new_content: str, spans, new_texts) -> str:
+    """改完的那一段（带行号，前后各多 2 行）：改到了哪、缩进对不对，模型当场看得到，不用再读一遍。
+
+    以前只回"第 42 行附近替换 1 处"，灵犀改完常常再 read_file 确认——密钥打码那次自己的新文件
+    就读了 4 遍。replace_all 改了多处时只列第一处。"""
+    if not spans:
+        return ""
+    (start, _end), text = min(zip(spans, new_texts), key=lambda x: x[0][0])
+    # 第一处之前没有别的替换，它在新内容里的起点和原文一样
+    lines = new_content.split("\n")
+    first = new_content.count("\n", 0, start)
+    last = new_content.count("\n", 0, start + len(text) - 1) if text else first
+    lo, hi = max(0, first - _EDIT_ECHO_CONTEXT), min(len(lines) - 1, last + _EDIT_ECHO_CONTEXT)
+    rows = list(range(lo, hi + 1))
+    skipped = 0
+    if last - first + 1 > _EDIT_ECHO_MAX_LINES:
+        keep = set(range(lo, first + 8)) | set(range(last - 4, hi + 1))
+        skipped = len(rows) - len(keep)
+        rows = sorted(keep)
+    width = max(4, len(str(hi + 1)))
+    out = []
+    for i, n in enumerate(rows):
+        if skipped and i and n != rows[i - 1] + 1:
+            out.append(f"{'':>{width}}  …（中间 {skipped} 行是你刚写的，不再列出）")
+        out.append(f"{n + 1:>{width}}: {lines[n].rstrip()}")
+    more = "（只列第一处）" if len(spans) > 1 else ""
+    return f"\n改完这一段现在是{more}：\n" + "\n".join(out)
 
 
 @tool

@@ -687,6 +687,23 @@ def _run_tool_calls(ui, tool_calls, gathered, clean_text):
         if state.stop_flag:
             break
         _execute_tool(tc, ui, _preinvoked=_pre.get(i))
+    if tool_calls and all(tc.get("name") in _BOOKKEEPING_TOOLS for tc in tool_calls):
+        _nudge_bookkeeping_round()
+
+
+# 只记进度、不干活的工具。整轮只调了它们，就白跑了一次往返：密钥打码那次 68 轮里有 7 轮是这样。
+# 系统提示词早就说了"同一轮里发多个调用"，DeepSeek 照样单发；对刚收到的工具结果它更上心
+_BOOKKEEPING_TOOLS = frozenset({"set_step_status", "update_plan"})
+_BOOKKEEPING_HINT = ("\n\n（这一轮只更新了进度。之后把进度更新和这一步的第一个动作放在同一轮一起发——"
+                     "先 set_step_status，再读 / 改 / 跑，不用单独占一轮。）")
+
+
+def _nudge_bookkeeping_round():
+    """在这一轮最后那条工具结果后面补一句提醒（只给模型看：界面上的结果已经显示过了）。"""
+    from langchain_core.messages import ToolMessage
+    last = state.chat_history[-1] if state.chat_history else None
+    if isinstance(last, ToolMessage) and isinstance(last.content, str):
+        state.chat_history[-1] = last.model_copy(update={"content": last.content + _BOOKKEEPING_HINT})
 
 
 def _maybe_inject_repair(ui, tool_calls):
