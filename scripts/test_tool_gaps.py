@@ -292,6 +292,21 @@ class TestWriteTools:
 
 
 class TestSearchFiles:
+    def test_a_file_path_searches_just_that_file(self, project_dir):
+        """grep / rg 都能直接给文件，模型也常这么传；以前一律报"目录不存在"（文件明明在）。"""
+        (project_dir / "src").mkdir()
+        (project_dir / "src" / "tools.py").write_text("x = 1\ndef run():\n    pass\n", encoding="utf-8")
+        (project_dir / "src" / "other.py").write_text("def run():\n    pass\n", encoding="utf-8")
+
+        result = search_files.func(r"def run", path="src/tools.py", file_pattern="*.ts")
+
+        assert "tools.py（1 处）" in result and "2: def run():" in result
+        assert "other.py" not in result, "只搜点名的那个文件"
+        assert "file_pattern" not in result, "点名一个文件时不按 file_pattern 筛，也就不提它"
+
+    def test_a_missing_path_says_it_does_not_exist(self, project_dir):
+        assert "路径不存在" in search_files.func("x", path="src/nope.py")
+
     def test_filters_patterns_and_ignored_directories(self, project_dir):
         (project_dir / "src").mkdir()
         (project_dir / "src" / "main.py").write_text("TODO: python\n", encoding="utf-8")

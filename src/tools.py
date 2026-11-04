@@ -1094,7 +1094,7 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
 
     用法：
       - `regex`：Python 正则，例如 `def\\s+\\w+\\(` / `TODO|FIXME` / `class \\w+\\(BaseModel\\)`
-      - `path`：搜索目录的相对/绝对路径（默认 `.` 即项目根）
+      - `path`：搜索的目录，或者单个文件（只在这一个文件里搜），相对/绝对路径（默认 `.` 即项目根）
       - `file_pattern`：glob 过滤文件名，例如 `*.py` / `*.{ts,tsx}` / `test_*.py`
       - `max_results`：截断阈值（默认 50，超过会提示 "还有 N 处未列出"）
       - `context`：每处匹配前后带几行（默认 2，0 = 只要匹配行）；匹配超过 20 处时自动只给匹配行
@@ -1113,11 +1113,15 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
         return f"失败：正则不合法 — {e}"
 
     full = _resolve_path(path) if path else _project_cwd()
-    reject = _subagent_path_rejection(full, "目录")
+    reject = _subagent_path_rejection(full, "路径")
     if reject:
         return reject
-    if not os.path.isdir(full):
-        return f"失败：目录不存在 {full}"
+    # 给的是文件就只搜这一个：grep / rg 都能这么用，模型也常这么传。以前一律报"目录不存在"
+    # （文件明明在），11/02–11/04 日志里 24 次，每次至少白费一轮
+    single = os.path.isfile(full)
+    if not single and not os.path.isdir(full):
+        return f"失败：路径不存在 {full}"
+    base = os.path.dirname(full) if single else full
 
     # 支持 `*.{ts,tsx}` 这种 brace expansion
     def _expand_braces(pattern):
@@ -1135,37 +1139,46 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
     total = 0
     truncated = False
 
-    for root, dirs, files in os.walk(full):
-        # 原地修改 dirs 跳过忽略目录
-        dirs[:] = [d for d in dirs if d not in _SEARCH_IGNORE_DIRS and not d.startswith(".")]
-        for fname in files:
-            if not any(fnmatch.fnmatch(fname, p) for p in patterns):
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                if os.path.getsize(fpath) > _SEARCH_MAX_FILE_SIZE:
+    def _candidates():
+        # 点名的那个文件不按 file_pattern 筛、也不因为大就跳过：搜不到时只会说"未找到"，更让人摸不着头脑
+        if single:
+            yield full
+            return
+        for root, dirs, files in os.walk(full):
+            # 原地修改 dirs 跳过忽略目录
+            dirs[:] = [d for d in dirs if d not in _SEARCH_IGNORE_DIRS and not d.startswith(".")]
+            for fname in files:
+                if not any(fnmatch.fnmatch(fname, p) for p in patterns):
                     continue
-            except OSError:
-                continue
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                    lines = f.read().splitlines()
-            except (OSError, UnicodeDecodeError):
-                continue
-            hit_lines = []
-            for ln, line in enumerate(lines, 1):
-                if pat.search(line):
-                    total += 1
-                    if shown < max_results:
-                        hit_lines.append(ln)
-                        shown += 1
-                    else:
-                        truncated = True
-            if hit_lines:
-                hit_files.append((os.path.relpath(fpath, full).replace(os.sep, "/"), lines, hit_lines))
+                fpath = os.path.join(root, fname)
+                try:
+                    if os.path.getsize(fpath) > _SEARCH_MAX_FILE_SIZE:
+                        continue
+                except OSError:
+                    continue
+                yield fpath
 
+    for fpath in _candidates():
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        hit_lines = []
+        for ln, line in enumerate(lines, 1):
+            if pat.search(line):
+                total += 1
+                if shown < max_results:
+                    hit_lines.append(ln)
+                    shown += 1
+                else:
+                    truncated = True
+        if hit_lines:
+            hit_files.append((os.path.relpath(fpath, base).replace(os.sep, "/"), lines, hit_lines))
+
+    scope = "" if single else f"（file_pattern={file_pattern}）"
     if not hit_files:
-        return f"未在 {full} 找到匹配 /{regex}/ 的内容（file_pattern={file_pattern}）"
+        return f"未在 {full} 找到匹配 /{regex}/ 的内容{scope}"
 
     # 匹配多时只给匹配行：每处带前后几行会把结果撑得很长，这时模型要的是"在哪"
     try:
@@ -1188,8 +1201,8 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
         blocks.append("\n".join(block))
 
     note = "" if ctx or not context else f"；匹配超过 {_SEARCH_CONTEXT_MAX_HITS} 处，只列匹配行"
-    header = (f"在 {full} 下找到 {total} 处匹配 /{regex}/（file_pattern={file_pattern}），"
-              f"分布在 {len(hit_files)} 个文件{note}:\n")
+    header = (f"在 {full} 里找到 {total} 处匹配 /{regex}/{note}:\n" if single else
+              f"在 {full} 下找到 {total} 处匹配 /{regex}/{scope}，分布在 {len(hit_files)} 个文件{note}:\n")
     body = "\n".join(blocks)
     if truncated:
         body += f"\n... [仅显示前 {max_results} 处，还有 {total - max_results} 处未列出，请缩小 path 或 file_pattern]"

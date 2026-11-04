@@ -131,3 +131,14 @@ class TestCodeMap:
         out = code_map.func("")
         for name in ("Shop", "checkout", "ServeOrders", "Cart", "total"):
             assert name in out
+
+    def test_a_file_path_lists_just_that_file(self, project_dir):
+        """给文件就只列这个文件；以前报"目录不存在"（文件明明在），模型只好换办法再来一轮。"""
+        (project_dir / "pkg").mkdir()
+        (project_dir / "pkg" / "a.py").write_text("class Alpha:\n    def go(self):\n        pass\n",
+                                                   encoding="utf-8")
+        (project_dir / "pkg" / "b.py").write_text("def beta():\n    pass\n", encoding="utf-8")
+        out = code_map.func("pkg/a.py")
+        assert "pkg/a.py" in out and "Alpha" in out and "go" in out
+        assert "beta" not in out
+        assert "路径不存在" in code_map.func("pkg/missing.py")

@@ -19,7 +19,7 @@
 | `run_command` | 执行命令（默认 300s 超时、可传 `timeout`；屏蔽交互式，**执行前弹内联确认卡**；cwd = 项目根；流式输出 + taskkill 杀进程树；**`background=True` 转后台**跑 dev server/长服务，立即返回 bg_id；**`stdin` 交给命令标准输入**：多行脚本用 `command="python -"` 加代码一次跑完，不用拼 `python -c`、不在项目里写临时脚本——文件面板语法高亮那次 87 轮里有 25 条 `python -c` 在试库的用法。确认卡在命令下面列出整段输入，危险判定和子 Agent 沙箱检查也扫它；「记住」和 python 命令共用（信任所有 python 类），旧版精确白名单不覆盖带 stdin 的调用；不能和 background 一起用） |
 | `read_background_output` / `list_background_commands` / `stop_background_command` | 管理本会话后台命令（read·list 进 `PLAN_MODE_READONLY_TOOLS`、不弹确认）；通过 `background.py` 获取快照/请求停止，停止后保留结果，失败可重试；应用退出时 `stop_all_background` 统一有界清理 |
 | `search_in_file` | 单文件关键词（`offset`/`limit` 分页） |
-| `search_files` | 跨文件正则搜索（ripgrep 风格，忽略噪声目录） |
+| `search_files` | 跨文件正则搜索（ripgrep 风格，忽略噪声目录）；`path` 给单个文件就只搜这一个、不按 `file_pattern` 筛——以前一律报"目录不存在"，三天里白费 24 轮 |
 | `find_definition` / `find_references` | 跳符号定义 / 找所有引用（LSP→jedi→search 降级链，比正则准；只读、Plan 放行） |
 | `find_tests` / `related_files` | 找某源文件的相关测试 / 列出导入·被导入·相关测试（只读、Plan 放行） |
 | `remember` / `forget` | 长期记忆存取（本地安全操作，**不弹确认**，Plan 模式放行） |
@@ -27,7 +27,7 @@
 | `update_plan` / `set_step_status` | 任务计划：创建或显式调整 / 增量改单步状态（Plan 放行；驱动计划面板） |
 | `get_project_instructions` | 读目标路径适用的项目规则（CLAUDE.md / AGENTS.md / .lingxirules；只读、Plan 放行） |
 | `notify_user` | 主动给用户推 Telegram 通知（分级；本地安全、Plan 放行） |
-| `code_map` | 代码库符号地图（命名组正则提取函数/类，commonpath 防越界；Plan 只读放行） |
+| `code_map` | 代码库符号地图（命名组正则提取函数/类，commonpath 防越界；Plan 只读放行）；`path` 给单个文件就只列这一个 |
 | `run_tests` | 跑 pytest（`_resolve_python()` 选解释器：项目 venv → 开发期 sys.executable → PATH；精炼失败定位 + 总耗时；`encoding=utf-8` 防 GBK 崩） |
 | `git_diff` / `git_log` / `git_status` | 只读 git（看改动/历史/状态；commonpath 越界防护；Plan 只读放行） |
 | `git_stage` / `git_unstage` / `git_commit` | git 写操作（暂存/取消暂存/本地提交，**无 push**）；**执行前强制弹确认卡**（按危险操作处理、不给"记住"选项）；路径白名单防注入，commit 不自动暂存、校验信息非空 |

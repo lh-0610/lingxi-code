@@ -20,7 +20,7 @@ def code_map(path: str = "", max_chars: int = 8000) -> str:
     """列出项目（或指定子目录）每个源码文件的类/函数清单（带行号），用于快速定位
     "某功能/类在哪个文件"，省去逐个 read_file 摸索。各种语言都认（Java、Go、Rust、C/C++、C#、
     Kotlin、PHP、Ruby、Swift、Vue……）。
-    path: 相对项目根的子目录，空 = 整个项目。只读、安全。"""
+    path: 相对项目根的子目录，空 = 整个项目；给单个文件就只列这个文件。只读、安全。"""
     from . import code_graph, codeintel
 
     # ── 路径起点 ──
@@ -32,13 +32,17 @@ def code_map(path: str = "", max_chars: int = 8000) -> str:
             return "失败：路径超出项目范围，不允许（不能用 .. 逃出项目根）"
     except ValueError:  # 不同盘符（Windows）→ 必然越界
         return "失败：路径超出项目范围，不允许（不能用 .. 逃出项目根）"
-    if not os.path.isdir(base):
-        return f"失败：目录不存在 {base}"
+    # 给的是文件就只列这一个（以前报"目录不存在"，文件明明在，模型只好换别的办法再来一轮）
+    single = os.path.isfile(base)
+    if not single and not os.path.isdir(base):
+        return f"失败：路径不存在 {base}"
 
     # ── 逐文件抽类 / 函数：tree-sitter，没有语法库的语言退回通用正则（codeintel.file_symbols）。
     #    git 仓库按 git ls-files 列文件，跳过 .gitignore 里的目录 ──
     output_lines = []
-    for fpath, rel in code_graph.project_files(base, codeintel.SOURCE_EXTENSIONS):
+    files = ([(base, os.path.relpath(base, root).replace(os.sep, "/"))] if single
+             else code_graph.project_files(base, codeintel.SOURCE_EXTENSIONS))
+    for fpath, rel in files:
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                 text = f.read()
@@ -53,7 +57,8 @@ def code_map(path: str = "", max_chars: int = 8000) -> str:
             output_lines.append(f"  L{sym['line']:<5d} {prefix}{sym['kind']} {sym['name']}")
 
     if not output_lines:
-        return f"在 {base} 下未找到可扫描的源文件"
+        return (f"{base} 里没有认出类或函数" if single
+                else f"在 {base} 下未找到可扫描的源文件")
 
     result = "\n".join(output_lines)
     if len(result) > max_chars:
