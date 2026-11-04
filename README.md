@@ -212,6 +212,7 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 ├── config.json             # 配置（已 .gitignore）
 ├── config.example.json     # 配置模板
 ├── lingxi.spec             # PyInstaller 打包配置（产物 exe 名：灵犀Code）
+├── installer/              # 安装程序：lingxi.iss（Inno Setup 脚本）、build.py（打包 + 出安装程序）、简体中文语言文件
 │
 ├── src/                    # 主代码
 │   ├── agent.py            # Agent 主循环 + 模块 facade + 启动拉起 MCP
@@ -350,11 +351,19 @@ MCP（Model Context Protocol）让灵犀连接**外部工具服务器**，把它
 
 ## 打包
 
+先装好 PyInstaller 和 Inno Setup 6，再一条命令打包并做安装程序：
+
 ```bash
-pyinstaller lingxi.spec
+python -m pip install pyinstaller
+winget install JRSoftware.InnoSetup
+python installer/build.py
 ```
 
-产物在 `dist/灵犀Code/` 目录。
+- `dist/LingxiCode-Setup-<版本>.exe`：安装程序。默认装到当前用户（`%LOCALAPPDATA%\Programs\灵犀Code`），不用管理员权限；装完有开始菜单入口和可选的桌面快捷方式，「设置 → 应用」里能卸载。配置和会话存在 `%APPDATA%\灵犀`，覆盖升级和卸载都不会动它们
+- `dist/灵犀Code/`：PyInstaller 打出的程序文件夹（`灵犀Code.exe` + `_internal/`），安装程序装的就是它，也可以直接打 zip 发
+- 版本号取 `src/__init__.py` 的 `__version__`
+- 安装程序没做代码签名：第一次运行时 Windows 会提示「已保护你的电脑」，点「更多信息 → 仍要运行」
+- 项目目录如果被沙箱工具（比如 Codex）打了低完整性标签（`icacls` 能看到 `Low Mandatory Level`），`dist/` 里的 exe 会以低权限运行，安装程序报「无法创建目录 …\Temp\is-….tmp，拒绝访问」：把安装程序复制到别处（比如桌面）再运行
 
 ## 已知约束
 

@@ -78,7 +78,7 @@ python main.py
 - `config.json` 含 API 密钥，**已 `.gitignore`，禁止提交**
 - MiMo 模型走 Anthropic 兼容接口（`ChatAnthropic` + 自定义 `base_url`）
 - DeepSeek V4 默认开 thinking，要显式 `extra_body={"thinking": {"type": "disabled"}}` 才能关
-- PyInstaller 打包配置见 `lingxi.spec`（产物 exe 名为中文「灵犀Code」）
+- PyInstaller 打包配置见 `lingxi.spec`（产物 exe 名为中文「灵犀Code」）；`python installer/build.py` 打包并用 Inno Setup 出安装程序（`installer/lingxi.iss`，AppId 不能改）
 
 ## 已知限制与有意取舍（避免 code review 反复重提）
 

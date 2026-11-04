@@ -9,6 +9,14 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 # tools._bundled_ruff() 会优先找它）。找不到就跳过——产物退化到内置 py_compile 语法检查，
 # 不影响打包。要指定特定 ruff 用环境变量 RUFF_PATH。
 _ruff_path = os.environ.get("RUFF_PATH") or _shutil.which("ruff")
+if not _ruff_path:
+    # pip 装的 ruff 在解释器的 Scripts 目录，那里不一定在 PATH 上（Python 安装管理器装的就不在），
+    # 只认 PATH 会悄悄打出一个没有 ruff 的包
+    try:
+        from ruff.__main__ import find_ruff_bin as _find_ruff_bin
+        _ruff_path = _find_ruff_bin()
+    except Exception:
+        _ruff_path = None
 if _ruff_path and os.path.isfile(_ruff_path):
     _ruff_datas = [(_ruff_path, '.')]
     print(f"[lingxi.spec] 随包打入 ruff: {_ruff_path}")

@@ -10,6 +10,7 @@ icon.ico
 config.json              # API 密钥 / 路径配置（已 .gitignore）
 config.example.json
 lingxi.spec              # PyInstaller 打包配置（产物 exe 名：灵犀Code）
+installer/               # 安装程序：lingxi.iss（Inno Setup，默认装到当前用户、不要管理员）+ build.py（打包 + 出安装程序）+ 简体中文语言文件
 
 src/                     # 主代码
   __init__.py
