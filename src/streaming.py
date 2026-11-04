@@ -1641,6 +1641,15 @@ def _execute_tool(tc, ui, _preinvoked=None):
         if operation is not None:
             _rr.clear_current_operation()
 
+    # 工具结果在进历史 / 界面 / 日志之前统一打码：read_file 读 config.json、命令输出里 echo 出
+    # key，原文会随 chat_history 落盘并发给模型服务商。放在这里是因为它是所有工具的唯一出口
+    # （并行预取的结果也从 _preinvoked 汇到这里）；run_command 的流式输出在 tools 侧另有一道。
+    try:
+        from .secret_mask import mask as _mask_secrets
+        result = _mask_secrets(str(result))
+    except Exception as _mask_err:
+        logger.warning(f"工具结果打码失败（按原文继续）: {_mask_err}")
+
     # 流式工具（run_command）执行过程中已经把每行 stdout 实时 push 到 UI 了；
     # 这里若再 push 一次 result，会把所有输出在末尾**重复显示一遍**。
     # 所以对流式工具跳过 UI display；AI 那边仍然拿到完整 result。

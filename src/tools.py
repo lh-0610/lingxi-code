@@ -893,34 +893,39 @@ def _run_command(command: str, timeout: int | None, background: bool, stdin: str
     reader_done = _thr_local.Event()
 
     def _reader():
-        """子线程：从 proc.stdout 读字节，按 utf-8/gbk 解码，行边界 push 到 UI。"""
+        """子线程：从 proc.stdout 读字节，按 utf-8/gbk 解码，行边界 push 到 UI。
+
+        推到界面之前先过 `secret_mask.mask`：命令输出里 echo 出配置里的 key 时，
+        界面这一份不该出现原文。`output_chunks` 仍存**原文**，最终结果在拼接后
+        整段打码一次——流式按行/按块切分，密钥恰好横跨两块时逐块打码会漏。"""
+        try:
+            from .secret_mask import mask as _mask_secrets
+        except Exception:               # 打码不可用时退回原文，别让命令输不出来
+            _mask_secrets = None
+
+        def _emit(chunk_text):
+            shown = _mask_secrets(chunk_text) if _mask_secrets is not None else chunk_text
+            with chunks_lock:
+                output_chunks.append(chunk_text)
+            if ui is not None:
+                try:
+                    ui.show_message(shown, "tool_result")
+                except Exception:
+                    pass
+
         try:
             buf = b""
             while True:
                 raw = proc.stdout.read(4096)
                 if not raw:
                     if buf:
-                        text = _decode_chunk(buf)
-                        with chunks_lock:
-                            output_chunks.append(text)
-                        if ui is not None:
-                            try:
-                                ui.show_message(text, "tool_result")
-                            except Exception:
-                                pass
+                        _emit(_decode_chunk(buf))
                     break
                 buf += raw
                 # 按 \n 切分，把已经完整的行 flush 出去，剩余半行留在 buf 等下次
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
-                    text = _decode_chunk(line + b"\n")
-                    with chunks_lock:
-                        output_chunks.append(text)
-                    if ui is not None:
-                        try:
-                            ui.show_message(text, "tool_result")
-                        except Exception:
-                            pass
+                    _emit(_decode_chunk(line + b"\n"))
         finally:
             reader_done.set()
 
@@ -972,6 +977,14 @@ def _run_command(command: str, timeout: int | None, background: bool, stdin: str
     # 看得见，只有模型瞎，所以很难发现）。
     with chunks_lock:
         output = "".join(output_chunks)
+    # 整段结果再过一遍打码：流式推送是逐行/逐块的，key 恰好横跨两块时逐块打码会漏；
+    # 而且不经 _execute_tool 直接调 run_command（测试 / 子 Agent 内部）也要挡。
+    # 放在截断之前：截断把 key 砍成半截的话，剩下的那半截一样能定位实际密钥。
+    try:
+        from .secret_mask import mask as _mask_secrets
+        output = _mask_secrets(output)
+    except Exception as _mask_err:
+        logger.warning(f"命令输出打码失败（按原文继续）: {_mask_err}")
     if not output:
         output = "(无输出)"
     if len(output) > RUN_COMMAND_MAX_OUTPUT_CHARS:

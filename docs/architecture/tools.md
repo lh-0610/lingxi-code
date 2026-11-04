@@ -38,6 +38,14 @@
 
 > 写盘类工具（edit/write/append）共用 `tools.py:_confirm_file_write()`：算 unified diff → `ui.confirm_edit` 弹蓝色卡片 → worker 阻塞等审批。CLI/测试无 UI 时直接放行。
 
+### 工具结果里的密钥打码（src/secret_mask.py）
+- **问题**：`run_command` 的子进程环境已剔掉名字像密钥的变量（`tools._scrubbed_env`），但工具**结果**本身没处理。`read_file` 读 config.json、`python -` 脚本 `print(key)`、命令 `echo` 出 key，原文都会进 `chat_history`（落进 chat_memory 的会话 JSON）、日志、界面，并随下一轮请求发给模型服务商；排查问题时常见的 `key[:10]` 同样是泄露。
+- **收集**：`config.json` 里字段名含 `key` / `token` / `secret` / `password` / `passwd` / `credential` / `authorization` 的非空字符串（含这类字段下的字符串列表），**递归**进嵌套对象与数组（`custom_models`、`mcp_servers.*.env`、请求头都覆盖）；加环境变量里名字像密钥的值（判定直接复用 `tools._SECRET_ENV_PARTS`，不另抄一份）。值按空白切开取片段（`Bearer xxx` 只收 xxx），只收长度 `>= 12` 的片段；**路径、URL 不收**——`GOOGLE_APPLICATION_CREDENTIALS` 这类变量装的是路径，收了的话前缀打码会把输出里所有 `C:\Users…` 都换掉。
+- **打码**：`mask(text)` 把命中的值换成 `‹已隐藏：字段名›`；字母、数字都有的随机样式值只出现开头一段（`>= 8` 字符，如 `key[:10]`）也打码——这么长的前缀已经能定位到具体 key；纯字母的口令只认完整出现（开头 8 个字母就是个普通词）。重叠命中取更长的那个。非字符串、内部异常一律原样返回，宁可漏打码也不让工具结果丢失。
+- **接入点**（缺一不可）：`streaming._execute_tool` 拿到 `result` 之后（所有工具的唯一出口，含并行预取回放的 `_preinvoked`），以及 `tools._run_command` 的 `_reader` 逐行推给界面之前。此外 `_run_command` 在拼接完整输出后**再整段打一次**：流式按行/逐块切分，密钥恰好横跨两块时逐块打码会漏；不经 `_execute_tool` 直接调用（测试、子 Agent 内部）也要挡。
+- **刷新**：进程内首次用到时构建一次；设置页 `_save()` 写完 config.json 后调 `secret_mask.refresh(self.config)`，新填的 key 立刻生效。打码表是进程级缓存，测试里要 patch `_loaded` / `_secrets` 隔离。
+- **边界**：不改 config.json 的存储方式、不禁止读它（打码后照样能看配置，只是值被替换）；`verification.redact` 是另一套（证据摘要的正则打码），保持不动。回归见 `scripts/test_secret_mask.py`。
+
 ### 计划稳定性（tools.py / roles.py / UI）
 - 创建后默认固定步骤文字、顺序和数量；`set_step_status` 只更新状态。`update_plan` 兼容同一清单的进度更新，但不做模糊匹配或隐式合并。
 - 重列、改名、增删、清空、开始新任务或回退进度必须传 `explanation`；缺失原因时整次拒绝且保留原计划。原因由模型随工具调用说明，不增加用户确认。相同状态重复上报不刷新 UI。

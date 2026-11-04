@@ -993,6 +993,13 @@ class SettingsDialog(QDialog):
         except Exception:
             pass
 
+        # 打码表跟着刷新：刚填进去的 key 立刻生效，否则按新配置跑工具时它的值还能原样出现
+        try:
+            from .. import secret_mask as _secret_mask
+            _secret_mask.refresh(self.config)
+        except Exception:
+            pass
+
         # 密钥 / Base URL 是启动时加载的模块常量，改完要重启才生效。给个一键重启，
         # 省掉小白"怎么重启"的困惑;重启失败则退回手动(不会把用户卡死)。
         box = QMessageBox(self)
