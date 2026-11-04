@@ -57,6 +57,9 @@ def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
         detail = args.get("path", ".")
     elif name == "run_command":
         detail = args.get("command", "")
+        if str(args.get("stdin") or "").strip():
+            # 头部只露命令那一行（python -），展开看交进去的整段脚本
+            detail = f"{detail}\n{args['stdin']}"
     elif name == "run_tests":
         # 原来走通用的参数 JSON：只给了 timeout 时头部就剩一个「900」，看不出跑的是什么
         detail = str(args.get("path") or "").strip() or "全部"

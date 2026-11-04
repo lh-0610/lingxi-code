@@ -48,7 +48,7 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 （改完文件会**自动跑静态检查**：工具返回里若有"⚠️ 自动校验发现问题"，**接着把它修干净**再报告完成；也可用 check_code 主动复查单个文件）
 
 **跑 / 验**
-- run_command: 执行命令（流式输出、300s 超时、会弹确认）。dev server 等长服务传 `background=True` 转后台，再用 read_background_output / list_background_commands / stop_background_command 管理
+- run_command: 执行命令（流式输出、300s 超时、会弹确认）。dev server 等长服务传 `background=True` 转后台，再用 read_background_output / list_background_commands / stop_background_command 管理。要跑一段多行脚本（试第三方库怎么用、一次性的检查）：`command="python -"`，整段代码放进 `stdin` 一次跑完——别拆成好几条 `python -c`，也别在项目里写临时脚本
 - run_tests: 跑 pytest，返回精炼的通过/失败数 + 失败位置
 - git_diff / git_log: 只读看改动 / 提交历史（绝不碰 commit/push）
 - git_status: 查看仓库状态（分支、暂存/未暂存/未跟踪文件）
@@ -107,7 +107,7 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 3. **一轮多做几件事**：要看几个文件、搜几个关键词、或者读完还要挑出相关的几段，就写一段 `run_code` 一次做完；
    只是读几个文件也可以 `read_files(paths=[...])`
 4. **尽早测**：定位清楚就把复现写成测试，改完马上跑它和相关测试——不要等到最后才第一次 `run_tests`
-5. **临时文件不落项目**：试验用 `python -c` 或写进系统临时目录；万一写在项目里，收尾前删掉
+5. **临时文件不落项目**：试验代码用 run_command 的 stdin 跑（`python -`），要留文件就写进系统临时目录；万一写在项目里，收尾前删掉
 6. **不输出密钥**：查环境变量、配置时只看有没有、多长，别把 key 的内容（哪怕开头几位）打出来
 
 ## 完成验证（重要）
@@ -240,14 +240,16 @@ def _shell_context() -> str:
     不说的话模型默认写 bash：`| tail`、`rm -f`、heredoc、`cd /c/...`，在 Windows 的 cmd 里不是报错就是
     什么都不输出，它只好换个写法再试——评测 011 里三次运行合计 79 条命令，大半在为这个绕路，
     `rm -f` 删不掉临时脚本还留在了项目里。"""
-    scratch = (f"- 临时脚本、试验文件写到 `{scratch_dir()}` 下（不是项目目录，写的时候用这个完整路径）；"
-               "只读的查看、统计用 run_code，不用写脚本\n")
+    scratch = ('- 多行的试验脚本用 `run_command(command="python -", stdin=代码)` 直接跑，不用写文件；'
+               f"真要留文件的写到 `{scratch_dir()}` 下（不是项目目录，写的时候用这个完整路径）；"
+               "只读的查看、统计用 run_code\n")
     if os.name != "nt":
         return "\n\n# 运行环境\n`run_command` 在 /bin/sh 里执行。\n" + scratch
     return (
         "\n\n# 运行环境\n"
         "Windows。`run_command` 在 **cmd.exe** 里执行，不是 bash，也不保证装了 grep / tail / sed：\n"
-        "- 别写 `| tail`、`| head`、`| grep`、`sed -n`、`cat`、`ls -la`、`rm -f`、heredoc（`<<'EOF'`）、`cd /c/...`\n"
+        "- 别写 `| tail`、`| head`、`| grep`、`sed -n`、`cat`、`ls -la`、`rm -f`、heredoc（`<<'EOF'`）、`cd /c/...`；"
+        "heredoc 想做的事用 stdin 参数做\n"
         "- 看文件、搜内容用 read_file / search_files（比命令快，结果也不用再过滤）；删文件用 `del`；"
         "切目录用 `cd /d`；命令输出过长会自动截断，不必接管道\n"
         + scratch +

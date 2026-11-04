@@ -730,7 +730,8 @@ def _scrubbed_env():
 
 
 @tool
-def run_command(command: str, timeout: int | None = None, background: bool = False) -> str:
+def run_command(command: str, timeout: int | None = None, background: bool = False,
+                stdin: str = "") -> str:
     """执行系统命令并**流式**返回输出（边跑边显示，不必等命令结束）。
 
     命令耗时 > 几秒时（pytest / npm test / build / 长 curl 等），UI 上能实时
@@ -740,11 +741,16 @@ def run_command(command: str, timeout: int | None = None, background: bool = Fal
 
     background=True 时命令在后台运行（适用于 dev server / watch / 长服务），
     立即返回 bg_id；用 read_background_output 看输出，stop_background_command 停止。
+
+    stdin：交给命令标准输入的文本。要跑一段多行脚本（试库的用法、一次性的检查）就用它，
+    不用拼 `python -c "..."`，也不要在项目里写临时脚本：command="python -"，把整段代码放进
+    stdin（Node 用 "node -"）。工作目录和别的命令一样（默认项目根），能直接 import 项目里的模块。
+    不能和 background 一起用。
     """
     from .workspace_changes import track_workspace_changes
     root = _project_cwd()
     with track_workspace_changes(root) as changed:
-        result = _run_command(command, timeout, background)
+        result = _run_command(command, timeout, background, stdin)
     return result + _report_command_changes(root, changed)
 
 
@@ -784,11 +790,13 @@ def _report_command_changes(root: str, changed: list) -> str:
             "如果是脚本改的，用 git_diff 核对一遍实际改动。）")
 
 
-def _run_command(command: str, timeout: int | None, background: bool) -> str:
+def _run_command(command: str, timeout: int | None, background: bool, stdin: str = "") -> str:
     import threading as _thr_local
 
     caller_session = _session.current_session()
     effective_timeout = timeout if timeout is not None else RUN_COMMAND_TIMEOUT_S
+    if stdin and background:
+        return "stdin 不能和 background 一起用：后台命令起来以后没法再交输入。"
 
     cmd_lower = command.lower().strip()
     for blocked in BLOCKED_COMMANDS:
@@ -822,7 +830,9 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
             return refusal
     if ui is not None:
         try:
-            allowed, user_feedback = ui.confirm_command(command)
+            # 带 stdin 时确认卡上把要交进去的内容一起列出来：用户同意的是"python -"加这段代码
+            allowed, user_feedback = (ui.confirm_command(command, stdin=stdin) if stdin
+                                      else ui.confirm_command(command))
         except Exception as e:
             logger.warning(f"确认对话框异常，默认拒绝执行: {e}")
             return f"用户确认对话框出错，已拒绝执行: {e}"
@@ -834,7 +844,8 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
             return _msg
 
     run_cwd = _shell_cwd()
-    reject = _subagent_command_rejection(command, run_cwd)
+    # 交进去的脚本里引用的路径和命令行里的一样算数（open("C:/...")、subprocess 调别处的程序）
+    reject = _subagent_command_rejection(command + ("\n" + stdin if stdin else ""), run_cwd)
     if reject:
         return reject
 
@@ -854,7 +865,7 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
         proc = subprocess.Popen(
             command, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             cwd=run_cwd,
             bufsize=0,
             **({"env": _env} if _env is not None else {}),
@@ -915,6 +926,20 @@ def _run_command(command: str, timeout: int | None, background: bool) -> str:
 
     rt = _thr_local.Thread(target=_reader, daemon=True)
     rt.start()
+
+    if stdin:
+        def _feed():
+            # 另起线程写：输出管道已经有人在读，命令边读输入边大量输出也不会互相卡死。
+            # 写完就关，命令读到结尾才知道输入结束了（python - 读完整段才开始执行）
+            try:
+                proc.stdin.write(stdin.encode("utf-8"))
+            except OSError:
+                pass        # 命令没读完就退了
+            finally:
+                with contextlib.suppress(OSError):
+                    proc.stdin.close()
+
+        _thr_local.Thread(target=_feed, daemon=True).start()
 
     # 主循环：等进程结束 / 监控 stop_flag / 监控超时
     start = time.time()

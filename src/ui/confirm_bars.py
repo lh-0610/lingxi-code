@@ -507,6 +507,17 @@ class ConfirmBarsMixin:
                 + self._format_command_html(command)
                 + '</div>'
             )
+            stdin = holder.get("stdin") or ""
+            if stdin:
+                # 交给命令的脚本原样列在命令下面：用户同意的是这段代码，不只是"python -"
+                import html as _html
+                body_html += (
+                    f'<div style="margin-top:8px; color:{self._t("text_dim")}; font-size:12px;">'
+                    '交给它的输入：</div>'
+                    f'<pre style="font-family: {MONO_CSS}; white-space: pre-wrap; word-wrap: break-word; '
+                    'margin: 2px 0 0 0; font-size: 12px; line-height: 1.45;">'
+                    + _html.escape(stdin) + '</pre>'
+                )
         self.command_confirm_text.setHtml(body_html)
 
         # 标题 / 描述 / 徽章按操作类型设
@@ -913,11 +924,13 @@ class ConfirmBarsMixin:
     # worker 线程同步等待入口
     # ══════════════════════════════════════
 
-    def confirm_command(self, command: str, kind: str = "command", tool: str = "") -> tuple[bool, str]:
+    def confirm_command(self, command: str, kind: str = "command", tool: str = "",
+                        stdin: str = "") -> tuple[bool, str]:
         """从 worker 线程同步等待用户在主线程的内联确认条上选择。
 
         kind 由调用方明说是什么操作（permission_modes.KIND_*）：shell 命令 / Git 写 / MCP 工具 /
         派子 Agent。判定按类型来，不从文案开头去猜。tool 是 MCP 工具名（"记住"只记这一个工具）。
+        stdin 是要交给命令标准输入的内容（`python -` 加一段脚本）：卡片上原样列出，危险判定也看它。
 
         放行优先级：
           1. Git 写、派子 Agent、或命令被"危险"判定 → 永不绕过白名单，必须弹卡片
@@ -940,22 +953,25 @@ class ConfirmBarsMixin:
         from .. import session as _session
         _sess = _session.current_session()      # 发起确认的会话（worker 线程绑的）
         # 危险操作必须每次确认，永不被白名单绕过
+        # 脚本里用 subprocess 调 rm -rf / git reset --hard，和直接写在命令行里一样危险
         is_destructive = kind in _pm.ALWAYS_ASK_KINDS or (
-            kind == _pm.KIND_COMMAND and self._is_destructive_command(command))
+            kind == _pm.KIND_COMMAND
+            and self._is_destructive_command(command + ("\n" + stdin if stdin else "")))
         # 权限模式（输入框底栏的"模式"菜单）：自动放行普通命令，跳过权限确认全部放行
         if _pm.allows_command(_pm.current(_sess), risky=is_destructive or kind == _pm.KIND_MCP):
             return True, ""
         remember_key = "" if is_destructive else self._remember_key(command, kind, tool)
         if remember_key and remember_key in _sess.command_prefix_allowlist:
             return True, ""
-        if (not is_destructive and kind == _pm.KIND_COMMAND
+        # 旧版精确白名单只认整条命令串：带 stdin 时同一条 "python -" 后面跟的是别的代码，不算
+        if (not is_destructive and kind == _pm.KIND_COMMAND and not stdin
                 and self._normalize_command(command) in _sess.command_allowlist):
             return True, ""
 
         # 携带发起会话（主线程槽据此判断是否后台、把"记住"加对会话），以及卡片要的判定结果——
         # 卡片不再自己从文案里重新猜一遍"危险不危险"
         result = {"_session": _sess, "kind": kind, "destructive": is_destructive,
-                  "remember_key": remember_key}
+                  "remember_key": remember_key, "stdin": stdin}
         done = threading.Event()
 
         # --- 手机 Telegram 遥控确认（与 PC 卡片竞争，先点先到） ---
@@ -967,8 +983,9 @@ class ConfirmBarsMixin:
                 _pending_remote_confirms[remote_cid] = {
                     "result": result, "done": done, "msg_id": None,
                 }
+            stdin_note = f"\n\n交给它的输入：\n{stdin[:1500]}" + ("…" if len(stdin) > 1500 else "") if stdin else ""
             remote_msg_id = telegram_push.push_confirm(
-                f"执行命令？\n\n{command}\n\n请点击下方按钮",
+                f"执行命令？\n\n{command}{stdin_note}\n\n请点击下方按钮",
                 remote_cid,
                 is_destructive=is_destructive,
             )

@@ -215,3 +215,16 @@ def test_phone_confirmation_retains_request_owner(confirmation_ui, monkeypatch, 
     assert bool(_trust(a, kind)) is allow
     assert not _trust(b, kind)
     pump(lambda: _holder(ui, kind) is None)
+
+def test_the_script_handed_to_a_command_is_on_the_card(confirmation_ui):
+    """python - 加一段脚本：卡片上要看得到这段代码——用户同意的是它，不只是 "python -"。"""
+    ui, *_ = confirmation_ui
+    script = "for i in range(3):\n    print('从 stdin 来的', i)\n"
+    result, done = {"kind": "command", "destructive": False, "remember_key": "python",
+                    "stdin": script}, threading.Event()
+    ui._on_confirm_request("python -", result, done)
+    text = ui.command_confirm_text.toPlainText()
+    assert "python -" in text and "交给它的输入" in text
+    assert "for i in range(3):" in text and "print('从 stdin 来的', i)" in text
+    ui._resolve_command_confirm(False)
+    assert done.is_set()
