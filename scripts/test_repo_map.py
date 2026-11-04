@@ -94,7 +94,8 @@ def test_git_repo_skips_ignored_directories(tmp_path):
     (root / "tmp" / "pytest-1").mkdir(parents=True)
     (root / "tmp" / "pytest-1" / "leftover.py").write_text("def leftover():\n    pass\n", encoding="utf-8")
     (root / ".gitignore").write_text("tmp/\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True, stdin=subprocess.DEVNULL)
+    # 输出也要接住：pytest 默认的 fd 捕获下，子进程继承 stdout / stderr 偶尔报 WinError 6（句柄无效）
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, stdin=subprocess.DEVNULL, capture_output=True)
     from src import code_graph
     rels = [rel for _a, rel in code_graph.project_files(str(root), (".py",))]
     assert "src/ui/task_panel.py" in rels                   # 没提交的新文件也算
