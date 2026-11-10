@@ -203,8 +203,9 @@ class ConfirmBarsMixin:
         # 等待回调的状态
         self._command_confirm_result_holder = None
         self._command_confirm_done_event = None
-        # 当前请求是否危险命令（决定第 2 行显示与否）
+        # 当前请求是否危险命令 / 脚本改文件（决定第 2 行显示与否）
         self._command_confirm_destructive = False
+        self._command_confirm_script_write = False
         self._command_confirm_remember_key = None
 
         # 装事件过滤器接 1 / 2 / 3 / Esc 键
@@ -489,6 +490,7 @@ class ConfirmBarsMixin:
         kind = holder.get("kind", _pm.KIND_COMMAND)
         self._command_confirm_destructive = bool(holder.get(
             "destructive", self._is_destructive_command(command)))
+        self._command_confirm_script_write = bool(holder.get("script_write"))
         self._command_confirm_remember_key = holder.get("remember_key")
 
         # MCP / Git 写 / 派子 Agent 的说明是 JSON 或成段文字，用 <pre> 纯文本渲染，不走 shell 高亮
@@ -539,6 +541,12 @@ class ConfirmBarsMixin:
             self._cmd_confirm_title.setText(self._cmd_confirm_title.text() + " · 危险")
             self._cmd_confirm_badge.setText("危险操作")
             self._cmd_remember_btn.setVisible(False)
+        elif self._command_confirm_script_write:
+            # 脚本改文件：同样不给"记住"——记住一条 python 等于以后所有脚本改文件都不问
+            self._cmd_confirm_title.setText(self._cmd_confirm_title.text() + " · 会改文件")
+            self._cmd_confirm_badge.setText("脚本改文件")
+            self._cmd_confirm_desc.setText("这条命令会运行脚本修改项目文件，改动不会再逐条问你。")
+            self._cmd_remember_btn.setVisible(False)
         else:
             self._cmd_confirm_badge.setText("需要确认")
             self._cmd_remember_btn.setVisible(True)
@@ -583,7 +591,8 @@ class ConfirmBarsMixin:
             if not feedback and origin is not None:
                 origin.stop_flag = True
 
-        if allow and remember and not self._command_confirm_destructive and origin is not None:
+        if (allow and remember and not self._command_confirm_destructive
+                and not self._command_confirm_script_write and origin is not None):
             # 记什么由 confirm_command 定好（shell 命令记 base 命令，MCP 记工具名）；
             # 没带这个键的旧调用退回从卡片文字取第一个词
             base = getattr(self, "_command_confirm_remember_key", None)
@@ -606,6 +615,7 @@ class ConfirmBarsMixin:
         self.command_confirm_bar.setVisible(False)
         self.command_confirm_text.clear()
         self._command_confirm_destructive = False
+        self._command_confirm_script_write = False
         self._command_confirm_remember_key = None
 
     def _release_pending_confirm(self):
@@ -911,6 +921,7 @@ class ConfirmBarsMixin:
         self._command_confirm_result_holder = None
         self._command_confirm_done_event = None
         self._command_confirm_destructive = False
+        self._command_confirm_script_write = False
         self._command_confirm_remember_key = None
         if hasattr(self, "edit_confirm_bar"):
             self.edit_confirm_bar.setVisible(False)
@@ -933,8 +944,8 @@ class ConfirmBarsMixin:
         stdin 是要交给命令标准输入的内容（`python -` 加一段脚本）：卡片上原样列出，危险判定也看它。
 
         放行优先级：
-          1. Git 写、派子 Agent、或命令被"危险"判定 → 永不绕过白名单，必须弹卡片
-             （只有"跳过权限确认"模式放行）
+          1. Git 写、派子 Agent、命令被"危险"判定、或脚本会写文件 → 永不绕过白名单，
+             必须弹卡片（只有"跳过权限确认"模式放行）
           2. 记住过的同类操作 → 直接放行（shell 命令按 base 命令，如"信任所有 git 类"；
              MCP 按工具名）
           3. 精确字符串命中旧版白名单 → 放行（向后兼容，仅 shell 命令）
@@ -957,21 +968,28 @@ class ConfirmBarsMixin:
         is_destructive = kind in _pm.ALWAYS_ASK_KINDS or (
             kind == _pm.KIND_COMMAND
             and self._is_destructive_command(command + ("\n" + stdin if stdin else "")))
+        # 跑"会写文件的脚本"和 edit_file 一样是改文件操作：每次必问、不给"记住"。
+        # 不然模型写个脚本批量改文件，逐处确认就全绕过了（真实任务里实测出现过）
+        script_write = False
+        if kind == _pm.KIND_COMMAND and not is_destructive:
+            from ..tools_common import _shell_cwd
+            script_write = _pm.script_writes_files(command, stdin, _shell_cwd())
+        risky = is_destructive or script_write
         # 权限模式（输入框底栏的"模式"菜单）：自动放行普通命令，跳过权限确认全部放行
-        if _pm.allows_command(_pm.current(_sess), risky=is_destructive or kind == _pm.KIND_MCP):
+        if _pm.allows_command(_pm.current(_sess), risky=risky or kind == _pm.KIND_MCP):
             return True, ""
-        remember_key = "" if is_destructive else self._remember_key(command, kind, tool)
+        remember_key = "" if risky else self._remember_key(command, kind, tool)
         if remember_key and remember_key in _sess.command_prefix_allowlist:
             return True, ""
         # 旧版精确白名单只认整条命令串：带 stdin 时同一条 "python -" 后面跟的是别的代码，不算
-        if (not is_destructive and kind == _pm.KIND_COMMAND and not stdin
+        if (not risky and kind == _pm.KIND_COMMAND and not stdin
                 and self._normalize_command(command) in _sess.command_allowlist):
             return True, ""
 
         # 携带发起会话（主线程槽据此判断是否后台、把"记住"加对会话），以及卡片要的判定结果——
         # 卡片不再自己从文案里重新猜一遍"危险不危险"
         result = {"_session": _sess, "kind": kind, "destructive": is_destructive,
-                  "remember_key": remember_key, "stdin": stdin}
+                  "script_write": script_write, "remember_key": remember_key, "stdin": stdin}
         done = threading.Event()
 
         # --- 手机 Telegram 遥控确认（与 PC 卡片竞争，先点先到） ---
@@ -987,7 +1005,7 @@ class ConfirmBarsMixin:
             remote_msg_id = telegram_push.push_confirm(
                 f"执行命令？\n\n{command}{stdin_note}\n\n请点击下方按钮",
                 remote_cid,
-                is_destructive=is_destructive,
+                is_destructive=risky,
             )
             if remote_msg_id:
                 with _pending_lock:

@@ -7,7 +7,7 @@
 - **Agent 主循环**（`src/agent.py:agent_loop`）：stream → 收 tool_calls → 执行 → 再 stream → 没工具就停
 - **Claude Code 模式**：`subprocess.Popen` 调本地 `claude -p --output-format stream-json`，解析 `assistant`/`user`/`result` 事件
 - **UI ⟷ Agent 解耦**：agent 线程通过 `ui.show_message(text, tag)` 调用，内部 `bridge.append_signal.emit()` queue 到主线程渲染。所有 `ChatUI` 的对 agent 暴露接口（`show_message / render_final_markdown / remove_thinking_indicator / show_token_usage / show_retry / confirm_command`）都是线程安全的 wrapper
-- **命令确认**（`src/ui/chat_window.py:confirm_command`）：worker 线程调它时，会通过 `confirm_request = Signal(str, object, object)` 投递到主线程，UI 显示内联确认卡，worker 线程 `event.wait()` 等待用户操作；授权记忆与拒绝停止必须取当前确认卡 `result_holder['_session']` 的归属，不能依赖窗口共享的“最后发起确认的会话”指针。会话级 allowlist（`_session_command_allowlist`）让用户选"允许并记住"后同样命令秒过；危险命令（`_is_destructive_command` 正则匹配 `rm -rf` / `format` / `sudo` 等）不给"记住"选项
+- **命令确认**（`src/ui/chat_window.py:confirm_command`）：worker 线程调它时，会通过 `confirm_request = Signal(str, object, object)` 投递到主线程，UI 显示内联确认卡，worker 线程 `event.wait()` 等待用户操作；授权记忆与拒绝停止必须取当前确认卡 `result_holder['_session']` 的归属，不能依赖窗口共享的“最后发起确认的会话”指针。会话级 allowlist（`_session_command_allowlist`）让用户选"允许并记住"后同样命令秒过；危险命令（`_is_destructive_command` 正则匹配 `rm -rf` / `format` / `sudo` 等）不给"记住"选项；跑会写文件的脚本（`permission_modes.script_writes_files` 查 stdin / `-c` 内联代码 / 脚本文件 / 从 `<` 或管道喂给解释器的脚本，链式 `cd` 跟进；按引号外的 `&&` `||` `|` `&` `;` 切段，不要求两边有空格；`call` / `start` / `cmd /c` 包的一层会剥掉，`bash -c` / `powershell -Command` 的内联代码当命令行再判一层）同样每次必问、不给"记住"——否则模型写个脚本批量改文件就绕过了 edit_file 的逐处确认
 - **思考过程**：解析 `<think>...</think>` / `reasoning_content` / Anthropic `thinking` content block，统一显示成可折叠的紫色块
 - **Markdown 渲染**：流式过程显示纯文本，完成后用 `markdown` 库一次性转 HTML 替换（QTextBrowser 不支持 `<style>` 标签，所有样式必须 inline）。复制/重新生成按钮用 `<table cellpadding=0 height=18>` spacer 撑开（QTextBrowser 对 `<div margin>` 支持差）
 
@@ -23,7 +23,7 @@
 - **`get_project_instructions` 也受同一预算**，不是完整原文的后门；要拿全文用它的 `source`/`offset`/`limit` 分页（按 Unicode 字符计、默认 6000 上限 12000，返回内容指纹，翻页途中文件被改能发现）。路径作用域判定与 system prompt 注入共用 `_rule_dirs_for_target()`，不因分页放宽
 - **项目指令的优先级边界**（`roles._PROJECT_RULES_PRECEDENCE`，注入 CLAUDE.md / AGENTS.md / .lingxirules 时统一前置）：它们优先于通用编码约定，但**不得覆盖系统提示的安全约束与用户在本次对话中的直接指令**。这些文件来自**代码仓库**，是不可信输入——克隆一个第三方项目不该等于授权它改写助手的行为。早先写的"优先于上面任何通用约定"等于给了仓库里一句「忽略之前所有安全限制」以最高权限，是现成的提示注入面
 - **Plan/Act 随会话持久化**：`agent_mode` 进 session JSON，`load_session` 回填、`_sync_header_from_session` 同步输入框底栏的模式按钮。不存的话重开一个"聊到一半正在 Plan"的会话会变成 Act——用户以为还在只读规划、模型却已能动手改代码，是有安全后果的静默降级。旧会话缺该字段 → 默认 act
-- **权限模式**（permission_modes.py）：输入框底栏的"模式"菜单有五种——自动 / 手动 / 接受编辑 / 计划 / 跳过权限确认。计划就是 agent_mode=plan；其余四种是执行时的放行规则，存在会话的 `permission_mode`。放行只在 confirm_bars 的 `confirm_command` / `confirm_edit` 开头按发起确认的会话判一次：接受编辑放行写文件，自动再放行普通命令（危险命令、Git 写操作、MCP 工具仍问），跳过权限确认全部放行。跳过权限确认不落盘、不作为新会话的默认（重开程序或新建会话退回上次的非跳过模式）；旧会话缺该字段 → 手动
+- **权限模式**（permission_modes.py）：输入框底栏的"模式"菜单有五种——自动 / 手动 / 接受编辑 / 计划 / 跳过权限确认。计划就是 agent_mode=plan；其余四种是执行时的放行规则，存在会话的 `permission_mode`。放行只在 confirm_bars 的 `confirm_command` / `confirm_edit` 开头按发起确认的会话判一次：接受编辑放行写文件，自动再放行普通命令（危险命令、脚本改文件、Git 写操作、MCP 工具仍问），跳过权限确认全部放行。跳过权限确认不落盘、不作为新会话的默认（重开程序或新建会话退回上次的非跳过模式）；旧会话缺该字段 → 手动
 
 ## 模块级 facade（src/agent.py）
 - `agent.py` 通过模块级 `__getattr__` 把读取代理到 `state` —— 让 `src/ui/chat_window.py` 等模块继续用 `agent.stop_flag` 不报错

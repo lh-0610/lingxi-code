@@ -49,14 +49,14 @@ def confirmation_ui(monkeypatch, isolated_memory):
         sessions.append(sess)
         return sess
 
-    def start(sess, kind, target):
+    def start(sess, kind, target, stdin=""):
         output = []
 
         def worker():
             paths.set_data_dir(str(isolated_memory.parent))
             session.bind_thread(sess)
             try:
-                output.append(ui.confirm_command(target) if kind == "command"
+                output.append(ui.confirm_command(target, stdin=stdin) if kind == "command"
                               else ui.confirm_edit(target, "-old\n+new"))
             except BaseException as exc:
                 errors.append(exc)
@@ -228,3 +228,37 @@ def test_the_script_handed_to_a_command_is_on_the_card(confirmation_ui):
     assert "for i in range(3):" in text and "print('从 stdin 来的', i)" in text
     ui._resolve_command_confirm(False)
     assert done.is_set()
+
+
+def test_script_write_card_marks_it_and_hides_remember(confirmation_ui):
+    """脚本改文件的卡：标"会改文件"、不给"允许并记住"——记住一条 python 等于放行以后所有脚本。"""
+    ui, new_session, *_ = confirmation_ui
+    sess = new_session()
+    session.set_active(sess)
+    script = "open('x.txt', 'w').write('hi')"
+    # remember_key 故意给值：验证卡片侧的防御保险（不只靠闸门给空 key）
+    result, done = {"_session": sess, "kind": "command", "destructive": False,
+                    "script_write": True, "remember_key": "python", "stdin": script}, threading.Event()
+    ui._on_confirm_request("python -", result, done)
+    assert "会改文件" in ui._cmd_confirm_title.text()
+    assert ui._cmd_confirm_badge.text() == "脚本改文件"
+    assert not ui._cmd_remember_btn.isVisible()
+    ui._resolve_command_confirm(True, remember=True)
+    assert done.is_set() and result["allow"] is True
+    assert not sess.command_prefix_allowlist
+
+
+def test_auto_mode_still_pops_card_for_stdin_script(confirmation_ui):
+    """端到端回归：自动模式下 python - 带写文件脚本，必须弹卡，不能悄悄放行。"""
+    from src import permission_modes as pm
+    ui, new_session, start, pump = confirmation_ui
+    a = new_session()
+    pm.apply(a, "auto")
+    session.set_active(a)
+    ta, ra = start(a, "command", "python -", stdin="open('x.txt', 'w').write('hi')")
+    pump(lambda: _holder(ui, "command") is not None)
+    assert ra == []
+    assert _holder(ui, "command")["script_write"] is True
+    ui._resolve_command_confirm(False)
+    ta.join(5)
+    assert ra == [(False, "")]
