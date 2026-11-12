@@ -31,6 +31,7 @@ class SignalBridge(QObject):
     run_result = Signal(object, str, object)
     token_usage = Signal(dict, dict)   # (session_usage, round_usage)
     sessions_refresh = Signal()        # 异步标题生成完后刷新侧栏会话列表
+    session_search_done = Signal(str, object)  # 跨会话搜索 worker 完成：(查询词, 结果列表)
     # 让 worker 线程能阻塞式请求 UI 弹确认框：发 (命令文本, 用于回传结果的 dict,
     # threading.Event)。槽运行在 UI 主线程，调完 QMessageBox 后写 dict + 唤醒 Event
     confirm_request = Signal(str, object, object)

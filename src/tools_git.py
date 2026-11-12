@@ -8,8 +8,12 @@ import subprocess
 
 from langchain_core.tools import tool
 
+from .limits import GIT_DIFF_OVERVIEW_MAX_CHARS
 from .tools_common import _project_cwd, _resolve_path
+from .verification import covers as _v_covers
 from .verification import mark_diff_reviewed as _v_mark_diff_reviewed
+from .verification import record_diff_files as _v_record_diff_files
+from .verification import record_diff_side as _v_record_diff_side
 
 
 def _mark_reviewed(root):
@@ -23,6 +27,40 @@ def _mark_reviewed(root):
         _v_mark_diff_reviewed(_session.get_verification(), root=root)
     except Exception:
         pass
+
+
+def _record_diff_files(cwd, rel_paths):
+    """整段展示出来的文件按绝对路径记进审阅记录，**不**解除范围级义务（见 record_diff_files）。"""
+    try:
+        from . import session as _session
+        _v_record_diff_files(_session.get_verification(),
+                             [os.path.join(cwd, rel) for rel in rel_paths if rel])
+    except Exception:
+        pass
+
+
+def _record_diff_sides(cwd, shown_rel, staged, other):
+    """整段展示出来的文件记下"这一侧看过了"，返回**只看到一半**的那些（相对项目根）。
+
+    other 是另一侧此刻有改动的文件集合，None = 枚举不出来（按"还有改动"算，不知道就不放行）。
+    另一侧确实没改动的、或两侧都已经记过的，才算这个文件看完。
+    """
+    if not shown_rel:
+        return []
+    from . import session as _session
+    try:
+        v = _session.get_verification()
+    except Exception:
+        return list(shown_rel)
+    side = "staged" if staged else "unstaged"
+    partial = []
+    for rel in shown_rel:
+        if not rel:
+            continue
+        both = _v_record_diff_side(v, os.path.join(cwd, rel), side)
+        if not both and (other is None or rel in other):
+            partial.append(rel)
+    return partial
 
 
 # 提示里最多点名几个文件，其余只报数量——工具结果要能读，不是要把仓库列一遍。
@@ -125,7 +163,7 @@ def _uncovered_changes(cwd):
         return [line for line in (done.stdout or "").splitlines() if line.strip()]
 
     try:
-        staged_files = _names(["git", "diff", "--cached", "--name-only"])
+        staged_files = _names(["git", "diff", "--cached", "--name-only", "--relative"])
         # --exclude-standard 尊重 .gitignore：构建产物、缓存不该被当成"未审阅的改动"
         untracked = _names(["git", "ls-files", "--others", "--exclude-standard"])
     except subprocess.TimeoutExpired:
@@ -150,9 +188,15 @@ def _untracked_as_diff(cwd, path, max_chars):
     for rel in files[:_NEW_FILES_MAX]:
         head = f"diff --git a/{rel} b/{rel}\nnew file (git 还没跟踪)\n--- /dev/null\n+++ b/{rel}"
         try:
-            content = _read_text(cwd, rel, max_chars)
+            content = _read_text(cwd, rel, max_chars + 1)
         except OSError as e:
             parts.append(f"{head}\n（读取失败：{e}）")
+            continue
+        if len(content) > max_chars:
+            # 读不全就不算"整份给出了"：这份记录后面要用来判目录是不是看全了，
+            # 半截内容混进去等于把没看过的改动记成看过。
+            parts.append(f"{head}\n（文件超过 {max_chars} 字，这次没展示。"
+                         f"单独看：git_diff(path=\"{rel}\", max_chars=30000)）")
             continue
         if "\x00" in content:
             parts.append(f"{head}\n（二进制文件，不显示内容）")
@@ -166,12 +210,20 @@ def _untracked_as_diff(cwd, path, max_chars):
     return ("\n".join(parts) + "\n") if parts else "", shown, files
 
 
-def _describe_uncovered(staged_files, untracked):
-    """告诉模型：没暂存的改动确实没有，但还有它没看过的东西，以及去哪儿看。"""
-    parts = ["工作区没有**未暂存**的改动，但默认 diff 看不到下面这些，"
-             "因此还不能认为整个项目已经审阅过："]
+def _describe_uncovered(staged_files, untracked, empty: bool, path: str = ""):
+    """告诉模型：默认 diff 还有没看到的东西，以及去哪儿看。
+
+    措辞按 diff 空不空分开——上面明明列着未暂存的改动还说"没有未暂存的改动"是自相矛盾
+    （与核对失败那条提前返回同一个坑）。path 非空时说的是**那个范围**，不是整个工作区，
+    补看的命令也带上同一个 path。
+    """
+    head = (("这个范围" if path else "工作区") + "没有**未暂存**的改动，但默认 diff 看不到下面这些，"
+            if empty else "上面的改动之外，默认 diff 还看不到下面这些，")
+    parts = [head + ("因此还不能认为这个范围已经审阅过：" if path
+                     else "因此还不能认为整个项目已经审阅过：")]
+    staged_how = f'git_diff(path="{path}", staged=True)' if path else "git_diff(staged=True)"
     for label, files, how in (
-        ("已暂存的修改", staged_files, "用 git_diff(staged=True) 查看"),
+        ("已暂存的修改", staged_files, f"用 {staged_how} 查看"),
         ("未跟踪的新文件", untracked, "用 git_diff(path=...) 逐个查看"),
     ):
         if not files:
@@ -182,17 +234,187 @@ def _describe_uncovered(staged_files, untracked):
     return "\n".join(parts)
 
 
+def _describe_half_shown(partial, staged: bool, path: str) -> str:
+    """点名只看到一半的文件，并说清另一半用哪条命令看。"""
+    if path:
+        how = f'git_diff(path="{path}"' + ("" if staged else ", staged=True") + ")"
+    else:
+        how = "git_diff()" if staged else "git_diff(staged=True)"
+    names = ", ".join(partial[:_UNCOVERED_SAMPLE])
+    more = f" 等 {len(partial)} 个" if len(partial) > _UNCOVERED_SAMPLE else ""
+    return ("下面这些文件**另一侧的改动还没看过**，这次只展示了一半，不算审阅过：\n"
+            f"- {names}{more} —— 用 {how} 看另一半")
+
+
+def _diff_char_limit(path: str, max_chars) -> tuple[int, bool]:
+    """(这次最多交回多少字, 是不是只看单个文件)。
+
+    整个项目 / 一个目录的 diff 封顶 GIT_DIFF_OVERVIEW_MAX_CHARS，max_chars 传得再大也不超过；
+    指到单个文件的按 max_chars 给——大改动只能这样看全，非 Git 项目的审阅义务也靠它了结。"""
+    try:
+        limit = max(1000, int(max_chars))
+    except (TypeError, ValueError):
+        limit = GIT_DIFF_OVERVIEW_MAX_CHARS
+    single = bool(path) and not os.path.isdir(_resolve_path(path))
+    return (limit if single else min(limit, GIT_DIFF_OVERVIEW_MAX_CHARS)), single
+
+
+def _section_path(section: str) -> str:
+    """一个文件的 diff 段 → 它改的是哪个文件（相对仓库根）。认不出返回空串。
+
+    认不出就不记：`core.quotepath` 会把非 ASCII 路径写成八进制转义的引号串，
+    照着它拼出来的路径指向一个不存在的文件，记进去只会污染审阅记录。
+    """
+    first = section.split("\n", 1)[0]
+    if " b/" not in first:
+        return ""
+    name = first.rsplit(" b/", 1)[-1].strip()
+    return "" if name.startswith('"') else name
+
+
+def _diff_file_summary(section: str) -> str:
+    """一个文件的 diff 段 → `路径（+增 −删）`。"""
+    first = section.split("\n", 1)[0]
+    name = _section_path(section) or first.strip()
+    body = [ln for ln in section.splitlines()[1:] if not ln.startswith(("+++", "---"))]
+    added = sum(1 for ln in body if ln.startswith("+"))
+    removed = sum(1 for ln in body if ln.startswith("-"))
+    return f"{name}（+{added} −{removed}）"
+
+
+def _clip_diff(output: str, limit: int, single: bool) -> tuple[str, list[str]]:
+    """diff 超过 limit 时截短，并交回**整段展示出来了**的那些文件的相对路径。
+
+    第二项是给审阅记录用的：只有整段留在输出里的文件才算看过。单文件截断、
+    以及"第一个文件就超长、只展示了它的开头"都一个都不算——半截内容不是审阅。
+    """
+    import re as _re
+    sections = [s for s in _re.split(r"(?m)^(?=diff --git )", output) if s]
+    if len(output) <= limit:
+        return output, [_section_path(s) for s in sections]
+    if single:
+        return (output[:limit]
+                + f"\n\n... [输出已截断（共 {len(output)} 字符），要看后面的部分把 max_chars 调大]"), []
+    kept, size, left = [], 0, []
+    for section in sections:
+        if not left and size + len(section) <= limit:
+            kept.append(section)
+            size += len(section)
+        else:
+            left.append(section)
+    if kept:
+        shown = "".join(kept).rstrip("\n")
+        head = f"改动共 {len(output)} 字符，这次只完整展示了前 {len(kept)} 个文件"
+    else:
+        shown = left[0][:limit]
+        head = f"改动共 {len(output)} 字符，第一个文件就超出了长度，只展示了它的开头"
+    names = "、".join(_diff_file_summary(s) for s in left[:_UNCOVERED_SAMPLE])
+    more = f" 等 {len(left)} 个" if len(left) > _UNCOVERED_SAMPLE else ""
+    text = (f"{shown}\n\n... [{head}。没展示全的：{names}{more}。"
+            "要看哪个就 git_diff(path=\"那个文件\")，单个文件不受这个长度限制]")
+    return text, [_section_path(s) for s in kept]
+
+
+def _changed_in_dir(cwd: str, rel_scope: str) -> list[str] | None:
+    """这个目录范围内此刻有改动的文件（相对项目根）。枚举不出来返回 None。
+
+    未暂存 + 已暂存 + 未跟踪**全都算**，调用方看的是不是暂存区都一样：判"目录看全了没有"
+    时，只数暂存区就会把没暂存的改动当成不存在，逐个看完暂存文件即可替整个目录背书。
+    """
+    scope = ["--", rel_scope] if rel_scope else []
+    files = []
+    for args in (["diff", "--name-only", "--relative", *scope],
+                 ["diff", "--cached", "--name-only", "--relative", *scope],
+                 ["ls-files", "--others", "--exclude-standard", "--", rel_scope or "."]):
+        out = _git_text(cwd, args)
+        if out is None:
+            return None
+        files += [ln for ln in out.splitlines() if ln.strip()]
+    return files
+
+
+def _unstaged_leftovers(cwd: str, path: str) -> bool:
+    """暂存区之外还有没有改动（未暂存 + 未跟踪）。枚举不出来按"有"算——不知道就不放行。"""
+    scope = ["--", path] if path else []
+    for args in (["diff", "--name-only", "--relative", *scope],
+                 ["ls-files", "--others", "--exclude-standard", "--", path or "."]):
+        out = _git_text(cwd, args)
+        if out is None or out.strip():
+            return True
+    return False
+
+
+def _other_side_changes(cwd: str, path: str, staged: bool) -> set[str] | None:
+    """这次**没**展示的那一侧有哪些改动文件（相对项目根）。枚举不出来返回 None。
+
+    暂存视图看不见未暂存的改动，未暂存视图看不见已暂存的改动。未跟踪的新文件只有一侧
+    （整份附上就是全部），不在这里数。
+    """
+    args = ["diff", "--name-only", "--relative"]
+    if not staged:
+        args.append("--cached")
+    if path:
+        args.extend(["--", path])
+    out = _git_text(cwd, args)
+    if out is None:
+        return None
+    return {ln for ln in out.splitlines() if ln.strip()}
+
+
+def _mark_range_if_fully_reviewed(cwd: str, path: str) -> None:
+    """范围内的改动是不是已经被逐个完整看过了？是就把这个范围记成已审阅。
+
+    盲区义务按**目录**记着，而目录级 diff 有 8000 字硬上限、max_chars 抬不动：改动一多
+    就必然截断，逐个文件看又只记到文件路径，`covers(文件, 目录)` 永远 False——两头都够不着，
+    义务无解。这里反过来用累计的按文件记录判目录：范围内**每一个**改动文件都被某条记录
+    覆盖才记目录。`covers` 同时守住 Git 工作区边界，嵌套仓库 / 隔离区的改动不会被主项目
+    这边的审阅顺带清掉。枚举失败、或有任何一个文件没被覆盖，都不记。
+    """
+    from . import session as _session
+    try:
+        v = _session.get_verification()
+        roots = v.get("diff_roots") or []
+        if not roots:
+            return
+        candidates = [cwd]
+        if path:
+            resolved = _resolve_path(path)
+            if os.path.isdir(resolved) and os.path.realpath(resolved) != os.path.realpath(cwd):
+                candidates.insert(0, resolved)
+        cache = {}
+        for directory in candidates:
+            scope = os.path.relpath(directory, cwd).replace(os.sep, "/") if directory != cwd else ""
+            files = _changed_in_dir(cwd, scope)
+            if files is None:
+                continue
+            targets = [os.path.join(cwd, rel) for rel in files]
+            if not all(any(_v_covers(r, t, cache=cache) for r in roots) for t in targets):
+                continue
+            # 目录本身也得和这些文件在同一个工作区里，否则"覆盖"是假的
+            if all(_v_covers(directory, t, cache=cache) for t in targets):
+                _mark_reviewed(directory)
+    except Exception:
+        pass
+
+
 @tool
 def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str:
     """查看 git 改动（默认未暂存的工作区改动）。path: 限定文件/目录（相对项目根，空=全部）。
-    staged=True 看已暂存（git add 过）的改动。只读、调研用。"""
+    staged=True 看已暂存（git add 过）的改动。只读、调研用。
+    不指到单个文件时一次最多交回 8000 字（max_chars 调大也一样），放不下的文件会列出名字和改动量；
+    要看全某个文件的改动，path 指到那个文件。"""
     try:
         import shutil as _shutil
+        max_chars, single = _diff_char_limit(path, max_chars)
         if not _shutil.which("git"):
             return _review_without_git(path, max_chars, "没有找到 git，")
 
         cwd = _project_cwd()
-        cmd = ["git", "diff"]
+        # --relative：路径相对**项目根**而不是仓库根。项目根是仓库子目录时（monorepo 里
+        # 只打开 backend/），默认输出给的是 backend/src/a.py，按项目根拼就成了
+        # backend/backend/src/a.py——审阅记录指向不存在的路径，按文件记和目录反判全失效。
+        # 顺带把范围也收到项目内，与 _untracked_as_diff（ls-files 本来就相对 cwd）一致。
+        cmd = ["git", "diff", "--relative"]
 
         if staged:
             cmd.append("--staged")
@@ -227,23 +449,32 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
         output = tracked + (("\n" if tracked and not tracked.endswith("\n") else "") + new_text if new_text else "")
         empty = not output.strip()
 
-        # 标记 diff 已审查（验证状态）。**必须在"空 diff"提前返回之前**：
-        # 早先空结果直接 return，于是"跑完命令、结果确实是干净的"反而结不了验证义务。
-        # 触发它的是没有 dirty 文件、却仍要求审阅 diff 的场景（如 verification 的盲区），
-        # 那时 diff 本来就该是空的——义务永远解除不了，闸门死在这里。
-        #
-        # 但**不是所有成功的空 diff 都算审阅过**，判据是"这次调用有没有覆盖到该看的范围"：
-        #   - 带 path 限定：只看了一个文件，它没改动说明不了别处 → 不算。
-        #   - staged=True：暂存区空不代表工作区干净（改了没 add 照样看不见）→ 不算。
-        #   - 全工作区且非 staged：**还要再核对一次**才算，见下面 _uncovered_changes。
-        #   - 非空输出：沿用原有行为，照常算（含 path 限定的情形）。
+        # 标记 diff 已审查（验证状态）。判据是"这次有没有把该看的范围**完整**展示"，
+        # 与 _review_without_git 同一原则：看不全就不放行，并点名去哪儿单独看。
+        #   - 被长度截断（truncated）：整个范围不算看过，但**整段展示出来的那几个文件按文件记**
+        #     （record_diff_files，不动 diff_reviewed）。早先在截断之前就按整个范围记，
+        #     被截掉的文件也被当成审阅过；后来改成一律不记，又让模型把已经看全的文件再看一遍。
+        #   - 带 path 限定且为空：只看了一个没改动的文件，说明不了别处 → 不记。
+        #   - staged=True 且为空：暂存区空不代表工作区干净 → 不记。非空但范围内还有未暂存 /
+        #     未跟踪改动的，整个范围也不记（只按文件记）——暂存区的 diff 看不见它们。
+        #   - 部分暂存的文件（两侧各有改动）：任一视图都只展示一半，按"文件 + 侧"记，
+        #     两侧都看过才算这个文件看完（见 _record_diff_sides）。
+        #   - 带 path 的未暂存视图：范围里的暂存改动一个字都看不见，**再核对一次**，有完全
+        #     没出现的就不按整个范围记（与默认视图的 _uncovered_changes 对称）。
+        #   - 全工作区且非 staged：默认 diff 看不见已暂存改动和未跟踪新文件，**再核对一次**，
+        #     还有没覆盖到的就不记（见 _uncovered_changes）。
+        #   - 范围内改动都完整展示了（含"全工作区确实干净"）→ 按整个范围记。
+        #   - 范围没看全，但范围里的改动已经被逐个看全了 → 也按范围记（盲区目录义务靠它了结，
+        #     见 _mark_range_if_fully_reviewed）。
         # 执行失败（git 缺失 / 非仓库 / 非零退出 / 超时 / 异常）一律走不到这里，不放行。
         uncovered_note = ""
         covered = _resolve_path(path) if path else cwd
         new_left_out = [f for f in new_all if f not in new_shown]
-        if tracked.strip() or (path and new_text and not new_left_out):
-            _mark_reviewed(covered)
-        elif not path and not staged:
+        clipped, shown_rel = _clip_diff(output, max_chars, single)
+        # 新文件那几段可能只是"读取失败 / 太长没展示"的占位说明，段在输出里不等于内容看全了
+        shown_rel = [rel for rel in shown_rel if rel not in new_left_out]
+        truncated = len(output) > max_chars
+        if not path and not staged:
             # 默认 `git diff` **只看已跟踪文件的未暂存改动**——已 `git add` 的修改和
             # 未跟踪的新文件它一个都看不见。所以"输出为空"不等于"整个项目干净"：
             # 实测过 app.py 改完 add 了、以及新增一个未跟踪的 new_module.py，
@@ -253,16 +484,51 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
             staged_files, untracked, probe_error = _uncovered_changes(cwd)
             if probe_error:
                 # 核对失败 = 不知道干不干净。不知道就不放行（与追踪枚举失败同一取舍）。
-                return ((output + "\n\n" if output.strip() else "")
-                        + "工作区没有未暂存的改动，但无法核对暂存区和未跟踪文件"
-                        f"（{probe_error}），因此不能确认整个项目干净。"
+                # 改动非空时也会走到这儿，所以一样要截断（否则 8000 字上限被这条返回绕开），
+                # 措辞按 diff 空不空分开：上面列着改动还说"没有未暂存的改动"是自相矛盾。
+                head = ("工作区没有未暂存的改动，但无法核对暂存区和未跟踪文件" if empty
+                        else "上面的改动之外，无法核对暂存区和未跟踪文件")
+                return ((clipped + "\n\n" if not empty else "")
+                        + head + f"（{probe_error}），因此不能确认整个项目干净。"
                         "请用 git_status 手动确认后再判断是否完成。")
             # 上面已经整份给出的新文件算看过了；没给出的（太多被截掉的）照旧算没覆盖
             untracked = [f for f in untracked if f not in new_shown]
             if staged_files or untracked:
-                uncovered_note = _describe_uncovered(staged_files, untracked)
+                uncovered_note = _describe_uncovered(staged_files, untracked, empty)
+            all_shown = not truncated and not staged_files and not untracked
+            other = set(staged_files)   # 暂存区上面已经枚举过了，不必再跑一次 git
+        else:
+            # 限定 path / staged：范围内有内容、且没被截断、新文件也都附上了，才算看全。
+            all_shown = not empty and not truncated and not new_left_out
+            other = _other_side_changes(cwd, path, staged)
+            if staged:
+                if all_shown:
+                    # 暂存区的 diff 看不见未暂存的改动和未跟踪的新文件。只看暂存区就把整个范围
+                    # 记成已审阅，等于替那些没看过的改动背书——与默认 diff 看不见暂存区是对称的坑。
+                    all_shown = not _unstaged_leftovers(cwd, path)
             else:
-                _mark_reviewed(covered)
+                # 对称的另一半：带路径的未暂存视图看不见范围里的暂存改动。`git_diff(path=".")`
+                # 原来绕过了只有默认视图才有的核对，把只有暂存改动、这次一个字都没出现的文件
+                # 连同整个范围一起记成已审阅，目录反判再顺带把项目根也记上。
+                # 只列**完全没出现**的那些：部分暂存、已展示了一半的由 _record_diff_sides 管。
+                left_out = sorted(other - set(shown_rel)) if other is not None else []
+                if left_out or other is None:
+                    all_shown = False
+                if left_out:
+                    uncovered_note = _describe_uncovered(left_out, [], empty, path)
+        # 部分暂存的文件：两侧各有改动，这次只展示了一半。按整个文件记的话，下面的目录反判
+        # 会认为改动全覆盖了，把没露过面的那一半连同整个项目根一起放行。所以先按"文件 + 侧"
+        # 记，两侧齐了才算这个文件看完（只有一侧有改动的照旧看一次就算数）。
+        half_shown = _record_diff_sides(cwd, shown_rel, staged, other)
+        if half_shown:
+            all_shown = False
+        if all_shown:
+            _mark_reviewed(covered)
+        else:
+            _record_diff_files(cwd, [rel for rel in shown_rel if rel not in half_shown])
+        # 全工作区已经整体记过了就不用再核（候选只有它自己）；其余情形核一次目录是否已逐个看全
+        if not empty and not (all_shown and not path):
+            _mark_range_if_fully_reviewed(cwd, path)
 
         if empty:
             if staged:
@@ -270,15 +536,13 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
             if uncovered_note:
                 return uncovered_note
             return "工作区干净，没有未提交改动。"
+        # 先截 diff 再附"还有没覆盖到的改动"：这句是完成闸门要模型看到的，不能被截掉
+        output = clipped
         if uncovered_note:
             output = output.rstrip("\n") + "\n\n" + uncovered_note
-
-        if len(output) > max_chars:
-            output = (
-                output[:max_chars]
-                + f"\n\n... [输出已截断（共 {len(output)} 字符），"
-                f"可用 path 参数缩小到具体文件/目录查看]"
-            )
+        if half_shown and (path or staged):
+            # 默认全局视图的 uncovered_note 已经点名了这些文件、也说了去哪儿看，不再重复一遍
+            output = output.rstrip("\n") + "\n\n" + _describe_half_shown(half_shown, staged, path)
         return output
 
     except FileNotFoundError:

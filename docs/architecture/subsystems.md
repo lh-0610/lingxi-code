@@ -24,12 +24,14 @@
 
 ## 代码导航（src/lsp_client.py + codeintel.py + tools_codemap.py）
 - `find_definition` / `find_references`：**LSP（最准，装了语言服务器）→ jedi（Python）→ 退回 search_files** 的降级链
+- **LSP 多语言**：按文件扩展名选语言组（python / typescript〔含 js/jsx/tsx〕/ go / rust / cpp〔含 .c/.h〕/ java），每组一个常驻服务器单例（`_servers` dict，不再写死一个 pyright）。默认命令 pyright-langserver→pylsp、typescript-language-server、gopls、rust-analyzer、clangd、jdtls；`config.lsp_servers` 覆盖 python、`config.lsp_languages`（对象，值为命令字符串或候选列表）覆盖其它组。`didOpen` 的 `languageId` 也按扩展名给（tsx→typescriptreact、jsx→javascriptreact、.h→cpp），不再写死 `"python"`——这是旧版只支持 Python 的根因。jdtls 启动补 `-data <工作区>`，工作区**不在项目根里**（早先建 `<项目根>/.lingxi-jdtls-workspace` 会污染用户项目、被 git 看见）：按项目根 realpath 的 sha256 前 16 位 keyed 到 `get_data_dir()/lsp_workspaces/<hash>`，dev 期数据根恰是项目根时退回临时目录（`_jdtls_workspace`，best-effort，起不来就降级）。**Windows 上 npm 装的语言服务器（`.cmd` shim）裸名字起不来**：`_LspServer.__init__` 用 `shutil.which(argv[0])` 解析成完整路径再交给 CreateProcess（它只认 `.exe`、不查 PATHEXT，裸名字会 WinError 2）。认不出扩展名 → 不起服务器、`definition/references` 返回 None
+- **jedi 只兜 Python**：LSP 没命中后，非 `.py/.pyw` 文件不再拿 jedi 硬解析（会得到误导性空结果），而是诚实提示"装对应语言服务器 / 用 search_files"（`_non_python_nav_hint`）
 - `codeintel.py`：tree-sitter 符号提取 / 导入追踪，支撑 `code_map` / `related_files` / 代码地图。Python / JS / TS 用官方单语言包和专门遍历；其余语言用 tree-sitter-language-pack 0.x（语法预编译在 wheel 里；1.x 运行时联网下载，不用）+ 通用遍历（按节点类型名认定义）；没有语法库的退回通用正则。Vue / Svelte 只解析 `<script>`
 - `related_files`：Python / JS / TS 按 import 语句；其余语言按引用图给"它用到的 / 用到它的"
 - 这些都是只读工具，进 `PLAN_MODE_READONLY_TOOLS`、不弹确认
 
 ## 持久化（memory.py 并发安全）
-- 所有读写 `chat_memory/` 的函数都被 `threading.RLock` 串行化（`save_session` / `_update_index` / `_write_session_title` / `load_session` / `list_sessions` / `delete_session` / `move_sessions_to_no_project` / `_ensure_memory_dir`）
+- 所有读写 `chat_memory/` 的函数都被 `threading.RLock` 串行化（`save_session` / `_update_index` / `_write_session_title` / `load_session` / `list_sessions` / `delete_session` / `move_sessions_to_no_project` / `rename_session` / `_ensure_memory_dir`）。例外：`search_sessions` 只在读 index 时持锁，逐个读正文在锁外（见「会话重命名与跨会话搜索」）
 - save_session 必须在同一临界区内取得 ID/标题/历史快照并写 session/index、rekey；只锁写盘会让 UI 的旧快照覆盖 worker 的新回复。
 - 用 RLock 不用 Lock：`save_session` 自己持锁时还会调 `_update_index`（也持锁），普通 Lock 会自死锁
 - 修复了原来"快速发两条消息时，标题生成线程和 save_session 同时改 index.json 互相覆盖丢会话"的并发 bug
@@ -39,6 +41,18 @@
 - **展示数量是界面状态**（`limits.SIDEBAR_GROUP_VISIBLE_INITIAL/STEP`，各 30）：侧栏每个分组初始显示 30 条，组尾「加载更多」按步长追加；每组按 `collapse_key`（项目路径 / 无项目 / RAG 专用键）**独立计数**——RAG 与编码"无项目"都以 project=None 渲染，计数与折叠共用同一套键区分，互不串用。计数是内存级（`_group_visible_counts`），普通刷新（重渲染）不重置；删除会话后剩余不足时按钮自然消失。
 - **排序**：更新时间倒序，同刻按 id 倒序（id 含"年月日_时分秒_微秒"，跨重启稳定）。保存旧会话会刷新它的 `updated`，把它带回所在分组的近期位置。
 - **正常保存永不触发历史清理**；用户主动删除（`delete_session`）连正文 + 索引条目 + 索引修复登记 + inflight sidecar 一起删，修复路径以正文为唯一真相（正文不在 → 销案不复活），已删除的会话不会因后续保存、索引修复或重启复活。不做孤儿 JSON 扫描重建索引——那会复活用户主动删除的会话，也不声称能恢复已被旧代码删除的数据。
+
+## 对话时间轴：编辑 / 回退 / 分叉（src/memory.py + src/ui/timeline.py）
+- 每条用户气泡下挂三个幽灵按钮（`MessageView.add_user_actions`，编辑/回退/分叉），点击发 `user_edit_requested / user_rewind_requested / user_fork_requested` 信号，参数是该消息在 `chat_history` 里的**绝对下标**。重绘（`_replay_history` 用 `enumerate`）和实时发送（`_do_send` 记下追加前的 `len`）两路都挂。
+- 三个操作统一以「被点消息之前」为边界（`TimelineMixin`，src/ui/timeline.py）：**编辑** = 截断到该下标 + 把改后文本走 `_do_send` 重发（编辑框预填的是**用户原始输入**：`_user_message_text` 剥掉程序追加的 @ 引用提示与图片提示——否则重发会把提示当正文再追加一遍、越滚越长；原消息带图片时弹一行提醒「编辑重发只发文字、图片不保留」，图片块只存 base64 不存源路径、无法随文字重发，`_message_has_images` 按块结构判定）；**回退** = 截断并落盘；**分叉** = 把前缀复制成新会话（`fork_session`，继承模型/模式/权限/思考/分类，运行态从零、拿新 id），原会话不动。
+- 后端核心 `truncate_history(sess, cut_index)`：在**同一 `snapshot_lock` 临界区**内截断历史 + 作废 compaction（`covered_upto` 是绝对下标）+ 按存活 ToolMessage 过滤 `evicted_tool_results` + `_clear_progress` 重置运行态（RLock 可重入）。`rewind_session` 再落盘：截断后 >1 条正常存盘覆盖旧正文；回退到空（只剩 SystemMessage）走 `delete_session(old_id, keep_file_history=True)`（存盘守卫 `len<=1` 会跳过空历史，故走删除），但**保留 `current_session_id` 与文件撤销材料**：磁盘改动并没被回退，顶栏撤销靠会话 id + file_history 定位，清掉 id 或删掉材料就让"回退到空"后的改动再也撤不回。
+- **绝不撤销磁盘文件改动**：不碰 `file_history` 的记录/blob，顶栏「撤销」照常可用。没有"每轮进度快照"，所以回退/分叉把计划/台账/待验证义务/结果卡/任务身份重置为干净态，而非精确还原到某轮——诚实且无损坏。分叉的新会话 id 查不到旧撤销记录（不继承）。
+- 都改/复制历史，先过 `_worker_alive(sess) or resume_pending` 闸（与 retry 同源：worker 还活着就拒绝，不排队）；回退另弹确认框说明"不撤销文件"。下标失效（消息已不在）→ 提示 + 重绘自愈。
+
+## 会话重命名与跨会话搜索（src/memory.py + src/ui/sidebar.py）
+- **重命名 `rename_session(session_id, title)`**：与 `move_sessions_to_no_project` 同样的"三处一起改"，同一 `_LOCK` 临界区内改 ① 内存里已打开会话的 `current_session_title`（经 `live_sessions()` 取一致快照；只改磁盘的话下次 `save_session` 会用旧内存标题覆盖回去——正常流程必现）② index.json 的 title ③ `<id>.json` 正文 title。**不刷新 `updated`**：改名是元数据编辑、不是新活动，不该把会话顶到分组最前打乱历史顺序。用户标题只折叠空白 + 截断 100 字符（`_sanitize_user_title`，不像自动标题那样剥标点/书名号）；空标题抛 `ValueError`。UI 走会话行右键菜单「重命名」→ `QInputDialog`（生成中也可改名，标题不动历史/运行态）。
+- **跨会话搜索 `search_sessions(query, *, kind=None, project="__all__")`**：先 `list_sessions` 拿索引（只在读 index 时持 `_LOCK`，读完即释放），再**锁外**逐个读正文（`_atomic_write_json` 保证读到完整旧/新文件）。只搜真实用户输入 + 助手可见正文（`content_text` 跳过思考块），跳过 SystemMessage / 内部消息（`lingxi_internal`）/ 工具结果；大小写不敏感。结果按索引顺序（更新时间倒序），每项含 `snippet`（首个命中处上下文预览）/ `match_in_title` / `match_count`。单个正文读不出（损坏/版本过新）只跳过其正文、保留标题命中，不中断整次搜索。
+- **搜索 UI 不卡主线程**：侧栏「历史记录」下的搜索框防抖 250ms（回车立即搜），扫描放 daemon worker，结果经 `SignalBridge.session_search_done(str, object)` 回主线程渲染。**worker 必须继承启动时刻的数据根**（`paths.get_data_dir()` → 线程内 `set_data_dir`，与 send worker 同套路）：`set_data_dir` 是线程本地的，不继承则 Web 多用户模式读到默认根（别人的数据）、测试读不到隔离目录。搜索态下 `_refresh_session_list` 改渲染扁平结果行（标题 + 项目名 + 命中预览，点击 `_load_session` 跳转）；过期结果（查询词已变）丢弃；切工作区（`switch_workspace`）清空搜索（kind 变了旧结果失效）。
 
 ## 角色卡
 - `roles/*.md` 直接作为 system prompt
@@ -89,7 +103,7 @@
 | `chat_memory/<session_id>.json` | 会话消息历史（HumanMessage/AIMessage/ToolMessage 序列化；内部消息带 `lingxi_internal` / `lingxi_kind`，恢复说明另带 `lingxi_recovery` 交接记录）+ project / session_kind / rag_kb_dir / agent_mode + `progress`（计划 / 台账 / revision / `last_run`（含 `evidence.validation_runs` 结构化检查记录、`model` 稳定标识、`workspace` 现场锚点）/ `pending_verification`（含 `file_paths`：改动文件的实际位置）/ `last_committed_operation` / `recent_operations`） |
 | `chat_memory/<session_id>.inflight.unreadable-<哈希>.json` | 执行前记录里无法解析的条目的**完整原文**（交接前隔离留底；恢复说明里只有摘要和对它的引用）。随 `delete_session` 删除 |
 | `chat_memory/<session_id>.inflight.json` | 有副作用工具的**执行前**记录（sidecar）：session_id / run_id / operation_id / 工具名 / tool_call_id / 起始 revision / 路径 / `work_root`（工具实际的工作目录）。提交后删除；解析不了的条目原样保留、交接到恢复说明后才摘除；**不进侧栏索引**，也不能作为复活已删除会话的依据（`delete_session` 会一并删掉） |
-| `chat_memory/file_history/<id>.json` + `.bin` | 文件撤销的恢复材料（B11a）：归属记录（session/run/task/operation_id + 工具 + 工作区 + 目标路径 + 写前/写后指纹 + 阶段）与写前原始字节。随 `delete_session` 删除；不进侧栏索引 |
+| `chat_memory/file_history/<id>.json` + `.bin` | 文件撤销的恢复材料（B11a）：归属记录（session/run/task/operation_id + 工具 + 工作区 + 目标路径 + 写前/写后指纹 + 阶段）与写前原始字节（**移动记录无 `.bin`，只记指纹**）。随 `delete_session` 删除（回退到空 `keep_file_history=True` 保留）；不进侧栏索引 |
 | `chat_memory/projects.json` | 注册的项目列表 + 当前激活项目（`{current, projects: [{path, name}]}`） |
 | `chat_memory/role_config.json` | 当前激活的角色卡名 |
 | `chat_memory/ui_prefs.json` | UI 偏好（如关闭按钮记住的选择） |

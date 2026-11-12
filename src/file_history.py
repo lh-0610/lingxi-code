@@ -7,11 +7,16 @@
 
 ## 记录必须属于真实操作
 
-每条记录在「用户允许写入之后、实际写盘之前」由写文件工具（edit/write/append）
-经 `prepare_write` 建立，身份直接取自 B03 的执行前记录（`run_records.current_operation`，
-由 `_execute_tool` 写 sidecar 时放进线程局部）：session_id / run_id / task_id（可为空）/
-operation_id / 工具名，**不从模型文本或"当前前台会话"猜归属**。拿不到运行归属
-（子 Agent、会话尚未落盘、直接调用）→ 不建记录，工具结果明确"本次改动不可撤销"。
+每条记录在「用户允许写入之后、实际写盘之前」由写文件工具（edit/write/append/copy）与
+路径工具（delete_path/move_path）经 `prepare_write` 建立，身份直接取自 B03 的执行前记录
+（`run_records.current_operation`，由 `_execute_tool` 写 sidecar 时放进线程局部）：
+session_id / run_id / task_id（可为空）/ operation_id / 工具名，**不从模型文本或"当前前台
+会话"猜归属**。拿不到运行归属（子 Agent、会话尚未落盘、直接调用）→ 不建记录，工具结果
+明确"本次改动不可撤销"。
+
+`kind` 区分三类操作：`write` 改内容（写后状态 = 指纹）、`delete` 删文件、`move` 挪文件
+（后两类的写后状态 = **原路径不存在**，移动另记 `dest`）。目录的删除/移动不建记录——
+备份是逐文件字节，整棵树的备份无界，工具结果如实说明不可撤销。
 
 ## 记录阶段（phase）与可撤销的关系
 
@@ -47,6 +52,7 @@ operation_id / 工具名，**不从模型文本或"当前前台会话"猜归属*
 import hashlib
 import os
 import re
+import shutil
 import threading
 import time
 import tempfile
@@ -77,6 +83,13 @@ PHASE_POST_FAILED = "post_failed"
 PHASE_BACKUP_FAILED = "backup_failed"
 PHASE_UNDO_FAILED = "undo_failed"
 PHASE_UNDONE = "undone"
+
+# 操作类型。write = 改内容（默认，旧记录没有这个字段）；delete = 删掉一个文件；
+# move = 把文件挪到 dest。三者的"写后状态"不同：write 是指纹，delete/move 是**原路径不存在**，
+# 所以现场核对与恢复动作也按类型分开（见 _assess / execute_undo）。
+KIND_WRITE = "write"
+KIND_DELETE = "delete"
+KIND_MOVE = "move"
 
 # 预检/执行状态。
 ST_RESTORABLE = "restorable"
@@ -241,6 +254,9 @@ def _valid_record(raw) -> bool:
     read_error = pre.get("read_error")
     if not isinstance(read_error, str):
         return False
+    kind = raw.get("kind", KIND_WRITE)
+    if kind not in (KIND_WRITE, KIND_DELETE, KIND_MOVE):
+        return False
     if existed:
         if blob:
             if not isinstance(blob, str) or not isinstance(sha, str) \
@@ -248,11 +264,20 @@ def _valid_record(raw) -> bool:
                 return False
             if not isinstance(size, int) or isinstance(size, bool) or size < 0:
                 return False
-        else:
-            # 存在但没有备份材料：只可能是"读不了"，必须带读失败原因，
+        elif read_error:
+            # 存在但读不了（任何类型的 backup_failed）：必须带读失败原因，
             # 且不得声称任何指纹或大小
-            if not read_error or sha or size:
+            if sha or size:
                 return False
+        elif kind == KIND_MOVE:
+            # 移动不存整份备份：材料是 dest 处的文件本身，记录里只留指纹 + 大小用于核对。
+            if not isinstance(sha, str) or not _HEX64.match(sha):
+                return False
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                return False
+        else:
+            # 存在、无备份、无读失败、又不是移动 → 非法（write/delete 必须有备份材料）
+            return False
     else:
         # 原本不存在：不得携带任何备份、指纹或读失败说明
         if sha or size or blob or read_error:
@@ -267,6 +292,17 @@ def _valid_record(raw) -> bool:
     post_size = post.get("size")
     if post_size is not None and (
             not isinstance(post_size, int) or isinstance(post_size, bool) or post_size < 0):
+        return False
+    # kind / dest 严格校验：删除与移动的"写后状态"是原路径不存在，绝不能带着写后指纹
+    # （那会让 _assess 拿一个不存在的文件去比指纹）。移动必须带 dest，其余必须不带。
+    # kind 的取值已在上面 pre 校验前提取并校验过。
+    dest = raw.get("dest", "")
+    if not isinstance(dest, str):
+        return False
+    if kind == KIND_MOVE:
+        if not dest or not existed or post_sha:
+            return False
+    elif dest or (kind == KIND_DELETE and (not existed or post_sha)):
         return False
     return True
 
@@ -342,10 +378,14 @@ def _write_blob(checkpoint_id: str, data: bytes):
 
 def _materials_present(record) -> bool:
     """按钮启停用的便宜检查：材料文件还在不在（不校验指纹，预检再做全量核对）。"""
-    if not (record.get("pre") or {}).get("existed"):
+    pre = record.get("pre") or {}
+    if not pre.get("existed"):
         return True
-    return bool((record.get("pre") or {}).get("blob")) and \
-        os.path.exists(_blob_path(record["checkpoint_id"]))
+    if (record.get("kind") or KIND_WRITE) == KIND_MOVE:
+        # 移动不存整份备份：材料就是 dest 处的文件本身，它还在才谈得上挪回来。
+        dest = record.get("dest") or ""
+        return bool(dest) and os.path.lexists(dest)
+    return bool(pre.get("blob")) and os.path.exists(_blob_path(record["checkpoint_id"]))
 
 
 def _atomic_write_bytes(path, data: bytes) -> None:
@@ -387,7 +427,8 @@ def _atomic_write_bytes(path, data: bytes) -> None:
 # 写入路径：写前记录 → 写入 → 写后定格
 # ══════════════════════════════════════════════════════════════
 
-def prepare_write(tool: str, target: str, *, expected_raw=None) -> PrepareResult:
+def prepare_write(tool: str, target: str, *, expected_raw=None,
+                  kind: str = KIND_WRITE, dest: str = "") -> PrepareResult:
     """用户允许写入之后、实际写盘**之前**调用：核对目标 + 建立可靠写前记录。
 
     - 重新核对：目标 realpath 后必须仍在当前工作区内；与确认时看到的原始字节
@@ -397,6 +438,9 @@ def prepare_write(tool: str, target: str, *, expected_raw=None) -> PrepareResult
       read_error（不伪装成空文件），该改动明确不可撤销。
     - 备份失败（磁盘/权限）→ 返回 record=None + 原因；写入是否继续由调用方决定
       （工具会继续写，但在结果里如实说明不可撤销）。
+
+    kind=delete/move 时目标是**被删/被挪走的源文件**：它必须此刻仍然存在（否则没有
+    可恢复的东西），move 还要求 dest 此刻不存在且同样在工作区内（绝不覆盖）。
     """
     operation = run_records.current_operation()
     if operation is None:
@@ -419,6 +463,23 @@ def prepare_write(tool: str, target: str, *, expected_raw=None) -> PrepareResult
                              "未写入：目标路径经符号链接/junction 解析后超出当前工作区，拒绝写入")
 
     existed_now = os.path.lexists(resolved)
+    if kind in (KIND_DELETE, KIND_MOVE):
+        if not existed_now:
+            return PrepareResult(None, True,
+                                 "未执行：目标已不存在（可能被外部删除或移动），请重新确认后再试")
+        if kind == KIND_MOVE:
+            if not dest:
+                return PrepareResult(None, True, "未执行：移动缺少目标路径")
+            try:
+                dest_resolved = os.path.realpath(dest)
+            except OSError as error:
+                return PrepareResult(None, True, f"未执行：目标路径无法解析（{error}）")
+            if not _inside(dest_resolved, workspace):
+                return PrepareResult(None, True,
+                                     "未执行：移动的目标路径超出当前工作区，拒绝移动")
+            if os.path.lexists(dest_resolved):
+                return PrepareResult(None, True,
+                                     "未执行：目标位置已经有东西了（可能被外部创建），拒绝覆盖")
     fresh = None
     read_error = ""
     if existed_now:
@@ -454,6 +515,8 @@ def prepare_write(tool: str, target: str, *, expected_raw=None) -> PrepareResult
         "tool": tool,
         "workspace": workspace,
         "path": resolved,
+        "kind": kind,
+        "dest": os.path.realpath(dest) if (kind == KIND_MOVE and dest) else "",
         "pre": {"existed": False, "sha256": "", "size": 0, "blob": "", "read_error": ""},
         "post": {"sha256": "", "size": None},
         "phase": PHASE_PREPARED,
@@ -476,13 +539,20 @@ def prepare_write(tool: str, target: str, *, expected_raw=None) -> PrepareResult
             return PrepareResult(record, False, record["reason"])
 
         if existed_now:
-            ok, error = _write_blob(record["checkpoint_id"], fresh)
-            if not ok:
-                return PrepareResult(None, False, f"写前备份保存失败（{error}），本次改动不可撤销")
-            record["pre"] = {"existed": True, "sha256": _sha(fresh), "size": len(fresh),
-                             "blob": _blob_name(record["checkpoint_id"]), "read_error": ""}
+            if kind == KIND_MOVE:
+                # 移动只挪位置、不改内容：撤销是把 dest 的文件挪回原路径，靠指纹核对即可。
+                # 文件本身就在 dest，再存一份整份字节备份纯属冗余，还会反过来卡住撤销
+                # （备份缺失就拒绝），所以移动只记指纹 + 大小，不落 .bin。
+                record["pre"] = {"existed": True, "sha256": _sha(fresh), "size": len(fresh),
+                                 "blob": "", "read_error": ""}
+            else:
+                ok, error = _write_blob(record["checkpoint_id"], fresh)
+                if not ok:
+                    return PrepareResult(None, False, f"写前备份保存失败（{error}），本次改动不可撤销")
+                record["pre"] = {"existed": True, "sha256": _sha(fresh), "size": len(fresh),
+                                 "blob": _blob_name(record["checkpoint_id"]), "read_error": ""}
         if not _persist(record):
-            if existed_now:
+            if existed_now and record["pre"].get("blob"):
                 try:
                     os.unlink(_blob_path(record["checkpoint_id"]))
                 except OSError:
@@ -553,6 +623,62 @@ def complete_write(record, *, expected_bytes=None) -> tuple:
         return current["phase"] == PHASE_UNDOABLE, current["reason"]
 
 
+def _finalize(record, *, ok: bool, reason: str) -> tuple:
+    """删除/移动完成后的定格：与 complete_write 同一套纪律（锁内重载、只认 prepared、
+    原子落盘、淘汰），只是"写后状态"由调用方核对好再传进来。"""
+    if not record:
+        return False, "没有恢复记录"
+    with _LOCK:
+        current, error = _load_record(record.get("checkpoint_id") or "")
+        if current is None:
+            record["phase"] = PHASE_POST_FAILED
+            record["reason"] = error
+            return False, f"恢复记录已无法读取（{error}），本次改动不可撤销"
+        if current.get("phase") != PHASE_PREPARED:
+            return False, (f"恢复记录状态为 {current.get('phase')}（写前材料不完整），"
+                           "本次改动不可撤销")
+        current["completed_at"] = _now()
+        current["phase"] = PHASE_UNDOABLE if ok else PHASE_POST_FAILED
+        current["reason"] = "" if ok else reason
+        if not _persist(current):
+            record.update(current)
+            return False, "写后记录保存失败，本次改动不可撤销"
+        record.update(current)
+        _prune_locked()
+        return ok, current["reason"]
+
+
+def complete_delete(record) -> tuple:
+    """删除完成后定格：原路径必须**确实不存在**了。还在（删除实际没生效 / 又被外部
+    创建）→ post_failed，不认领现场，明确不可撤销。返回 (是否可撤销, 原因)。"""
+    path = (record or {}).get("path") or ""
+    if os.path.lexists(path):
+        return _finalize(record, ok=False,
+                         reason="删除后核对失败：原路径仍然存在，本次改动不可撤销")
+    return _finalize(record, ok=True, reason="")
+
+
+def complete_move(record) -> tuple:
+    """移动完成后定格：原路径必须不存在，且新位置的内容与写前指纹一致（移动只记指纹、
+    不落整份备份，文件本身就在 dest）。任一条不成立 → post_failed（不认领外部改动）。
+    返回 (是否可撤销, 原因)。"""
+    if not record:
+        return False, "没有恢复记录"
+    path, dest = record.get("path") or "", record.get("dest") or ""
+    if os.path.lexists(path):
+        return _finalize(record, ok=False,
+                         reason="移动后核对失败：原路径仍然存在，本次改动不可撤销")
+    moved, error = _read_bytes_now(dest)
+    if moved is None:
+        return _finalize(record, ok=False,
+                         reason=f"移动后核对失败：新位置无法读取（{error}），本次改动不可撤销")
+    if _sha(moved) != ((record.get("pre") or {}).get("sha256") or ""):
+        return _finalize(record, ok=False,
+                         reason="移动后核对不一致：新位置内容与移动前不同（可能有并发写入），"
+                                "不认领外部修改，本次改动不可撤销")
+    return _finalize(record, ok=True, reason="")
+
+
 # ══════════════════════════════════════════════════════════════
 # 查询 / 预检 / 执行
 # ══════════════════════════════════════════════════════════════
@@ -567,6 +693,8 @@ def _summary(record) -> dict:
         "tool": record["tool"],
         "workspace": record["workspace"],
         "path": record["path"],
+        "kind": record.get("kind") or KIND_WRITE,
+        "dest": record.get("dest") or "",
         "phase": record["phase"],
         "reason": record.get("reason") or "",
         "created_at": record.get("created_at") or "",
@@ -650,9 +778,14 @@ def _later_unresolved_records(record):
 
     当前内容与写后指纹一致不能证明版本链完整：v0→v1→v2→v1 之后请求撤销第一次
     操作，指纹恰好吻合但中间还有两次未撤销的修改——必须核对后续记录，不完整就拒绝。
+
+    移动动两个路径，两侧都要查：挪走之后有人在新位置写了东西，或者有人在原位置
+    新建了文件，都不能直接挪回去覆盖。
     """
-    want_path = _norm(record.get("path"))
     want_workspace = _norm(record.get("workspace"))
+    want_paths = {_norm(record.get("path"))}
+    if record.get("dest"):
+        want_paths.add(_norm(record["dest"]))
     key = record.get("created_at") or ""
     out = []
     for _cid, other, _error in _scan_records():
@@ -660,7 +793,12 @@ def _later_unresolved_records(record):
             continue
         if other.get("phase") == PHASE_UNDONE:
             continue
-        if _norm(other.get("path")) != want_path or _norm(other.get("workspace")) != want_workspace:
+        if _norm(other.get("workspace")) != want_workspace:
+            continue
+        other_paths = {_norm(other.get("path"))}
+        if other.get("dest"):
+            other_paths.add(_norm(other["dest"]))
+        if not (other_paths & want_paths):
             continue
         if (other.get("created_at") or "") > key:
             out.append(other)
@@ -728,6 +866,9 @@ def _assess(record, load_error, session_id, workspace) -> dict:
     }
     base["diff"] = diff
 
+    if (record.get("kind") or KIND_WRITE) != KIND_WRITE:
+        return _assess_path_op(record, base, current_existed)
+
     if current_existed and current is None:
         return _fail(ST_UNSUPPORTED,
                      f"无法读取目标当前内容进行核对（{read_error}）；恢复材料已保留")
@@ -764,6 +905,57 @@ def _assess(record, load_error, session_id, workspace) -> dict:
     return base
 
 
+def _assess_path_op(record, base, current_existed) -> dict:
+    """删除 / 移动的现场核对：写后状态是"原路径不存在"，恢复就是把文件放回去。
+
+    与改内容反过来：原路径**又出现东西**才是冲突（不能覆盖别人的新建），
+    移动还要求新位置的内容仍与移动前逐字节一致。
+    """
+    def _fail(status, reason):
+        base["status"] = status
+        base["reason"] = reason
+        return base
+
+    pre = record.get("pre") or {}
+    is_move = record.get("kind") == KIND_MOVE
+    if not is_move:
+        # 删除的恢复材料就是写前备份；移动的材料是 dest 处的文件本身（下面按指纹核对），
+        # 不需要整份备份——备份缺失不该卡住移动撤销。
+        blob, blob_error = _read_blob(record)
+        if blob is None:
+            return _fail(ST_UNSUPPORTED, f"恢复材料不可用：{blob_error}")
+    if current_existed:
+        return _fail(ST_CONFLICT,
+                     "原路径又出现了文件（可能是您或其它程序新建的）；已拒绝覆盖以保留它")
+    if is_move:
+        dest = record.get("dest") or ""
+        if os.path.islink(dest) or not _inside(dest, record.get("workspace") or ""):
+            return _fail(ST_UNSUPPORTED, "新位置已变成符号链接或移出工作区，恢复目标不可靠")
+        if not os.path.lexists(dest):
+            return _fail(ST_CONFLICT, "新位置的文件已不存在（被外部删除或移动）；已拒绝撤销")
+        moved, error = _read_bytes_now(dest)
+        if moved is None:
+            return _fail(ST_UNSUPPORTED,
+                         f"无法读取新位置的内容进行核对（{error}）；恢复材料已保留")
+        if _sha(moved) != (pre.get("sha256") or ""):
+            return _fail(ST_CONFLICT,
+                         "文件移动之后又被修改（新位置内容与移动前不一致）；"
+                         "已拒绝恢复以保留后来的修改")
+        base["diff"]["dest"] = dest
+        base["diff"]["dest_sha256"] = _sha(moved)
+    later = _later_unresolved_records(record)
+    if later:
+        return _fail(ST_UNSUPPORTED,
+                     f"版本链不完整：此操作之后相关路径还有 {len(later)} 次未撤销的记录"
+                     "操作，必须先撤销最近的一次")
+    if record["phase"] == PHASE_UNDO_FAILED:
+        base["reason"] = "上次撤销尝试失败，材料完整可重试：" + (record.get("reason") or "")
+    else:
+        base["reason"] = "现场核对通过：原路径为空，恢复材料完好"
+    base["status"] = ST_RESTORABLE
+    return base
+
+
 def precheck(record_id: str, *, session_id=None, workspace=None) -> dict:
     """结构化撤销预检：restorable / conflict / unsupported / not_found + 原因与差异信息。"""
     with _LOCK:
@@ -776,6 +968,9 @@ def execute_undo(record_id: str, *, session_id: str, workspace: str) -> dict:
 
     - 原本存在的文件 → 原始字节原子写回，恢复后按指纹校验；
     - 原本不存在的文件 → 仅当当前内容仍是本次操作的产物（指纹一致）才删除；
+    - 删除（kind=delete）→ 原始字节写回原路径；
+    - 移动（kind=move）→ 从新位置移回原路径；
+      这两类的"写后状态"是原路径不存在，原路径又出现东西时预检先判冲突，绝不覆盖；
     - 任何失败都保留恢复材料并把记录标为 undo_failed，可重试；
     - 只动目标文件本身：不碰 Git index / 分支 / stash，不做整项目 reset。
 
@@ -809,11 +1004,28 @@ def execute_undo(record_id: str, *, session_id: str, workspace: str) -> dict:
         pre = record.get("pre") or {}
         detail = ""
         restored_sha = ""
-        if pre.get("existed"):
+        if (record.get("kind") or KIND_WRITE) == KIND_MOVE:
+            try:
+                os.makedirs(os.path.dirname(record["path"]) or ".", exist_ok=True)
+                shutil.move(record["dest"], record["path"])
+            except (OSError, shutil.Error) as error:
+                return _mark_undo_failed(record, result, f"移回原路径失败：{error}")
+            result["changed"] = True
+            readback, read_error = _read_bytes_now(record["path"])
+            if readback is not None and _sha(readback) == (pre.get("sha256") or ""):
+                result["verified"] = True
+                detail = f"已移回原路径（{len(readback)} 字节）"
+            else:
+                result["verified"] = False
+                detail = ("已移回原路径，但恢复后读回校验未完成"
+                          f"（{read_error or '内容不一致'}）")
+            restored_sha = pre.get("sha256") or ""
+        elif pre.get("existed"):
             data, blob_error = _read_blob(record)
             if data is None:
                 return _mark_undo_failed(record, result, f"恢复材料不可用：{blob_error}")
             try:
+                os.makedirs(os.path.dirname(record["path"]) or ".", exist_ok=True)
                 _atomic_write_bytes(record["path"], data)
             except OSError as error:
                 return _mark_undo_failed(record, result, f"恢复写入失败：{error}")

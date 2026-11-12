@@ -31,7 +31,7 @@
 - `state.ui_ref = self` 在 ChatUI 启动时设置，让 worker 线程的 tools 能找到主窗口弹确认框
 
 ## 多会话并发（src/session.py + state.py 代理）
-- **会话级状态收进 `Session` 对象**：`chat_history / stop_flag / session_token_usage / compaction / current_plan / task_ledger / shell_cwd / current_model_index / agent_mode / reasoning_effort / verification / worktree / project / role_snapshot` 等都是会话级（每会话一份），见 `session.py:_SESSION_FIELDS`。旧的布尔 `reasoning_enabled` 不再是存储字段，而是 `reasoning_effort`（off/low/high/max，见 `reasoning.py`）的派生视图——读 = 不是 off，写 = 开→high、关→off
+- **会话级状态收进 `Session` 对象**：`chat_history / stop_flag / session_token_usage / compaction / evicted_tool_results / current_plan / task_ledger / shell_cwd / current_model_index / agent_mode / reasoning_effort / verification / worktree / project / role_snapshot` 等都是会话级（每会话一份），见 `session.py:_SESSION_FIELDS`。旧的布尔 `reasoning_enabled` 不再是存储字段，而是 `reasoning_effort`（off/low/high/max，见 `reasoning.py`）的派生视图——读 = 不是 off，写 = 开→high、关→off
 - **`state.py` 用 `ModuleType` property 代理**：`state.chat_history` 等读写自动落到「当前线程的当前会话」，所以几十处 `state.X` 老代码无需改动。**真正全局**的（`llm` / `ui_ref` / `current_project` 等）仍是 state.py 的普通变量
 - **线程路由**（`session.current_session()`）：worker 线程进 `agent_loop` 时 `bind_thread(sess)` 把自己绑到该会话 → 该线程所有 `state.X` 都落到这个会话；主线程（UI）/ 未绑定线程 → `get_active()`（前台显示的会话）。这就是「后台会话边跑、前台切到别的会话」不互串的根基
 - **注册表** `session.sessions`（key→Session）：`register` / `rekey`（存盘拿到 id 后把临时 `_new_N` 换成 id）/ `drop`
@@ -44,6 +44,19 @@
 - 易变块用 `<system-reminder>` 包裹：这是系统注入的运行态，不是用户的新要求，模型不该把它当指令执行
 - **缓存命中要能被观测**：`_extract_usage` 采集 `cache_read` / `cache_write`（兼容 Anthropic 的 `input_token_details`、OpenAI 的 `prompt_tokens_details.cached_tokens`、DeepSeek 的 `prompt_cache_hit_tokens`）。prompt caching 省的是**钱**不是 token——命中部分照样计进 `input_tokens`、只是按约 10% 计费，不单独采集就完全看不出有没有生效
 - 回归守卫在 `scripts/test_prompt_cache_stability.py`：这条性质极易被无意破坏（往 `get_system_prompt` 里再拼一个「当前 xxx」就够了），而破坏后一切照常工作、只是**静默开始烧钱**，没有任何报错
+
+## 上下文长度：水位线式回收（streaming.py）
+- **上下文是匀速涨上去的，不是被几个大结果撑大的**：回放 11 月初五个 68–115 轮的真实任务，每轮净增一两千 token，读文件类结果占累计重发量的 50–80%，但 138 条读结果里超过 6k token 的只有 2 条；重复读同一段只占约 2%。所以"读得更省"压不住长任务，到头来只能折掉旧内容
+- **折旧内容就是改写前文，改写前文就会断前缀缓存**（DeepSeek 未命中比命中贵 50 倍）。两条规矩：**一次折够**——估算涨过回收线才触发，一口气折到回收线的一半；**折过的不再变**——折了哪些 `tool_call_id` 记在会话的 `evicted_tool_results`，之后每轮照样折，存根只由原内容决定（`_evicted_stub`），所以两次触发之间每一轮发出去的前缀逐字节相同
+- 以前是无状态的"超预算（DeepSeek 20 万）就把最近 6 条之外的大结果全折掉"：每轮从完整历史重算，刚滑出最近 6 条的那条当轮才变成存根，前缀**每轮**都从那里断。估算修好后日志里一次没触发过，但 83 轮的任务已经到 15.7 万，再跑二三十轮就会撞上；评测 011 基线里它触发了 107 次、`models.py` 被重读 13–19 遍
+- `_trim_tool_results` 从最老的折起，最近 6 条和不超过 1000 字的小结果不动。**按内容排先后试过、没有用**：先折"之后被改过的文件"的旧读取、先折搜索 / 命令输出、把正在改的文件留到最后等五种顺序，回放下来被迫重读 6–7 次、成本差 1% 以内——降到一半要把能折的几乎折完，折谁在先不改变结果
+- **能折出来的不到水位线间距一半就先不折**：折不下去多少还要重建一次缓存，下一轮又触发，等于回到每轮都断。只有超过真正的历史预算（`hard_limit` = `_current_history_budget()`）时不管多少都折。窗口小的模型历史预算不到回收线，就按预算和它的一半（`_trim_watermarks`）
+- **回收线是设置项**：`config.CONTEXT_TRIM_TOKENS`（config.json 的 `context_trim_tokens`，设置弹窗「高级」页可改，默认 20 万，改动需重启；0 = 跟历史预算走；非 0 的值低于 2 万按 2 万算）。设得比 `MAX_HISTORY_BUDGET`（20 万）高时，`_current_history_budget` 的上限跟着抬到回收线——不然线设在 40 万、预算却在 20 万就开始压缩，那条线永远到不了；再高也不超过模型窗口，所以只对 DeepSeek 这类 100 万窗口的模型有意义
+- **线设低是用钱换短上下文，不省钱**。用真实实现回放那五个任务（不回收时峰值 10–17 万）：10 万 → 五个都触发 1–2 次，成本合计 +5.9%（单个 +2%～+19%），两个任务里共 7 次改文件前读取已被折掉；12 万 → +5.6%；15 万 → 只有最长的两个触发、但各 +13%，合计 +6.6%（触发得晚，剩下的轮数不够回本）；18 万以上 → 一次不触发。每次触发要按未命中重付留下的那一半，之后每轮少带的部分按命中价算，要四十来轮才回本。上下文短了模型是不是更好，没有数据。所以默认和历史预算取齐：平时不碰，只拦住会撞预算的超长任务。估算不含工具 schema，实际输入约多 1.5 万
+- **折过哪些随会话文件落盘**（`evicted_tool_results`，只留历史里还在的 id）：重开程序接着跑，发出去的前缀和关掉之前一样。旧会话没有这个键 → 当成没折过。新对话清空
+- **合成 tool_call_id 必须会话内唯一**（`streaming._normalize_tool_calls`）：部分本地模型不返回 tool_call id，兜底用 `call_<name>_<uuid4 前 12 位>`，**不能用每轮重置的计数器**——回收按 tool_call_id 记且随 `evicted_tool_results` 落盘，跨轮重复的 id 会让新一轮的结果顶着旧 id 被当成"已回收"误折，哪怕它就在最近 keep_recent 条里
+- 之后两步只在回收折不动、仍超出历史预算时才轮得到，仍是无状态的：`_cap_oversized_tool_results`（单条超 2.4 万字截头尾）、`_compact_history`（LLM 把中段压成摘要，留最近 20 条）。全程只动发送副本，`state.chat_history` 和界面保留完整历史
+- 回归守卫在 `scripts/test_tool_eviction.py`（`test_prefix_stays_identical_between_trips`）：和 system prompt 那条一样，破坏之后一切照常工作，只是每轮开始按未命中计费
 
 ## 主循环边界与错误恢复（src/agent.py + llm_errors.py）
 - **轮次上限** `config.AGENT_MAX_ROUNDS`（config.json 的 `agent_max_rounds`，设置弹窗「高级」页可改，默认 50；**设 0 = 不限**）：主循环原本是裸 `while True`，模型只要一直返回 tool_calls 就一直跑，唯一刹车是用户点停止。触顶后停下并把结论**写进 chat_history**（只弹 UI 的话，用户接着发消息时模型看不到自己被截断，会以为任务做完了）

@@ -143,14 +143,25 @@ def test_remember_belongs_to_visible_card(
     _release_background(b)
     tb.join(5)
     assert rb == [(False, "")]
-    # A's grant must not let B bypass the next related operation.
+    # 授权归属仍不能串：B 自己的会话白名单是空的。但「记住」现在落盘（permission_rules），
+    # 所以 B 的同类操作也免问——这正是"信任活不过一次重启"要修的行为，代价是跨会话共享。
+    # 共享的边界是项目范围 + 设置 → 权限 可撤销；撤销后必须立刻恢复询问。
     tb2, rb2 = start(b, kind, next_target)
-    pump(lambda: b.pending_confirm is not None or bool(rb2))
-    assert b.pending_confirm is not None
-    assert rb2 == []
-    _release_background(b)
     tb2.join(5)
-    assert rb2 == [(False, "")]
+    assert not tb2.is_alive()
+    assert rb2 == [(True, "")], "落盘规则对别的会话同样生效"
+    assert not _trust(b, kind), "B 的会话白名单没被偷偷写入"
+
+    from src import permission_rules as rules
+    for rule in rules.list_rules():
+        assert rules.remove_rule(rule["id"]) is not None
+    tb3, rb3 = start(b, kind, next_target)
+    pump(lambda: b.pending_confirm is not None or bool(rb3))
+    assert b.pending_confirm is not None, "撤销规则后立刻恢复询问"
+    assert rb3 == []
+    _release_background(b)
+    tb3.join(5)
+    assert rb3 == [(False, "")]
 
 
 @pytest.mark.parametrize("kind,target", [("command", "git status"), ("edit", "same.py")])

@@ -14,13 +14,14 @@
 - `self._t(key)` 主题色查表
 - `self._svg_icon(filename, color)` 单色 SVG 图标
 - `self.bridge.confirm_request` / `edit_confirm_request` 跨线程 Signal
-- `self._session_command_allowlist` / `_session_command_prefix_allowlist`
-  / `_session_edit_path_allowlist` 三个会话级白名单 set（在 ChatUI.__init__ 里建）
+- 会话级白名单在 Session 上（`command_prefix_allowlist` / `edit_path_allowlist`）；
+  跨会话/跨重启的那层在 `permission_rules.py`，撤销入口是设置 → 权限
 - QMainWindow 的 `show / raise_ / activateWindow`
 """
 import threading
 
 from .. import state as _state
+from .. import permission_rules as _rules
 from .. import telegram_push
 from .. import config as _config  # 运行时读 _config.REMOTE_TELEGRAM_CONFIRM（设置里改完即时生效，无需重启）
 from .fonts import MONO_CSS, mono_font
@@ -43,6 +44,29 @@ def _trustable_path(path) -> bool:
     一次可能改好几个文件，信任它等于以后所有补丁、改任何文件都不再问。"""
     p = (path or "").strip()
     return bool(p) and not (p.startswith("(") and p.endswith(")"))
+
+
+# 路径级操作的确认卡文案：(标题, 徽章, 图标, 手机推送标题)。
+# 删除和移动**每次必问、不给"记住"**：它们让文件从这个路径上消失，是永久数据丢失那一类，
+# 与危险命令 / Git 写操作同一取舍——"接受编辑 / 自动"模式也不放行。
+_PATH_OP_CARDS = {
+    "edit": ("确认应用修改", "需要确认", "file-pen.svg", "编辑文件确认"),
+    "copy": ("确认复制文件", "需要确认", "copy_lucide.svg", "复制文件确认"),
+    "delete": ("确认删除文件", "会删文件", "trash_lucide.svg", "删除文件确认"),
+    "move": ("确认移动文件", "会移走文件", "file-pen.svg", "移动文件确认"),
+}
+_ALWAYS_ASK_PATH_OPS = ("delete", "move")
+
+
+def _remember_persistently(kind: str, value: str, sess) -> None:
+    """"允许并记住"除了会话白名单，再落一条持久规则，重启和新会话不用重新授权。
+
+    范围跟着发起确认的那个会话的项目走（后台会话的确认在主线程处理，
+    那时 current_session() 是前台会话，不能用它）。
+    """
+    from .. import session as _session
+    project = _session.project_of(sess) if sess is not None else None
+    _rules.add_rule(kind, value, project)
 
 
 def _new_confirm_id() -> str:
@@ -550,11 +574,11 @@ class ConfirmBarsMixin:
         else:
             self._cmd_confirm_badge.setText("需要确认")
             self._cmd_remember_btn.setVisible(True)
-            # base 命令放进「允许并记住」的 tooltip（如"信任所有 git 类命令（本次会话）"）
+            # base 命令放进「允许并记住」的 tooltip（如"信任所有 git 类命令"）
             base = self._extract_base_command(command)
             self._cmd_remember_btn.setToolTip(
-                f"信任所有 `{base}` 类命令，本次会话不再询问" if base
-                else "信任所有同类命令，本次会话不再询问"
+                f"信任所有 `{base}` 类命令，以后不再询问（设置 → 权限 可撤销）" if base
+                else "信任所有同类命令，以后不再询问（设置 → 权限 可撤销）"
             )
 
         # 工作目录行
@@ -600,6 +624,7 @@ class ConfirmBarsMixin:
                 base = self._extract_base_command(self.command_confirm_text.toPlainText())
             if base:
                 origin.command_prefix_allowlist.add(base)
+                _remember_persistently(_rules.KIND_COMMAND, base, origin)
                 logger_log = getattr(self, "_logger", None)  # 不强依赖；只是 best-effort
                 if logger_log:
                     try:
@@ -723,7 +748,7 @@ class ConfirmBarsMixin:
         self._edit_trust_btn = _make_btn(
             "3", "接受所有", "editConfirmTrustBtn",
             lambda: self._resolve_edit_confirm(True, remember=True))
-        self._edit_trust_btn.setToolTip("信任对此文件的所有后续修改（本次会话不再询问）")
+        self._edit_trust_btn.setToolTip("信任对此文件的所有后续修改（设置 → 权限 可撤销）")
         btn_row.addWidget(self._edit_allow_btn)
         btn_row.addWidget(self._edit_deny_btn)
         btn_row.addWidget(self._edit_trust_btn)
@@ -733,6 +758,7 @@ class ConfirmBarsMixin:
         self._edit_confirm_result_holder = None
         self._edit_confirm_done_event = None
         self._edit_confirm_path = ""  # 当前待批 path，按钮 callback 用
+        self._edit_confirm_op = "edit"   # edit / delete / move / copy，决定标题与能否"记住"
 
         # 装事件过滤器接 1 / 2 / 3 / Esc 键
         bar.installEventFilter(self)
@@ -850,13 +876,20 @@ class ConfirmBarsMixin:
         self._edit_confirm_result_holder = result_holder
         self._edit_confirm_done_event = done_event
         self._edit_confirm_path = path
-        # 补丁一次可能改好几个文件，确认卡上只有一个占位名"(patch)"：不给"信任此文件"
-        self._edit_trust_btn.setVisible(_trustable_path(path))
+        op = result_holder.get("_op") or "edit"
+        self._edit_confirm_op = op
+        title, badge, icon, _push = _PATH_OP_CARDS.get(op, _PATH_OP_CARDS["edit"])
+        self._edit_confirm_title.setText(title)
+        self._edit_confirm_badge.setText(badge)
+        # 补丁一次可能改好几个文件，确认卡上只有一个占位名"(patch)"：不给"信任此文件"。
+        # 删除/移动同样不给：记住一条路径等于以后随便删它。
+        self._edit_trust_btn.setVisible(
+            _trustable_path(path) and op not in _ALWAYS_ASK_PATH_OPS)
 
         import html as _html_mod
         self.edit_confirm_path.setTextFormat(Qt.RichText)
         self.edit_confirm_path.setText(
-            self._inline_svg_img("file-pen.svg", self._t("mv_indigo"), 14, "编辑")
+            self._inline_svg_img(icon, self._t("mv_indigo"), 14, title)
             + " " + _html_mod.escape(path)
         )
         # diff 渲染：加号绿色 / 减号红色 / 头部信息灰色
@@ -880,14 +913,17 @@ class ConfirmBarsMixin:
                 origin.stop_flag = True
         if allow and remember and origin is not None:
             p = self._edit_confirm_path
-            if _trustable_path(p):
+            # 删除/移动不接受"记住"：按钮虽然藏了，数字键 3 仍会触发 click，这里再挡一层
+            if _trustable_path(p) and self._edit_confirm_op not in _ALWAYS_ASK_PATH_OPS:
                 origin.edit_path_allowlist.add(p)
+                _remember_persistently(_rules.KIND_EDIT_PATH, p, origin)
         self._edit_confirm_result_holder["allow"] = allow
         self._edit_confirm_result_holder["feedback"] = feedback
         self._edit_confirm_done_event.set()
         self._edit_confirm_result_holder = None
         self._edit_confirm_done_event = None
         self._edit_confirm_path = ""
+        self._edit_confirm_op = "edit"
         self.edit_confirm_bar.setVisible(False)
         self.edit_confirm_diff.clear()
         self.edit_confirm_path.setText("")
@@ -930,6 +966,7 @@ class ConfirmBarsMixin:
         self._edit_confirm_result_holder = None
         self._edit_confirm_done_event = None
         self._edit_confirm_path = ""
+        self._edit_confirm_op = "edit"
 
     # ══════════════════════════════════════
     # worker 线程同步等待入口
@@ -947,7 +984,7 @@ class ConfirmBarsMixin:
           1. Git 写、派子 Agent、命令被"危险"判定、或脚本会写文件 → 永不绕过白名单，
              必须弹卡片（只有"跳过权限确认"模式放行）
           2. 记住过的同类操作 → 直接放行（shell 命令按 base 命令，如"信任所有 git 类"；
-             MCP 按工具名）
+             MCP 按工具名）。先查本会话内存白名单，再查落盘的持久规则
           3. 精确字符串命中旧版白名单 → 放行（向后兼容，仅 shell 命令）
           4. 其它 → 弹卡片让用户选
 
@@ -980,6 +1017,10 @@ class ConfirmBarsMixin:
             return True, ""
         remember_key = "" if risky else self._remember_key(command, kind, tool)
         if remember_key and remember_key in _sess.command_prefix_allowlist:
+            return True, ""
+        # 持久规则：重启 / 新会话后照样生效（设置 → 权限 可撤销）。risky 时 remember_key 为空，
+        # 所以落盘规则同样绕不过危险判定
+        if remember_key and _rules.allows_command(remember_key, _session.project_of(_sess)):
             return True, ""
         # 旧版精确白名单只认整条命令串：带 stdin 时同一条 "python -" 后面跟的是别的代码，不算
         if (not risky and kind == _pm.KIND_COMMAND and not stdin
@@ -1020,6 +1061,7 @@ class ConfirmBarsMixin:
         # 手机端点了"记住同类"——补加白名单（PC 路径已在 _resolve_command_confirm 里加过）
         if result.get("allow") and result.get("remember") and remember_key:
             _sess.command_prefix_allowlist.add(remember_key)
+            _remember_persistently(_rules.KIND_COMMAND, remember_key, _sess)
 
         # 清理远程注册表（如果远程那边还没触发）
         if remote_cid:
@@ -1033,10 +1075,15 @@ class ConfirmBarsMixin:
 
         return bool(result.get("allow", False)), result.get("feedback", "")
 
-    def confirm_edit(self, path: str, diff_text: str) -> tuple[bool, str]:
-        """从 worker 线程同步等待用户审批 edit_file 的 diff 预览。
+    def confirm_edit(self, path: str, diff_text: str, op: str = "edit") -> tuple[bool, str]:
+        """从 worker 线程同步等待用户审批写文件 / 路径操作的 diff 预览。
 
-        本次会话用户主动选过"信任所有对此文件的修改"的话直接放行。
+        op：edit（改内容）/ copy（复制出新文件）/ delete（删文件）/ move（挪文件）。
+        delete 与 move **每次必问、不给"记住"**，"接受编辑 / 自动"模式也不放行——
+        文件从路径上消失属于永久数据丢失那一类，只有"跳过权限确认"才免问。
+
+        用户主动选过"信任所有对此文件的修改"的话直接放行：先查本会话内存白名单，
+        再查落盘的持久规则（重启 / 新会话后照样生效，设置 → 权限 可撤销）。
         否则弹 diff 预览卡（参考命令确认卡的非模态机制）。
 
         手机遥控模式下同时推 Telegram inline 确认（与 PC 卡片竞争）。
@@ -1046,13 +1093,21 @@ class ConfirmBarsMixin:
         from .. import permission_modes as _pm
         from .. import session as _session
         _sess = _session.current_session()      # 发起编辑确认的会话（worker 线程绑的）
-        if _trustable_path(path) and path in _sess.edit_path_allowlist:
-            return True, ""
-        # 权限模式：接受编辑 / 自动 / 跳过权限确认 下写文件不用问（撤销记录照样在写之前建好）
-        if _pm.allows_edit(_pm.current(_sess)):
-            return True, ""
+        op = op if op in _PATH_OP_CARDS else "edit"
+        always_ask = op in _ALWAYS_ASK_PATH_OPS
+        if always_ask:
+            if _pm.current(_sess) == "bypass":
+                return True, ""
+        else:
+            if _trustable_path(path) and path in _sess.edit_path_allowlist:
+                return True, ""
+            if _rules.allows_edit(path, _session.project_of(_sess)):
+                return True, ""
+            # 权限模式：接受编辑 / 自动 / 跳过权限确认 下写文件不用问（撤销记录照样在写之前建好）
+            if _pm.allows_edit(_pm.current(_sess)):
+                return True, ""
 
-        result = {"_session": _sess}   # 携带发起会话（同 confirm_command）
+        result = {"_session": _sess, "_op": op}   # 携带发起会话与操作类型（同 confirm_command）
         done = threading.Event()
 
         # --- 手机 Telegram 遥控确认 ---
@@ -1069,7 +1124,7 @@ class ConfirmBarsMixin:
             if len(diff_text or "") > 800:
                 diff_preview += "\n…(已截断)"
             remote_msg_id = telegram_push.push_confirm(
-                f"编辑文件确认\n\n{path}\n\n{diff_preview}\n\n请点击下方按钮",
+                f"{_PATH_OP_CARDS[op][3]}\n\n{path}\n\n{diff_preview}\n\n请点击下方按钮",
                 remote_cid,
             )
             if remote_msg_id:
@@ -1082,9 +1137,11 @@ class ConfirmBarsMixin:
         self.bridge.edit_confirm_request.emit(path or "", diff_text or "", result, done)
         done.wait()
 
-        # 手机端点了"记住同类"——补加文件白名单（PC 路径已在 _resolve_edit_confirm 里加过）
-        if result.get("allow") and result.get("remember") and path:
+        # 手机端点了"记住同类"——补加文件白名单（PC 路径已在 _resolve_edit_confirm 里加过）。
+        # 删除/移动不接受"记住"：手机端的 inline 按钮同样可能带 remember，这里再挡一层。
+        if result.get("allow") and result.get("remember") and path and not always_ask:
             _sess.edit_path_allowlist.add(path)
+            _remember_persistently(_rules.KIND_EDIT_PATH, path, _sess)
 
         # 清理
         if remote_cid:

@@ -74,3 +74,34 @@ def test_search_settings_save_and_apply_without_restart(tmp_path, monkeypatch):
     assert (config.BOCHA_API_KEY, config.WEB_SEARCH_PROVIDER, config.WEB_SEARCH_DEEP) == \
         ("sk-bocha", "bocha", True)
     dlg.deleteLater()
+
+
+def test_context_trim_line_is_a_setting(tmp_path, monkeypatch):
+    """设置 → 高级 → 上下文长度：回收线能填、存成数字；没填过显示默认值，乱填回落默认。"""
+    import json
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from src.limits import CONTEXT_TRIM_TOKENS_DEFAULT
+    from src.ui import settings_dialog as sd
+
+    QApplication.instance() or QApplication([])
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(sd, "CONFIG_PATH", str(cfg_path))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+
+    dlg = sd.SettingsDialog()
+    assert dlg.fields["context_trim_tokens"].text() == str(CONTEXT_TRIM_TOKENS_DEFAULT)
+    dlg.fields["context_trim_tokens"].setText("400000")
+    dlg._save()
+    assert json.loads(cfg_path.read_text(encoding="utf-8"))["context_trim_tokens"] == 400000
+    dlg.deleteLater()
+
+    dlg = sd.SettingsDialog()
+    assert dlg.fields["context_trim_tokens"].text() == "400000"
+    dlg.fields["context_trim_tokens"].setText("0")
+    dlg._save()
+    assert json.loads(cfg_path.read_text(encoding="utf-8"))["context_trim_tokens"] == 0, "0 = 不提前回收，是合法值"
+    dlg.fields["context_trim_tokens"].setText("很多")
+    dlg._save()
+    assert json.loads(cfg_path.read_text(encoding="utf-8"))["context_trim_tokens"] == CONTEXT_TRIM_TOKENS_DEFAULT
+    dlg.deleteLater()

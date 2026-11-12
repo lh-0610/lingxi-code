@@ -99,6 +99,11 @@ def long_term_memory_file():
     return os.path.join(memory_dir(), "long_term_memory.json")
 
 
+def permission_rules_file():
+    """持久化权限规则（"允许并记住"跨会话/跨重启生效），撤销入口在设置 → 权限。"""
+    return os.path.join(memory_dir(), "permission_rules.json")
+
+
 def rag_index_dir():
     """RAG 向量索引目录（按当前上下文）。存 embeddings.npy + meta.jsonl + 向量缓存。"""
     return os.path.join(memory_dir(), "rag_index")

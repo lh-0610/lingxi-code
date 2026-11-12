@@ -85,6 +85,8 @@ SVG_CLIPBOARD = _svg('<rect x="3" y="2.5" width="10" height="11.5" rx="1.5"/><pa
 SVG_STAR = _svg('<path d="M8 1.8l1.7 3.9 4.2.4-3.2 2.8 1 4.1L8 10.8l-3.7 2.2 1-4.1-3.2-2.8 4.2-.4z"/>')
 SVG_COPY = _svg('<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3 10.5V3.5A1 1 0 014 2.5h6.5"/>')
 SVG_REFRESH = _svg('<path d="M13.5 3v3.2h-3.2"/><path d="M13.3 6.2A5.5 5.5 0 102.6 9.5"/>')
+SVG_UNDO = _svg('<path d="M2.5 3v3.2h3.2"/><path d="M2.7 6.2A5.5 5.5 0 1113.4 9.5"/>')
+SVG_FORK = _svg('<circle cx="4" cy="3.3" r="1.7"/><circle cx="4" cy="12.7" r="1.7"/><circle cx="12" cy="5.3" r="1.7"/><path d="M4 5v6M12 7v.5a2 2 0 01-2 2H4"/>')
 SVG_TERMINAL = _svg('<rect x="1.8" y="2.5" width="12.4" height="11" rx="1.5"/><path d="M4.5 6l2 2-2 2M8.5 10h3"/>')
 SVG_FILE = _svg('<path d="M9 1.8H4.5A1.5 1.5 0 003 3.3v9.4a1.5 1.5 0 001.5 1.5h7a1.5 1.5 0 001.5-1.5V5.8z"/><path d="M9 1.8v4h4"/>')
 SVG_PEN = _svg('<path d="M10.5 2.5l3 3L6 13H3v-3z"/>')
@@ -1287,6 +1289,10 @@ class MessageView(QScrollArea):
     image_clicked = Signal(QPixmap)   # 点击聊天区图片 → 宿主弹放大遮罩(传全分辨率原图)
     file_clicked = Signal(str)        # 点了命令卡上改动的文件 → 宿主在文件面板里打开
     file_link_clicked = Signal(str)   # 点了回复正文里的文件链接（href 原样转给宿主解析）
+    # 用户气泡上的时间轴操作：参数是该用户消息在 chat_history 里的绝对下标
+    user_edit_requested = Signal(int)     # 编辑这条消息并重发
+    user_rewind_requested = Signal(int)   # 回退到这条之前（丢弃它及之后）
+    user_fork_requested = Signal(int)     # 从这条之前分叉出新对话
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1475,6 +1481,38 @@ class MessageView(QScrollArea):
         if self._cur_user is None:
             self.add_user_turn()
         self._cur_user.set_html(html)
+
+    def add_user_actions(self, index):
+        """用户气泡下的时间轴操作按钮：编辑 / 回退 / 分叉（幽灵图标按钮，与回复末尾同款）。
+        index 是该用户消息在 chat_history 里的绝对下标，点击时原样发信号给宿主解析。"""
+        if self._cur_user is None or self._cur_round is None:
+            return
+        row = QWidget()
+        row.setObjectName("userActions")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        specs = [
+            (SVG_PEN, "编辑并重发", self.user_edit_requested),
+            (SVG_UNDO, "回退到这里（丢弃这一轮及之后）", self.user_rewind_requested),
+            (SVG_FORK, "从这里分叉新对话", self.user_fork_requested),
+        ]
+        for svg, tip, sig in specs:
+            b = QPushButton()
+            b.setObjectName("msgAction")
+            b.setFixedSize(28, 28)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(tip)
+            b.setAccessibleName(tip)
+            b.setIcon(QIcon(_icon(svg, _P["muted"], 14)))
+            b.setIconSize(QSize(14, 14))
+            b.setStyleSheet(
+                "#msgAction { border:none; background:transparent; border-radius:6px; } "
+                f"#msgAction:hover {{ background:{_P['header_bg']}; }}")
+            b.clicked.connect(lambda _checked=False, s=sig, i=index: s.emit(i))
+            h.addWidget(b, 0, Qt.AlignVCenter)
+        h.addStretch(1)
+        self._cur_round.add(row, top_gap=4)
 
     def start_assistant(self, model_name=""):
         r = self._round()

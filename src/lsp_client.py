@@ -1,8 +1,11 @@
-"""LSP M1 客户端 —— 常驻语言服务器子进程，JSON-RPC over stdio。
+"""LSP 客户端 —— 常驻语言服务器子进程，JSON-RPC over stdio，**多语言**。
 
-功能：维护一个全局语言服务器单例（默认 pyright-langserver，降级 pylsp），提供
+按文件扩展名选语言组（python / typescript / go / rust / cpp / java），每组一个常驻服务器
+单例（默认 pyright-langserver→pylsp、typescript-language-server、gopls、rust-analyzer、
+clangd、jdtls），可用 config 的 lsp_servers（python）/ lsp_languages（其它）覆盖。提供：
   - initialize / initialized 握手
-  - textDocument/didOpen（查询前必须先 open，否则 pyright 不解析 → 这是旧版的致命缺陷）
+  - textDocument/didOpen（查询前必须先 open，否则服务器不解析 → 这是旧版的致命缺陷；
+    languageId 按**文件扩展名**给，不是写死 python）
   - textDocument/definition
   - textDocument/references
 
@@ -11,15 +14,18 @@
     这样跨平台都不卡（不依赖 select，Windows 上 select 不能用于管道）。
   - **server→client 请求要回应**：pyright/pylsp 会发 workspace/configuration 等请求，
     不回应会卡住握手/查询，这里统一回最小默认值。
-  - 没装语言服务器时 get_server() 返回 None，所有公开函数优雅返回 None，绝不抛异常崩溃。
+  - 没装对应语言服务器时 get_server(group) 返回 None，所有公开函数优雅返回 None，绝不抛异常崩溃。
+  - Java（jdtls）启动参数环境相关，默认 best-effort；起不来就降级，可用 lsp_languages.java 自定义。
 """
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -31,9 +37,58 @@ try:
     from .config import LSP_SERVERS
 except Exception:
     LSP_SERVERS = ["pyright-langserver", "pylsp"]
+try:
+    from .config import LSP_LANGUAGES
+except Exception:
+    LSP_LANGUAGES = {}
 
-# ── 模块级单例 ────────────────────────────────────────────────────────────────
-_server: _LspServer | None = None
+# ── 语言注册表 ────────────────────────────────────────────────────────────────
+# 语言组 → 候选服务器命令（取 PATH 上第一个可用的）+ 裸命令的默认 stdio 参数。
+# 一个组可能服务多种扩展名（typescript 组同时管 js/ts），didOpen 的 languageId 另按扩展名给。
+_LANG_SPECS: dict[str, dict] = {
+    "python": {"commands": ["pyright-langserver", "pylsp"]},
+    "typescript": {"commands": ["typescript-language-server"], "args": ["--stdio"]},
+    "go": {"commands": ["gopls"], "args": []},
+    "rust": {"commands": ["rust-analyzer"], "args": []},
+    "cpp": {"commands": ["clangd"], "args": []},
+    "java": {"commands": ["jdtls"], "args": []},   # -data 工作区在启动时按项目根补
+}
+
+# 扩展名 → 语言组
+_EXT_TO_GROUP: dict[str, str] = {
+    ".py": "python", ".pyw": "python",
+    ".ts": "typescript", ".mts": "typescript", ".cts": "typescript", ".tsx": "typescript",
+    ".js": "typescript", ".jsx": "typescript", ".mjs": "typescript", ".cjs": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".c": "cpp", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+    ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+    ".java": "java",
+}
+
+# 扩展名 → didOpen 的 languageId（LSP 规范值；tsx/jsx 用 react 变体，C 头文件按 cpp 交给 clangd）
+_EXT_TO_LANGUAGE_ID: dict[str, str] = {
+    ".py": "python", ".pyw": "python",
+    ".ts": "typescript", ".mts": "typescript", ".cts": "typescript", ".tsx": "typescriptreact",
+    ".js": "javascript", ".jsx": "javascriptreact", ".mjs": "javascript", ".cjs": "javascript",
+    ".go": "go", ".rs": "rust",
+    ".c": "c", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+    ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+    ".java": "java",
+}
+
+
+def language_group_for_path(path: str) -> str | None:
+    """文件扩展名 → 语言组；认不出返回 None（导航降级到 jedi / search）。"""
+    return _EXT_TO_GROUP.get(os.path.splitext(path)[1].lower())
+
+
+def _language_id_for_path(path: str) -> str:
+    return _EXT_TO_LANGUAGE_ID.get(os.path.splitext(path)[1].lower(), "plaintext")
+
+
+# ── 模块级单例（每个语言组一个）────────────────────────────────────────────────
+_servers: dict[str, "_LspServer"] = {}
 _server_lock = threading.Lock()
 
 
@@ -50,7 +105,10 @@ def _get_project_root() -> Path:
 
 
 def _find_server() -> str | None:
-    """从 LSP_SERVERS 列表找到第一个 PATH 上可用的语言服务器命令。找不到返回 None。"""
+    """Python 语言服务器：从 LSP_SERVERS 列表找第一个 PATH 上可用的命令。找不到返回 None。
+
+    保留无参签名（历史调用方 / 测试按 python 后端打桩）。其它语言走 _find_server_for。
+    """
     servers = LSP_SERVERS if isinstance(LSP_SERVERS, list) else ["pyright-langserver", "pylsp"]
     for cmd in servers:
         exe = cmd.split()[0] if cmd else ""
@@ -59,15 +117,58 @@ def _find_server() -> str | None:
     return None
 
 
-def _make_args(cmd: str) -> list[str]:
-    """命令字符串 → argv。已带参数的原样切；裸命令补默认 stdio 参数。"""
+def _candidate_commands(group: str) -> list[str]:
+    """某语言组的候选命令：config.lsp_languages 覆盖优先，否则内置默认。"""
+    override = LSP_LANGUAGES.get(group) if isinstance(LSP_LANGUAGES, dict) else None
+    if isinstance(override, str) and override.strip():
+        return [override.strip()]
+    if isinstance(override, list) and override:
+        return [str(c) for c in override if str(c).strip()]
+    return list(_LANG_SPECS.get(group, {}).get("commands", []))
+
+
+def _find_server_for(group: str) -> str | None:
+    """某语言组第一个 PATH 上可用的服务器命令。python 委托 _find_server()。"""
+    if group == "python":
+        return _find_server()
+    for cmd in _candidate_commands(group):
+        exe = cmd.split()[0] if cmd else ""
+        if exe and shutil.which(exe):
+            return cmd
+    return None
+
+
+def _jdtls_workspace(root: str) -> str:
+    """jdtls 的 -data 工作区目录：放在用户数据目录下、按项目根哈希区分，**绝不放进项目根**。
+
+    放进项目根会被 git_diff 当成未跟踪文件，平白多出一块"未审阅的改动"，完成闸门永远收不了。
+    按 realpath 哈希区分：不同项目各用一个工作区，同一项目稳定复用（索引缓存可跨次保留）。
+    数据目录本身恰好就是项目根时（开发灵犀自身）退到系统临时目录，仍保证在项目外。
+    """
+    from .paths import get_data_dir
+    from .tools_common import _path_inside
+    real = os.path.realpath(root)
+    digest = hashlib.sha256(real.encode("utf-8")).hexdigest()[:16]
+    candidate = os.path.join(get_data_dir(), "lsp_workspaces", digest)
+    if _path_inside(candidate, real):
+        candidate = os.path.join(tempfile.gettempdir(), "lingxi-jdtls", digest)
+    return candidate
+
+
+def _make_args(cmd: str, group: str, root: str) -> list[str]:
+    """命令字符串 → argv。已带参数的原样切；裸命令补该组的默认 stdio 参数。
+
+    Java 的 jdtls 需要一个 -data 工作区目录，放在项目外的用户数据目录（best-effort，起不来就降级）。
+    """
     parts = cmd.split()
     if len(parts) > 1:
         return parts
     exe = parts[0]
-    if exe == "pylsp":
-        return [exe]
-    return [exe, "--stdio"]
+    if group == "python":
+        return [exe] if exe == "pylsp" else [exe, "--stdio"]
+    if group == "java" and exe == "jdtls":
+        return [exe, "-data", _jdtls_workspace(root)]
+    return [exe] + list(_LANG_SPECS.get(group, {}).get("args", ["--stdio"]))
 
 
 def _path_to_uri(p: str) -> str:
@@ -98,8 +199,9 @@ def _ls_uri_to_rel(uri: str) -> str:
 class _LspServer:
     """管理一个 LSP 服务器子进程（stdio JSON-RPC 2.0，reader 线程异步收）。"""
 
-    def __init__(self, cmd: str):
+    def __init__(self, cmd: str, group: str = "python"):
         self.cmd = cmd
+        self.group = group
         self.root = str(_get_project_root())
         self.running = False
         self._initialized = False
@@ -109,8 +211,15 @@ class _LspServer:
         self._lock = threading.Lock()          # 保护 _pending 读写 + stdin 写
 
         try:
+            argv = _make_args(cmd, group, self.root)
+            # Windows 上 npm 装的语言服务器是 .cmd 垫片（pyright-langserver.cmd、脚本式 jdtls），
+            # CreateProcess 只认 .exe、不查 PATHEXT，裸名字会 WinError 2。shutil.which 尊重
+            # PATHEXT，把它解析成完整路径（.cmd/.bat 给全路径就能起），再交给 Popen。
+            resolved = shutil.which(argv[0]) if argv else None
+            if resolved:
+                argv[0] = resolved
             self._proc = subprocess.Popen(
-                _make_args(cmd),
+                argv,
                 cwd=self.root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -269,7 +378,7 @@ class _LspServer:
             return
         self._notify("textDocument/didOpen", {"textDocument": {
             "uri": _path_to_uri(full_path),
-            "languageId": "python",
+            "languageId": _language_id_for_path(full_path),
             "version": 1,
             "text": text,
         }})
@@ -317,32 +426,32 @@ class _LspServer:
 
 # ── 模块级 API ────────────────────────────────────────────────────────────────
 
-def get_server() -> _LspServer | None:
-    """获取全局 LSP 服务器单例。首次懒启动 + 握手。无可用服务器返回 None。
+def get_server(group: str = "python") -> _LspServer | None:
+    """获取某语言组的 LSP 服务器单例。首次懒启动 + 握手。无可用服务器返回 None。
 
-    项目根变了（用户切项目）时重启服务器以对准新 rootUri。
+    默认 python（历史调用方 / 测试按此打桩）。项目根变了（用户切项目）时重启该组服务器以对准新 rootUri。
     """
-    global _server
     with _server_lock:
         cur_root = str(_get_project_root())
-        if _server is not None and _server.running and _server.root == cur_root:
-            return _server
+        srv = _servers.get(group)
+        if srv is not None and srv.running and srv.root == cur_root:
+            return srv
         # 旧服务器死了 / 根变了 → 清掉
-        if _server is not None:
+        if srv is not None:
             try:
-                _server.shutdown()
+                srv.shutdown()
             except Exception:
                 pass
-            _server = None
-        cmd = _find_server()
+            _servers.pop(group, None)
+        cmd = _find_server() if group == "python" else _find_server_for(group)
         if cmd is None:
-            logger.info("[LSP] 未安装 pyright/pylsp，代码导航降级到 jedi")
+            logger.info("[LSP] 未安装 %s 语言服务器，代码导航降级到 jedi / search", group)
             return None
-        srv = _LspServer(cmd)
+        srv = _LspServer(cmd, group)
         if srv.running and srv._initialized:
-            logger.info("[LSP] 服务器就绪: %s (PID=%s)", cmd, srv._proc.pid)
-            _server = srv
-            return _server
+            logger.info("[LSP] 服务器就绪: %s (group=%s, PID=%s)", cmd, group, srv._proc.pid)
+            _servers[group] = srv
+            return srv
         try:
             srv.shutdown()
         except Exception:
@@ -351,15 +460,14 @@ def get_server() -> _LspServer | None:
 
 
 def shutdown() -> None:
-    """关闭 LSP 服务器，释放子进程。窗口退出时调（幂等）。"""
-    global _server
+    """关闭所有语言组的 LSP 服务器，释放子进程。窗口退出时调（幂等）。"""
     with _server_lock:
-        if _server is not None:
+        for srv in list(_servers.values()):
             try:
-                _server.shutdown()
+                srv.shutdown()
             except Exception:
                 pass
-            _server = None
+        _servers.clear()
 
 
 def _locations_from_result(result) -> list:
@@ -389,10 +497,13 @@ def definition(name: str, path: str, line: int, col: int = 0, timeout: float = 1
     返回 [{file, line, column}, ...]；无服务器 / 无结果 / 出错均返回 None。
     （name 仅用于统一调用风格，定位靠 line+col。）
     """
-    srv = get_server()
+    full = path if os.path.isabs(path) else str(_get_project_root() / path)
+    group = language_group_for_path(full)
+    if group is None:
+        return None
+    srv = get_server(group)
     if srv is None:
         return None
-    full = path if os.path.isabs(path) else str(_get_project_root() / path)
     try:
         res = srv.definition(full, line - 1, max(col, 0), timeout=timeout)
     except Exception as e:
@@ -404,10 +515,13 @@ def definition(name: str, path: str, line: int, col: int = 0, timeout: float = 1
 
 def references(name: str, path: str, line: int, col: int = 0, timeout: float = 10.0):
     """查符号引用。参数同 definition。返回 [{file, line, column}, ...] 或 None。"""
-    srv = get_server()
+    full = path if os.path.isabs(path) else str(_get_project_root() / path)
+    group = language_group_for_path(full)
+    if group is None:
+        return None
+    srv = get_server(group)
     if srv is None:
         return None
-    full = path if os.path.isabs(path) else str(_get_project_root() / path)
     try:
         res = srv.references(full, line - 1, max(col, 0), timeout=timeout)
     except Exception as e:

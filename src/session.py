@@ -31,6 +31,10 @@ _SESSION_FIELDS = {
     "stop_flag": lambda: False,
     "session_token_usage": lambda: {"input": 0, "output": 0, "total": 0},
     "compaction": lambda: {"summary": "", "covered_upto": 0},
+    # 已经折成存根的工具结果（tool_call_id，按回收先后）。回收会改写发给模型的前文，折过哪些
+    # 必须记住、之后每轮照样折，前缀缓存才不会每轮都断（见 streaming._trim_tool_results）。
+    # 随会话文件落盘：重开程序接着跑时，发出去的前缀和关掉之前一样。
+    "evicted_tool_results": list,
     # 上下文溢出的"收紧档位"：provider 明确报告超窗时 +1，让下次的历史预算按 1/2^n 收缩，
     # 强制更狠的压缩后重发。不在成功后清零——溢出说明我们对该模型窗口的估算偏乐观，这个
     # 教训应当在本会话内保持，否则每轮都要重新撞一次墙、白付一个往返。
@@ -266,6 +270,18 @@ def get_verification() -> dict:
     return current_session().verification
 
 
+def project_of(sess):
+    """指定会话锚定的项目根（_UNSET 回退全局 state.current_project；None = 无项目）。
+
+    主线程处理后台会话的确认时用它：那时 current_session() 是前台会话，不是发起确认的那个。
+    """
+    p = sess.project
+    if p is _UNSET:
+        from . import state  # 延迟 import 避免循环（state 顶层 import session）
+        p = state.current_project
+    return p
+
+
 def current_project():
     """当前会话锚定的项目根（_UNSET 回退全局 state.current_project；None = 无项目）。
 
@@ -273,11 +289,7 @@ def current_project():
     统一用这个，保证后台会话的工具落点 + 模型"以为自己在哪个项目"一致——不会因为前台
     切了项目，让正在后台跑的会话串到别的项目。
     """
-    p = current_session().project
-    if p is _UNSET:
-        from . import state  # 延迟 import 避免循环（state 顶层 import session）
-        p = state.current_project
-    return p
+    return project_of(current_session())
 
 
 def seal_render_log() -> None:

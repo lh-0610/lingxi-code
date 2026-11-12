@@ -88,6 +88,15 @@ LSP_SERVERS: list[str] = _config.get("lsp_servers", ["pyright-langserver", "pyls
 if not isinstance(LSP_SERVERS, list) or not all(isinstance(s, str) for s in LSP_SERVERS):
     LSP_SERVERS = ["pyright-langserver", "pylsp"]
 
+# 其它语言的 LSP 服务器覆盖（按语言组）：{"typescript": "typescript-language-server --stdio",
+# "go": "gopls", "rust": "rust-analyzer", "cpp": "clangd", "java": "jdtls -data /path"}。
+# 值是命令字符串（可带参数）或候选命令列表（取 PATH 上第一个可用的）；没配的语言用内置默认。
+# python 仍走上面的 LSP_SERVERS，这里配 python 会被忽略（避免两处真相）。
+LSP_LANGUAGES: dict = _config.get("lsp_languages", {})
+if not isinstance(LSP_LANGUAGES, dict):
+    logger.warning("config.json 的 lsp_languages 应是对象，按未配置处理")
+    LSP_LANGUAGES = {}
+
 
 def _cfg_dict(root: dict, key: str) -> dict:
     """安全取配置里的 dict 段：写成字符串/数组等（如 "rag": "oops"）时按未配置处理并告警，
@@ -277,3 +286,24 @@ if RAG_RERANK_TOP_N <= 0:
 # 放在文件末尾是因为 _cfg_num（负责非法值回退默认）定义在上面的 RAG 段里。
 from .limits import AGENT_MAX_ROUNDS_DEFAULT as _AGENT_MAX_ROUNDS_DEFAULT  # noqa: E402
 AGENT_MAX_ROUNDS: int = max(0, _cfg_num(_config, "agent_max_rounds", _AGENT_MAX_ROUNDS_DEFAULT))
+
+# ── 上下文回收线 ──
+# 每轮发给模型的历史（估算 token）涨过这条线，就把旧的大工具结果折成存根、降到它的一半
+# （streaming._trim_tool_results）。**0 = 不提前回收**：一直涨到历史预算才回收。
+# 设得比 20 万（MAX_HISTORY_BUDGET）高时，历史预算跟着抬到这个数——DeepSeek 这类 100 万窗口的
+# 模型可以让上下文长到几十万再回收；再高也不会超过模型窗口。负数按 0 处理。
+from .limits import (  # noqa: E402
+    CONTEXT_TRIM_TOKENS_DEFAULT as _CONTEXT_TRIM_TOKENS_DEFAULT,
+    CONTEXT_TRIM_TOKENS_MIN as _CONTEXT_TRIM_TOKENS_MIN,
+)
+
+
+def _context_trim_tokens_from(cfg: dict) -> int:
+    value = max(0, _cfg_num(cfg, "context_trim_tokens", _CONTEXT_TRIM_TOKENS_DEFAULT))
+    if 0 < value < _CONTEXT_TRIM_TOKENS_MIN:
+        logger.warning(f"context_trim_tokens={value} 太低（几轮就要回收一次），按 {_CONTEXT_TRIM_TOKENS_MIN} 算")
+        return _CONTEXT_TRIM_TOKENS_MIN
+    return value
+
+
+CONTEXT_TRIM_TOKENS: int = _context_trim_tokens_from(_config)

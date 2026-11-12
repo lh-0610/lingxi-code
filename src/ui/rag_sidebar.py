@@ -159,6 +159,7 @@ class RagSidebarMixin:
         不修改任何现有会话的 session_kind。"""
         from .. import session as _session
         active = _session.get_active()
+        self._clear_sidebar_search()               # 切工作区清掉跨会话搜索（kind 变了，旧结果失效）
         agent.save_session()                       # 保存当前会话活动状态
         self._remember_ws_active(active)           # 记住它作为其工作区的最近会话
         sid, sess = self._recent_of_kind(kind)

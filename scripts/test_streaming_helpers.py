@@ -215,6 +215,36 @@ class TestToolCallCollection:
         assert len(set(ids)) == 2, f"id 应唯一，实际 {ids}"
         assert all(i for i in ids), "不应有空 id"
 
+    def test_synthetic_ids_unique_across_rounds_so_recent_result_not_evicted(self, monkeypatch):
+        """合成 id 跨轮重复时：旧结果被回收后，新一轮同名工具的结果顶着同一个 id，
+        会被"已回收"那一遍误折——哪怕它就在最近 keep_recent 条里。id 必须会话内唯一。"""
+        monkeypatch.setattr(streaming, "get_tool_map", lambda: {"read_file": object()})
+        round1 = SimpleNamespace(
+            tool_calls=[{"name": "read_file", "args": {"path": "a.py"}, "id": None}],
+            invalid_tool_calls=[])
+        round2 = SimpleNamespace(
+            tool_calls=[{"name": "read_file", "args": {"path": "b.py"}, "id": None}],
+            invalid_tool_calls=[])
+        id1 = streaming._collect_tool_calls(round1)[0]["id"]
+        id2 = streaming._collect_tool_calls(round2)[0]["id"]
+        assert id1 != id2, f"跨轮合成 id 不能重复：{id1} == {id2}"
+
+        # 旧结果（id1）已回收；新结果（id2）就在最近几条里，不该被误折
+        messages = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="q"),
+            AIMessage(content="", tool_calls=[
+                {"name": "read_file", "args": {}, "id": id1, "type": "tool_call"}]),
+            ToolMessage(content="OLD_RESULT", tool_call_id=id1),
+            AIMessage(content="", tool_calls=[
+                {"name": "read_file", "args": {}, "id": id2, "type": "tool_call"}]),
+            ToolMessage(content="RECENT_RESULT", tool_call_id=id2),
+        ]
+        out, _ = streaming._trim_tool_results(messages, [id1], high=10**9, low=0)
+        recent = out[-1]
+        assert recent.tool_call_id == id2
+        assert "旧工具结果已回收" not in recent.content, "最近的结果被误折了"
+
     def test_extracts_anthropic_thinking_blocks(self):
         gathered = SimpleNamespace(content=[
             {"type": "thinking", "thinking": "first"},

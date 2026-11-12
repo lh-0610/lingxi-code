@@ -3,6 +3,7 @@
 同时保留 git_diff / git_log 已有测试。
 需要 git 才有意义，没装则整文件跳过。
 """
+import os
 import subprocess
 import shutil
 
@@ -127,6 +128,45 @@ def git_repo(tmp_path):
 
 # ── git_diff 与验证义务的接线（真实跑 git，不打桩）───────────────
 
+@pytest.fixture()
+def subdir_repo(tmp_path):
+    """Git 仓库在上一层、项目打开的是其中一个子目录（monorepo 的常见布局）。
+
+    这种布局下 `git diff` 默认给的路径相对**仓库根**，而项目根是 backend/，
+    两者差一层——按项目根去拼就会拼出 backend/backend/… 这种不存在的路径。
+    """
+    from src import state
+    from src import session as _session
+
+    repo = tmp_path / "monorepo"
+    backend = repo / "backend"
+    (backend / "src").mkdir(parents=True)
+    (repo / "frontend").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), check=True,
+                   capture_output=True, encoding="utf-8", stdin=subprocess.DEVNULL)
+    for key, value in (("user.email", "test@example.com"), ("user.name", "Tester")):
+        subprocess.run(["git", "config", key, value], cwd=str(repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+    (repo / "frontend" / "f.py").write_text("init\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True,
+                   capture_output=True, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=str(repo), check=True,
+                   capture_output=True, stdin=subprocess.DEVNULL)
+
+    old_project, old_ui = state.current_project, state.ui_ref
+    _sess = _session.get_active()
+    old_sess_proj = _sess.project
+    state.current_project = str(backend)
+    state.ui_ref = None
+    _sess.project = str(backend)
+
+    yield backend
+
+    state.current_project = old_project
+    state.ui_ref = old_ui
+    _sess.project = old_sess_proj
+
+
 class TestGitDiffMarksReviewed:
     """`git_diff` 什么时候算"审阅过"。
 
@@ -234,6 +274,7 @@ class TestGitDiffMarksReviewed:
         out = git_diff.func("")
         assert v["diff_reviewed"] is False
         assert "无法核对" in out and "模拟核对失败" in out
+        assert "工作区没有未暂存的改动" in out, "diff 确实是空的，这句该照旧说"
 
     def test_non_empty_diff_counts_as_reviewed(self, git_repo):
         v = self._fresh()
@@ -241,6 +282,245 @@ class TestGitDiffMarksReviewed:
         out = git_diff.func("")
         assert "README.md" in out
         assert v["diff_reviewed"] is True
+
+    def _four_big_changed_files(self, git_repo):
+        """四个已跟踪文件各改大到全局 diff 超过 8000 字会被截断（前三个展示全、第四个被截掉）。"""
+        big = "\n".join(f"line {i} " + "x" * 40 for i in range(50))
+        names = ("a.py", "b.py", "c.py", "d.py")
+        for name in names:
+            (git_repo / name).write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", *names], cwd=str(git_repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "add four"], cwd=str(git_repo),
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        for name in names:
+            (git_repo / name).write_text(big, encoding="utf-8")
+
+    def test_clipped_diff_does_not_count_unshown_files(self, git_repo):
+        """改动多到被长度截断：没展示全的文件不能算审阅过，整个范围都不记（与 _review_without_git 一致）。"""
+        v = self._fresh()
+        self._four_big_changed_files(git_repo)
+        out = git_diff.func("")
+        assert "没展示全" in out and "d.py" in out, out
+        assert v["diff_reviewed"] is False, "被截断的 diff 不能把整个范围记成已审阅"
+
+    def test_clipped_file_counts_after_viewing_it_alone(self, git_repo):
+        """被截掉的文件，单独 git_diff(path=它) 完整看过之后才记为已审阅。"""
+        v = self._fresh()
+        self._four_big_changed_files(git_repo)
+        git_diff.func("")
+        assert v["diff_reviewed"] is False
+        out = git_diff.func("d.py", max_chars=30000)
+        assert "+line 0" in out and "没展示全" not in out
+        assert v["diff_reviewed"] is True
+
+    def test_blind_directory_discharges_after_viewing_each_file(self, git_repo):
+        """盲区目录 + 改动合计超过 8000 字：逐个文件看全之后，这条义务必须能解开。
+
+        盲区义务按**目录**记（need_diff 里是目录本身），而 git_diff() 和 git_diff(path=目录)
+        都受 8000 字硬上限、max_chars 抬不动；按文件看只记到文件路径，covers(文件, 目录)
+        永远是 False。改动一多就两头都够不着，完成闸门一直把模型打回去。
+        """
+        from src.verification import gaps_from_state
+        v = self._fresh()
+        self._four_big_changed_files(git_repo)
+        v["unknown_changes"] = {str(git_repo): "模拟枚举失败"}
+        v["tests_run"] = True
+        v["tests_passed"] = True
+        v["tests_roots"] = [str(git_repo)]
+
+        git_diff.func("")
+        for name in ("a.py", "b.py", "c.py", "d.py"):
+            git_diff.func(name, max_chars=30000)
+        assert gaps_from_state(v) == [], gaps_from_state(v)
+
+    def test_clipped_diff_records_the_fully_shown_files(self, git_repo):
+        """截断的全局 diff：整段展示出来的那几个文件要按文件记下来，别让人再看一遍。"""
+        from src.verification import covers
+        v = self._fresh()
+        self._four_big_changed_files(git_repo)
+        out = git_diff.func("")
+        assert "没展示全" in out and "d.py" in out, out
+        for name in ("a.py", "b.py", "c.py"):
+            assert any(covers(r, str(git_repo / name)) for r in v["diff_roots"]), \
+                f"{name} 整段展示了，却没记成看过：{v['diff_roots']}"
+        assert not any(covers(r, str(git_repo / "d.py")) for r in v["diff_roots"]), \
+            "被截掉的文件不能算看过"
+
+    def test_clipped_overview_plus_the_left_out_file_is_enough(self, git_repo):
+        """完整展示过的不用重看：补看被截掉的那一个，整个范围就该算审阅过。"""
+        from src.verification import gaps_from_state, mark_dirty
+        v = self._fresh()
+        self._four_big_changed_files(git_repo)
+        for name in ("a.py", "b.py", "c.py", "d.py"):
+            mark_dirty(v, name, abs_path=str(git_repo / name))
+        v["tests_run"] = True
+        v["tests_passed"] = True
+        v["tests_roots"] = [str(git_repo)]
+
+        git_diff.func("")
+        git_diff.func("d.py", max_chars=30000)
+        assert gaps_from_state(v) == [], gaps_from_state(v)
+
+    def test_first_file_too_long_records_nothing(self, git_repo):
+        """第一个文件就超长、只展示了开头：它一个字都没看全，不能记。"""
+        from src.verification import covers
+        v = self._fresh()
+        big = "\n".join(f"line {i} " + "x" * 40 for i in range(400))
+        (git_repo / "huge.py").write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", "huge.py"], cwd=str(git_repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "add huge"], cwd=str(git_repo),
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        (git_repo / "huge.py").write_text(big, encoding="utf-8")
+
+        out = git_diff.func("")
+        assert "第一个文件就超出了长度" in out, out
+        assert not any(covers(r, str(git_repo / "huge.py")) for r in v["diff_roots"])
+        assert v["diff_reviewed"] is False
+
+    def test_oversized_new_file_is_not_counted_as_shown(self, git_repo):
+        """未跟踪的新文件也是按 max_chars 读的：读不全就不能算"整份给出了"。"""
+        from src.verification import covers
+        v = self._fresh()
+        big = "\n".join(f"line {i} " + "x" * 40 for i in range(400))
+        (git_repo / "huge_new.py").write_text(big, encoding="utf-8")
+
+        out = git_diff.func("")
+        assert "huge_new.py" in out
+        assert "未跟踪的新文件" in out, "没整份给出的新文件要点名让人单独看"
+        assert not any(covers(r, str(git_repo / "huge_new.py")) for r in v["diff_roots"])
+        assert v["diff_reviewed"] is False
+
+    def test_directory_completion_stops_at_the_worktree_boundary(self, git_repo):
+        """嵌套仓库是另一份文件现场：主项目这边全看过了，也不能替它了结盲区义务。"""
+        from src.verification import covers, gaps_from_state
+        v = self._fresh()
+        sub = git_repo / "nested"
+        sub.mkdir()
+        subprocess.run(["git", "init"], cwd=str(sub), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        (sub / "inner.py").write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", "inner.py"], cwd=str(sub), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "-c", "user.email=t@e.com", "-c", "user.name=T",
+                        "commit", "-m", "inner"], cwd=str(sub), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        (sub / "inner.py").write_text("changed inside the nested repo\n", encoding="utf-8")
+        # 忽略掉，主项目的 git 就一个字也看不见它——"范围内改动都看过了"必须仍然不算数
+        (git_repo / ".gitignore").write_text("nested/\n", encoding="utf-8")
+        (git_repo / "outer.py").write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", "outer.py", ".gitignore"], cwd=str(git_repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "outer"], cwd=str(git_repo),
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        (git_repo / "outer.py").write_text("changed outside\n", encoding="utf-8")
+
+        v["unknown_changes"] = {str(sub): "模拟枚举失败"}
+        v["tests_run"] = True
+        v["tests_passed"] = True
+        v["tests_roots"] = [str(git_repo), str(sub)]
+
+        git_diff.func("")
+        git_diff.func("outer.py", max_chars=30000)
+        assert not any(covers(r, str(sub)) for r in v["diff_roots"]), v["diff_roots"]
+        assert gaps_from_state(v), "嵌套仓库里的改动没人看过，义务不能消失"
+
+    def _big_backend_changes(self, backend):
+        """backend/src 下四个已跟踪文件各改大到全局 diff 超过 8000 字会被截断。"""
+        repo = backend.parent
+        names = ("src/a.py", "src/b.py", "src/c.py", "src/d.py")
+        for name in names:
+            (backend / name).write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", "backend"], cwd=str(repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "add backend"], cwd=str(repo),
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        big = "\n".join(f"line {i} " + "x" * 40 for i in range(50))
+        for name in names:
+            (backend / name).write_text(big, encoding="utf-8")
+        return names
+
+    def test_subdirectory_project_records_paths_that_exist(self, subdir_repo):
+        """项目根是仓库子目录：记下来的路径必须真的存在，不能是 backend/backend/…。"""
+        from src.verification import covers
+        v = self._fresh()
+        self._big_backend_changes(subdir_repo)
+        out = git_diff.func("")
+        assert "没展示全" in out, out
+        assert v["diff_roots"], "整段展示出来的文件一个都没记"
+        for root in v["diff_roots"]:
+            assert os.path.exists(root), f"记下了不存在的路径: {root}"
+        for name in ("src/a.py", "src/b.py", "src/c.py"):
+            assert any(covers(r, str(subdir_repo / name)) for r in v["diff_roots"]), name
+
+    def test_subdirectory_project_blind_directory_discharges(self, subdir_repo):
+        """同上布局下的盲区死结：逐个文件看全之后，目录义务必须能解开。"""
+        from src.verification import gaps_from_state
+        v = self._fresh()
+        names = self._big_backend_changes(subdir_repo)
+        v["unknown_changes"] = {str(subdir_repo): "模拟枚举失败"}
+        v["tests_run"] = True
+        v["tests_passed"] = True
+        v["tests_roots"] = [str(subdir_repo)]
+
+        git_diff.func("")
+        for name in names:
+            git_diff.func(name, max_chars=30000)
+        assert gaps_from_state(v) == [], gaps_from_state(v)
+
+    def _staged_and_unstaged(self, git_repo):
+        """a.py 改了并 add 了，b.py 改了没 add——暂存区的 diff 看不见 b.py。"""
+        from src.verification import mark_dirty
+        v = self._fresh()
+        for name in ("a.py", "b.py"):
+            (git_repo / name).write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.py", "b.py"], cwd=str(git_repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "add ab"], cwd=str(git_repo),
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        (git_repo / "a.py").write_text("staged change\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.py"], cwd=str(git_repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        (git_repo / "b.py").write_text("unstaged change\n", encoding="utf-8")
+        mark_dirty(v, "b.py", abs_path=str(git_repo / "b.py"))
+        v["tests_run"] = True
+        v["tests_passed"] = True
+        v["tests_roots"] = [str(git_repo)]
+        return v
+
+    def test_staged_file_review_does_not_discharge_unstaged(self, git_repo):
+        """逐个看完暂存文件，不能把整个项目根记成已审阅——未暂存的改动还没人看。"""
+        from src.verification import covers, gaps_from_state
+        v = self._staged_and_unstaged(git_repo)
+        out = git_diff.func("a.py", staged=True)
+        assert "+staged change" in out
+        assert not any(covers(r, str(git_repo)) for r in v["diff_roots"]), v["diff_roots"]
+        assert gaps_from_state(v), "b.py 的未暂存改动没人看过，义务不能消失"
+
+    def test_staged_overview_does_not_discharge_unstaged(self, git_repo):
+        """不带路径的 git_diff(staged=True) 同样不能替未暂存的改动背书。"""
+        from src.verification import covers, gaps_from_state
+        v = self._staged_and_unstaged(git_repo)
+        out = git_diff.func("", staged=True)
+        assert "+staged change" in out
+        assert not any(covers(r, str(git_repo)) for r in v["diff_roots"]), v["diff_roots"]
+        assert gaps_from_state(v), "b.py 的未暂存改动没人看过，义务不能消失"
+
+    def test_probe_failure_with_changes_still_clips(self, git_repo, monkeypatch):
+        """核对失败 + diff 非空：这条提前返回也要截断，且不能说"没有未暂存的改动"。"""
+        from src import tools_git
+        v = self._fresh()
+        self._four_big_changed_files(git_repo)
+        monkeypatch.setattr(tools_git, "_uncovered_changes",
+                            lambda cwd: ([], [], "模拟核对失败"))
+
+        out = git_diff.func("")
+        assert "无法核对" in out and "模拟核对失败" in out
+        assert "没展示全" in out and "d.py" in out, "四万字的改动不能原样交回"
+        assert len(out) < 9000, len(out)
+        assert "工作区没有未暂存的改动" not in out, "上面明明列着改动，这句自相矛盾"
+        assert v["diff_reviewed"] is False
 
     def test_empty_scoped_diff_does_not_count(self, git_repo):
         """只看了一个文件、它没改动——说明不了别处，不能拿来结清整个工作区的义务。"""
@@ -273,6 +553,173 @@ class TestGitDiffMarksReviewed:
     def test_path_escape_never_counts_as_reviewed(self, git_repo):
         v = self._fresh()
         assert "不允许" in git_diff.func("../")
+        assert v["diff_reviewed"] is False
+
+    # ── 部分暂存的文件：两侧各有改动，任一视图都只展示一半 ──
+
+    def _run_git(self, repo, *args):
+        subprocess.run(["git", *args], cwd=str(repo), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+
+    def _commit_initial(self, git_repo, name="a.py"):
+        (git_repo / name).write_text("init\n", encoding="utf-8")
+        self._run_git(git_repo, "add", name)
+        self._run_git(git_repo, "commit", "-m", f"add {name}")
+
+    def _ready(self, git_repo, name="a.py"):
+        from src.verification import mark_dirty
+        v = self._fresh()
+        mark_dirty(v, name, abs_path=str(git_repo / name))
+        v["tests_run"] = True
+        v["tests_passed"] = True
+        v["tests_roots"] = [str(git_repo)]
+        return v
+
+    def _partially_staged(self, git_repo):
+        """a.py 改一版并 add，再追加一行不 add——同一个文件两侧各有改动。
+
+        提示词里的提交流程（暂存 → 测试失败再改同一个文件 → git_diff(staged=True) 审查）
+        正好造出这种状态。
+        """
+        self._commit_initial(git_repo)
+        (git_repo / "a.py").write_text("staged version\n", encoding="utf-8")
+        self._run_git(git_repo, "add", "a.py")
+        (git_repo / "a.py").write_text("staged version\nunstaged line\n", encoding="utf-8")
+        return self._ready(git_repo)
+
+    def test_partially_staged_staged_view_does_not_count(self, git_repo):
+        """情形 A（带路径）：暂存视图只展示了第一版，追加的那行没露过面，不能按整个文件记。"""
+        from src.verification import gaps_from_state
+        v = self._partially_staged(git_repo)
+        out = git_diff.func("a.py", staged=True)
+        assert "+staged version" in out
+        assert "+unstaged line" not in out, "暂存区的 diff 看不见后来追加的那行"
+        assert gaps_from_state(v), "只看了暂存的一半，义务不能消失"
+        assert 'git_diff(path="a.py")' in out, "要点名去哪儿看另一半"
+
+    def test_partially_staged_staged_overview_does_not_count(self, git_repo):
+        """情形 A（不带路径）：同一个口子，整个项目根也不能被记成已审阅。"""
+        from src.verification import gaps_from_state
+        v = self._partially_staged(git_repo)
+        out = git_diff.func("", staged=True)
+        assert "+staged version" in out and "+unstaged line" not in out
+        assert gaps_from_state(v), "只看了暂存的一半，义务不能消失"
+        assert "git_diff()" in out, "要告诉模型另一半在哪儿看"
+
+    def test_partially_staged_unstaged_view_does_not_count(self, git_repo):
+        """情形 B：未暂存视图只展示索引→工作区的差异，已暂存的那版不在输出里。"""
+        from src.verification import gaps_from_state
+        v = self._partially_staged(git_repo)
+        out = git_diff.func("a.py")
+        assert "+unstaged line" in out
+        assert "+staged version" not in out, "已暂存的那版改动没在这次输出里露过面"
+        assert gaps_from_state(v), "只看了未暂存的一半，义务不能消失"
+        assert 'git_diff(path="a.py", staged=True)' in out
+
+    def test_partially_staged_default_overview_does_not_count(self, git_repo):
+        """默认全局视图同样只看到未暂存的一半：按文件记 + 目录反判会把暂存的那半放行。"""
+        from src.verification import gaps_from_state
+        v = self._partially_staged(git_repo)
+        out = git_diff.func("")
+        assert "+unstaged line" in out and "+staged version" not in out
+        assert gaps_from_state(v)
+        assert "已暂存的修改" in out and "a.py" in out
+        assert "工作区没有**未暂存**的改动" not in out, "上面明明列着未暂存的改动，这句自相矛盾"
+
+    @pytest.mark.parametrize("order", ["staged_first", "unstaged_first", "overview"])
+    def test_partially_staged_both_sides_discharge(self, git_repo, order):
+        """两侧都看过之后必须能放行——不能修成一个永远解不开的死结。"""
+        from src.verification import gaps_from_state
+        v = self._partially_staged(git_repo)
+        calls = {
+            "staged_first": [("a.py", True), ("a.py", False)],
+            "unstaged_first": [("a.py", False), ("a.py", True)],
+            "overview": [("", True), ("", False)],
+        }[order]
+        for path, staged in calls:
+            git_diff.func(path, staged=staged)
+        assert gaps_from_state(v) == [], gaps_from_state(v)
+
+    @pytest.mark.parametrize("staged", [True, False])
+    @pytest.mark.parametrize("path", ["a.py", ""])
+    def test_single_sided_file_counts_after_one_view(self, git_repo, staged, path):
+        """只有一侧有改动（绝大多数情况）：看一次就该算数，不能因为新判定变严而回归。"""
+        from src.verification import gaps_from_state
+        self._commit_initial(git_repo)
+        (git_repo / "a.py").write_text("changed\n", encoding="utf-8")
+        if staged:
+            self._run_git(git_repo, "add", "a.py")
+        v = self._ready(git_repo)
+        git_diff.func(path, staged=staged)
+        assert gaps_from_state(v) == [], gaps_from_state(v)
+
+    # ── 带目录路径的未暂存视图：范围里只有暂存改动的文件完全不出现 ──
+
+    def _one_side_each(self, git_repo, directory="", stage_second=True):
+        """c.py 只有未暂存改动、d.py 只有暂存改动（stage_second=False 时两个都只有未暂存）。"""
+        from src.verification import mark_dirty
+        prefix = f"{directory}/" if directory else ""
+        if directory:
+            (git_repo / directory).mkdir()
+        names = [f"{prefix}c.py", f"{prefix}d.py"]
+        for name in names:
+            (git_repo / name).write_text("init\n", encoding="utf-8")
+        self._run_git(git_repo, "add", *names)
+        self._run_git(git_repo, "commit", "-m", "add cd")
+        for name in names:
+            (git_repo / name).write_text("unstaged change\n", encoding="utf-8")
+        if stage_second:
+            (git_repo / names[1]).write_text("staged change\n", encoding="utf-8")
+            self._run_git(git_repo, "add", names[1])
+        v = self._fresh()
+        for name in names:
+            mark_dirty(v, name, abs_path=str(git_repo / name))
+        v["tests_run"] = True
+        v["tests_passed"] = True
+        v["tests_roots"] = [str(git_repo)]
+        return v, names
+
+    @pytest.mark.parametrize("path,directory", [(".", ""), ("src", "src")])
+    def test_scoped_unstaged_view_does_not_discharge_staged_only(self, git_repo, path, directory):
+        """带目录路径看未暂存 diff：只有暂存改动的那个文件没露过面，范围和义务都不能清。"""
+        from src.verification import covers, gaps_from_state
+        v, names = self._one_side_each(git_repo, directory)
+        out = git_diff.func(path)
+        assert "+unstaged change" in out
+        assert "+staged change" not in out, "只有暂存改动的文件在这个视图里根本不出现"
+        assert names[1] in out, "要点名没看到的那个文件"
+        assert f'git_diff(path="{path}", staged=True)' in out, "要给出补看的确切命令"
+        assert not any(covers(r, str(git_repo)) for r in v["diff_roots"]), v["diff_roots"]
+        if directory:
+            assert not any(covers(r, str(git_repo / directory)) for r in v["diff_roots"]), \
+                v["diff_roots"]
+        assert gaps_from_state(v), "d.py 的暂存改动没人看过，义务不能消失"
+
+    @pytest.mark.parametrize("path,directory", [(".", ""), ("src", "src")])
+    def test_scoped_view_both_directions_discharge(self, git_repo, path, directory):
+        """补看暂存那一侧之后必须能放行——不能修成死结。"""
+        from src.verification import gaps_from_state
+        v, _ = self._one_side_each(git_repo, directory)
+        git_diff.func(path)
+        assert gaps_from_state(v), "先看未暂存的一侧还不够"
+        git_diff.func(path, staged=True)
+        assert gaps_from_state(v) == [], gaps_from_state(v)
+
+    @pytest.mark.parametrize("path,directory", [(".", ""), ("src", "src")])
+    def test_scoped_view_without_staged_changes_still_counts(self, git_repo, path, directory):
+        """范围里没有暂存改动：带路径的视图照旧一次就算数，不能因为新核对变严而回归。"""
+        from src.verification import gaps_from_state
+        v, _ = self._one_side_each(git_repo, directory, stage_second=False)
+        git_diff.func(path)
+        assert gaps_from_state(v) == [], gaps_from_state(v)
+
+    def test_scoped_empty_view_does_not_claim_clean_when_staged_exists(self, git_repo):
+        """范围里只有暂存改动：未暂存视图是空的，但"工作区干净"是谎报（与默认视图对称）。"""
+        v, names = self._one_side_each(git_repo, "src")
+        (git_repo / "src" / "c.py").write_text("init\n", encoding="utf-8")
+        out = git_diff.func("src")
+        assert "工作区干净" not in out, out
+        assert names[1] in out and 'git_diff(path="src", staged=True)' in out
         assert v["diff_reviewed"] is False
 
 

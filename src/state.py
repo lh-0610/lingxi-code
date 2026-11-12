@@ -130,6 +130,9 @@ _LEDGER_FILE_OPS = {
     "edit_file": "已编辑",
     "write_file": "已创建/覆盖",
     "append_file": "已追加",
+    "delete_path": "已删除",
+    "move_path": "已移动",
+    "copy_path": "已复制",
 }
 
 
@@ -141,10 +144,12 @@ def new_task_ledger() -> dict:
 def record_tool_in_ledger(ledger: dict, name: str, args: dict, result) -> None:
     """把一次【成功】的工具调用记进台账。纯 dict 操作，不抛异常（调用方仍兜 try）。
 
-    - edit/write/append → **仅当结果以"成功"开头**（成功编辑/成功写入文件/成功追加到文件）才记
+    - edit/write/append/delete → **仅当结果以"成功"开头**（成功编辑/成功写入文件/成功追加到文件）才记
       files[相对路径] = 动作词。用户拒绝（"已拒绝…"）、old_string 没匹配（"失败：…"）等都不记——
       否则会把没真改的文件误记成已改、污染台账。（"工具执行失败"前缀只在 invoke 抛异常时才有，
       盖不住工具自己返回的拒绝/失败串，所以这里用"成功"白名单而非失败黑名单。）
+    - move/copy 的参数是 source/destination：移动记两侧（旧路径没了、新路径有了），
+      复制只记新路径（源文件没动）。
     - run_tests / run_command → 只要真跑过就记 {cmd, brief}（哪怕测试没过，brief 里的失败信息也有用），
       仅跳过 invoke 抛异常（result 以"工具执行失败"开头）。超 N 条丢最老。
     """
@@ -154,9 +159,16 @@ def record_tool_in_ledger(ledger: dict, name: str, args: dict, result) -> None:
     if name in _LEDGER_FILE_OPS:
         if not res.startswith("成功"):       # 只记真改成功的；拒绝/失败/没匹配都不记
             return
-        path = (args or {}).get("path") or ""
-        if path:
-            ledger.setdefault("files", {})[str(path)] = _LEDGER_FILE_OPS[name]
+        a = args or {}
+        if name == "move_path":
+            targets = [a.get("source"), a.get("destination")]
+        elif name == "copy_path":
+            targets = [a.get("destination")]
+        else:
+            targets = [a.get("path")]
+        for path in targets:
+            if path:
+                ledger.setdefault("files", {})[str(path)] = _LEDGER_FILE_OPS[name]
     elif name in ("run_tests", "run_command"):
         if res.startswith("工具执行失败"):    # 命令只跳 invoke 异常；跑了没过仍记
             return

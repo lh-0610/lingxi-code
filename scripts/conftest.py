@@ -82,6 +82,18 @@ def _fresh_active_session():
     _paths.set_data_dir(None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_permission_rules(tmp_path, monkeypatch):
+    """持久化权限规则指到临时文件。
+
+    不隔离的话：① 测试结果随开发者真实攒下的授权而变（他信任过 git，测试里"应该问"的用例
+    就直接放行了）；② 测试里点"记住"会把规则写进真实数据，之后真人用灵犀时莫名其妙不问。
+    """
+    import src.paths as _paths
+    monkeypatch.setattr(_paths, "permission_rules_file",
+                        lambda: str(tmp_path / "permission_rules.json"))
+
+
 @pytest.fixture()
 def project_dir(tmp_path):
     """创建临时项目目录，并注入 state.current_project / state.ui_ref。

@@ -114,7 +114,7 @@ class _FakeUI:
     def show_message(self, text, tag=""):
         self.messages.append((tag, str(text)))
 
-    def confirm_edit(self, full, diff_text):
+    def confirm_edit(self, full, diff_text, op="edit"):
         if self.on_confirm is not None:
             self.on_confirm()
         return self.approve, None

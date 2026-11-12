@@ -13,7 +13,7 @@ from langchain_core.messages import (
 
 from src.streaming import (
     _cap_oversized_tool_results,
-    _evict_old_tool_results,
+    _trim_tool_results,
 )
 
 
@@ -186,7 +186,7 @@ def test_original_history_unchanged():
 
 def test_cap_then_evict():
     """一条历史里既有"旧大结果"又有"最近大结果"，
-    过 _cap_oversized_tool_results 再过 _evict_old_tool_results（都用小 budget）→
+    过 _trim_tool_results 再过 _cap_oversized_tool_results（都用小 budget）→
     最近的被截成头+尾、旧的被回收成存根、配对完整。"""
     big = "G" * 40_000
     msgs = [
@@ -204,13 +204,13 @@ def test_cap_then_evict():
     ]
     original_count = len(msgs)
 
-    # Step 1: M4 硬上限
-    after_cap, capped = _cap_oversized_tool_results(msgs, budget=50)
-    assert capped > 0
-
-    # Step 2: M2 回收
-    after_evict, evicted = _evict_old_tool_results(after_cap, budget=50)
+    # Step 1: 回收（发送流程里它在前）
+    after_trim, evicted = _trim_tool_results(msgs, [], high=50, low=0)
     assert evicted > 0
+
+    # Step 2: M4 硬上限
+    after_evict, capped = _cap_oversized_tool_results(after_trim, budget=50)
+    assert capped > 0
 
     # 消息条数不变
     assert len(after_evict) == original_count

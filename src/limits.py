@@ -23,7 +23,24 @@ HISTORY_SAFETY_MARGIN = 8_000
 MAX_HISTORY_BUDGET = 200_000
 HISTORY_KEEP_RECENT = 20
 
-# 工具结果分级回收（M2）：超预算时先把"旧的大工具结果"截成存根，再走 LLM 压缩
+# 上下文回收线的**默认值**（估算 token）。实际生效值是 config.CONTEXT_TRIM_TOKENS（config.json 的
+# context_trim_tokens，设置弹窗「高级」页可改；设 0 = 跟历史预算走）。
+# 发送历史涨过这条线，就一次性把旧的大工具结果折成存根、降到它的一半，折过的记在会话里，之后每轮
+# 原样照发。一次折一半是为了少触发：每触发一次，前缀缓存从最早那条被折的结果往后全部重建
+# （DeepSeek 未命中比命中贵 50 倍），要四十来轮才回本。
+# 线定在哪是钱和上下文长度的取舍，回放五个 68–115 轮的真实任务（不回收时峰值 10–17 万）：
+#   10 万：五个都触发 1–2 次，成本合计 +5.9%（单个 +2%～+19%），峰值压在 10 万内；
+#   12 万：四个各触发一次，合计 +5.6%；
+#   15 万：只有最长的两个触发，但各 +13%，合计 +6.6%——触发得晚，剩下的轮数不够回本；
+#   18 万以上：一次不触发，成本不变。
+# 也就是在这种长度的任务里，只要触发就是净亏，线低只换来上下文短（短了模型是不是更好，没有数据）。
+# 所以默认和历史预算上限（MAX_HISTORY_BUDGET）取齐：平时不碰，只拦住会撞预算的超长任务；
+# 想要更短的上下文、或者在 100 万窗口的模型上放得更长，自己在设置里调。
+CONTEXT_TRIM_TOKENS_DEFAULT = 200_000
+# 设得太低会几轮就触发一次、每次都重建缓存；非 0 的值低于这个数按这个数算
+CONTEXT_TRIM_TOKENS_MIN = 20_000
+
+# 工具结果回收（M2）的参数：哪些结果能折、存根留多长
 TOOL_RESULT_EVICT_KEEP_RECENT = 6      # 最近 N 条工具结果保持完整（不回收）
 TOOL_RESULT_EVICT_MIN_CHARS = 1000     # 只回收内容超过这个字符数的旧工具结果（小结果不值当）
 TOOL_RESULT_EVICT_PREVIEW_CHARS = 150  # 存根保留的开头预览长度
@@ -46,6 +63,15 @@ SEARCH_IN_FILE_MAX_LIMIT = 200
 SEARCH_FILES_MAX_RESULTS = 50
 # search_files 每处匹配默认带前后几行；显示的匹配超过这个数就只列匹配行，免得结果撑得太长
 SEARCH_FILES_CONTEXT_MAX_HITS = 20
+# 搜索结果里单行最多显示这么多字。11-03 两次搜项目根各交回 3 万字（约 1 万 token，之后每轮都带着），
+# 其中 95% 是会话 JSON 里一行两万多字的 "content"——要的只是"哪个文件第几行有"。
+SEARCH_LINE_MAX_CHARS = 300
+# search_files 一次最多交回这么多字，超了按行截断并说明还有多少处没列
+SEARCH_FILES_MAX_CHARS = 8000
+# git_diff 不指到单个文件时（整个项目 / 一个目录）一次最多交回这么多字，max_chars 传得再大也不超过：
+# 模型常传 2–3 万把全部改动再看一遍，内容和它自己发出的改动重复，还会一直留在上下文里。
+# 指到单个文件不受这个限制——那是看全一个大改动的唯一办法。
+GIT_DIFF_OVERVIEW_MAX_CHARS = 8000
 
 RUN_COMMAND_TIMEOUT_S = 300
 RUN_COMMAND_MAX_OUTPUT_CHARS = 5000

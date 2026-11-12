@@ -16,11 +16,11 @@ self._open_settings_menu
 """
 import os
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 from langchain_core.messages import SystemMessage
 
@@ -96,6 +96,27 @@ class SidebarMixin:
         label.setObjectName("historyLabel")
         layout.addWidget(label)
 
+        # 跨会话搜索框：输入关键词（标题/正文）→ 后台线程扫描 → 结果替换下方列表。
+        # 清空即恢复按项目分组的正常列表。防抖 250ms，回车立即搜。
+        self._sidebar_search_query = ""
+        self._sidebar_search_results = []
+        self._sidebar_search_pending = False
+        search_input = QLineEdit()
+        search_input.setObjectName("sidebarSearch")
+        search_input.setPlaceholderText("搜索会话（标题 / 内容）")
+        search_input.setAccessibleName("搜索会话")
+        search_input.setClearButtonEnabled(True)
+        self._sidebar_search_input = search_input
+        self._sidebar_search_timer = QTimer(self)
+        self._sidebar_search_timer.setSingleShot(True)
+        self._sidebar_search_timer.setInterval(250)
+        self._sidebar_search_timer.timeout.connect(
+            lambda: self._start_sidebar_search(self._sidebar_search_input.text()))
+        search_input.textChanged.connect(lambda _t: self._sidebar_search_timer.start())
+        search_input.returnPressed.connect(
+            lambda: self._start_sidebar_search(search_input.text()))
+        layout.addWidget(search_input)
+
         # 历史列表（可滚动）
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -162,6 +183,13 @@ class SidebarMixin:
         # 把 #historyRow[current/rowstate] 的整行底色盖掉(Qt 样式表经典坑)。
         self.history_widget.setStyleSheet(
             f"#historyWidget {{ background: {self._t('sidebar_bg')}; }}")
+        if hasattr(self, "_sidebar_search_input"):
+            self._sidebar_search_input.setStyleSheet(
+                f"QLineEdit#sidebarSearch {{ background: {self._t('sidebar_bg')};"
+                f" color: {self._t('history_item')}; border: 1px solid {self._t('sidebar_border')};"
+                f" border-radius: 7px; padding: 5px 8px; font-size: 12px; }}"
+                f"QLineEdit#sidebarSearch:focus {{ border-color: {self._t('new_chat_hover_text')}; }}"
+            )
 
     # ── 会话列表 ──
 
@@ -177,6 +205,11 @@ class SidebarMixin:
             item = self.history_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+        # 搜索态：用搜索结果替换分组列表（任何刷新都重渲染搜索视图，保持一致）
+        if getattr(self, "_sidebar_search_query", ""):
+            self._render_search_results()
+            return
 
         from .. import projects as _projects
         from .. import session as _session
@@ -342,6 +375,10 @@ class SidebarMixin:
             btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             btn.setMinimumWidth(0)
             btn.clicked.connect(lambda checked=False, s=sid: self._load_session(s))
+            # 右键菜单：重命名（生成中也可改名——标题是元数据，不动历史/运行态）
+            btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, b=btn, s=sid, t=title: self._show_session_row_menu(b, s, t))
 
             if is_gen:
                 # 生成中：标题（靛蓝加粗）占满剩余宽度 → 右边一个转圈，占删除按钮的位置
@@ -481,6 +518,143 @@ class SidebarMixin:
         a_remove.triggered.connect(_do_remove)
         menu.addAction(a_remove)
         menu.exec(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
+
+    # ── 会话重命名 ──
+
+    def _show_session_row_menu(self, anchor_widget, session_id, title):
+        """会话行右键菜单：重命名。"""
+        menu = QMenu(self)
+        a_rename = QAction("重命名", menu)
+        a_rename.setIcon(self._svg_icon("file-pen.svg", self._t("menu_text")))
+        a_rename.triggered.connect(
+            lambda _=False, s=session_id, t=title: self._rename_session_dialog(s, t))
+        menu.addAction(a_rename)
+        menu.exec(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
+
+    def _rename_session_dialog(self, session_id, old_title):
+        """弹输入框改名：非空校验 → agent.rename_session（三处一起改）→ 刷新侧栏。"""
+        text, ok = QInputDialog.getText(
+            self, "重命名会话", "会话标题：", QLineEdit.Normal, old_title or "")
+        if not ok:
+            return
+        text = (text or "").strip()
+        if not text:
+            self._show_toast("会话标题不能为空")
+            return
+        try:
+            renamed = agent.rename_session(session_id, text)
+        except Exception as e:
+            self._show_toast(f"重命名失败：{e}", 3000)
+            return
+        if not renamed:
+            self._show_toast("会话不存在或已被删除")
+        self._refresh_session_list()
+
+    # ── 跨会话搜索 ──
+
+    def _start_sidebar_search(self, text):
+        """防抖到期 / 回车：设查询词，后台线程扫描会话正文，结果经 bridge 回主线程。
+
+        扫描放 worker 线程：search_sessions 要逐个读会话正文（可能很大），绝不能卡 UI。
+        空查询 → 立即恢复分组列表。kind 跟随当前工作区（编码/知识库各搜各的）。
+        """
+        text = (text or "").strip()
+        self._sidebar_search_query = text
+        if not text:
+            self._sidebar_search_results = []
+            self._sidebar_search_pending = False
+            self._refresh_session_list()
+            return
+        self._sidebar_search_pending = True
+        self._refresh_session_list()          # 先显示「搜索中…」
+        from .. import session as _session
+        kind = getattr(_session.get_active(), "session_kind", "code")
+        import threading
+        # 数据根是线程本地的：worker 必须继承启动时刻的根，否则 Web 多用户模式下
+        # 会读到默认根（别人的数据），测试里也会读不到隔离目录。与 send worker 同套路。
+        from .. import paths as _paths
+        inherited_root = _paths.get_data_dir()
+
+        def _work():
+            _paths.set_data_dir(inherited_root)
+            try:
+                results = agent.search_sessions(text, kind=kind)
+            except Exception:
+                results = []
+            finally:
+                _paths.set_data_dir(None)
+            self.bridge.session_search_done.emit(text, results)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_session_search_done(self, text, results):
+        """bridge.session_search_done 槽（主线程）：丢弃过期结果，渲染最新命中。"""
+        if text != self._sidebar_search_query:
+            return                            # 用户又改了词，这次结果已过期
+        self._sidebar_search_results = results or []
+        self._sidebar_search_pending = False
+        self._refresh_session_list()
+
+    def _render_search_results(self):
+        """把搜索结果渲染成扁平列表（替换分组视图）：标题 + 命中预览，点击跳转。"""
+        def _add_hint(txt):
+            lbl = QLabel(txt)
+            lbl.setObjectName("historyEmptyHint")
+            self.history_layout.insertWidget(self.history_layout.count() - 1, lbl)
+
+        if self._sidebar_search_pending:
+            _add_hint("搜索中…")
+            return
+        results = self._sidebar_search_results
+        if not results:
+            _add_hint("无匹配会话")
+            return
+        for r in results:
+            sid = r["id"]
+            title = r.get("title") or "新对话"
+            is_current = (sid == agent.current_session_id)
+            row = HistoryRow()
+            row.setObjectName("historyRow")
+            row.setProperty("current", "true" if is_current else "false")
+            vbox = QVBoxLayout(row)
+            vbox.setContentsMargins(8, 4, 6, 4)
+            vbox.setSpacing(1)
+            display = title if len(title) <= 16 else title[:16] + "..."
+            btn = QPushButton(display)
+            btn.setProperty("class", "historyItemActive" if is_current else "historyItem")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(title)
+            btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            btn.setMinimumWidth(0)
+            btn.clicked.connect(lambda checked=False, s=sid: self._load_session(s))
+            vbox.addWidget(btn)
+            # 副行：命中预览（正文命中）或「标题命中」；跨项目时带上项目名帮助区分
+            snippet = r.get("snippet") or ("标题命中" if r.get("match_in_title") else "")
+            proj = r.get("project")
+            tag = os.path.basename(proj) if proj else "无项目"
+            sub_text = f"{tag} · {snippet}" if snippet else tag
+            sub = QLabel(sub_text)
+            sub.setObjectName("searchResultSub")
+            sub.setWordWrap(False)
+            sub.setTextFormat(Qt.PlainText)
+            sub.setStyleSheet(
+                f"QLabel#searchResultSub {{ color: {self._t('history_label')};"
+                f" font-size: 11px; background: transparent; padding-left: 2px; }}")
+            sub.setToolTip(snippet or title)
+            vbox.addWidget(sub)
+            self.history_layout.insertWidget(self.history_layout.count() - 1, row)
+
+    def _clear_sidebar_search(self):
+        """清空搜索态（切工作区时调用）：不复触发搜索，随后由调用方刷新列表。"""
+        if not hasattr(self, "_sidebar_search_input"):
+            return
+        self._sidebar_search_timer.stop()
+        self._sidebar_search_query = ""
+        self._sidebar_search_results = []
+        self._sidebar_search_pending = False
+        self._sidebar_search_input.blockSignals(True)
+        self._sidebar_search_input.clear()
+        self._sidebar_search_input.blockSignals(False)
 
     def _stop_session_generation(self, sess, wait: bool = False, timeout: float = 3.0):
         """停一条（可能是后台）会话的 worker。

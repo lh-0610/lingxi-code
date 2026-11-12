@@ -46,6 +46,11 @@ from .memory import (
     list_sessions,                  # noqa: F401  facade 出口 → sidebar
     delete_session,                 # noqa: F401  facade 出口 → sidebar
     reset_history,                  # noqa: F401  facade 出口 → header/sidebar
+    truncate_history,               # noqa: F401  facade 出口 → 时间轴回退/编辑
+    rewind_session,                 # noqa: F401  facade 出口 → 时间轴回退
+    fork_session,                   # noqa: F401  facade 出口 → 时间轴分叉
+    rename_session,                 # noqa: F401  facade 出口 → sidebar 重命名
+    search_sessions,                # noqa: F401  facade 出口 → sidebar 跨会话搜索
     maybe_generate_session_title,
     move_sessions_to_no_project,    # noqa: F401  facade 出口 → sidebar 删项目
     _build_ai_message,

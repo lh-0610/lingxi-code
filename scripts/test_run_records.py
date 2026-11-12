@@ -534,6 +534,21 @@ class TestInflight:
         # 不写进主 JSON
         assert "inflight" not in json.dumps(_read(isolated_memory, sid))
 
+    def test_move_and_copy_record_both_source_and_destination(self, isolated_memory):
+        """move_path/copy_path 用 source/destination 传路径——执行前记录必须把两端都记下，
+        否则崩溃恢复时根本不知道这次操作动了哪些文件（#8）。"""
+        sess = _new_session()
+        sid = _saved(sess)
+        run_records.begin_run(sess)
+        run_records.begin_operation(sess, tool="move_path", tool_call_id="m1",
+                                    args={"source": "a.py", "destination": "b.py"})
+        run_records.begin_operation(sess, tool="copy_path", tool_call_id="c1",
+                                    args={"source": "b.py", "destination": "c.py"})
+        doc = json.loads((isolated_memory / f"{sid}.inflight.json").read_text(encoding="utf-8"))
+        by_id = {op["tool_call_id"]: op for op in doc["operations"]}
+        assert by_id["m1"]["paths"] == ["a.py", "b.py"]
+        assert by_id["c1"]["paths"] == ["b.py", "c.py"]
+
     def test_record_carries_the_identity_needed_to_match_a_receipt(self, isolated_memory):
         sess = _new_session()
         sid = _saved(sess)

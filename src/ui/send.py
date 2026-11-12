@@ -256,12 +256,15 @@ class SendMixin:
         sess.is_generating = True
 
         # 显示用户消息
+        # 这条用户消息即将追加到历史末尾，记下它的绝对下标，给气泡挂时间轴操作按钮
+        _user_index = len(agent.chat_history)
         self._append_html("\n", "spacer")
         self._append_html("你\n", "user_label")
         if images:
             self._insert_images_in_chat(images)
         if display_text:
             self._append_user_text(display_text + "\n\n")
+        self.chat_area.add_user_actions(_user_index)
         # 发消息后强制滚到底：看到自己刚发的 + 贴底后 AI 回复会自动跟随
         self._scroll_to_bottom()
 

@@ -174,10 +174,13 @@ SIDE_EFFECT_FREE_TOOLS = frozenset({
     # 网络只读：GET 语义、不落盘。已知边界见 CLAUDE.md 的 fetch_url DNS 重绑定条目——
     # 重绑定到某个对 GET 有副作用的内网端点时，这里确实不会留记录。
     "fetch_url", "web_search",
+    "read_image",  # 读图：只读文件 + 视觉模型识别成文本，不落盘（网络外发同 web_search）
 })
 
 # 从参数里挑"值得记进 sidecar 的路径"。体积要控住：不复制 content/new_string 这类长参数。
-_PATH_ARG_KEYS = ("path", "file", "file_path", "target", "cwd")
+# source/destination 是 move_path / copy_path 的两端路径，漏了它们这两个工具的执行前记录
+# 就一个路径都不带，崩溃恢复时认不出动了哪些文件。
+_PATH_ARG_KEYS = ("path", "file", "file_path", "target", "cwd", "source", "destination")
 
 
 def extract_paths(args) -> list:
@@ -754,6 +757,7 @@ def _anchor_files(sess):
 # 同一个取舍：宁可多花一点，也不要漏看。
 _FILE_ONLY_TOOLS = frozenset({
     "write_file", "edit_file", "append_file", "apply_patch",
+    "delete_path", "move_path", "copy_path", "make_directory",
     "git_stage", "git_unstage",          # 只动索引，HEAD 与分支不变
     "remember", "forget", "notify_user", "update_plan", "set_step_status",
 })

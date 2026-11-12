@@ -38,8 +38,9 @@ pip install pypdf
 # MCP 客户端（可选；没装则 MCP 功能静默跳过）
 pip install mcp
 
-# 代码导航（可选；装语言服务器走 LSP 最准 → 没有退 jedi → 都没有退回 search_files）
-pip install jedi python-lsp-server   # 或 pip install pyright（需 Node）
+# 代码导航（可选；多语言 LSP 最准：Python/TS/JS/Go/Rust/C-C++/Java 按扩展名选服务器 →
+# Python 没有服务器退 jedi，其它语言给安装提示 → 都不可用退回 search_files）
+pip install jedi python-lsp-server   # 或 pip install pyright（需 Node）；其它语言装对应服务器：typescript-language-server / gopls / rust-analyzer / clangd / jdtls
 
 # 代码地图增强（可选；tree-sitter 多语言符号提取，没装则回退内置正则）
 pip install tree-sitter tree-sitter-python tree-sitter-javascript tree-sitter-typescript
@@ -59,7 +60,7 @@ python main.py
 - **Python 3.14 环境**，`ConversationBufferMemory` 等旧版 LangChain API 不可用
 - **路径**：`src/paths.py` 的 `_app_data_dir()` 在 dev 期返回 src 上一级目录（项目根），打包后返回 exe 目录
 - **写入 state**：必须 `state.X = ...`（不是 `agent.X = ...`）
-- **新增工具**：在 `src/tools.py` 用 `@tool` 装饰器定义，加进 `ALL_TOOLS` 和 `TOOL_MAP`；如果是文件类工具记得用 `_resolve_path()` 解析相对路径
+- **新增工具**：在 `src/tools.py` 用 `@tool` 装饰器定义，加进 `ALL_TOOLS`（`get_tool_map()` 自动从中构建 name→tool 映射）；如果是文件类工具记得用 `_resolve_path()` 解析相对路径。**同步在 `roles.py` 的 `SYSTEM_PROMPT` 工具清单里加一条说明**——注册了但提示词不提，模型就不知道有它（notify_user / search_knowledge 曾这样漏过）
 - **新增模型**：编辑 `src/models.py` 的 `MODEL_LIST` 元组列表，并在 `_create_llm()` 加 dispatch 分支
 - **新增 UI 子模块**：`src/ui/` 下放，注意从 `..` 引父包（`from .. import agent`），从 `.` 引同级（`from .theme import ...`）；`__init__.py` 只对外暴露 `ChatUI` / `SettingsDialog`
 

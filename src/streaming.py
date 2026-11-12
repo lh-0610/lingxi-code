@@ -9,6 +9,7 @@ import queue as _queue
 import re
 import time
 import threading as _threading
+import uuid
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
@@ -20,6 +21,7 @@ from .content_blocks import is_text_block, is_think_block, block_text, block_thi
 from .tools import TOOL_DISPLAY_NAMES, build_git_write_confirmation, get_tool_map
 from .limits import (
     COMPACTION_SUMMARY_MAX_CHARS,
+    CONTEXT_TRIM_TOKENS_DEFAULT,
     HISTORY_KEEP_RECENT,
     HISTORY_SAFETY_MARGIN,
     HISTORY_TOKEN_BUDGET,
@@ -51,7 +53,15 @@ def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
         detail = f"{str(args.get('question', ''))[:80]}（{args.get('thoroughness', 'medium')}）"
     elif name == "read_files":
         detail = "、".join(str(p) for p in (args.get("paths") or []))
-    elif name in ("read_file", "write_file", "append_file", "edit_file"):
+    elif name in ("read_file", "write_file", "append_file", "edit_file", "delete_path"):
+        detail = args.get("path", "")
+    elif name == "read_image":
+        detail = args.get("path", "")
+        if str(args.get("question") or "").strip():
+            detail += f"（{str(args['question']).strip()[:60]}）"
+    elif name in ("move_path", "copy_path"):
+        detail = f"{args.get('source', '')} → {args.get('destination', '')}"
+    elif name == "make_directory":
         detail = args.get("path", "")
     elif name == "list_directory":
         detail = args.get("path", ".")
@@ -118,6 +128,7 @@ PLAN_MODE_READONLY_TOOLS = {
     # 像"检查"不代表它只读——同理 `run_tests` 起的是项目自己的测试代码，也不在这里。
     "fetch_url",  # 抓取网页只读
     "web_search",  # 网络搜索只读
+    "read_image",  # 读图只读（视觉模型识别成文本，网络外发同 web_search）
     "search_knowledge",  # 知识库语义检索只读
     "find_definition", "find_references",  # jedi 代码导航，只读分析
     "find_tests", "related_files",  # 测试发现 / 关联文件，只读分析
@@ -475,41 +486,113 @@ def _cap_oversized_tool_results(
     return out, capped
 
 
-def _evict_old_tool_results(
+# ── 工具结果回收（水位线式）──
+# 回收会改写前文。DeepSeek / Anthropic 的前缀缓存要求前缀逐字节不变，所以两条规矩：
+# 1. 一次折够（高水位触发、折到低水位），不是每轮折一点；
+# 2. 折过哪些记在会话里（state.evicted_tool_results），之后每轮照同样的字节发。
+# 以前是无状态的"超预算就把最近 6 条之外的全折掉"：每轮都从完整历史重算，刚滑出最近 6 条的
+# 那条当轮才变成存根，前缀每轮都从那里断（评测 011 基线回收 107 次、models.py 重读 13–19 遍）。
+
+
+def _evicted_stub(content: str) -> str:
+    """回收后的存根。只由原内容决定：同一条结果每一轮折出来都逐字节相同。"""
+    preview = content[:TOOL_RESULT_EVICT_PREVIEW_CHARS].replace("\n", " ")
+    return (
+        f"{preview}…\n"
+        f"[旧工具结果已回收：原 {len(content)} 字符。需要完整内容请重新调用对应工具获取。]"
+    )
+
+
+def _tool_text(msg) -> str:
+    return msg.content if isinstance(msg.content, str) else str(msg.content)
+
+
+def _context_trim_tokens() -> int:
+    """用户设的上下文回收线（config.json 的 context_trim_tokens；0 = 不提前回收）。"""
+    try:
+        from . import config as _cfg
+        return max(0, int(getattr(_cfg, "CONTEXT_TRIM_TOKENS", CONTEXT_TRIM_TOKENS_DEFAULT)))
+    except Exception:
+        return CONTEXT_TRIM_TOKENS_DEFAULT
+
+
+def _trim_watermarks(budget: int) -> tuple[int, int]:
+    """(高水位, 低水位)：涨过高水位触发回收，折到低水位（高水位的一半）为止。
+
+    高水位 = 用户设的回收线，但不超过历史预算——窗口小的模型预算本来就不到这条线，
+    设成 0（不提前回收）也一样，都是到预算才回收。"""
+    line = _context_trim_tokens()
+    high = min(line, budget) if line > 0 else budget
+    return high, high // 2
+
+
+def _trim_tool_results(
     messages,
-    budget=HISTORY_TOKEN_BUDGET,
+    evicted_ids,
+    high,
+    low,
+    hard_limit=None,
     keep_recent=TOOL_RESULT_EVICT_KEEP_RECENT,
     min_chars=TOOL_RESULT_EVICT_MIN_CHARS,
 ):
-    """超预算时，把"最近 keep_recent 条之外、且内容超过 min_chars 的"工具结果截成存根。
+    """先把以前折过的工具结果照原样折好；估算超过 high 时再折一批旧的，折到 low 为止。
 
-    存根 = 原内容前 PREVIEW 字符 + "[已回收，需要重新调用工具]"。保留 ToolMessage 本体和
-    tool_call_id（不破坏 tool_use/tool_result 配对）。只动发送副本，不碰 state.chat_history。
-    返回 (新 messages, evicted_count)。未超预算或没啥可回收 → 原样返回, 0。
+    evicted_ids：会话里记着的"已回收的 tool_call_id"（list，新折的原地追加）。
+    从最老的折起；最近 keep_recent 条、不超过 min_chars 的小结果不动。试过按内容排先后
+    （先折"之后被改过的文件"的旧读取、先折搜索 / 命令输出、把正在改的文件留到最后…共五种），
+    回放五个真实任务没有区别：降到低水位要把能折的几乎折完，折谁在先不改变结果
+    （改文件时它的读取已全被折掉 6–7 次，成本差 1% 以内）。所以用最简单的。
+
+    能折出来的不到两条水位线间距的一半就先不折：折不动多少还要重建一次缓存，下一轮又会
+    再触发，等于回到每轮都断。只有超过 hard_limit（真正的历史预算）时不管多少都折。
+
+    只动发送副本，保留 ToolMessage 本体和 tool_call_id（不破坏 tool_use/tool_result 配对）。
+    返回 (新 messages, 本次新折的条数)。什么都没折 → 原列表, 0。
     """
-    if _estimate_tokens(messages) <= budget:
-        return messages, 0
-    # 所有 ToolMessage 的下标；最近 keep_recent 条保持完整，其余的算"旧"
-    tool_idx = [i for i, m in enumerate(messages) if isinstance(m, ToolMessage)]
-    if len(tool_idx) <= keep_recent:
-        return messages, 0
-    evict_set = set(tool_idx[:-keep_recent])
-    out = []
-    evicted = 0
-    for i, m in enumerate(messages):
-        if i in evict_set and isinstance(m, ToolMessage):
-            content = m.content if isinstance(m.content, str) else str(m.content)
-            if len(content) > min_chars:
-                preview = content[:TOOL_RESULT_EVICT_PREVIEW_CHARS].replace("\n", " ")
-                stub = (
-                    f"{preview}…\n"
-                    f"[旧工具结果已回收：原 {len(content)} 字符。需要完整内容请重新调用对应工具获取。]"
-                )
-                out.append(ToolMessage(content=stub, tool_call_id=m.tool_call_id))
-                evicted += 1
-                continue
-        out.append(m)
-    return out, evicted
+    known = set(evicted_ids)
+    out = messages
+    if known:
+        applied = [
+            m.model_copy(update={"content": _evicted_stub(_tool_text(m))})
+            if isinstance(m, ToolMessage) and m.tool_call_id in known else m
+            for m in messages
+        ]
+        if any(a is not b for a, b in zip(applied, messages)):
+            out = applied
+
+    est = _estimate_tokens(out)
+    if est <= high:
+        return out, 0
+
+    tool_idx = [i for i, m in enumerate(out) if isinstance(m, ToolMessage)]
+    protected = set(tool_idx[-keep_recent:]) if keep_recent > 0 else set()
+    candidates = []     # (下标, 折掉能省的 token)，从老到新
+    for i in tool_idx:
+        m = out[i]
+        if i in protected or m.tool_call_id in known:
+            continue
+        content = _tool_text(m)
+        if len(content) <= min_chars:
+            continue
+        gain = _text_tokens(content) - _text_tokens(_evicted_stub(content))
+        if gain > 0:
+            candidates.append((i, gain))
+
+    over_hard = hard_limit is not None and est > hard_limit
+    if not candidates or (not over_hard and sum(g for _, g in candidates) < (high - low) / 2):
+        return out, 0
+
+    out = list(out)
+    picked = 0
+    for i, gain in candidates:
+        if est <= low:
+            break
+        m = out[i]
+        out[i] = m.model_copy(update={"content": _evicted_stub(_tool_text(m))})
+        evicted_ids.append(m.tool_call_id)
+        est -= gain
+        picked += 1
+    return out, picked
 
 
 _COMPACT_SYSTEM_PROMPT = (
@@ -806,6 +889,8 @@ def _current_history_budget() -> int:
     """根据当前模型的上下文窗口动态计算历史预算。
 
     公式: 窗口 - max_tokens - SAFETY_MARGIN，上限 MAX_HISTORY_BUDGET。
+    用户把上下文回收线（context_trim_tokens）设得比这个上限高时，上限跟着抬到回收线：
+    不然线设在 40 万、预算却在 20 万就开始压缩，那条线永远到不了。窗口那一项不受影响。
     异常时回退到 HISTORY_TOKEN_BUDGET。
     """
     try:
@@ -814,7 +899,7 @@ def _current_history_budget() -> int:
         cwin = context_window_for(mtype, model_id)
         max_out = _max_tokens_for(mtype, model_id)
         budget = cwin - max_out - HISTORY_SAFETY_MARGIN
-        budget = min(budget, MAX_HISTORY_BUDGET)
+        budget = min(budget, max(MAX_HISTORY_BUDGET, _context_trim_tokens()))
     except Exception:
         budget = HISTORY_TOKEN_BUDGET
     # provider 报过上下文溢出 → 说明上面这套估算（窗口大小 / token 估算系数）对当前模型
@@ -907,27 +992,41 @@ def _prepare_stream_history(ui):
     # 只改发送副本，不动 state.chat_history（跟压缩同一个原则：UI/持久化保留原始对话）。
     history_for_send = _append_volatile_context(history_for_send)
 
-    # 先做便宜的工具结果回收（超预算时把旧的大工具结果截成存根，模型要详情可重新调工具）。
-    # 常常回收完就压回预算内，下面的 LLM 压缩自然 no-op，省钱省延迟。
+    # 工具结果回收（水位线式，见 _trim_tool_results）：以前折过的照原样折好；涨过高水位再折一批。
+    # 放在最前：平时就靠它把上下文压在高水位以下，后面两步（硬上限、LLM 压缩）只在它折不动、
+    # 仍超出真正的历史预算时才轮得到。
     _budget = _current_history_budget()
-    # M4: 先把单条巨无霸(含最近的)截成头+尾,防它躲过回收/压缩撑爆预算
+    _high, _low = _trim_watermarks(_budget)
+    _unfolded = history_for_send
+    history_for_send, _evicted = _trim_tool_results(
+        history_for_send, state.evicted_tool_results, high=_high, low=_low, hard_limit=_budget,
+    )
+    if _evicted > 0:
+        # "折之前"按上一轮的折法算（以前折过的照样折），不是按完整历史——那会把早就折掉的也算进去
+        _recorded = state.evicted_tool_results
+        _est_before = _estimate_tokens(_trim_tool_results(
+            _unfolded, _recorded[:len(_recorded) - _evicted], high=float("inf"), low=0)[0])
+        _est_after = _estimate_tokens(history_for_send)
+        logger.info(
+            f"工具结果回收：上下文估算 {_est_before} 超过水位 {_high}，本轮把 {_evicted} 条旧的大工具结果"
+            f"折成存根，降到 {_est_after}（会话累计已回收 {len(_recorded)} 条）"
+        )
+        try:
+            ui.show_message(
+                f"\n♻️ 上下文偏长（约 {_est_before // 1000}k token），本轮把 {_evicted} 条较早的大工具结果"
+                f"折叠为摘要存根（约剩 {_est_after // 1000}k；最近 {TOOL_RESULT_EVICT_KEEP_RECENT} 条"
+                f"保持完整，需要详情我会重新读）。\n",
+                "tool_result",
+            )
+        except Exception:
+            pass
+    # M4: 仍超预算时把单条巨无霸(含最近的)截成头+尾,防它躲过回收/压缩撑爆预算
     history_for_send, _capped = _cap_oversized_tool_results(history_for_send, budget=_budget)
     if _capped > 0:
         logger.info(f"工具结果硬上限:本轮把 {_capped} 条过大结果截成头+尾")
         try:
             ui.show_message(
                 f"\n✂️ 有 {_capped} 条过大的工具结果被截断为首尾摘要(需要细节我会重新读指定范围)。\n",
-                "tool_result",
-            )
-        except Exception:
-            pass
-    history_for_send, _evicted = _evict_old_tool_results(history_for_send, budget=_budget)
-    if _evicted > 0:
-        logger.info(f"工具结果回收：本轮截断 {_evicted} 条旧的大工具结果为存根")
-        try:
-            ui.show_message(
-                f"\n♻️ 上下文偏长，本轮把 {_evicted} 条较早的大工具结果折叠为摘要存根"
-                f"（最近 {TOOL_RESULT_EVICT_KEEP_RECENT} 条保持完整；需要详情我会重新读）。\n",
                 "tool_result",
             )
         except Exception:
@@ -1188,20 +1287,19 @@ def _collect_tool_calls(gathered):
     valid_tool_calls = []
     if gathered is None:
         return valid_tool_calls
-    # 合成 id 兜底用单调序号：部分 provider（某些本地模型）不返回 tool_call id，原来回退成
-    # 工具名——同一轮调两次同名工具时两条 id 撞车，AIMessage.tool_calls 与 ToolMessage 配对
-    # 错乱，下一轮 Anthropic/OpenAI 因「重复 tool_use id」抛 400。带序号保证唯一；provider
-    # 给了真 id 时完全不变（or 短路）。序号每次迭代都自增，跨两个 loop 也不重复。
-    _i = 0
+    # 合成 id 兜底：部分 provider（某些本地模型）不返回 tool_call id。id 必须**会话内唯一**
+    # （不只是同一轮内）——工具结果回收按 tool_call_id 记且会持久化，跨轮重复的 id 会让
+    # 新一轮的结果顶着旧 id 被当成"已回收"误折，哪怕它就在最近 keep_recent 条里。用 uuid4
+    # 随机段：跨轮 / 跨线程不撞，重开程序也不会像进程级序号那样归零后与盘上旧 id 重合。
+    # provider 给了真 id 时完全不变（or 短路）。
     for tc in (gathered.tool_calls or []):
         name = tc.get("name", "")
         if name and name in get_tool_map():
             valid_tool_calls.append({
                 "name": name,
                 "args": tc.get("args") or {},
-                "id": tc.get("id") or f"call_{name}_{_i}",
+                "id": tc.get("id") or f"call_{name}_{uuid.uuid4().hex[:12]}",
             })
-        _i += 1
     # 兼容 args JSON 解析失败的工具调用：保持原 fail-open 行为（args={}）
     for tc in (getattr(gathered, 'invalid_tool_calls', None) or []):
         name = tc.get("name", "") or ""
@@ -1209,9 +1307,8 @@ def _collect_tool_calls(gathered):
             valid_tool_calls.append({
                 "name": name,
                 "args": {},
-                "id": tc.get("id") or f"call_{name}_{_i}",
+                "id": tc.get("id") or f"call_{name}_{uuid.uuid4().hex[:12]}",
             })
-        _i += 1
     return valid_tool_calls
 
 
@@ -1332,6 +1429,7 @@ PARALLEL_SAFE_TOOLS = {
     "find_tests", "related_files",  # 测试发现 / 关联文件，纯读无副作用
     "git_diff", "git_log", "git_status", "check_code", "read_background_output",
     "list_background_commands", "fetch_url", "web_search",
+    "read_image",  # 读图：只读文件 + 视觉识别，无磁盘副作用
     "get_project_instructions",  # 读取项目规则文件，只读
 }
 

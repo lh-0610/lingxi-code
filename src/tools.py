@@ -27,7 +27,9 @@ from .limits import (
     RUN_COMMAND_MAX_OUTPUT_CHARS,
     RUN_COMMAND_TIMEOUT_S,
     SEARCH_FILES_CONTEXT_MAX_HITS as _SEARCH_CONTEXT_MAX_HITS,
+    SEARCH_FILES_MAX_CHARS,
     SEARCH_FILES_MAX_RESULTS,
+    SEARCH_LINE_MAX_CHARS,
     SEARCH_IN_FILE_DEFAULT_LIMIT,
     SEARCH_IN_FILE_MAX_LIMIT,
 )
@@ -91,11 +93,29 @@ def _read_one(path, offset, limit, max_chars=READ_FILE_MAX_CHARS):
         reject = _subagent_path_rejection(full, "文件")
         if reject:
             return reject
+        ext = os.path.splitext(full)[1].lower()
+        # 结构化非文本：notebook / PDF 先转成可读文本，再走同一套按行分页
+        if ext == ".ipynb":
+            return _read_ipynb(full, offset, limit, max_chars)
+        if ext == ".pdf":
+            return _read_pdf(full, offset, limit, max_chars)
+        if ext in _IMAGE_EXTS:
+            return (f"这是图片文件（{ext}），read_file 只读文本。"
+                    f'用 read_image(path="{path}") 让视觉模型识别成文字。')
+        # 二进制嗅探：前 8KB 里有 NUL 就当二进制，给清晰说明，而不是 utf-8 硬解出乱码 / 抛 codec 错
+        with open(full, "rb") as f:
+            head = f.read(8192)
+        if b"\x00" in head:
+            return _binary_note(ext)
         with open(full, "r", encoding="utf-8") as f:
             all_lines = f.readlines()
     except Exception as e:
         return f"读取失败: {e}"
+    return _paginate_lines(all_lines, offset, limit, max_chars)
 
+
+def _paginate_lines(all_lines, offset, limit, max_chars):
+    """把若干行文本按 offset/limit/字数上限渲染成 `cat -n` 样式（read_file 与 pdf/ipynb 共用）。"""
     total = len(all_lines)
     if total == 0:
         return "（空文件）"
@@ -137,6 +157,107 @@ def _read_one(path, offset, limit, max_chars=READ_FILE_MAX_CHARS):
     return rendered + footer
 
 
+_BINARY_KINDS = {
+    ".xlsx": "Excel 工作簿", ".xls": "Excel 工作簿", ".xlsm": "Excel 工作簿",
+    ".docx": "Word 文档", ".doc": "Word 文档", ".pptx": "PPT 演示文稿", ".ppt": "PPT 演示文稿",
+    ".zip": "压缩包", ".gz": "压缩包", ".tar": "压缩包", ".7z": "压缩包", ".rar": "压缩包",
+    ".exe": "可执行文件", ".dll": "动态库", ".so": "动态库", ".dylib": "动态库",
+    ".pyc": "Python 字节码", ".class": "Java 字节码", ".o": "目标文件",
+    ".db": "数据库", ".sqlite": "数据库", ".sqlite3": "数据库",
+    ".mp3": "音频", ".wav": "音频", ".mp4": "视频", ".mov": "视频", ".avi": "视频",
+}
+
+
+def _binary_note(ext):
+    kind = _BINARY_KINDS.get(ext, "二进制文件")
+    return (f"这是{kind}（{ext or '无扩展名'}），read_file 只读文本，不硬解二进制（避免乱码）。"
+            "图片用 read_image；PDF / notebook 用 read_file 会自动提取文字；"
+            "其它二进制（Office / 压缩包 / 可执行文件 / 音视频等）请用对应工具或 run_command 处理。")
+
+
+def _read_ipynb(full, offset, limit, max_chars):
+    """Jupyter notebook：JSON 解析后把每个 cell 的源码与输出渲染成可读文本，再按行分页。"""
+    import json
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            nb = json.load(f)
+    except Exception as e:
+        return f"读 notebook 失败: {e}"
+    cells = nb.get("cells") if isinstance(nb, dict) else None
+    if not isinstance(cells, list):
+        return "读 notebook 失败: 不是有效的 .ipynb（缺少 cells 数组）"
+    lines = []
+    for i, cell in enumerate(cells, 1):
+        if not isinstance(cell, dict):
+            continue
+        ctype = cell.get("cell_type", "code")
+        lines.append(f"### Cell {i} [{ctype}]")
+        src = cell.get("source", "")
+        src_text = "".join(src) if isinstance(src, list) else str(src)
+        lines.extend(src_text.splitlines() or ["（空）"])
+        for out in cell.get("outputs", []) or []:
+            if not isinstance(out, dict):
+                continue
+            text = _ipynb_output_text(out)
+            if text:
+                lines.append(f"#### 输出 [{out.get('output_type', '')}]")
+                lines.extend(text.splitlines())
+        lines.append("")
+    if not lines:
+        return "（notebook 没有 cell）"
+    return _paginate_lines(lines, offset, limit, max_chars)
+
+
+def _ipynb_output_text(out):
+    """提取一个 cell 输出的文本：stream / execute_result / display_data / error 都覆盖。"""
+    ot = out.get("output_type", "")
+    if ot == "stream":
+        text = out.get("text", "")
+        return "".join(text) if isinstance(text, list) else str(text)
+    if ot == "error":
+        ename = out.get("ename", "")
+        evalue = out.get("evalue", "")
+        tb = out.get("traceback", []) or []
+        return f"{ename}: {evalue}\n" + "\n".join(str(t) for t in tb)
+    data = out.get("data", {}) or {}
+    text = data.get("text/plain", "")
+    if isinstance(text, list):
+        text = "".join(text)
+    return str(text) if text else ""
+
+
+def _read_pdf(full, offset, limit, max_chars):
+    """PDF：用 pypdf 逐页提取文字（可选依赖，没装就明确提示），再按行分页。"""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return ("读 PDF 需要 pypdf 库（pip install pypdf），当前环境没装。装好后 read_file "
+                "会自动逐页提取文字；扫描件 / 图片型 PDF 提取不到文字，需逐页截图用 read_image。")
+    try:
+        reader = PdfReader(full)
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception:
+                return f"读 PDF 失败: 文件已加密，无法提取文字 {full}"
+        pages = reader.pages
+        if not pages:
+            return "（PDF 没有页面）"
+        lines = []
+        for i, page in enumerate(pages, 1):
+            lines.append(f"### 第 {i} 页")
+            try:
+                text = (page.extract_text() or "").strip()
+            except Exception as e:
+                text = ""
+                lines.append(f"（本页提取失败: {e}）")
+            lines.extend(text.splitlines() if text else ["（本页未提取到文字，可能是扫描件 / 图片型）"])
+            lines.append("")
+    except Exception as e:
+        return f"读 PDF 失败: {e}"
+    return _paginate_lines(lines, offset, limit, max_chars)
+
+
 def _no_ui_refusal(what: str) -> str:
     """没有确认界面、又不是子 Agent 时：默认拒绝，返回给模型的说明；显式打开了
     state.headless_auto_approve（测试这类明确的无界面环境）才放行，返回空串。
@@ -148,11 +269,14 @@ def _no_ui_refusal(what: str) -> str:
             "无界面运行需要显式打开 state.headless_auto_approve。")
 
 
-def _confirm_file_write(full: str, old_content: str, new_content: str):
-    """写盘前的 diff 确认（写盘类工具共用）。
+def _confirm_file_write(full: str, old_content: str, new_content: str,
+                        op: str = "edit", preview: str = ""):
+    """写盘前的 diff 确认（写盘类与路径类工具共用）。
 
     worker 线程算 unified diff → 通过 SignalBridge 投到 UI 主线程弹 diff 卡 →
-    阻塞等用户点完。无 UI（CLI / 测试）时返回 (True, None) 直接放行。
+    阻塞等用户点完。op 说明是哪类操作（edit/copy/delete/move），卡片标题与能否
+    "记住"按它来；preview 非空时直接用它当预览（移动文件没有内容 diff，
+    要展示的是"从哪挪到哪"）。
 
     返回 (allowed, reject_message)：allowed=True 时 reject_message 为 None；
     allowed=False 时 reject_message 是给 AI 的拒绝文案。
@@ -169,29 +293,32 @@ def _confirm_file_write(full: str, old_content: str, new_content: str):
         pass
     ui = getattr(state, "ui_ref", None)
     if ui is None:
-        refusal = _no_ui_refusal("写文件")
+        what = {"delete": "删除文件", "move": "移动文件", "copy": "复制文件"}.get(op, "改文件")
+        refusal = _no_ui_refusal(what)
         return (False, refusal) if refusal else (True, None)
     import difflib as _difflib
     base = os.path.basename(full)
-    diff_text = "".join(_difflib.unified_diff(
-        (old_content or "").splitlines(keepends=True),
-        (new_content or "").splitlines(keepends=True),
-        fromfile=f"a/{base}",
-        tofile=f"b/{base}",
-        n=3,
-    ))
+    diff_text = preview
+    if not diff_text:
+        diff_text = "".join(_difflib.unified_diff(
+            (old_content or "").splitlines(keepends=True),
+            (new_content or "").splitlines(keepends=True),
+            fromfile=f"a/{base}",
+            tofile=f"b/{base}",
+            n=3,
+        ))
     if not diff_text:
         diff_text = f"--- a/{base}\n+++ b/{base}\n(无 diff，可能是看不见的空白差异)\n"
     try:
-        allowed, user_feedback = ui.confirm_edit(full, diff_text)
+        allowed, user_feedback = ui.confirm_edit(full, diff_text, op)
     except Exception as e:
         logger.warning(f"文件写入确认对话框异常，默认拒绝: {e}")
         return False, f"用户确认对话框出错，已拒绝写入: {e}"
     if not allowed:
-        _msg = "已拒绝：用户不允许此次写入。"
+        _msg = "已拒绝：用户不允许此次操作。"
         if user_feedback:
             _msg += f"\n用户补充说明：{user_feedback}"
-        logger.info(f"用户拒绝写入 {full}")
+        logger.info(f"用户拒绝{op}操作 {full}")
         return False, _msg
     return True, None
 
@@ -1073,6 +1200,17 @@ run_command.description += (
 )
 
 
+def _clip_search_line(line: str, at: int = 0) -> str:
+    """搜索结果里的一行：太长就只留匹配位置（at）附近的一段，并说明这一行原本多长。
+
+    一行几万字的多是数据（JSON / 压缩过的 JS / 日志），搜索要的是"在哪"，不是把它整行读进来。"""
+    if len(line) <= SEARCH_LINE_MAX_CHARS:
+        return line
+    start = max(0, min(at - SEARCH_LINE_MAX_CHARS // 4, len(line) - SEARCH_LINE_MAX_CHARS))
+    piece = line[start:start + SEARCH_LINE_MAX_CHARS]
+    return f"{'…' if start else ''}{piece}…[这一行共 {len(line)} 字，只显示匹配附近]"
+
+
 @tool
 def search_in_file(path: str, keyword: str, offset: int = 0, limit: int = SEARCH_IN_FILE_DEFAULT_LIMIT) -> str:
     """在单个文件中搜索关键词，返回匹配的行。
@@ -1095,8 +1233,9 @@ def search_in_file(path: str, keyword: str, offset: int = 0, limit: int = SEARCH
             lines = f.readlines()
         matches = []
         for i, line in enumerate(lines, 1):
-            if keyword.lower() in line.lower():
-                matches.append(f"  L{i}: {line.rstrip()}")
+            at = line.lower().find(keyword.lower())
+            if at >= 0:
+                matches.append(f"  L{i}: {_clip_search_line(line.rstrip(), at)}")
         if matches:
             shown = matches[offset:offset + limit]
             if not shown:
@@ -1133,6 +1272,8 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
       - `file_pattern`：glob 过滤文件名，例如 `*.py` / `*.{ts,tsx}` / `test_*.py`
       - `max_results`：截断阈值（默认 50，超过会提示 "还有 N 处未列出"）
       - `context`：每处匹配前后带几行（默认 2，0 = 只要匹配行）；匹配超过 20 处时自动只给匹配行
+
+    一次最多交回 8000 字（超了会说明还有多少处没列），单行超过 300 字只显示匹配附近的一段。
 
     默认忽略噪声目录：.git / node_modules / __pycache__ / .venv / venv / build / dist 等；
     单文件 > 1MB 自动跳过（避免读到二进制大文件）。
@@ -1222,24 +1363,42 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
         ctx = 2
     if shown > _SEARCH_CONTEXT_MAX_HITS:
         ctx = 0
-    blocks = []
+    out_lines = []      # (这一行的文字, 是不是匹配行)
     for rel, lines, hit_lines in hit_files:
-        block = [f"{rel}（{len(hit_lines)} 处）"]
+        out_lines.append((f"{rel}（{len(hit_lines)} 处）", False))
         hits, last = set(hit_lines), 0
         for ln in hit_lines:
             start, end = max(1, ln - ctx), min(len(lines), ln + ctx)
             if last and start > last + 1:
-                block.append("    …")
+                out_lines.append(("    …", False))
             for i in range(max(start, last + 1), end + 1):
-                block.append(f"  {i:>5}{':' if i in hits else '-'} {lines[i - 1].rstrip()}")
+                text = lines[i - 1].rstrip()
+                if i in hits:
+                    found = pat.search(text)
+                    text = _clip_search_line(text, found.start() if found else 0)
+                else:
+                    text = _clip_search_line(text)
+                out_lines.append((f"  {i:>5}{':' if i in hits else '-'} {text}", i in hits))
             last = max(last, end)
-        blocks.append("\n".join(block))
+
+    # 总量上限：按行截，不把一行切成两半；截了就说清楚列了几处、还剩几处
+    kept, size, listed, clipped = [], 0, 0, False
+    for text, is_hit in out_lines:
+        if kept and size + len(text) + 1 > SEARCH_FILES_MAX_CHARS:
+            clipped = True
+            break
+        kept.append(text)
+        size += len(text) + 1
+        listed += is_hit
 
     note = "" if ctx or not context else f"；匹配超过 {_SEARCH_CONTEXT_MAX_HITS} 处，只列匹配行"
     header = (f"在 {full} 里找到 {total} 处匹配 /{regex}/{note}:\n" if single else
               f"在 {full} 下找到 {total} 处匹配 /{regex}/{scope}，分布在 {len(hit_files)} 个文件{note}:\n")
-    body = "\n".join(blocks)
-    if truncated:
+    body = "\n".join(kept)
+    if clipped:
+        body += (f"\n... [结果超过 {SEARCH_FILES_MAX_CHARS} 字，只列了前 {listed} 处，还有 {total - listed} 处未列出；"
+                 "请缩小 path 或 file_pattern" + ("，或传 context=0 只看匹配行]" if ctx else "]"))
+    elif truncated:
         body += f"\n... [仅显示前 {max_results} 处，还有 {total - max_results} 处未列出，请缩小 path 或 file_pattern]"
     return header + body
 
@@ -1794,13 +1953,21 @@ def _pick_symbol_pos(src: str, name: str, line: int):
     return 0, 0
 
 
+def _non_python_nav_hint(path: str, what: str) -> str:
+    """LSP 没命中后、jedi 只懂 Python：非 .py 文件给诚实提示，别拿 jedi 去解析出误导性空结果。"""
+    return (f"{path} 不是 Python 文件，jedi 降级只支持 Python，无法在此解析{what}。"
+            f"装对应语言的 LSP 服务器（typescript-language-server / gopls / rust-analyzer / "
+            f"clangd / jdtls）可获得精准导航；否则用 search_files 正则搜{what}。")
+
+
 @tool
 def find_definition(name: str, path: str = "", line: int = 0) -> str:
     """跳到符号（函数/类/变量）的定义位置。比 search_files 正则准——LSP / jedi 懂作用域/import/继承。
     name: 符号名，如 "agent_loop" / "Session"。
     path: 指定某文件（相对项目根）里该符号的引用点去跟踪定义；留空则在整个项目搜该符号的定义。
     line: 符号所在行号（1-based，配合 path 用，提高 LSP 精度；留空则自动扫描文件找 name）。
-    LSP 服务器未安装时静默降级到 jedi；jedi 也未装则给出安装提示。"""
+    LSP 多语言（Python/TS/JS/Go/Rust/C-C++/Java），按文件扩展名选服务器；未装对应服务器时
+    Python 降级到 jedi，其它语言给安装提示。jedi 也未装则提示改用 search_files。"""
     proj_dir = _project_cwd()
 
     # ── 优先尝试 LSP ──
@@ -1832,6 +1999,10 @@ def find_definition(name: str, path: str = "", line: int = 0) -> str:
                         f"  • {loc['file']}:{loc['line']}" for loc in resp)
             except Exception:
                 pass  # LSP 不可用，继续降级
+
+    # 非 Python 文件：LSP 没命中就别用 jedi 硬解析（它只懂 Python）
+    if path and os.path.splitext(path)[1].lower() not in (".py", ".pyw"):
+        return _non_python_nav_hint(path, "定义")
 
     # ── 降级到 jedi ──
     try:
@@ -1873,7 +2044,8 @@ def find_references(name: str, path: str = "", line: int = 0) -> str:
     """找符号的所有引用/调用处（谁用了它）。比 search_files 准——按真实绑定找、不误匹配同名。
     name: 符号名。path: 该符号出现的文件（相对项目根）；留空则先在项目里定位其定义再找引用。
     line: 符号所在行号（1-based，配合 path 用，提高 LSP 精度；留空则自动扫描文件找 name）。
-    LSP 服务器未安装时静默降级到 jedi；jedi 也未装则给出安装提示。"""
+    LSP 多语言（Python/TS/JS/Go/Rust/C-C++/Java），按文件扩展名选服务器；未装对应服务器时
+    Python 降级到 jedi，其它语言给安装提示。jedi 也未装则提示改用 search_files。"""
     proj_dir = _project_cwd()
 
     # ── 优先尝试 LSP ──
@@ -1903,6 +2075,10 @@ def find_references(name: str, path: str = "", line: int = 0) -> str:
                         f"  • {loc['file']}:{loc['line']}" for loc in resp)
             except Exception:
                 pass  # LSP 不可用，继续降级
+
+    # 非 Python 文件：LSP 没命中就别用 jedi 硬解析（它只懂 Python）
+    if path and os.path.splitext(path)[1].lower() not in (".py", ".pyw"):
+        return _non_python_nav_hint(path, "引用")
 
     # ── 降级到 jedi ──
     try:
@@ -3125,15 +3301,19 @@ from .tools_codemap import _extract_imports_py, _find_test_files, _module_name_f
 from .tools_rag import search_knowledge  # noqa: E402
 from .tools_explore import explore  # noqa: E402
 from .tools_code import run_code  # noqa: E402
+from .tools_fs import delete_path, move_path, copy_path, make_directory  # noqa: E402
+from .tools_image import read_image, _IMAGE_EXTS  # noqa: E402  _IMAGE_EXTS 供 read_file 指向 read_image
 
 # 导出
 ALL_TOOLS = [
     read_file, read_files, write_file, append_file, edit_file,
+    delete_path, move_path, copy_path, make_directory,
     list_directory, run_command,
     search_in_file, search_files,
     find_definition, find_references,
     find_tests, related_files,
     explore, run_code,
+    read_image,
     remember, forget,
     spawn_agents,
     update_plan,
@@ -3192,9 +3372,14 @@ TOOL_DISPLAY_NAMES = {
     "read_files": "📖 读取多个文件",
     "explore": "🔎 探索代码",
     "run_code": "🧩 批量查看（程序）",
+    "read_image": "🖼 读取图片",
     "write_file": "✏️ 写入文件",
     "append_file": "📝 追加文件",
     "edit_file": "🪄 精确编辑",
+    "delete_path": "🗑 删除文件",
+    "move_path": "📦 移动/重命名",
+    "copy_path": "📄 复制文件",
+    "make_directory": "📁 新建目录",
     "list_directory": "📂 列出目录",
     "run_command": "⚡ 执行命令",
     "search_in_file": "🔍 单文件搜索",

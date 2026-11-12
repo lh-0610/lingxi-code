@@ -44,6 +44,9 @@ def new_verification() -> dict:
         # diff 实际查的是哪个目录；每个改动文件实际在哪儿。失效规则与两个全局标志相同。
         "tests_roots": [],        # 通过的测试实际运行的目录（realpath）
         "diff_roots": [],         # 算作审阅过的 diff 实际覆盖的目录 / 路径（realpath）
+        # 文件 → 已完整看过的**哪一侧**改动（"staged" / "unstaged"）。部分暂存的文件
+        # 两侧各有改动，任一视图都只展示一半；两侧都记过才允许进 diff_roots。
+        "diff_sides": {},
         "dirty_abs": {},          # dirty 路径 → 实际绝对位置（位置未知的不在里面）
         # ── B06 结构化证据 ──
         # 每条记录来自**实际执行位置**（run_tests / 各 checker），带 argv / cwd / 退出码 /
@@ -77,6 +80,7 @@ def reset_verification(v: dict) -> None:
     v["gate_prompted"] = False
     v["tests_roots"] = []
     v["diff_roots"] = []
+    v["diff_sides"] = {}
     v["dirty_abs"] = {}
     # 证据是**本轮**的执行记录：上一轮的已经随 last_run 落盘，留在内存里只会让结果卡
     # 把上轮跑过的命令算进这一轮。change_revision 同归零，它只在一轮之内用于比新旧。
@@ -146,6 +150,7 @@ def mark_dirty(v: dict, rel_path: str, *, abs_path: str | None = None) -> None:
     # 写入即失效：diff 需要重新审查
     v["diff_reviewed"] = False
     v["diff_roots"] = []
+    v["diff_sides"] = {}
     # 写入即失效：测试结果作废（如果有代码文件被改）
     if _is_code_file(rel_path):
         v["tests_run"] = False
@@ -249,6 +254,7 @@ def mark_blind_period(v: dict, root: str, reason: str) -> None:
     v["diff_reviewed"] = False
     v["tests_roots"] = []
     v["diff_roots"] = []
+    v["diff_sides"] = {}
 
 
 # 证据的状态枚举。"没跑起来"(not_run) / "超时" / "取消" 必须和 "跑了且失败"(failed) 分开：
@@ -399,6 +405,31 @@ def mark_diff_reviewed(v: dict, *, root: str | None = None) -> None:
     v["diff_reviewed"] = True
     if root:
         _add_root(v, "diff_roots", root)
+
+
+def record_diff_files(v: dict, paths) -> None:
+    """记下"这几个文件的改动已完整看过"，但**不**解除范围级的审阅义务。
+
+    截断的 diff 里整段展示出来的那些文件走这里：它们是实打实看过的证据，按位置核对时算数，
+    模型不必为了凑记录把它们再看一遍。但整个范围还没看全，`diff_reviewed` 保持 False，
+    闸门继续要求补看剩下的——否则"看了一部分"就成了"全都看过"。
+    """
+    for path in paths:
+        if path:
+            _add_root(v, "diff_roots", path)
+
+
+def record_diff_side(v: dict, path: str, side: str) -> bool:
+    """记下"这个文件的**这一侧**改动已完整看过"，返回两侧是不是都看过了。
+
+    一个文件同时有已暂存和未暂存的改动时，`git diff` 和 `git diff --staged` 各只展示一半。
+    按整个文件记就等于替没露过面的那一半背书，所以这里按"文件 + 侧"记，两侧齐了才算看完。
+    只有一侧有改动时调用方直接算看完（另一侧枚举为空），不必凑齐两侧。
+    """
+    seen = v.setdefault("diff_sides", {}).setdefault(os.path.normcase(_real(path)), [])
+    if side not in seen:
+        seen.append(side)
+    return "staged" in seen and "unstaged" in seen
 
 
 def _located_obligations(v):

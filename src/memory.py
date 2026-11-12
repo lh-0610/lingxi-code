@@ -20,7 +20,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Tool
 from . import state
 from .paths import logger, memory_dir, memory_index
 from .roles import get_system_prompt
-from .content_blocks import is_text_block, is_think_block, block_text
+from .content_blocks import is_text_block, is_think_block, block_text, content_text
 
 
 # 串行化 chat_memory/ 下所有文件的读-改-写。
@@ -715,6 +715,18 @@ def _build_ai_message(gathered, clean_text, tool_calls):
         )
 
 
+def _evicted_ids_for_save(sess, chat_history) -> list:
+    """要落盘的"已回收工具结果"清单：只留历史里还在的（消息被删 / 重新生成后，对应的记录没用了）。"""
+    alive = {m.tool_call_id for m in list(chat_history) if isinstance(m, ToolMessage)}
+    return [i for i in list(getattr(sess, "evicted_tool_results", None) or []) if i in alive]
+
+
+def _evicted_ids_from_data(data) -> list:
+    """从会话文件读"已回收工具结果"清单。旧会话没有这个键 → 空；手改坏了的项丢掉。"""
+    raw = data.get("evicted_tool_results")
+    return [i for i in raw if isinstance(i, str) and i] if isinstance(raw, list) else []
+
+
 def save_session(*, session=None):
     """保存当前会话到本地文件（追加/更新）。失败抛异常（行为与本批之前一致）。
 
@@ -857,6 +869,8 @@ def _save_session_locked(*, session=None, started=None):
         "permission_mode": permission_mode,
         # 思考强度（off/low/high/max）。旧程序读不懂这个键会原样带过去（下面的未知键透传）。
         "reasoning_effort": reasoning_effort,
+        # 已折成存根的工具结果：重开后照样折，发给模型的前缀和关掉之前一样（不然缓存整段重建）
+        "evicted_tool_results": _evicted_ids_for_save(sess, chat_history),
         "schema_version": _SCHEMA_VERSION,
         "progress": {
             "version": _PROGRESS_VERSION,
@@ -1162,6 +1176,7 @@ def load_session(session_id, *, session=None):
         state.current_session_title = data.get("title")
         state.compaction["summary"] = ""
         state.compaction["covered_upto"] = 0
+        state.evicted_tool_results = _evicted_ids_from_data(data)
         tgt = _session_mod.current_session()
     else:
         session.session_token_usage = {"input": 0, "output": 0, "total": 0}
@@ -1171,6 +1186,7 @@ def load_session(session_id, *, session=None):
         session.current_session_id = session_id
         session.current_session_title = data.get("title")
         session.compaction = {"summary": "", "covered_upto": 0}
+        session.evicted_tool_results = _evicted_ids_from_data(data)
 
     # 每个会话拿自己的深拷贝：共享容器会让两个会话的计划/台账互相串改。
     with tgt.snapshot_lock:
@@ -1357,7 +1373,7 @@ def move_sessions_to_no_project(old_path):
     return moved
 
 
-def delete_session(session_id):
+def delete_session(session_id, *, keep_file_history=False):
     from .session import drop as drop_session
 
     session_file = os.path.join(memory_dir(), f"{session_id}.json")
@@ -1377,13 +1393,16 @@ def delete_session(session_id):
         # 留着只会让下次启动为一个不存在的会话报"有操作结果未知"。
         from .run_records import discard_inflight
         discard_inflight(session_id)
-        # B11a：文件撤销恢复材料（写前字节 + 归属记录）同样随会话删除。
+        # B11a：文件撤销恢复材料（写前字节 + 归属记录）通常随会话删除。
         # 只删 file_history 自己目录下的记录文件，不碰用户 stash / Git。
-        try:
-            from .file_history import discard_session
-            discard_session(session_id)
-        except Exception as error:
-            logger.warning(f"清理文件撤销记录失败 {session_id}: {error}")
+        # keep_file_history=True 用于"回退到空"：对话清空了，但磁盘改动还在，
+        # 顶栏撤销仍要能撤回它们——恢复材料必须留下（会话 id 也保留，见 rewind_session）。
+        if not keep_file_history:
+            try:
+                from .file_history import discard_session
+                discard_session(session_id)
+            except Exception as error:
+                logger.warning(f"清理文件撤销记录失败 {session_id}: {error}")
     # 同步清除会话注册表（不再持有该 Session 对象）
     drop_session(session_id)
     logger.info(f"会话已删除: {session_id}")
@@ -1409,6 +1428,7 @@ def reset_history(*, session=None):
         state.shell_cwd = None
         state.compaction["summary"] = ""
         state.compaction["covered_upto"] = 0
+        state.evicted_tool_results = []
         _clear_progress(_sess)
         _sess.background_owner_id = uuid.uuid4().hex
         # 关键：这个 Session 对象已被"回收"成空白新对话，但注册表里还以旧 id 指向它。
@@ -1426,5 +1446,224 @@ def reset_history(*, session=None):
         session.current_session_title = None
         session.shell_cwd = None
         session.compaction = {"summary": "", "covered_upto": 0}
+        session.evicted_tool_results = []
         _clear_progress(session)
         session.background_owner_id = uuid.uuid4().hex
+
+
+# ── 对话时间轴：回退 / 编辑 / 分叉 ──────────────────────────────────────────────
+# 设计契约（与 file_history 的"绝不回滚磁盘"一致）：
+#   这些操作只动**对话与运行态**，绝不撤销磁盘文件改动。要撤销文件改动用顶栏的撤销按钮
+#   （file_history.execute_undo），它独立于这里被清掉的运行态。
+#   没有"每轮进度快照"，所以回退/分叉把运行态（计划/台账/待验证义务/结果卡/任务身份）
+#   重置为干净状态，而不是精确还原到某一轮——这是诚实且无损坏的选择。
+
+
+def truncate_history(sess, cut_index):
+    """把会话历史回退到 cut_index：保留 chat_history[:cut_index]，丢弃其后所有消息。
+
+    cut_index 是"保留多少条"（1 基计数，至少保留 index 0 的 SystemMessage）。
+    在同一 snapshot_lock 临界区内完成截断 + 运行态重置，避免并发存盘拍到半截状态。
+    **不存盘、不碰 file_history**。返回实际丢弃的消息数（0 = 没动）。
+    """
+    hist = sess.chat_history
+    if not isinstance(cut_index, int) or cut_index < 1 or cut_index > len(hist):
+        raise ValueError(f"cut_index 越界: {cut_index}（历史长度 {len(hist)}）")
+    dropped = len(hist) - cut_index
+    if dropped == 0:
+        return 0
+    with sess.snapshot_lock:
+        del hist[cut_index:]
+        # covered_upto 是绝对历史下标，截断后可能指向已删消息 → 摘要必须作废重算
+        sess.compaction = {"summary": "", "covered_upto": 0}
+        sess.evicted_tool_results = _evicted_ids_for_save(sess, hist)
+        # 运行态整体重置（RLock 可重入）：上一轮的 run/结果卡/义务/任务身份都已不属于这段对话
+        _clear_progress(sess)
+    return dropped
+
+
+def rewind_session(sess, cut_index):
+    """回退会话到 cut_index 并落盘。返回丢弃的消息数。
+
+    截断后仍有内容（>1 条）→ 正常存盘覆盖旧正文；
+    回退到空（只剩 SystemMessage）→ 这段对话的正文已不存在，删正文+索引（退出侧栏），
+    会话对象留作空白新对话。但**保留会话 id 与文件撤销材料**：磁盘改动并未被回退，
+    顶栏撤销按钮（读 current_session_id + file_history）仍要能撤回它们；下次发消息时
+    save_session 复用同一 id 重新落盘、重进侧栏，撤销链也接得上。删除只清会话正文，
+    **不撤销任何磁盘文件改动**。
+    """
+    dropped = truncate_history(sess, cut_index)
+    if dropped == 0:
+        return 0
+    if len(sess.chat_history) > 1:
+        save_session(session=sess)
+        return dropped
+    old_id = sess.current_session_id
+    if old_id:
+        delete_session(old_id, keep_file_history=True)
+    # 保留 current_session_id：撤销按钮靠它定位恢复材料。清掉它会让"回退到空"
+    # 之后顶栏撤销立刻失效（材料还在却找不到归属）。key 清空、退出注册表与侧栏，
+    # 下次 save_session 再按 old_id 重新注册。
+    sess.current_session_title = None
+    sess.key = None
+    return dropped
+
+
+def fork_session(sess, cut_index):
+    """从 sess 的 chat_history[:cut_index] 分叉出一个新会话，返回新 Session（已注册、未激活）。
+
+    复制对话前缀与用户设置（模型/模式/权限/思考强度/分类/项目），但运行态从零开始、
+    拿新 id（首次存盘时铸造），**不继承 file_history 撤销记录**（新会话 id 查不到旧记录）。
+    调用方负责激活（_activate_session 会重建系统提示词并重绘）与后续存盘。
+    """
+    from . import session as _sm
+    hist = sess.chat_history
+    if not isinstance(cut_index, int) or cut_index < 1 or cut_index > len(hist):
+        raise ValueError(f"cut_index 越界: {cut_index}（历史长度 {len(hist)}）")
+    new = _sm.Session()
+    new.current_model_index = sess.current_model_index
+    new.agent_mode = sess.agent_mode
+    new.permission_mode = sess.permission_mode
+    new.reasoning_effort = sess.reasoning_effort
+    new.session_kind = sess.session_kind
+    new.rag_mode = sess.rag_mode
+    new.rag_kb_dir = sess.rag_kb_dir
+    new.project = sess.project
+    new.chat_history = list(hist[:cut_index])
+    _sm.register(new)
+    return new
+
+
+# ── 会话重命名 / 跨会话搜索 ─────────────────────────────────────────────────────
+
+
+def _sanitize_user_title(title):
+    """用户手动命名的标题：只折叠空白 + 截断，不像自动标题那样剥掉标点/书名号。
+    用户输入的标点是有意的，保留；上限 100 字符（侧栏显示截断到 12，全名进 tooltip）。
+    """
+    title = re.sub(r"[\r\n\t]+", " ", title or "").strip()
+    return title[:100]
+
+
+def rename_session(session_id, title):
+    """把会话标题改成用户指定的 title。返回是否命中并改名（找不到该 id → False）。
+
+    与 move_sessions_to_no_project 同样的"三处一起改"，缺一不可：
+      1. **内存里已打开的 Session.current_session_title**（前台或后台）：只改磁盘的话，
+         下次 save_session 会按旧内存标题把盘上的新名字覆盖回去——正常流程必现。
+      2. index.json 的 title；3. <id>.json 正文的 title（重启后仍是新名）。
+    三处在同一 _LOCK 临界区内完成。
+
+    **不刷新 updated**：改名是元数据编辑、不是新活动，不该把会话顶到分组最前、
+    打乱用户的历史顺序。空标题（去空白后为空）→ ValueError，交由调用方拦截。
+    """
+    if not session_id:
+        return False
+    clean = _sanitize_user_title(title)
+    if not clean:
+        raise ValueError("会话标题不能为空")
+    renamed = False
+    with _LOCK:
+        from . import session as _sm
+        # 1. 同步内存锚点（最关键）：live_sessions() 在 session._lock 内取一致快照，
+        #    避免后台会话并发 register/rekey/drop 时遍历抛 RuntimeError。
+        #    锁序 memory._LOCK → session._lock，与 save_session→rekey 一致，无死锁。
+        for _sess in _sm.live_sessions():
+            if getattr(_sess, "current_session_id", None) == session_id:
+                _sess.current_session_title = clean
+
+        # 2. index.json
+        if os.path.exists(memory_index()):
+            with open(memory_index(), "r", encoding="utf-8") as f:
+                index = json.load(f)
+            for item in index:
+                if item.get("id") == session_id:
+                    item["title"] = clean
+                    renamed = True
+                    break
+            if renamed:
+                _atomic_write_json(memory_index(), index)
+
+        # 3. 正文（保留 updated 等其它字段，只改 title）
+        session_file = os.path.join(memory_dir(), f"{session_id}.json")
+        if os.path.exists(session_file):
+            with open(session_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["title"] = clean
+            _atomic_write_json(session_file, data)
+            renamed = True
+    if renamed:
+        logger.info(f"会话已重命名: {session_id} → {clean}")
+    return renamed
+
+
+def _search_snippet(text, idx, qlen, radius=30):
+    """命中处前后各取 radius 字符做预览，折叠空白，越界端加省略号。"""
+    start = max(0, idx - radius)
+    end = min(len(text), idx + qlen + radius)
+    frag = re.sub(r"\s+", " ", text[start:end]).strip()
+    return ("…" if start > 0 else "") + frag + ("…" if end < len(text) else "")
+
+
+def search_sessions(query, *, kind=None, project="__all__"):
+    """跨会话搜索：命中标题或对话正文（用户 + 助手的可见文本）的会话列表。
+
+    结果按索引顺序（更新时间倒序）返回，每项：
+      {id, title, project, session_kind, updated, snippet, match_in_title, match_count}
+    snippet 是正文首个命中处的上下文预览（仅标题命中时为 ""）；match_count 是命中的消息条数。
+
+    搜索范围：跳过 SystemMessage、内部消息（resume/recovery/repair/gate/vision_bridge）、
+    思考块与工具结果——只搜真实用户输入与助手可见回复，避免噪声与巨串拖慢。大小写不敏感。
+
+    并发：list_sessions 只在读 index 时持 _LOCK，读完即释放；随后逐个读正文都在锁外
+    （_atomic_write_json 保证读到的是完整旧/新文件，不会读到半截）。本函数不持锁做重 IO，
+    可安全放到 worker 线程跑，调用方（UI）负责不在主线程调用。空查询 → []。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    needle = q.casefold()
+    results = []
+    for entry in list_sessions(project, kind=kind):
+        sid = entry.get("id")
+        if not sid:
+            continue
+        title = entry.get("title") or ""
+        title_hit = needle in title.casefold()
+        path = os.path.join(memory_dir(), f"{sid}.json")
+        try:
+            data = _read_existing_session(path, sid)
+        except Exception as e:
+            # 单个会话读不出（损坏/版本过新）不该中断整次搜索，跳过其正文、仍保留标题命中
+            logger.debug(f"搜索跳过无法读取的会话 {sid}: {e}")
+            data = {}
+        snippet = ""
+        match_count = 0
+        for m in data.get("messages", []):
+            if not isinstance(m, dict):
+                continue
+            if m.get("type") not in ("HumanMessage", "AIMessage"):
+                continue
+            if m.get("lingxi_internal") is True:
+                continue
+            text = content_text(m.get("content"))
+            if not text:
+                continue
+            idx = text.casefold().find(needle)
+            if idx < 0:
+                continue
+            match_count += 1
+            if not snippet:
+                snippet = _search_snippet(text, idx, len(q))
+        if title_hit or match_count:
+            results.append({
+                "id": sid,
+                "title": title,
+                "project": entry.get("project"),
+                "session_kind": entry.get("session_kind", "code"),
+                "updated": entry.get("updated", ""),
+                "snippet": snippet,
+                "match_in_title": title_hit,
+                "match_count": match_count,
+            })
+    return results

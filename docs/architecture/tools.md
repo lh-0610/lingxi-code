@@ -8,19 +8,20 @@
 
 | 工具 | 功能 |
 |------|------|
-| `read_file` | 读取文件（`offset`/`limit` 分页，行号前缀） |
+| `read_file` | 读取文件（`offset`/`limit` 分页，行号前缀）。**按扩展名分派**：`.ipynb` 解析 JSON 渲染每个 cell 的源码与输出（stream/error/display_data 的 text/plain），`.pdf` 用 pypdf 逐页提取文字（可选依赖，没装明确提示 `pip install pypdf`；加密试空密码、扫描件无文字如实说明）；图片扩展名直接指向 `read_image`；其它二进制**前 8KB 嗅探到 NUL 就给清晰说明**（Office/压缩包/可执行文件/音视频…），不再 utf-8 硬解出乱码或抛 codec 错。结构化结果与纯文本共用同一套按行分页（`_paginate_lines`） |
 | `read_files` | 一次读多个文件（最多 8 个、总共 6 万字，超出的列出不读；遥控只读模式下每个路径都过黑名单） |
 | `run_code` | 代码模式：一小段 Python 一轮里连着调好几次只读工具，只交回 print 的内容（`tools_code.py`；执行前语法树检查——不许 import / class / 生成器 / 下划线属性 / 栈帧属性 / .format，只给基本内置函数，60 秒限时；只读、可并行、Plan 放行、遥控拦）。`re` 直接可用（也可以写 `import re`），给的是只有正则函数和标志的精简版——完整模块挂着 enum / functools，顺着 `re.enum.sys` 能摸到整个运行环境；别的 import 被拒时指向 `run_command` 的 stdin（日志里 11 次 import 被拒，5 次是 re）。没有的 `tools.xxx`、`open` 报错时说清该用什么 |
 | `explore` | 派只读探索子代理弄清一个问题，只交回带 `路径:行号` 的报告（`tools_explore.py`；只读、可并行、Plan 放行、遥控拦） |
+| `read_image` | 读图（`tools_image.py`）：png/jpg/jpeg/gif/bmp/webp/tiff → 视觉模型识别成**文本**交回（`question` 指定侧重）。**复用用户上传图片时非视觉模型走的同一条 OCR 桥接**（`models.describe_images_with_vision`），不返回图片块——本项目工具结果一律是字符串（streaming 把 result `str()` 后打码/展示/装 ToolMessage），让 ToolMessage 带多模态块要改多处还要绕开 Anthropic 的 tool_result+图片 "Multimodal data corrupted"，代价是拿到识别文本而非原图。只认栅格图（SVG 是文本→read_file，ico 各家支持不一不收）；20MB 上限防超大 base64；没配视觉模型 / 识别出错 / 空结果都给明确文案。闸门同 fetch_url/web_search（只读+网络外发）：进 Plan 只读、可并行、不建运行记录；**不进遥控只读白名单、不进 explore 子代理工具集**（网络外发默认不给远程/子代理） |
 | `write_file` | 创建/覆盖（**写盘前弹 diff 确认卡**；全量覆盖比 edit 危险） |
 | `append_file` | 追加（**弹 diff 确认卡**） |
 | `edit_file` | 精确字符串替换（比 write_file 安全省 token；**弹 diff 预览卡** + 路径白名单）；成功后回显改完的那一段（带行号、前后各 2 行，超过 16 行只露头尾）——以前只回"第 N 行附近替换 1 处"，模型常再读一遍确认 |
 | `list_directory` | 列目录 |
 | `run_command` | 执行命令（默认 300s 超时、可传 `timeout`；屏蔽交互式，**执行前弹内联确认卡**；cwd = 项目根；流式输出 + taskkill 杀进程树；**`background=True` 转后台**跑 dev server/长服务，立即返回 bg_id；**`stdin` 交给命令标准输入**：多行脚本用 `command="python -"` 加代码一次跑完，不用拼 `python -c`、不在项目里写临时脚本——文件面板语法高亮那次 87 轮里有 25 条 `python -c` 在试库的用法。确认卡在命令下面列出整段输入，危险判定和子 Agent 沙箱检查也扫它；「记住」和 python 命令共用（信任所有 python 类），旧版精确白名单不覆盖带 stdin 的调用；不能和 background 一起用） |
 | `read_background_output` / `list_background_commands` / `stop_background_command` | 管理本会话后台命令（read·list 进 `PLAN_MODE_READONLY_TOOLS`、不弹确认）；通过 `background.py` 获取快照/请求停止，停止后保留结果，失败可重试；应用退出时 `stop_all_background` 统一有界清理 |
-| `search_in_file` | 单文件关键词（`offset`/`limit` 分页） |
-| `search_files` | 跨文件正则搜索（ripgrep 风格，忽略噪声目录）；`path` 给单个文件就只搜这一个、不按 `file_pattern` 筛——以前一律报"目录不存在"，三天里白费 24 轮 |
-| `find_definition` / `find_references` | 跳符号定义 / 找所有引用（LSP→jedi→search 降级链，比正则准；只读、Plan 放行） |
+| `search_in_file` | 单文件关键词（`offset`/`limit` 分页）；单行超过 300 字只显示匹配附近 |
+| `search_files` | 跨文件正则搜索（ripgrep 风格，忽略噪声目录）；`path` 给单个文件就只搜这一个、不按 `file_pattern` 筛——以前一律报"目录不存在"，三天里白费 24 轮。**单行超过 300 字只显示匹配附近的一段、一次最多交回 8000 字**（按行截，说明列了几处、还剩几处）：11-03 两次搜项目根各交回 3 万字（约 1 万 token，之后每轮都带着），95% 是会话 JSON 里一行两万多字的 `"content"` |
+| `find_definition` / `find_references` | 跳符号定义 / 找所有引用（LSP→jedi→search 降级链，比正则准；只读、Plan 放行）。LSP **多语言**：按扩展名选服务器（Python/TS/JS/Go/Rust/C-C++/Java），jedi 只兜 Python，非 Python 且无服务器时提示装服务器 / 用 search_files |
 | `find_tests` / `related_files` | 找某源文件的相关测试 / 列出导入·被导入·相关测试（只读、Plan 放行） |
 | `remember` / `forget` | 长期记忆存取（本地安全操作，**不弹确认**，Plan 模式放行） |
 | `spawn_agents` | 并行派生子 Agent 处理独立子任务（各自隔离 worktree、跑完合并；写工具，Plan/遥控拦） |
@@ -28,15 +29,16 @@
 | `get_project_instructions` | 读目标路径适用的项目规则（CLAUDE.md / AGENTS.md / .lingxirules；只读、Plan 放行） |
 | `notify_user` | 主动给用户推 Telegram 通知（分级；本地安全、Plan 放行） |
 | `code_map` | 代码库符号地图（命名组正则提取函数/类，commonpath 防越界；Plan 只读放行）；`path` 给单个文件就只列这一个 |
-| `run_tests` | 跑 pytest（`_resolve_python()` 选解释器：项目 venv → 开发期 sys.executable → PATH；精炼失败定位 + 总耗时；`encoding=utf-8` 防 GBK 崩） |
-| `git_diff` / `git_log` / `git_status` | 只读 git（看改动/历史/状态；commonpath 越界防护；Plan 只读放行） |
+| `run_tests` | 跑项目测试，**自动认测试工具**（`test_runners.detect`）：Python→pytest、package.json→npm/pnpm/yarn test、pom.xml/build.gradle→Maven/Gradle（优先 mvnw/gradlew）、go.mod→go test、Cargo.toml→cargo test、.sln/.csproj→dotnet test；`k` 按名字筛用例各家语法各自映射。认不出的项目返回说明、改用 `run_command` 跑它自己的测试命令。Python 解释器由 `_resolve_python()` 选：项目 venv → 开发期 sys.executable → PATH；精炼失败定位 + 总耗时；`encoding=utf-8` 防 GBK 崩 |
+| `git_diff` / `git_log` / `git_status` | 只读 git（看改动/历史/状态；commonpath 越界防护；Plan 只读放行）。`git_diff` **不指到单个文件时一次最多 8000 字，`max_chars` 传得再大也不超过**（模型常传 2–3 万把全部改动再看一遍，和它自己发出的改动重复）；超了按文件整段取舍，列出没展示的文件和各自的 `+增 −删`。**指到单个文件不设这个上限**——那是看全一个大改动的唯一办法，非 Git 项目的审阅义务也靠它了结。"还有没覆盖到的改动"那句在截断之后才附上，不会被截掉。**路径与范围都相对项目根**（`git diff --relative`）：项目根是仓库子目录时默认输出相对仓库根，按项目根拼会拼出不存在的路径；顺带把已跟踪改动的范围也收到项目内，与未跟踪新文件一致。截断时**整段展示出来的文件按文件记审阅**、范围看全了（或范围里的改动已被逐个看全）才记范围；**部分暂存的文件按「文件 + 哪一侧」记**（`git diff` 与 `--staged` 各只展示一半），两侧都看过才算这个文件看完，输出点名另一半用哪条命令看。**带路径的视图两个方向都核对另一侧**（未暂存视图查范围内的暂存改动、暂存视图查未暂存 + 未跟踪），完全没出现的文件挡住范围级记录并点名补看命令。判据见 [undo-and-verification.md](undo-and-verification.md) |
 | `git_stage` / `git_unstage` / `git_commit` | git 写操作（暂存/取消暂存/本地提交，**无 push**）；**执行前强制弹确认卡**（按危险操作处理、不给"记住"选项）；路径白名单防注入，commit 不自动暂存、校验信息非空 |
 | `check_code` | 静态检查（lint/语法/类型/编译）：Python 用 `ruff check --select F,E9`（没装退化到 `py_compile`）+ mypy；其它语言用 config 的 `check_command`，没配就跑项目的编译 / 类型检查（`static_checks.py`）；不弹确认；**Plan 模式拦截**（见下） |
 | `apply_patch` | 多文件补丁（Codex 风格 `*** Begin Patch`）：统一校验、确认后，暂存新内容和原文件备份再写入。写入失败回滚，回滚受阻保留备份并报告；审批期间目标变化拒绝覆盖。不承诺崩溃时跨文件原子性。写工具、Plan/遥控自动拦 |
+| `delete_path` / `move_path` / `copy_path` / `make_directory` | 文件系统动词（`tools_fs.py`）：删文件 / 移动·重命名 / 复制 / 建目录。**别用 `run_command` 跑 del、mv、cp、mkdir**——那样确认卡上只有一条命令，用户看不到动的是哪个文件，撤销也接不住。四条边界是刻意的：① **不递归删除**（非空目录直接拒绝，逐个文件删才能逐个确认、逐个撤销，备份量也有界）；② **不覆盖**（目标已存在就拒绝，移动/复制都不偷偷盖掉别人的文件）；③ **删 / 挪永远问、永远不给"记住"**（`confirm_bars._ALWAYS_ASK_PATH_OPS`，信任过的路径、accept_edits / auto 模式都不免；只有 bypass 跳过卡片，但仍留撤销记录），复制按普通写盘规则弹卡；**建目录（`make_directory`）只建空目录、不动已有文件，项目内刻意不弹卡**（建错随时删，无数据丢失风险），但仍守两道闸：**只能在项目根内建**（`_path_inside`，主 Agent 也不许往项目外 / 系统目录乱建）、**无确认界面时默认拒绝**（`_no_ui_refusal`，子 Agent 已在 worktree 沙箱内放行），同名**文件**已存在也拒绝；④ **目录操作不进撤销记录**（备份是逐文件字节的，目录树没有恢复材料），结果里如实写"本次改动不可撤销"。删/挪/复制都过 `_confirm_file_write(op=...)` 弹卡：删除给逐行 `-` 预览（超 200 行只露头尾并说明省了多少），移动给"从哪 → 挪到哪"，二进制文件只报大小和类型不硬塞乱码。符号链接一律拒绝（撤销按 realpath 认路径，链接顶替会恢复错地方）。Plan / 遥控只读 / RAG / 子 Agent 白名单**自动拦住这四个**（那些闸门是白名单，新写工具默认进不去），有测试钉住 |
 | `search_knowledge` | 知识库语义检索（`query` + `scope` 分域，默认 all 各域按配额取；只读、Plan 放行、不弹确认；`kb_dir` 未配置/索引未建/索引锚不一致都返回明确提示而非空结果） |
 | `fetch_url` / `web_search` | 网络只读：`fetch_url` 抓网址（http(s) only、二进制拒绝、无需 key；网站自己拒绝（401/403/429/451/5xx、超时、连接失败）且有 DeepSeek key 时改用 DeepSeek Fetch API 再读一次，被我们 SSRF 检查拦下的和 404 绝不转给第三方；解码依次信响应头 charset → 页面 meta charset → 能完整按 UTF-8 解开 → GB18030（响应头没写 charset 时 requests 给 ISO-8859-1，中文页曾经整页乱码）；HTML 只留正文——去掉导航 / 页眉页脚 / 侧栏 / 维基目录和引用角标，优先取 main / article，表格按行转成「列 | 列」；请求头中文优先，User-Agent 如实写灵犀，冒充 Chrome 实测无益反而被部分站拒）；`web_search` 用 DeepSeek / Tavily / 博查。DeepSeek 是它自家的 Search API（`/v1/tools/search`，和模型共用 `deepseek_api_key`，按成功请求计费、失败和空结果不收；时间范围用查询语法 `after:日期`，查询限 128 字；深度搜索时带 `need_content` 直接拿正文），实测中文结果最好、每次不到 1 秒、都带发布时间，英文会混进其它语言。（`web_search_provider`：auto = 中文先 DeepSeek → 博查 → Tavily，其余先 Tavily → DeepSeek → 博查，没配 key 的跳过；一个出错（超时 / 4xx / 额度用完 / 业务错误码）换下一个；deepseek / tavily / bocha = 只用它、不偷偷换。博查只接普通 Web Search，不接带大模型总结的 AI Search——总结由灵犀自己的模型做；time_range→freshness，news 没给范围按一周。深度搜索开关 `web_search_deep`：并发读前 3 个结果的原文（`_fetch_text`，与 fetch_url 同一套 SSRF/正文提取），按问题词（英文按词、中文按相邻两字）覆盖度挑 3 段，其余结果只留一句话；评测里每次结果更小更准，但模型照样多次追问，总 token 不一定更省，所以默认关。设置 → 高级 → 网络搜索 改这几项即时生效；可选 topic=news、time_range=day/week/month/year，depth=advanced 时段落挑得更准但每次多花一份额度，说明里要求先 basic；开 include_answer 把直接答案放最前；Tavily 的 content 是用 [...] 隔开的几段相关原文，按段保留、每段限 350 字、清掉引用标记——整条硬截会把后几段相关内容砍掉）。均进 Plan 只读、**不进遥控白名单**（网络外发默认不给远程） |
 
-> 写盘类工具（edit/write/append）共用 `tools.py:_confirm_file_write()`：算 unified diff → `ui.confirm_edit` 弹蓝色卡片 → worker 阻塞等审批。CLI/测试无 UI 时直接放行。
+> 写盘类（edit/write/append）与路径类（delete/move/copy）工具共用 `tools.py:_confirm_file_write(full, old, new, op="edit", preview="")`：算 unified diff（`preview` 非空就直接用它——移动没有内容 diff，要展示的是"从哪挪到哪"）→ `ui.confirm_edit(path, diff_text, op)` 弹卡片 → worker 阻塞等审批。`op` 决定卡片标题/图标/徽标（`confirm_bars._PATH_OP_CARDS`）和能不能"记住"；它随 `result["_op"]` 走，Qt Signal 签名和侧栏 `pending_confirm` 回放都不用改。**无界面时默认拒绝**（`_no_ui_refusal`，按 op 说清是"不能改文件"还是"不能删除文件"），只有显式打开 `state.headless_auto_approve`（测试这类明确的无界面环境）才放行——以前 `ui_ref is None` 就直接放行，等于哪条路径没挂上界面就什么都不问。
 
 ### 工具结果里的密钥打码（src/secret_mask.py）
 - **问题**：`run_command` 的子进程环境已剔掉名字像密钥的变量（`tools._scrubbed_env`），但工具**结果**本身没处理。`read_file` 读 config.json、`python -` 脚本 `print(key)`、命令 `echo` 出 key，原文都会进 `chat_history`（落进 chat_memory 的会话 JSON）、日志、界面，并随下一轮请求发给模型服务商；排查问题时常见的 `key[:10]` 同样是泄露。

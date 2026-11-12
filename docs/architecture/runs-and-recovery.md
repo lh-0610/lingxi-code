@@ -14,7 +14,7 @@
 
 ## 工具边界的 inflight sidecar（src/run_records.py + streaming._execute_tool）
 - 有副作用的工具**进入调用前**把一条小记录原子写进 `chat_memory/<id>.inflight.json`；写不成功就抛 `InflightWriteError`、**中止该工具调用**并明确报错。假装建立了恢复点再动手，比根本没有这套记录更糟——用户会以为有记录可查
-- **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径 / 工作目录（B03 实测恒 480 字节；B04 多记 `work_root` 后随项目路径长度增加，154 字符的路径实测 707 字节；都不随历史增长），不复制历史、长参数或完整输出
+- **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径 / 工作目录（B03 实测恒 480 字节；B04 多记 `work_root` 后随项目路径长度增加，154 字符的路径实测 707 字节；都不随历史增长），不复制历史、长参数或完整输出。路径从 `run_records._PATH_ARG_KEYS`（`path/file/file_path/target/cwd/source/destination`）里挑——**`move_path`/`copy_path` 的两端是 `source`/`destination`**，漏了它们这两个工具的执行前记录一个路径都不带，崩溃恢复认不出动了哪些文件
 - **sidecar 内是操作列表不是单个对象**：一条记录结构上不可能覆盖另一条未完成的。目前只读工具才并行、写工具串行，但这个前提不该被隐含依赖
 - **判定哪些工具要记录**：只列纯读工具（`SIDE_EFFECT_FREE_TOOLS`），**不在清单里的一律记录**——未知工具、所有 `mcp_*`、以及 `remember`/`forget`/`notify_user`/`update_plan`/`set_step_status`。后面这几个虽在 `PLAN_MODE_READONLY_TOOLS` 里，却真有副作用（写长期记忆 / 推 Telegram / 改计划），**不能拿 Plan 白名单当这份清单用**
 - **`run_tests` / `check_code` 同样要记录**，尽管名字听起来只是检查：`run_tests` 起 pytest，测试代码是项目自己的代码，写文件建目录都合法；`check_code` 一旦配了 config 的 `check_command` 就执行它，那是用户配的任意命令（`_run_code_check` 先判 `check_command`、再判扩展名，所以 Python 文件同样走它，不限于非 Python 项目）。把它们当纯读的后果实测过——测试真的写出了文件、进程在结果返回前死掉，sidecar 前后都是空的，恢复分类返回空列表，连"结果未知"的线索都没有。判据是**「会不会执行项目代码或用户配置的命令」**，不是名字像不像检查

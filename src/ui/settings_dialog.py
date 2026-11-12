@@ -19,6 +19,7 @@ from ..paths import APP_DIR as _APP_DIR
 from .fonts import MONO_CSS
 from .theme import color as theme_color
 from ..limits import AGENT_MAX_ROUNDS_DEFAULT as _AGENT_MAX_ROUNDS_DEFAULT
+from ..limits import CONTEXT_TRIM_TOKENS_DEFAULT as _CONTEXT_TRIM_TOKENS_DEFAULT
 
 
 
@@ -235,6 +236,12 @@ class SettingsDialog(QDialog):
         kb.addStretch()
         tabs.addTab(kb_scroll, self._settings_icon("search.svg"), "知识库")
 
+        # ── 🔒 权限 tab ──
+        p_scroll, p = self._make_tab()
+        self._add_permission_section(p)
+        p.addStretch()
+        tabs.addTab(p_scroll, self._settings_icon("lock.svg"), "权限")
+
         # ── ⚙ 高级 tab ──
         a_scroll, a = self._make_tab()
 
@@ -251,6 +258,22 @@ class SettingsDialog(QDialog):
         rounds_hint.setObjectName("providerCardHint")
         rounds_hint.setWordWrap(True)
         a.addWidget(rounds_hint)
+
+        self._add_section(a, "上下文长度")
+        self._add_text(a, "context_trim_tokens", "上下文回收线（token）",
+                       placeholder=str(_CONTEXT_TRIM_TOKENS_DEFAULT), default=str(_CONTEXT_TRIM_TOKENS_DEFAULT))
+        trim_hint = QLabel(
+            "每轮发给模型的对话历史涨过这条线，就把较早的大工具结果（读过的文件、搜索结果等）折成一行摘要，"
+            "降到这条线的一半；模型需要时会重新读。界面上的对话不受影响。\n"
+            "• 默认 20 万：一百轮左右的任务一般到不了，不会触发\n"
+            "• 设低（比如 100000）：上下文短；但每回收一次要重建一次缓存，实测长任务总花费多 6% 左右，"
+            "模型也可能重读文件\n"
+            "• 设高：DeepSeek 这类 100 万窗口的模型可以设到几十万，更晚才回收；再高也不会超过模型自己的窗口\n"
+            "• 改动需重启应用才生效"
+        )
+        trim_hint.setObjectName("providerCardHint")
+        trim_hint.setWordWrap(True)
+        a.addWidget(trim_hint)
 
         self._add_section(a, "网络搜索")
         self._add_combo(a, "web_search_provider", "用哪个搜索服务", [
@@ -382,6 +405,102 @@ class SettingsDialog(QDialog):
         icon.addPixmap(_render(normal), QIcon.Normal)
         icon.addPixmap(_render(active), QIcon.Active)
         return icon
+
+    # ── 权限规则（确认卡上「允许并记住」落盘的那层）──────────────────
+
+    def _add_permission_section(self, layout):
+        """列出记住的权限规则，每条可撤销；撤销立即生效，不用重启。"""
+        self._add_section(layout, "记住的权限")
+        hint = QLabel(
+            "确认卡上点「允许并记住」会记到这里，重启应用、新开会话都照样生效。\n"
+            "• 命令按 base 命令记（信任 git = 所有 git 开头的命令）；文件按路径记\n"
+            "• 记的时候有当前项目 → 只对该项目生效；没有项目 → 全局生效\n"
+            "• 危险命令、会写文件的脚本、Git 写操作、派子 Agent 永远记不住，每次都问\n"
+            "• 撤销立即生效，不用重启"
+        )
+        hint.setObjectName("providerCardHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self._rules_container = QWidget()
+        self._rules_layout = QVBoxLayout(self._rules_container)
+        self._rules_layout.setContentsMargins(0, 0, 0, 0)
+        self._rules_layout.setSpacing(8)
+        layout.addWidget(self._rules_container)
+
+        self._refresh_rules_ui()
+
+    def _refresh_rules_ui(self):
+        from .. import permission_rules as _rules
+        while self._rules_layout.count():
+            item = self._rules_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        rules = _rules.list_rules()
+        if not rules:
+            empty = QLabel("（还没有记住任何权限——在确认卡上点「允许并记住」后会出现在这里）")
+            empty.setObjectName("providerCardHint")
+            empty.setWordWrap(True)
+            self._rules_layout.addWidget(empty)
+            return
+        for rule in rules:
+            self._rules_layout.addWidget(self._build_rule_row(rule))
+
+    def _build_rule_row(self, rule):
+        from .. import permission_rules as _rules
+        from .. import projects as _projects
+        row = QFrame()
+        row.setObjectName("providerCard")
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(10)
+
+        badge = QLabel("命令" if rule["kind"] == _rules.KIND_COMMAND else "文件")
+        badge.setObjectName("providerCardHint")
+        badge.setFixedWidth(32)
+        lay.addWidget(badge)
+
+        value = QLabel(rule["value"])
+        value.setObjectName("providerCardTitle")
+        value.setWordWrap(True)
+        value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(value, 1)
+
+        if rule.get("scope") == _rules.SCOPE_PROJECT:
+            proj = rule.get("project") or ""
+            names = {p["path"]: p.get("name") or os.path.basename(p["path"])
+                     for p in _projects.list_projects()}
+            scope = names.get(proj) or os.path.basename(proj) or "项目"
+        else:
+            scope = "全局"
+        scope_lbl = QLabel(scope)
+        scope_lbl.setObjectName("providerCardHint")
+        scope_lbl.setToolTip(rule.get("project") or "所有项目都生效")
+        lay.addWidget(scope_lbl)
+
+        btn = QPushButton("撤销")
+        btn.setObjectName("ruleRevokeBtn")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolTip("撤销后立即恢复询问，本次运行中的会话也一样")
+        btn.clicked.connect(lambda _=False, rid=rule["id"]: self._on_revoke_rule(rid))
+        lay.addWidget(btn)
+        return row
+
+    def _on_revoke_rule(self, rule_id):
+        from .. import permission_rules as _rules
+        from .. import session as _session
+        removed = _rules.remove_rule(rule_id)
+        if removed is not None:
+            # 落盘规则删了，各会话内存里那条也得清掉，否则本次运行还在放行
+            for sess in _session.live_sessions():
+                if removed["kind"] == _rules.KIND_COMMAND:
+                    sess.command_prefix_allowlist.discard(removed["value"])
+                else:
+                    for p in list(sess.edit_path_allowlist):
+                        if _rules.normalize_path(p) == removed["value"]:
+                            sess.edit_path_allowlist.discard(p)
+        self._refresh_rules_ui()
 
     def _make_tab(self):
         """建一个可滚动的 tab 页，返回 (外层 scroll widget, 内容 layout)。"""
@@ -777,6 +896,7 @@ class SettingsDialog(QDialog):
         "rag.rerank_top_n": (int, 20),
         "rag.min_score": (float, 0.0),
         "agent_max_rounds": (int, _AGENT_MAX_ROUNDS_DEFAULT),
+        "context_trim_tokens": (int, _CONTEXT_TRIM_TOKENS_DEFAULT),
     }
 
     # model 列表字段 → config.py 中对应的常量名（用于回填默认值）
@@ -1124,6 +1244,10 @@ class SettingsDialog(QDialog):
             f" background: {input_bg}; }}\n"
             f"#customModelTip {{ color: {muted}; font-size: 12px;"
             f" background: transparent; padding: 4px 2px; }}\n"
+            f"#ruleRevokeBtn {{ background: transparent; border: 1px solid {border};"
+            f" border-radius: 6px; padding: 5px 12px; color: {muted}; font-size: 12px; }}\n"
+            f"#ruleRevokeBtn:hover {{ border-color: {accent}; color: {accent};"
+            f" background: {input_bg}; }}\n"
             f"QScrollArea {{ background: {bg}; border: none; }}\n"
             f"#settingsViewport, #settingsPage {{ background: {bg}; }}\n"
             f"QScrollBar:vertical {{ width: 8px; background: transparent; }}\n"

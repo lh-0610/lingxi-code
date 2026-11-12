@@ -70,7 +70,7 @@ class HeadlessUI:
         self._append(command, "confirm_command")
         return True, ""
 
-    def confirm_edit(self, path: str, diff_text: str) -> tuple[bool, str]:
+    def confirm_edit(self, path: str, diff_text: str, op: str = "edit") -> tuple[bool, str]:
         self._append(f"{path}\n{diff_text}", "confirm_edit")
         return True, ""
 

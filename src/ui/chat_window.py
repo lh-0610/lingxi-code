@@ -45,12 +45,13 @@ from .run_admission import RunAdmissionMixin
 from .queue_dispatch import QueueDispatchMixin
 from .send import SendMixin
 from .run_results import RunResultMixin
+from .timeline import TimelineMixin
 
 
 class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
              SidebarMixin, HeaderMixin, RagSidebarMixin,
              SendMixin, RunAdmissionMixin, QueueDispatchMixin, RunResultMixin,
-             QMainWindow):
+             TimelineMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("灵犀")
@@ -89,6 +90,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.bridge.finished.connect(self._on_finished_sess)
         self.bridge.token_usage.connect(self._update_token_usage)
         self.bridge.sessions_refresh.connect(self._refresh_session_list)
+        self.bridge.session_search_done.connect(self._on_session_search_done)
         self.bridge.confirm_request.connect(self._on_confirm_request)
         self.bridge.edit_confirm_request.connect(self._on_edit_confirm_request)
         self.bridge.remote_submit.connect(self._on_remote_submit)
@@ -414,7 +416,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         rendered_any = False
         labeled = False      # 这一轮的回复已经起过头（实时也是一轮只标一次模型名）
         plan = []
-        for msg in history_snapshot:
+        for idx, msg in enumerate(history_snapshot):
             if self._is_hidden_bridge_message(msg):
                 continue
             note = self._recovery_note_text(msg)
@@ -448,6 +450,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                     self._append_html("\n", "spacer")
                 else:
                     self._append_html(msg.content + "\n\n", "user_msg")
+                # 用户气泡下挂时间轴操作（编辑/回退/分叉），idx 是绝对历史下标
+                self.chat_area.add_user_actions(idx)
             elif hasattr(msg, 'content') and msg.__class__.__name__ == "AIMessage":
                 # content 可能是 str 或 list（含 thinking + text blocks）
                 _ai_content = msg.content
@@ -586,6 +590,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.chat_area.file_clicked.connect(self._on_task_panel_file_clicked)
         # 回复正文里用行内代码写的项目文件路径（可带行号）：同样在文件面板里打开
         self.chat_area.file_link_clicked.connect(self._on_file_link_clicked)
+        # 用户气泡上的时间轴操作（参数是该消息在 chat_history 里的绝对下标）
+        self.chat_area.user_edit_requested.connect(self._on_user_edit)
+        self.chat_area.user_rewind_requested.connect(self._on_user_rewind)
+        self.chat_area.user_fork_requested.connect(self._on_user_fork)
         self.chat_area.meta_provider = self._stream_meta               # 回复上方那行小字里的模式
         self.chat_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         parent_layout.addWidget(self.chat_area, 1)

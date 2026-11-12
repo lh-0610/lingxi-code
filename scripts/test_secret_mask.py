@@ -190,7 +190,7 @@ class _FakeUI:
     def confirm_command(self, command, stdin="", **kwargs):
         return True, ""
 
-    def confirm_edit(self, full, diff_text):
+    def confirm_edit(self, full, diff_text, op="edit"):
         return True, None
 
 

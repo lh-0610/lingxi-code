@@ -21,7 +21,7 @@ src/                     # 主代码
   session.py             # 会话级运行时状态容器（Session 对象）+ 注册表 + 线程路由（current_session / bind_thread / active）—— 多会话并发的地基
   models.py              # BUILTIN_MODEL_LIST + 自定义模型合并 → MODEL_LIST；_create_llm 工厂（带缓存）+ 视觉探测 + get_model_config_issues
   agent.py               # facade（__getattr__ 代理 state）+ agent_loop 主循环 + resolve_bound_llm（按会话 model 分发/bind_tools 缓存）+ 启动拉起 MCP
-  streaming.py           # 全流式：_prepare_stream_history / _handle_stream_chunk / _stream_with_tools + 重试退避 + _execute_tool + 三级历史管理（截断/淘汰/压缩）
+  streaming.py           # 全流式：_prepare_stream_history / _handle_stream_chunk / _stream_with_tools + 重试退避 + _execute_tool + 历史管理（水位线式回收 → 单条截头尾 → LLM 压缩）
   permission_modes.py    # 五种权限模式（自动/手动/接受编辑/计划/跳过权限确认）各放行什么 + 模式名 + 脚本写文件识别；判定在 confirm_bars 开头
   static_checks.py       # 非 Python 的静态检查：编辑后 tree-sitter 语法提示（不拦闸门）+ check_code 跑 tsc / go vet / cargo check / Maven / Gradle / dotnet
   test_runners.py        # 认项目的测试工具（pytest / npm·pnpm·yarn / Maven / Gradle / go / cargo / dotnet）+ 认出 run_command 里跑的测试命令（退出码算测试结果）
@@ -73,6 +73,7 @@ src/                     # 主代码
     run_admission.py     # RunAdmissionMixin + _PendingRunRequest：待启动请求的准入（B09a 统一退出屏障）
     queue_dispatch.py    # QueueDispatchMixin：运行中输入队列的入队、派发与收尾（B09b）
     run_results.py       # RunResultMixin：运行结果卡（B06）与「继续任务」（B04）的 UI 侧
+    timeline.py          # TimelineMixin：用户气泡的编辑/回退/分叉（后端在 memory.truncate_history/rewind_session/fork_session；只动对话与运行态，不撤销磁盘改动）
     message_view.py      # 消息流时间线：每轮一条线串起用户消息、思考、工具卡、计划步骤分段和结果卡；新一轮开始时上一轮的过程收成一行
     fonts.py             # 字体族与字号（界面 / 等宽），全界面唯一来源
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
@@ -83,7 +84,7 @@ src/                     # 主代码
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理；行内代码里的项目文件路径在这里变成 lingxi-file: 链接（只认真实存在的文件，代码块不处理）
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开）
-    sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组）+ 项目添加/切换/移除
+    sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组）+ 项目添加/切换/移除 + 会话行右键重命名 + 跨会话搜索框（标题/正文，worker 扫描经 bridge.session_search_done 回主线程渲染结果，点击跳转）
     header.py            # HeaderMixin：顶栏（撤销/隔离/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描。模型与思考强度已挪到输入框底栏的模型按钮（model_btn / _show_model_menu）。计划|执行同样在底栏的模式按钮
     debug_inspector.py   # F12 调试弹窗（请求/响应/usage 可视化）
     theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
