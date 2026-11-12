@@ -33,6 +33,18 @@ def test_a_multi_line_script_runs_in_one_go(project_dir, headless):
     assert "你好，灵犀" in out and "你好，stdin" in out, out
 
 
+def test_child_python_writes_utf8_whatever_the_system_code_page(project_dir, headless):
+    """子进程的 stdout 是管道，Python 默认按系统代码页编码：英文 Windows（CI 运行机）是
+    cp1252，打印中文直接 UnicodeEncodeError；中文 Windows 是 GBK，打印 emoji 同样崩。
+    上面那条在中文系统上碰巧能过，这条在任何系统上都能抓到。"""
+    out = tools.run_command.func(
+        "python -", stdin="import sys\nprint(sys.stdout.encoding)\nprint('灵犀 \\u2713 \\U0001f600')\n",
+        timeout=60)
+    assert "退出码: 0" in out, out
+    assert "utf-8" in out.lower(), out
+    assert "灵犀 \u2713 \U0001f600" in out, out
+
+
 def test_the_script_can_import_project_modules_and_leaves_no_file(project_dir, headless):
     (project_dir / "helper.py").write_text("VALUE = 42\n", encoding="utf-8")
     before = {p.name for p in project_dir.iterdir()}

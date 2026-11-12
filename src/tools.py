@@ -891,6 +891,21 @@ def _scrubbed_env():
     return env
 
 
+def _command_env():
+    """run_command 子进程的环境：脱敏后的（关了脱敏就是原样继承的）环境变量，
+    再让子进程里的 Python 用 UTF-8 读写标准流。
+
+    子进程的 stdout 是管道，Python 默认按系统代码页编码：英文 Windows 是 cp1252，
+    `print("你好")` 直接抛 UnicodeEncodeError、脚本中途崩掉（CI 运行机上实测）；
+    中文 Windows 是 GBK，打印 emoji 之类同样会崩。而这边解码本来就先试 UTF-8
+    （background._decode_chunk），统一成 UTF-8 两头才对得上。用户自己设过就不覆盖。
+    """
+    env = _scrubbed_env()
+    env = dict(os.environ) if env is None else env
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
 @tool
 def run_command(command: str, timeout: int | None = None, background: bool = False,
                 stdin: str = "") -> str:
@@ -1023,14 +1038,13 @@ def _run_command(command: str, timeout: int | None, background: bool, stdin: str
 
     # stderr 合并进 stdout 走同一管道，按时间顺序输出（不再分开拼接）
     try:
-        _env = _scrubbed_env()          # None = 配置关了脱敏 → 不传 env，继承宿主环境
         proc = subprocess.Popen(
             command, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             cwd=run_cwd,
             bufsize=0,
-            **({"env": _env} if _env is not None else {}),
+            env=_command_env(),
         )
     except Exception as e:
         return f"启动失败: {e}"
