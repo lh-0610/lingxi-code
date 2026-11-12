@@ -343,11 +343,14 @@ class TestRelatedFiles:
         assert "失败" in result or "超出" in result or "不允许" in result
 
     def test_non_python_file_returns_hint(self):
-        """非 Python 文件应返回文件信息（无导入解析时只有建议下一步）。"""
+        """非 Python 文件应返回文件信息（无导入解析时只有建议下一步）。
+
+        用仓库里跟踪着的 config.example.json：config.json 被 .gitignore 忽略，
+        CI 的干净检出里没有它，拿它当素材的话这条只在开发机上能过。"""
         from src.tools import related_files
 
-        result = related_files.func("config.json")
-        assert "config.json" in result
+        result = related_files.func("config.example.json")
+        assert "config.example.json" in result
         # 无导入信息时应有"建议下一步"
         assert "建议下一步" in result
 

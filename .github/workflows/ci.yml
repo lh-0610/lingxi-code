@@ -22,12 +22,11 @@ jobs:
       - name: Ruff check
         run: python -m ruff check src/
 
-      # ── pytest：只装核心依赖跑测试套件 ──
-      # 可选依赖（mcp / tree-sitter / lsp）不装——代码在缺失时优雅降级，测试覆盖降级路径。
-      - name: Install core deps
-        run: >-
-          pip install -c requirements.lock langchain langchain-core langchain-ollama
-          langchain-openai langchain-anthropic langchain-google-genai PySide6 markdown
-          requests pillow numpy chromadb pypdf jedi pytest
+      # ── pytest：装齐 requirements-dev.txt（含可选依赖）跑测试套件 ──
+      # 与 CLAUDE.md 里开发机的装法一致。早先只装核心依赖，但测试套件默认 tree-sitter 语言包 /
+      # mcp / bs4 都在（代码地图、语法高亮、MCP 包装、网页正文提取都按真实库断言），于是从
+      # 2026-10-28 起 CI 一直红、而开发机全绿。缺依赖时的降级路径由各自测试打桩覆盖，不靠少装。
+      - name: Install deps
+        run: pip install -r requirements-dev.txt -c requirements.lock
       - name: Pytest
         run: python -m pytest scripts/ -q
