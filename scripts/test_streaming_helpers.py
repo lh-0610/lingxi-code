@@ -164,7 +164,8 @@ class TestExtractUsage:
         })
 
         assert streaming._extract_usage(gathered) == {
-            "input": 7, "output": 3, "total": 10, "cache_read": 0, "cache_write": 0}
+            "input": 7, "output": 3, "total": 10,
+            "cache_read": None, "cache_write": None, "reasoning": None}
 
     def test_falls_back_to_response_metadata(self):
         gathered = SimpleNamespace(
@@ -177,7 +178,8 @@ class TestExtractUsage:
         )
 
         assert streaming._extract_usage(gathered) == {
-            "input": 4, "output": 6, "total": 10, "cache_read": 0, "cache_write": 0}
+            "input": 4, "output": 6, "total": 10,
+            "cache_read": None, "cache_write": None, "reasoning": None}
 
 
 class TestToolCallCollection:

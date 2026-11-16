@@ -42,8 +42,13 @@
 - 早先 `task_ledger`（每执行一个工具就更新）和 `current_plan`（每次 update_plan 更新）被拼进 system prompt → **每轮 system 都不同 → prompt caching 每轮必然 miss**。缓存机制写对了，却被里面装的东西废掉了，每轮按全价重算角色卡 + 项目上下文 + 项目规则 + 长期记忆
 - 现在拆成两半：`get_system_prompt()` 只留跨轮稳定的（基底/角色卡/日期/项目上下文/项目规则/长期记忆）；`get_volatile_context()` 装每轮会变的（Plan 提示/计划/台账），由 `streaming._append_volatile_context` 作为一条 `HumanMessage` 追加到**发送历史的最末尾**——前面任何一条变了前缀缓存就从那里断掉，追加在最后才能让整段前缀可复用。只改发送副本，不动 `state.chat_history`
 - 易变块用 `<system-reminder>` 包裹：这是系统注入的运行态，不是用户的新要求，模型不该把它当指令执行
-- **缓存命中要能被观测**：`_extract_usage` 采集 `cache_read` / `cache_write`（兼容 Anthropic 的 `input_token_details`、OpenAI 的 `prompt_tokens_details.cached_tokens`、DeepSeek 的 `prompt_cache_hit_tokens`）。prompt caching 省的是**钱**不是 token——命中部分照样计进 `input_tokens`、只是按约 10% 计费，不单独采集就完全看不出有没有生效
-- 回归守卫在 `scripts/test_prompt_cache_stability.py`：这条性质极易被无意破坏（往 `get_system_prompt` 里再拼一个「当前 xxx」就够了），而破坏后一切照常工作、只是**静默开始烧钱**，没有任何报错
+- **缓存命中要能被观测**：`_extract_usage` 采集 `cache_read` / `cache_write`（兼容 Anthropic 的 `input_token_details`、OpenAI 的 `prompt_tokens_details.cached_tokens`、DeepSeek 的 `prompt_cache_hit_tokens`）和思考量 `reasoning`（`output_token_details.reasoning` / `completion_tokens_details.reasoning_tokens`，它是输出的子集，**不再加进 total**）。prompt caching 省的是**钱**不是 token——命中部分照样计进 `input_tokens`、只是按约 10% 计费，不单独采集就完全看不出有没有生效
+- **没上报的分项记 `None`，不填 0**：`_extract_cache_tokens` / `_usage_count` 对缺失、脏值、负数一律返回未知。填 0 会把"这家服务商根本不给缓存字段"（Claude Code CLI 就是）伪装成"缓存一次都没命中"，两者的处置完全相反。未知一路传到运行账本（`run_ledger`）和结果卡（显示"命中率未知"）；只有会话累计和底栏为了显示整数才把未知当 0 加
+- **发送前比对前缀指纹**（`streaming._record_prefix_fingerprint`，在 `_prepare_stream_history` 最后）：对 system、工具名列表、每条消息算 sha256，和**本会话上一轮真正发出去的**那份比，找出第一个不同的位置。必须在发送副本上比而不是 `chat_history`——回收、硬上限截断、压缩都只改发送副本，看原始历史会漏掉恰恰最贵的那几种断裂。指纹模块 `src/cache_fingerprints.py` 不依赖 Qt、只存哈希不存正文，离线回放可复用
+- **末尾那条易变消息不算断裂**：`_append_volatile_context` 给它打 `additional_kwargs["lingxi_kind"]="volatile"`（各 provider 的转换器只挑自己认识的键，不会把它发出去），指纹里 `lingxi_*` 一律排除、比对时丢掉上一轮的这条尾巴。不打标记的话每轮都会误报一次
+- 断裂事件记「第 N 轮从第 k 条消息起与上一轮不同」并尽量标原因：`工具列表变了` / `system 变了` / `工具结果回收`（本轮 `_evicted>0`）/ `历史压缩`（本轮 `_trimmed>0`）/ `未知`。**只进日志和运行账本，不弹给用户**——它是计费诊断，不是要用户处理的错误。基线 `cache_prefix` 是会话级的，跨运行保留（同一会话接着跑，前缀本来就该接着比），`reset_history` / `load_session` 清掉
+- **事后补抓服务端侧失效**：某轮命中率比上一轮骤降（上一轮 ≥50%、跌幅 ≥30 个百分点，用 `Fraction` 比避免浮点误差）、而发送前比对没发现变化时，记一条 `source="服务端侧"`。本地前缀逐字节没变却不再命中，只可能是服务端淘汰或路由换了实例；这是**疑似**不是确证，所以措辞和来源都和本地断裂分开。本轮已检出本地变化时不再补记（`cache_prefix_changed`），否则同一次断裂会被算两遍
+- 回归守卫在 `scripts/test_prompt_cache_stability.py`：这条性质极易被无意破坏（往 `get_system_prompt` 里再拼一个「当前 xxx」就够了），而破坏后一切照常工作、只是**静默开始烧钱**，没有任何报错。指纹与骤降判定的构造用例在 `scripts/test_cache_fingerprints.py`，经过真实发送边界的在 `scripts/test_run_ledger.py`
 
 ## 上下文长度：水位线式回收（streaming.py）
 - **上下文是匀速涨上去的，不是被几个大结果撑大的**：回放 11 月初五个 68–115 轮的真实任务，每轮净增一两千 token，读文件类结果占累计重发量的 50–80%，但 138 条读结果里超过 6k token 的只有 2 条；重复读同一段只占约 2%。所以"读得更省"压不住长任务，到头来只能折掉旧内容
@@ -57,6 +62,7 @@
 - **合成 tool_call_id 必须会话内唯一**（`streaming._normalize_tool_calls`）：部分本地模型不返回 tool_call id，兜底用 `call_<name>_<uuid4 前 12 位>`，**不能用每轮重置的计数器**——回收按 tool_call_id 记且随 `evicted_tool_results` 落盘，跨轮重复的 id 会让新一轮的结果顶着旧 id 被当成"已回收"误折，哪怕它就在最近 keep_recent 条里
 - 之后两步只在回收折不动、仍超出历史预算时才轮得到，仍是无状态的：`_cap_oversized_tool_results`（单条超 2.4 万字截头尾）、`_compact_history`（LLM 把中段压成摘要，留最近 20 条）。全程只动发送副本，`state.chat_history` 和界面保留完整历史
 - 回归守卫在 `scripts/test_tool_eviction.py`（`test_prefix_stays_identical_between_trips`）：和 system prompt 那条一样，破坏之后一切照常工作，只是每轮开始按未命中计费
+- **改发送流程 / 工具输出 / 回收逻辑后，跑一遍离线回放**：`python scripts/replay_sessions.py`（可传会话 ID 或 `--dir`，默认本地 `chat_memory/`）。它把已保存的会话按轮截到"模型即将发出第 N 条 AI 消息"那一刻，走**完整**的 `_prepare_stream_history`（不是只测 `_trim_tool_results` 一步），逐轮报告估算 token、与上一轮第一个不同的位置及原因、是否回收、是否会触发压缩，末尾汇总断裂次数与折算成本。前缀比对复用 `cache_fingerprints`、成本折算复用 `run_ledger` 的单价配置，都不另写一份。**不联网、不写盘、不改 chat_memory**：日志/配置/数据根指到临时目录、MCP 打桩、压缩要调的 LLM 换成占位实例（只报告"这一轮会触发压缩"，不真的压）。**成本是近似**：历史上每轮的 system 和易变运行态无法复原，用的是当前值，且不注入项目上下文/规则/长期记忆；命中按"与上一轮相同的前缀"估算，不是服务商真实上报值——用来看改动前后的**相对退化**。合成会话的回归在 `scripts/test_replay_regression.py`（几十轮、能触发几次回收，断言两次回收之间前缀不断、回收后下一轮起恢复稳定、只有末尾易变消息变化不算断裂；真实会话不进仓库、测试不读 `chat_memory/`）
 
 ## 主循环边界与错误恢复（src/agent.py + llm_errors.py）
 - **轮次上限** `config.AGENT_MAX_ROUNDS`（config.json 的 `agent_max_rounds`，设置弹窗「高级」页可改，默认 50；**设 0 = 不限**）：主循环原本是裸 `while True`，模型只要一直返回 tool_calls 就一直跑，唯一刹车是用户点停止。触顶后停下并把结论**写进 chat_history**（只弹 UI 的话，用户接着发消息时模型看不到自己被截断，会以为任务做完了）

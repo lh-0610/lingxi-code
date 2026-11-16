@@ -25,6 +25,17 @@
   "vision_model_id":   "",
   "default_model_id":  "mimo-v2.5-pro",
 
+  "model_pricing": {
+    "deepseek-flash": {
+      "currency": "CNY",
+      "input_miss_per_million": null,
+      "input_hit_per_million": null,
+      "output_per_million": null,
+      "cache_hit_equivalent_ratio": null
+    }
+  },
+  "_model_pricing_说明": "按实际 model_id 配置，费率单位为所填币种/百万 token。示例值为空，请按服务商官网核对后填写，不代表免费。三个费率齐全且用量已知才显示估算费用；思考 token 已包含在输出内，不重复收费。未配完整价格时，可填 cache_hit_equivalent_ratio（0～1）折算：未命中等价 token = 输入未命中 + 输入命中×折算比 + 输出；该指标不是金额。折算比也留空则只列 token。缓存字段缺失时命中率、折算与费用保留未知；不同币种不相加。配置改动需重启，历史账本金额不会随新配置重算。",
+
   "web_search_api_key": "",
   "bocha_api_key": "",
   "web_search_provider": "auto",

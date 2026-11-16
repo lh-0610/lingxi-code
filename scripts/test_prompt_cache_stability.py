@@ -216,24 +216,26 @@ class TestCacheUsageTracking:
 
     def test_openai_compatible_shape(self):
         from src.streaming import _extract_cache_tokens
-        assert _extract_cache_tokens({"prompt_tokens_details": {"cached_tokens": 3000}}) == (3000, 0)
+        assert _extract_cache_tokens({"prompt_tokens_details": {"cached_tokens": 3000}}) == (3000, None)
 
     def test_deepseek_shape(self):
         from src.streaming import _extract_cache_tokens
-        assert _extract_cache_tokens({"prompt_cache_hit_tokens": 2048}) == (2048, 0)
+        assert _extract_cache_tokens({"prompt_cache_hit_tokens": 2048}) == (2048, None)
 
-    def test_absent_is_zero_not_crash(self):
+    def test_absent_is_unknown_not_zero(self):
+        """没上报 ≠ 零命中：填 0 会把"这家服务商不给缓存字段"伪装成"缓存全没命中"。"""
         from src.streaming import _extract_cache_tokens
-        assert _extract_cache_tokens({"input_tokens": 10}) == (0, 0)
-        assert _extract_cache_tokens(None) == (0, 0)
+        assert _extract_cache_tokens({"input_tokens": 10}) == (None, None)
+        assert _extract_cache_tokens(None) == (None, None)
 
     def test_garbage_details_does_not_raise(self):
         """脏数据不能让整轮的 usage 统计崩掉。"""
         from src.streaming import _extract_cache_tokens
-        assert _extract_cache_tokens({"input_token_details": "oops"}) == (0, 0)
-        assert _extract_cache_tokens({"input_token_details": {"cache_read": "abc"}}) == (0, 0)
+        assert _extract_cache_tokens({"input_token_details": "oops"}) == (None, None)
+        assert _extract_cache_tokens({"input_token_details": {"cache_read": "abc"}}) == (None, None)
 
     def test_usage_dict_always_has_cache_keys(self):
-        """下游（agent 累加、UI 显示）直接取这两个键，缺了会 KeyError。"""
+        """下游（agent 累加、UI 显示）直接取这几个键，缺了会 KeyError。"""
         from src.streaming import _extract_usage
-        assert set(_extract_usage(None)) >= {"input", "output", "total", "cache_read", "cache_write"}
+        assert set(_extract_usage(None)) >= {
+            "input", "output", "total", "cache_read", "cache_write", "reasoning"}

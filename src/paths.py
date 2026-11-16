@@ -1,8 +1,11 @@
 """路径常量 + 日志初始化。
 
-`_app_data_dir()` 永远指向**项目根目录**（src/ 的上一级）。
+`_app_data_dir()` 默认指向**项目根目录**（src/ 的上一级），打包后指向 `%APPDATA%\\灵犀`。
 这样无论模块文件被搬到哪个子目录，对 config.json / chat_memory / logs 的
 访问位置都不变。
+
+可写数据的位置有三个环境变量出口，正常启动和打包后都不设、行为不变：
+`LINGXI_DATA_DIR`（整个数据根）、`LINGXI_LOG_DIR`（只改日志）、`LINGXI_CONFIG_PATH`（只改配置文件）。
 """
 import os
 import sys
@@ -13,11 +16,16 @@ from datetime import datetime, timedelta
 
 def _app_data_dir():
     """运行时**可写数据**根目录（config.json / chat_memory / logs）：
+    - `LINGXI_DATA_DIR`：显式覆盖。测试靠它把整个数据根默认搬到临时目录
+      （scripts/conftest.py 在导入 src 之前设好），漏开 isolated_memory 的用例也写不到用户数据。
     - 开发期：src/ 的上一级目录（项目根）—— 方便开发时数据就在项目里
     - PyInstaller 打包后：`%APPDATA%\\灵犀`（Windows 标准用户数据目录）
       不放 exe 旁边的原因：1) 装到 Program Files 时 exe 目录没写权限；
       2) 不污染安装目录；3) 重装/更新 exe 不丢历史和配置。
     """
+    override = os.environ.get("LINGXI_DATA_DIR")
+    if override:
+        return override
     if getattr(sys, "frozen", False):
         appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
         return os.path.join(appdata, "灵犀")
@@ -89,6 +97,15 @@ def memory_index():
 
 def role_config():
     return os.path.join(memory_dir(), "role_config.json")
+
+
+def theme_config_path():
+    """主题选择持久化文件（按当前上下文）。
+
+    必须是函数而不是模块常量：常量在导入时就按当时的 MEMORY_DIR 拼死了，
+    set_data_dir / 测试隔离都管不到它，切主题会写进用户真实的 chat_memory。
+    """
+    return os.path.join(memory_dir(), "theme_config.json")
 
 
 def projects_file():

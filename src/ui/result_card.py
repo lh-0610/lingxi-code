@@ -130,11 +130,13 @@ class ResultCard(QFrame):
             # 以前按钮压在一串检查记录下面，跑满轮数时得往下翻才找得到。
             self._add_resume(col)
             self._add_buttons(col)
+            self._add_usage(col)
             self._add_files(col)
             self._add_validations(col)
             self._add_pending(col)
             self._add_save_note(col)
         else:
+            self._add_usage(col)
             self._add_files(col)
             self._add_validations(col)
             self._add_pending(col)
@@ -142,6 +144,12 @@ class ResultCard(QFrame):
             self._add_buttons(col)
 
     # ── 各区块 ──
+
+    def _add_usage(self, col):
+        for line in self.view.get("usage_lines") or []:
+            # 不用 _soft_wrap：这行每个字段都短、且以空格分隔，交给 Qt 按词换行；
+            # 强插换行点会把"75.0%"劈成两半。
+            col.addWidget(_label(line, color=_P["muted2"], size=12))
 
     def _add_files(self, col):
         files = self.view.get("files") or []

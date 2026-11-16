@@ -10,11 +10,12 @@ related_files 对没有 import 解析的语言（Java、Go、Rust……）给出
 import math
 import os
 import re
+import stat
 from collections import Counter
 
 from . import codeintel
 from .tools_common import _SEARCH_MAX_FILE_SIZE
-from .tools_codemap import _is_noise_dir, _iter_project_files
+from .tools_codemap import _file_selected, _is_noise_dir, _iter_project_files
 from .workspace_anchor import _git
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
@@ -22,6 +23,8 @@ _MAX_DEFINERS = 6           # 一个名字定义在超过这么多文件里就�
 _SCAN_MAX_FILES = 5000      # 超大仓库只看前这么多个源码文件，别让每条消息都卡好几秒
 _MEMBER_WEIGHT = 0.2        # 方法名的引用权重（见 build_graph）
 _MIN_EDGE_WEIGHT = 0.3      # 比这弱的边不要：一个方法名用一次、只有一处定义是 0.2~0.4
+# 探测"点名的目录是否被忽略"用的假文件名：不带扩展名（避开 `*.log` 这类规则）、不会真实存在
+_IGNORE_PROBE = "lingxi-ignore-probe-9f3a2c"
 # 到处都有的方法名：哪个文件定义了它们都说明不了谁依赖谁
 _GENERIC_NAMES = {
     "main", "init", "__init__", "setup", "teardown", "run", "get", "set", "new", "add", "remove",
@@ -52,25 +55,57 @@ def file_symbols(abs_path: str, text: str) -> list[dict]:
     return syms
 
 
-def project_files(root: str, exts):
-    """项目里的源码文件 (绝对路径, 相对路径)。git 仓库按 git ls-files 列（跳过 .gitignore 里的
-    tmp/、构建产物这类目录——灵犀自己的仓库里 tmp/ 下的测试临时文件曾经把概览占满），
-    不是 git 仓库就遍历目录、跳过常见噪声目录。"""
-    out, _err = _git(root, "ls-files", "-co", "--exclude-standard", "-z")
+def project_files(root: str, exts=None, *, patterns=None, include_ignored: bool = False,
+                  named: bool = False):
+    """按 Git 清单枚举 (绝对路径, 相对路径)；patterns 优先于 exts，include_ignored 改用遍历。
+
+    named=True 表示 root 是用户点名的子目录：它是不是"被忽略的目录"按"在里面新建一个
+    普通文件会不会被忽略"来判，是才遍历（见下面的分支注释）。"""
+    out = None
+    if not include_ignored:
+        out, _err = _git(root, "ls-files", "-co", "--exclude-standard", "-z")
+    if named and out is not None:
+        # 问 Git：在这个目录里新建一个普通文件会不会被忽略。三种写法都判为是——目录内
+        # .gitignore 写 `*`（含 `*` + `!.gitignore`）、根写 `build/*`、根写 `logs/`。
+        # 不能看"目录里有没有被忽略的文件"：源码目录几乎总有日志 / .env / __pycache__，
+        # 那样点名子目录就等于不遵守 .gitignore，.env.local 这类密钥文件会被搜出来交给模型。
+        # 也不能只 check-ignore 目录本身：前两种写法它说目录没被忽略。
+        git_root, _err = _git(root, "rev-parse", "--show-toplevel")
+        if git_root:
+            # 路径相对仓库根、命令也在仓库根跑：项目根可能是仓库的子目录
+            relative = os.path.relpath(root, git_root).replace(os.sep, "/")
+            probe = _IGNORE_PROBE if relative == "." else f"{relative}/{_IGNORE_PROBE}"
+            # 不带 -q：_git 把非零退出码当失败给 None。被忽略时 check-ignore 打印路径（退出 0），
+            # 没被忽略退出 1 → None，用输出真假判断即可；真出错也是 None → 保守地继续用清单。
+            ignored, _err = _git(git_root, "check-ignore", "--no-index", "--", probe)
+            if ignored:
+                out = None
+    elif out == "":
+        # 没点名（项目根、代码地图）保持原样：只有目录**本身**被忽略才遍历。
+        # 从仓库根核对目录本身，避免把目录内的「*」规则误当成目录被忽略——否则根 .gitignore
+        # 写 `*` 时，默认的全项目搜索会把被忽略的文件也放进来。
+        git_root, _err = _git(root, "rev-parse", "--show-toplevel")
+        if git_root:
+            relative = os.path.relpath(root, git_root)
+            if relative != ".":
+                ignored, _err = _git(git_root, "check-ignore", "--", relative)
+                if ignored:
+                    out = None
     if out is None:
-        yield from _iter_project_files(root, exts)
+        yield from _iter_project_files(root, exts, patterns=patterns)
         return
     for rel in sorted(set(out.split("\0"))):
-        if not rel or not rel.lower().endswith(exts):
+        if not rel or not _file_selected(rel.rsplit("/", 1)[-1], exts, patterns):
             continue
         parts = rel.split("/")
         if any(_is_noise_dir(p) for p in parts[:-1]):
             continue
         abs_path = os.path.join(root, *parts)
         try:
-            if os.path.getsize(abs_path) > _SEARCH_MAX_FILE_SIZE:
-                continue
+            st = os.stat(abs_path)
         except OSError:          # 删了但还在索引里
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _SEARCH_MAX_FILE_SIZE:
             continue
         yield abs_path, rel
 

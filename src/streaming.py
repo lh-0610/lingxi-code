@@ -785,77 +785,50 @@ def _llm_endpoint() -> str:
     return ""
 
 
-def _extract_cache_tokens(um) -> tuple[int, int]:
-    """从 usage_metadata 里挖出缓存读/写 token 数，返回 (cache_read, cache_write)。
+def _usage_count(data, *keys):
+    if not isinstance(data, dict):
+        return None
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
 
-    为什么要采集：prompt caching 省的是**钱**不是 token——被缓存的输入照样计进
-    input_tokens，只是按约 10% 计费。只看 input/output 的话，缓存命中与否完全看不出来，
-    "system prompt 保持稳定"这件事就成了无法验证的信条。
 
-    各家字段名不同，都兜一遍：LangChain 归一化到 input_token_details（Anthropic 的
-    cache_read / cache_creation 也落在这里），OpenAI 兼容协议走 prompt_tokens_details
-    的 cached_tokens，DeepSeek 直接给 prompt_cache_hit_tokens。
-    """
+def _extract_cache_tokens(um) -> tuple[int | None, int | None]:
+    """缺失字段保留未知，不能把未上报误当成零命中。"""
     if not isinstance(um, dict):
-        return 0, 0
-    det = um.get("input_token_details") or um.get("prompt_tokens_details") or {}
-    if not isinstance(det, dict):
-        det = {}
-    read = (det.get("cache_read") or det.get("cache_read_input_tokens")
-            or det.get("cached_tokens") or um.get("prompt_cache_hit_tokens") or 0)
-    write = (det.get("cache_creation") or det.get("cache_creation_input_tokens") or 0)
-    try:
-        return int(read or 0), int(write or 0)
-    except (TypeError, ValueError):
-        return 0, 0
+        return None, None
+    details = um.get("input_token_details") or um.get("prompt_tokens_details")
+    read = _usage_count(details, "cache_read", "cache_read_input_tokens", "cached_tokens")
+    write = _usage_count(details, "cache_creation", "cache_creation_input_tokens")
+    if read is None:
+        read = _usage_count(um, "prompt_cache_hit_tokens", "cache_read_input_tokens")
+    if write is None:
+        write = _usage_count(um, "cache_creation_input_tokens")
+    return read, write
 
 
 def _extract_usage(gathered):
-    """从累加的 AIMessageChunk 提取 token 用量（含 prompt cache 命中情况）"""
-    usage = {"input": 0, "output": 0, "total": 0, "cache_read": 0, "cache_write": 0}
-    if gathered is None:
+    """提取输入、输出、缓存和思考用量；思考是输出的子集。"""
+    usage = dict.fromkeys(("input", "output", "total", "cache_read", "cache_write", "reasoning"))
+    sources = [getattr(gathered, "usage_metadata", None)]
+    for field in ("response_metadata", "additional_kwargs"):
+        metadata = getattr(gathered, field, None)
+        if isinstance(metadata, dict):
+            sources.append(metadata.get("token_usage") or metadata.get("usage"))
+    for data in sources:
+        if not isinstance(data, dict) or not data:
+            continue
+        usage["input"] = _usage_count(data, "input_tokens", "prompt_tokens")
+        usage["output"] = _usage_count(data, "output_tokens", "completion_tokens")
+        usage["total"] = _usage_count(data, "total_tokens")
+        usage["cache_read"], usage["cache_write"] = _extract_cache_tokens(data)
+        details = data.get("output_token_details") or data.get("completion_tokens_details")
+        usage["reasoning"] = _usage_count(details, "reasoning", "reasoning_tokens")
+        if usage["input"] is not None and usage["output"] is not None:
+            usage["total"] = usage["input"] + usage["output"]
         return usage
-
-    try:
-        # LangChain >= 0.2 的 usage_metadata（Anthropic / OpenAI 均支持）
-        um = getattr(gathered, 'usage_metadata', None)
-        if um and isinstance(um, dict):
-            usage["input"] = um.get("input_tokens", 0) or 0
-            usage["output"] = um.get("output_tokens", 0) or 0
-            usage["total"] = um.get("total_tokens", 0) or 0
-            usage["cache_read"], usage["cache_write"] = _extract_cache_tokens(um)
-            if usage["total"] == 0 and (usage["input"] or usage["output"]):
-                usage["total"] = usage["input"] + usage["output"]
-            return usage
-
-        # 回退: response_metadata（OpenAI 兼容协议）
-        rm = getattr(gathered, 'response_metadata', None) or {}
-        tu = rm.get('token_usage', rm.get('usage', {}))
-        if tu and isinstance(tu, dict):
-            usage["input"] = tu.get("prompt_tokens", tu.get("input_tokens", 0)) or 0
-            usage["output"] = tu.get("completion_tokens", tu.get("output_tokens", 0)) or 0
-            usage["total"] = tu.get("total_tokens", 0) or 0
-            usage["cache_read"], usage["cache_write"] = _extract_cache_tokens(tu)
-            if usage["total"] == 0 and (usage["input"] or usage["output"]):
-                usage["total"] = usage["input"] + usage["output"]
-            return usage
-
-        # 最后尝试从 additional_kwargs 提取
-        ak = getattr(gathered, 'additional_kwargs', None) or {}
-        tu = ak.get('token_usage', ak.get('usage', {}))
-        if tu and isinstance(tu, dict):
-            usage["input"] = tu.get("prompt_tokens", tu.get("input_tokens", 0)) or 0
-            usage["output"] = tu.get("completion_tokens", tu.get("output_tokens", 0)) or 0
-            usage["total"] = tu.get("total_tokens", 0) or 0
-            usage["cache_read"], usage["cache_write"] = _extract_cache_tokens(tu)
-            if usage["total"] == 0 and (usage["input"] or usage["output"]):
-                usage["total"] = usage["input"] + usage["output"]
-            return usage
-
-    except Exception as e:
-        logger.warning(f"提取 token 用量失败: {e}")
-        return usage
-
     return usage
 
 
@@ -937,7 +910,10 @@ def _append_volatile_context(messages):
     # 历史的处理——思考模式下它只保留"最后一条 user 消息之后"的思考内容。以前计划一建好
     # 尾部才冒出这条消息，前十几轮累积的思考被整段丢掉，前缀缓存从用户原话之后全部失效
     # （任务七、八各白付一次 5 万 / 8 万 token 的未命中），计划建好之前每轮还在重复发这些思考。
-    return list(messages) + [HumanMessage(content=text or _EMPTY_VOLATILE)]
+    # lingxi_kind 只给本地指纹用（发送时被各 provider 的转换器忽略），标记"这条是每轮
+    # 都会变的尾巴"，比对前缀时把它排除，否则每轮都会误报一次断裂。
+    return list(messages) + [HumanMessage(content=text or _EMPTY_VOLATILE,
+                                          additional_kwargs={"lingxi_kind": "volatile"})]
 
 
 # 没有运行态时追加的固定内容（见 _append_volatile_context）
@@ -1068,7 +1044,30 @@ def _prepare_stream_history(ui):
         system_prompt=_system_prompt,
         max_tokens=getattr(state.llm, "max_tokens", None),
     )
+    _record_prefix_fingerprint(history_for_send, evicted=_evicted > 0, compacted=_trimmed > 0)
     return history_for_send, debug_rec
+
+
+def _record_prefix_fingerprint(history_for_send, *, evicted, compacted):
+    """发送前比对前缀指纹，断裂只进日志和运行账本，不弹给用户。
+
+    必须在这里（真正发出去的那份 history 上）比，不能在 chat_history 上比：回收、
+    截断、压缩都只改发送副本，看原始历史会漏掉恰恰最贵的那几种断裂。
+    """
+    from . import session as _session
+    from .cache_fingerprints import compare_prefix, fingerprint_history
+    from .run_ledger import record_cache_event
+    try:
+        sess = _session.current_session()
+        current = fingerprint_history(history_for_send, get_tool_map().keys())
+        round_index = int(getattr(sess, "run_round_index", 0) or 0) + 1
+        event = compare_prefix(getattr(sess, "cache_prefix", None), current,
+                               round_index=round_index, evicted=evicted, compacted=compacted)
+        sess.cache_prefix = current
+        sess.cache_prefix_changed = event is not None
+        record_cache_event(sess, event)
+    except Exception as error:      # 诊断失败不能把整轮请求带崩
+        logger.warning(f"前缀缓存比对失败（本轮跳过）: {error}")
 
 
 def _chunk_has_visible(chunk) -> bool:
@@ -1747,6 +1746,12 @@ def _execute_tool(tc, ui, _preinvoked=None):
         result = _mask_secrets(str(result))
     except Exception as _mask_err:
         logger.warning(f"工具结果打码失败（按原文继续）: {_mask_err}")
+
+    # 运行账本：所有拒绝闸门都在上面，走到这里工具真的跑过了（含并行预取）。
+    # 字数按打码后的结果算——那才是进历史、下一轮要重新发出去并计费的内容。
+    _ledger = getattr(_sess, "run_ledger", None)
+    if _ledger is not None:
+        _ledger.record_tool(name, len(str(result)))
 
     # 流式工具（run_command）执行过程中已经把每行 stdout 实时 push 到 UI 了；
     # 这里若再 push 一次 result，会把所有输出在末尾**重复显示一遍**。

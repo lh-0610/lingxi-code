@@ -184,6 +184,71 @@ def is_resumable(snapshot, live_run_id=None):
     return snapshot.get("outcome") in _RESUMABLE_OUTCOMES
 
 
+def _fmt_count(value):
+    """token 数照实显示：未知就是未知，**不写 0**（0 会被读成"真的一次都没命中"）。"""
+    if value is None:
+        return "未知"
+    if isinstance(value, float) and not value.is_integer():
+        return f"{value:,.1f}"
+    return f"{int(value):,}"
+
+
+def _counts_active(counts):
+    return bool(counts.get("rounds")) or any(
+        isinstance(value, (int, float)) and value > 0 for value in counts.values())
+
+
+def _hit_rate_text(counts):
+    read, inp = counts.get("cache_read"), counts.get("input")
+    if not isinstance(read, int) or not isinstance(inp, int) or inp <= 0:
+        return "命中率未知"
+    return f"命中率 {read * 100 / inp:.1f}%"
+
+
+def _usage_text(counts):
+    parts = [f"{_fmt_count(counts.get('rounds'))} 轮",
+             f"输入 {_fmt_count(counts.get('input'))}",
+             f"输出 {_fmt_count(counts.get('output'))}"]
+    if counts.get("reasoning"):
+        parts.append(f"思考 {_fmt_count(counts['reasoning'])}")
+    parts.append(_hit_rate_text(counts))
+    return " · ".join(parts)
+
+
+def _cost_text(ledger):
+    """有单价才说金额；没配单价退到"未命中等价 token"，两者都没有就只列 token。"""
+    cost = ledger.get("cost")
+    if isinstance(cost, dict) and cost.get("currency") and cost.get("amount") is not None:
+        return f"费用 {cost['currency']} {cost['amount']:.6f}"
+    equivalent = ledger.get("equivalent_tokens")
+    if equivalent is not None:
+        return f"未命中等价 token {_fmt_count(equivalent)}"
+    return ""
+
+
+def usage_lines(snapshot):
+    """结果卡的用量行：轮数、token、命中率，有单价时给金额。
+
+    金额取账本快照里**收尾时算好的**数，不在这里按当前配置重算：改过单价之后重绘
+    历史卡片，会把过去的运行按新价格重新标价，那是改写事实。
+    """
+    ledger = snapshot.get("ledger") if isinstance(snapshot, dict) else None
+    if not isinstance(ledger, dict):
+        return []
+    total = ledger.get("total")
+    if not isinstance(total, dict) or not _counts_active(total):
+        return []
+    line = f"用量：{_usage_text(total)}"
+    cost = _cost_text(ledger)
+    if cost:
+        line = f"{line} · {cost}"
+    lines = [line]
+    subagents = ledger.get("subagents")
+    if isinstance(subagents, dict) and _counts_active(subagents):
+        lines.append(f"其中子 Agent：{_usage_text(subagents)}")
+    return lines
+
+
 def describe(snapshot, *, live_run_id=None):
     """把快照翻译成结果卡的全部内容。返回纯数据 dict，便于逐条断言。"""
     if not isinstance(snapshot, dict):
@@ -269,6 +334,7 @@ def describe(snapshot, *, live_run_id=None):
         "has_pending": bool(pending_files or pending_reason
                             or pending.get("tracking_incomplete")),
         "save_note": save_note,
+        "usage_lines": usage_lines(snapshot),
         "diff_reviewed": bool((snapshot.get("evidence") or {}).get("diff_reviewed")),
         "display_source": snapshot.get("display_source") or "live",
         # 有真实资料才给入口：没有目录就点不出差异，没有证据就没有输出可看。
@@ -294,6 +360,7 @@ def plain_text(view) -> str:
     lines = [view["title"]]
     if view["reason"]:
         lines.append(f"原因：{view['reason']}")
+    lines.extend(view.get("usage_lines") or [])
     if view["files_caption"]:
         lines.append(f"{view['files_caption']}：{'、'.join(view['files'])}")
     for row in view["validations"]:

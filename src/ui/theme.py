@@ -6,7 +6,7 @@ load/save_theme_choice 负责把选中的主题持久化到 chat_memory/theme_co
 import json
 import os
 
-from ._base import THEME_CONFIG_PATH
+from ..paths import theme_config_path
 from .fonts import UI_CSS
 
 
@@ -573,7 +573,7 @@ def color(key):
 def load_saved_theme():
     """读取持久化的主题选择，失败回到默认"""
     try:
-        with open(THEME_CONFIG_PATH, "r", encoding="utf-8") as f:
+        with open(theme_config_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
         name = data.get("theme")
         if name in THEMES:
@@ -585,8 +585,9 @@ def load_saved_theme():
 
 def save_theme_choice(name):
     try:
-        os.makedirs(os.path.dirname(THEME_CONFIG_PATH), exist_ok=True)
-        with open(THEME_CONFIG_PATH, "w", encoding="utf-8") as f:
+        path = theme_config_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump({"theme": name}, f, ensure_ascii=False, indent=2)
     except Exception:
         pass

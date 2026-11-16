@@ -109,3 +109,9 @@
 | `chat_memory/ui_prefs.json` | UI 偏好（如关闭按钮记住的选择） |
 | `chat_memory/theme_config.json` | 主题选择（light / dark） |
 | `logs/YYYYMMDD.log` | 按日期分的日志 |
+
+这些位置全部由 `src/paths.py` 的函数在**调用时**按当前数据根算出（`memory_dir()` / `memory_index()` /
+`theme_config_path()` / `rag_index_dir()` / `permission_rules_file()` …），不要在别的模块导入期拼成常量
+——常量会把导入那一刻的数据根固化，`set_data_dir` 的线程本地上下文和测试隔离都改不动它。
+测试里整个数据根默认被 `LINGXI_DATA_DIR` 搬到临时目录（`scripts/conftest.py`，守它的是
+`scripts/test_test_isolation.py`）。

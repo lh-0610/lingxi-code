@@ -307,3 +307,6 @@ def _context_trim_tokens_from(cfg: dict) -> int:
 
 
 CONTEXT_TRIM_TOKENS: int = _context_trim_tokens_from(_config)
+
+_model_pricing = _config.get("model_pricing")
+MODEL_PRICING: dict = _model_pricing if isinstance(_model_pricing, dict) else {}

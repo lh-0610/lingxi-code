@@ -7,6 +7,7 @@ _score_test_candidate 等），被 test_related_files 直接 import → 由 tool
 import os
 import re
 import ast as _ast
+import fnmatch
 
 from langchain_core.tools import tool
 
@@ -84,15 +85,20 @@ def _is_noise_dir(name: str) -> bool:
     return name in _SEARCH_IGNORE_DIRS or name.startswith(".")
 
 
-def _iter_project_files(root: str, extensions: tuple = (".py",), max_file_size: int = 0):
-    """遍历项目根下的文件，跳过噪声目录，返回 (absolute_path, relative_path) 元组。
-    max_file_size <= 0 时用默认 _SEARCH_MAX_FILE_SIZE。"""
+def _file_selected(fname: str, extensions, patterns) -> bool:
+    if patterns is not None:
+        return any(fnmatch.fnmatch(fname, p) for p in patterns)
+    return extensions is None or os.path.splitext(fname)[1].lower() in extensions
+
+
+def _iter_project_files(root: str, extensions: tuple | None = (".py",), max_file_size: int = 0,
+                        *, patterns=None):
+    """跳过噪声目录的遍历兜底；max_file_size <= 0 时用默认大小上限。"""
     _max = max_file_size if max_file_size > 0 else _SEARCH_MAX_FILE_SIZE
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not _is_noise_dir(d)]
         for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in extensions:
+            if not _file_selected(fname, extensions, patterns):
                 continue
             abs_path = os.path.join(dirpath, fname)
             try:

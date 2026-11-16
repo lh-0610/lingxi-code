@@ -12,6 +12,20 @@
 - **运行来源由程序填写**：`describe_source` 取最后一条**真实**用户消息。自动修复提示、完成闸门提示、视觉桥接说明都带 `additional_kwargs["lingxi_internal"]=True` 并**跟着落盘**（`_msg_to_dict`/`_dict_to_msg` 往返），在这里被跳过。不跳过的话，一轮自动修复就把"用户要求了什么"改写成程序自己生成的诊断文字
 - **`phase` 与 `outcome` 不能互推**：`phase` 是"程序有没有收到本轮结果"（running / ended），`outcome` 是实际返回的 AgentResult（中断时为 null）。重开看到 `phase=running` 就展示"上次运行被中断"，**加载不改写磁盘事实**，绝不凭空补一个 completed/failed
 
+## 运行账本：用量、费用、工具统计（src/run_ledger.py）
+- **花费主要由轮数驱动**，所以账本按「运行」累计而不是只按会话：`begin_run` 建一个 `RunLedger`（会话级 `session_token_usage` 照旧给底栏用，两者口径不同）。每轮 `agent._record_round_usage` 记输入/输出/缓存命中/缓存写入/思考，`streaming._execute_tool` 在**打码之后**记工具调用次数与结果字数——那才是进历史、下一轮要重新发出去并计费的内容
+- **轮数无论用量是否可得都要记**：一次没拿到 usage 的往返照样花了钱。原来 `total > 0` 才记账的写法会把这种轮次整个丢掉
+- **未知保持未知**：任何分项没上报就是 `None`，`_add` 遇到 `None` 结果仍是 `None`，绝不退化成 0。Claude Code CLI 那条路径没有缓存字段，`cache_read` / `reasoning` 如实记未知，轮数用它的 `num_turns`（一次 CLI 调用里面是好几轮往返），工具从 `tool_use` / `tool_result` 事件按 `tool_use_id` 配对计数
+- **按模型分行**：行键是 `(scope, model_id, model_type)`，中途换模型不会把两家的单价混在一起算。`scope` 只有 `main` / `subagent` 两种
+- **子 Agent 并入父运行、单独列一行**：`explore` 和 `spawn_agents` 建子会话时把 `parent_run_ledger` 指到父账本，子账本每条记录**在记录时**沿父链往上推（释放自己的锁之后才进父账本，不在收尾重复合并），父账本里落进 `subagents` / `subagent_tools`。只记在子会话自己那个用完就丢的账本上等于没记——worktree 隔离的是文件，不是成本
+- `explore` 跑满上限后 `_final_report` 那次额外的 `llm.invoke` **也要记**：它把整段探索历史重发一遍，恰恰是最贵的一次，而它不在 `agent_loop` 里。为此 `finalize_run` **不关账本**，改到下一轮 `begin_run` 才关——僵尸线程的迟到记录仍被 `close()` 拦在外面（子账本握的是创建时捕获的那个父账本对象，父会话开新一轮时它已经关了）
+- **单价只从 config 读**：`config.MODEL_PRICING`（config.json 的 `model_pricing`，按 model_id 配 `currency` + `input_miss_per_million` / `input_hit_per_million` / `output_per_million`，单位是**每百万 token 的货币金额**；另有 `cache_hit_equivalent_ratio` 命中折算比）。代码里没有任何写死的价格，`config.example.json` 的示例值留空并注明"请按服务商官网核对"。思考 token 已含在输出里，不另计价
+- **没配单价不显示金额**，改显示"未命中等价 token"= 未命中 + 命中×折算比 + 输出；折算比也没配就只列 token。金额只在三个单价齐全且货币非空时算，总额只在所有活跃行都有价且**同币种**时给——不同币种相加是没有意义的数
+- **账本不装正文**：`cache_breaks` 事件只收白名单字段（轮次/位置/原因/来源/模型/哈希/数值），`args`、`prompt`、`messages`、`content`、`result` 这类键一律拒收；`logs/run_ledger.jsonl` 每行只有 run_id / session_id / model / 起止时间 / outcome / 汇总。提示词和工具输出不进这条跨会话统计流
+- **落盘两处**：`finalize_run` 把快照写进 `last_run.ledger`（`normalize_last_run` 显式认这个键，读写一次不丢；旧记录没有它 → 读成 `None`，结果卡不画用量行），并追加一行 JSONL 供跨会话统计。追加失败只记日志，不影响本轮结果
+- **`normalize` 只验结构、不补零、不重算金额**：校验失败整份作废返回 `None`，绝不把坏数字改成 0 蒙混过关；历史金额按当时算好的存着，改单价之后重绘旧卡不会按新价格重新标价
+- 回归守卫：`scripts/test_run_ledger_core.py`（累加器/定价/校验的纯逻辑）、`scripts/test_run_ledger.py`（真实调用边界、落盘往返、结果卡文案、四种断裂构造）
+
 ## 工具边界的 inflight sidecar（src/run_records.py + streaming._execute_tool）
 - 有副作用的工具**进入调用前**把一条小记录原子写进 `chat_memory/<id>.inflight.json`；写不成功就抛 `InflightWriteError`、**中止该工具调用**并明确报错。假装建立了恢复点再动手，比根本没有这套记录更糟——用户会以为有记录可查
 - **为什么单独一个文件**：执行前若写主 JSON，就得把整段聊天历史重写一遍，长会话里每个写操作都付这个代价。sidecar 只装 ID / 工具名 / 路径 / 工作目录（B03 实测恒 480 字节；B04 多记 `work_root` 后随项目路径长度增加，154 字符的路径实测 707 字节；都不随历史增长），不复制历史、长参数或完整输出。路径从 `run_records._PATH_ARG_KEYS`（`path/file/file_path/target/cwd/source/destination`）里挑——**`move_path`/`copy_path` 的两端是 `source`/`destination`**，漏了它们这两个工具的执行前记录一个路径都不带，崩溃恢复认不出动了哪些文件
@@ -27,6 +41,7 @@
 - 子 Agent（`is_subagent`）全程跳过：不写 sidecar、不写运行记录、不发通知、不起标题
 
 ## 运行结果卡（src/result_view.py + ui/result_card.py，B06）
+- **用量行**（`result_view.usage_lines`）：轮数 · 输入 · 输出 · 思考（有上报才列）· 命中率，有单价时追加金额、没单价但有折算比时追加"未命中等价 token"，两者都没有就只列 token。子 Agent 有用量时另起一行"其中子 Agent：…"，免得总数看不出是谁花的。命中率拿不到就写"命中率未知"，**不写 0%**。金额取账本快照里收尾时算好的数，不在这里按当前配置重算。缓存断裂事件**不上卡片**（只进日志和账本，见 core.md）
 - **判断与绘制分开**：`result_view.describe(snapshot, live_run_id=...)` 算出标题/检查行/过期/待验证/保存提示，返回纯数据；`ui/result_card.py` 只负责画。卡片上"能不能说检查通过了"是要被逐条测试钉死的判断，混进布局代码就只能靠截图验
 - **卡片上每一句都要有程序证据**。模型正文说"已完成"不改变结论；没跑过检查就不写"测试通过"，纯问答连检查面板都不画（空面板会让人以为哪里出错）；`unverified` **不翻译成**"代码写完了只是没测"——它并不证明实现完整
 - **结构化证据在实际执行位置采集**（`verification.record_evidence` → `verification["evidence"]`，随 `last_run.evidence.validation_runs` 落盘）：`argv` / `command` / `cwd` / `started_at` / `duration_ms` / `exit_code` / `status`。`run_tests`、手动 `check_code`、编辑后的自动检查共用这一套

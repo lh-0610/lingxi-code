@@ -37,7 +37,9 @@ def _git(root, *args):
         return None, str(e)
     if done.returncode != 0:
         return None, (done.stderr or "").strip() or f"git {args[0]} 返回 {done.returncode}"
-    return (done.stdout or "").strip(), ""
+    output = done.stdout or ""
+    # NUL 分隔的清单里空白属于文件名，不能按普通命令输出裁剪。
+    return (output if "-z" in args else output.strip()), ""
 
 
 def _fingerprint(path):

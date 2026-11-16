@@ -30,6 +30,12 @@ _SESSION_FIELDS = {
     "current_session_title": lambda: None,
     "stop_flag": lambda: False,
     "session_token_usage": lambda: {"input": 0, "output": 0, "total": 0},
+    "run_ledger": lambda: None,
+    "parent_run_ledger": lambda: None,
+    "run_round_index": lambda: 0,
+    "cache_prefix": lambda: None,
+    "cache_last_usage": lambda: None,
+    "cache_prefix_changed": lambda: False,
     "compaction": lambda: {"summary": "", "covered_upto": 0},
     # 已经折成存根的工具结果（tool_call_id，按回收先后）。回收会改写发给模型的前文，折过哪些
     # 必须记住、之后每轮照样折，前缀缓存才不会每轮都断（见 streaming._trim_tool_results）。

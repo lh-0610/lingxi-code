@@ -23,6 +23,12 @@ from ..limits import (
 )
 
 
+def _usage_num(usage, key):
+    """没上报的用量显示"未知"，不显示 0 或 None。"""
+    value = usage.get(key)
+    return value if isinstance(value, int) else "未知"
+
+
 class DebugInspector(QDialog):
     """F12 触发的非模态调试窗口。"""
 
@@ -243,8 +249,8 @@ class DebugInspector(QDialog):
             f'<span style="color:{muted};">({esc(rec.get("provider",""))})</span><br>'
             f'<b>端点</b>：<code style="color:{sec};">{esc(rec.get("endpoint","") or "（未识别）")}</code><br>'
             f'<b>耗时</b>：{rec.get("elapsed_ms",0)} ms<br>'
-            f'<b>Usage</b>：input {usage.get("input",0)} · output {usage.get("output",0)} · '
-            f'总 {usage.get("total",0)}'
+            f'<b>Usage</b>：input {_usage_num(usage, "input")} · output {_usage_num(usage, "output")} · '
+            f'总 {_usage_num(usage, "total")}'
             f'</div>'
         )
 

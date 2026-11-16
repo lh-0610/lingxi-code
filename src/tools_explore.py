@@ -51,10 +51,17 @@ def _final_report(child) -> str:
     history.append(HumanMessage(content="轮次用完了。不要再调用工具，根据你到目前为止查到的内容，按报告格式写最终报告。"))
     try:
         llm = resolve_bound_llm(child)[0]
-        return _ai_text(llm.invoke(history))
+        response = llm.invoke(history)
     except Exception as e:
         logger.warning(f"explore 收尾报告失败: {e}")
         return ""
+    # 这次调用不在 agent_loop 里，用量得自己记：跑满上限时它恰恰是最贵的一次
+    # （整段探索历史重发一遍），漏掉就等于账本少算一轮。
+    ledger = getattr(child, "run_ledger", None)
+    if ledger is not None:
+        from .streaming import _extract_usage
+        ledger.record_usage(_extract_usage(response))
+    return _ai_text(response)
 
 
 def _last_report(child) -> str:
@@ -94,6 +101,9 @@ def explore(question: str, thoroughness: str = "medium") -> str:
     child.is_subagent = True
     child.agent_mode = "act"
     child.current_model_index = parent.current_model_index
+    # 用量并入父运行（账本里单独列 subagent 一行）：子代理花的钱是这次任务的成本，
+    # 只记在它自己那个用完就丢的会话上，等于没记。
+    child.parent_run_ledger = getattr(parent, "run_ledger", None)
     # quick 只是定位，不值得开思考；其余档位原样继承父会话
     child.reasoning_effort = "off" if depth == "quick" else parent.reasoning_effort
     child.project = project_root

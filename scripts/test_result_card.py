@@ -902,6 +902,36 @@ class TestQtRendering:
         assert "已停止" in _card_text(mv)
         mv.close()
 
+    def test_usage_row_renders_and_wraps_at_word_boundaries(self, qt_app, isolated_memory):
+        """用量行真的画出来；窄窗口下按词换行，不把"75.0%"劈成两半，也不撑宽卡片。"""
+        from PySide6.QtWidgets import QLabel
+        from src.ui.message_view import MessageView
+        from src.ui.result_card import ResultCard
+        sess = _new_session()
+        _saved(sess)
+        run_records.begin_run(sess)
+        sess.run_ledger.record_usage({"input": 144639, "output": 9360, "total": 153999,
+                                      "cache_read": 123018, "cache_write": 7200,
+                                      "reasoning": 3540}, rounds=3)
+        view = _describe(_finish(sess))
+        assert view["usage_lines"] and "命中率 85.1%" in view["usage_lines"][0]
+
+        for width in (420, 620):
+            mv = MessageView()
+            mv.resize(width, 700)
+            card = mv.add_result_card(ResultCard(view))
+            mv.show()
+            for _ in range(2):
+                qt_app.processEvents()
+            usage = [w for w in card.findChildren(QLabel) if w.text().startswith("用量：")]
+            assert usage, "用量行没画出来"
+            for lab in usage:
+                # 换行交给 Qt 按词做：文本里不该有强插的换行点（那会劈开数字）
+                assert "\n" not in lab.text()
+                assert lab.minimumSizeHint().width() <= width
+            assert card.height() > 0
+            mv.close()
+
 
 # ══════════════════════════════════════════════════════════════
 # 跨进程重绘

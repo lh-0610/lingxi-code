@@ -146,6 +146,8 @@ def spawn(tasks: list[str], project_root: str, parent_ui=None) -> list[dict]:
         child.is_subagent = True
         child.agent_mode = "act"
         child.current_model_index = parent_sess.current_model_index
+        # 用量并入父运行（账本里单独列 subagent 一行）：worktree 隔离的是文件，不是成本。
+        child.parent_run_ledger = getattr(parent_sess, "run_ledger", None)
         # 继承思考档位（不是布尔的 开/关）：子代理和父会话保持同一强度
         child.reasoning_effort = parent_sess.reasoning_effort
         child.project = project_root

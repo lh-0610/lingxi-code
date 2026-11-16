@@ -636,24 +636,54 @@ def _stream_round(ui):
                 raise
 
 
+_USAGE_KEYS = ("input", "output", "total", "cache_read", "cache_write", "reasoning")
+
+
 def _record_round_usage(ui, round_usage):
-    """累计本轮 token 用量并通知 UI。"""
-    if not (round_usage and round_usage['total'] > 0):
+    """本轮用量进运行账本 + 会话累计，并通知 UI。
+
+    两处口径不同：账本**保留未知**（没上报的缓存字段记 None，不能当成零命中），
+    会话累计和底栏只加已知数（显示要整数）。轮数无论用量是否可得都要记——
+    花费主要由轮数驱动，一次没拿到 usage 的往返照样花了钱。
+    """
+    from . import run_records as _rr
+    from . import session as _session
+    sess = _session.current_session()
+    usage = round_usage if isinstance(round_usage, dict) else {}
+    ledger = getattr(sess, "run_ledger", None)
+    if ledger is not None:
+        ledger.record_usage(usage, model=_rr._model_of(sess))
+    sess.run_round_index = int(getattr(sess, "run_round_index", 0) or 0) + 1
+    _record_cache_drop(sess, usage)
+
+    known = {key: value for key, value in usage.items()
+             if key in _USAGE_KEYS and type(value) is int and value >= 0}
+    if not known.get("total"):
         return
-    state.session_token_usage['input'] += round_usage['input']
-    state.session_token_usage['output'] += round_usage['output']
-    state.session_token_usage['total'] += round_usage['total']
-    # 缓存命中量（会话级字段可能是老结构，用 setdefault 兼容）
-    for _k in ("cache_read", "cache_write"):
-        state.session_token_usage[_k] = (
-            state.session_token_usage.get(_k, 0) + round_usage.get(_k, 0))
-    ui.show_token_usage(state.session_token_usage.copy(), round_usage)
+    for key, value in known.items():
+        state.session_token_usage[key] = state.session_token_usage.get(key, 0) + value
+    display = dict.fromkeys(_USAGE_KEYS, 0)
+    display.update(known)
+    ui.show_token_usage(state.session_token_usage.copy(), display)
     # 缓存命中率进日志：prompt caching 省的是钱不是 token（命中部分照样计进
     # input，只是按约 10% 计费），不单独打出来就完全看不见有没有生效。
-    _cr = round_usage.get("cache_read", 0)
-    _hit = f"，缓存命中 {_cr}（{_cr * 100 // max(round_usage['input'], 1)}%）" if _cr else ""
-    logger.info(f"Token 用量 - 输入: {round_usage['input']}, 输出: {round_usage['output']}, "
-                f"总计: {round_usage['total']}{_hit}")
+    _cr, _inp = known.get("cache_read"), known.get("input")
+    _hit = f"，缓存命中 {_cr}（{_cr * 100 // _inp}%）" if _cr and _inp else ""
+    _reason = known.get("reasoning")
+    _think = f"，思考 {_reason}" if _reason else ""
+    logger.info(f"Token 用量 - 输入: {known.get('input', '未知')}, 输出: {known.get('output', '未知')}, "
+                f"总计: {known.get('total', '未知')}{_hit}{_think}")
+
+
+def _record_cache_drop(sess, usage):
+    """命中率骤降、但发送前比对没发现前缀变化 → 记一条"服务端侧"的疑似失效。"""
+    from .cache_fingerprints import cache_drop
+    from .run_ledger import record_cache_event
+    previous = getattr(sess, "cache_last_usage", None)
+    sess.cache_last_usage = dict(usage)
+    record_cache_event(sess, cache_drop(
+        previous, usage, round_index=int(getattr(sess, "run_round_index", 0) or 0),
+        prefix_changed=bool(getattr(sess, "cache_prefix_changed", False))))
 
 
 def _strip_thinking_tags(raw_text):

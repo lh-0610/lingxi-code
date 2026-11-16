@@ -195,6 +195,10 @@ def claude_code_loop(ui) -> AgentResult:
         diagnostic_lines = []
         outcome = AgentResult("failed", "Claude Code 未返回最终 result 事件。")
         indicator_removed = False
+        # 运行账本：CLI 自己拼提示词、自己跑工具，这里只能从事件流里如实记账。
+        from . import session as _session
+        _ledger = getattr(_session.current_session(), "run_ledger", None)
+        _cli_tools = {}      # tool_use_id → 工具名：结果事件只带 id，不带名字
         for line in proc.stdout:
             if state.stop_flag:
                 _kill_proc_tree(proc)
@@ -252,6 +256,9 @@ def claude_code_loop(ui) -> AgentResult:
                         tool_input = block.get("input", {})
                         input_preview = _json.dumps(tool_input, ensure_ascii=False)[:80]
                         ui.show_message(f"\n🔧 {tool_name}  {input_preview}\n", "tool_tag")
+                        if _ledger is not None:
+                            _ledger.record_tool(tool_name, 0)
+                            _cli_tools[block.get("id")] = tool_name
             elif etype == "user":
                 # 工具结果
                 msg = event.get("message", {})
@@ -262,6 +269,10 @@ def claude_code_loop(ui) -> AgentResult:
                             result = " ".join(r.get("text", "") for r in result if isinstance(r, dict))
                         preview = str(result)[:200]
                         ui.show_message(f"{preview}\n", "tool_result")
+                        _name = _cli_tools.get(block.get("tool_use_id"))
+                        if _ledger is not None and _name:
+                            # 次数在 tool_use 时已记，这里只补字数
+                            _ledger.record_tool(_name, len(str(result)), calls=0)
             elif etype == "result":
                 subtype = event.get("subtype", "")
                 if subtype == "success" and event.get("is_error") is False:
@@ -272,10 +283,19 @@ def claude_code_loop(ui) -> AgentResult:
                     reason = event.get("errors") or event.get("result") or subtype or "未知结果"
                     outcome = AgentResult("failed", f"Claude Code 失败: {reason}")
                 # 提取 Claude Code 返回的 token 用量
-                usage_data = event.get('usage', {})
+                usage_data = event.get('usage')
+                usage_data = usage_data if isinstance(usage_data, dict) else {}
                 input_t = usage_data.get('input_tokens', 0) or 0
                 output_t = usage_data.get('output_tokens', 0) or 0
                 total_t = input_t + output_t
+                if _ledger is not None:
+                    # CLI 不上报缓存命中和思考分项：如实记未知，**不填 0**——填 0 会被
+                    # 读成"一次都没命中"，把这条路径的缓存表现彻底藏起来。
+                    # 轮数用 num_turns：一次 CLI 调用里面是好几轮往返。
+                    _ledger.record_usage(
+                        {"input": usage_data.get('input_tokens'),
+                         "output": usage_data.get('output_tokens')},
+                        rounds=event.get('num_turns'))
                 if total_t > 0:
                     round_usage = {'input': input_t, 'output': output_t, 'total': total_t}
                     state.session_token_usage['input'] += input_t

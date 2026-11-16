@@ -18,7 +18,6 @@ from .background import _decode_chunk, _kill_proc_tree
 from .tools_common import (  # 共享底座（拆包：路径/项目根/子 Agent 沙箱/验证标记/shell cwd/搜索常量）
     _project_cwd, _resolve_path, _subagent_path_rejection, _subagent_command_rejection,
     _mark_current_dirty, _mark_current_check, _shell_cwd, _parse_cd, _norm_vpath,
-    _SEARCH_IGNORE_DIRS, _SEARCH_MAX_FILE_SIZE,
 )
 from .limits import (
     BG_TOOL_OUTPUT_CHARS,
@@ -1271,12 +1270,9 @@ def search_in_file(path: str, keyword: str, offset: int = 0, limit: int = SEARCH
         return f"搜索失败: {e}"
 
 
-# search_files 默认跳过的目录（编译产物、依赖、版本控制等噪声）
-
-
 @tool
 def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_results: int = SEARCH_FILES_MAX_RESULTS,
-                 context: int = 2) -> str:
+                 context: int = 2, include_ignored: bool = False) -> str:
     """跨文件 / 跨目录用**正则**搜索（ripgrep 风格）。结果按文件分组，每处匹配带前后几行：
     匹配行是 `行号: 内容`，上下文行是 `行号- 内容`——多数时候看结果就够，不用再 read_file。
 
@@ -1286,14 +1282,19 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
       - `file_pattern`：glob 过滤文件名，例如 `*.py` / `*.{ts,tsx}` / `test_*.py`
       - `max_results`：截断阈值（默认 50，超过会提示 "还有 N 处未列出"）
       - `context`：每处匹配前后带几行（默认 2，0 = 只要匹配行）；匹配超过 20 处时自动只给匹配行
+      - `include_ignored`：默认 False，遵守 Git 忽略规则；要跨目录查被忽略的日志、会话或生成文件时传 True
 
+    Git 项目与 code_map 共用文件清单：包含未跟踪的新文件，排除被忽略的文件；非 Git 项目退回遍历。
+    include_ignored=True 直接遍历，但仍跳过 .git / node_modules / __pycache__ / .venv / build / dist 等噪声目录。
+    path 点名单文件时不受忽略规则、file_pattern 和大小上限限制；点名的子目录如果整个被忽略
+    （目录内 .gitignore 写 `*`、根 .gitignore 写 `build/*` 或 `logs/` 都算）就遍历它、连里面被忽略的
+    文件一起搜；普通子目录照旧遵守忽略规则（里面的 .log / .env.local 不会被搜出来）。
+    目录搜索跳过大于 1MB 的文件；Git 枚举不递归子模块 / 嵌套仓库，要搜其中内容可明确指定 path。
     一次最多交回 8000 字（超了会说明还有多少处没列），单行超过 300 字只显示匹配附近的一段。
-
-    默认忽略噪声目录：.git / node_modules / __pycache__ / .venv / venv / build / dist 等；
-    单文件 > 1MB 自动跳过（避免读到二进制大文件）。
     """
     import re as _re
-    import fnmatch
+
+    from . import code_graph
 
     if not regex:
         return "失败：regex 不能为空"
@@ -1312,6 +1313,9 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
     if not single and not os.path.isdir(full):
         return f"失败：路径不存在 {full}"
     base = os.path.dirname(full) if single else full
+    # 点名的是子目录（不是项目根）才放宽忽略规则：默认的全项目搜索必须照旧排除被忽略的文件
+    named = not single and os.path.normcase(os.path.abspath(full)) != os.path.normcase(
+        os.path.abspath(_project_cwd()))
 
     # 支持 `*.{ts,tsx}` 这种 brace expansion
     def _expand_braces(pattern):
@@ -1334,19 +1338,9 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
         if single:
             yield full
             return
-        for root, dirs, files in os.walk(full):
-            # 原地修改 dirs 跳过忽略目录
-            dirs[:] = [d for d in dirs if d not in _SEARCH_IGNORE_DIRS and not d.startswith(".")]
-            for fname in files:
-                if not any(fnmatch.fnmatch(fname, p) for p in patterns):
-                    continue
-                fpath = os.path.join(root, fname)
-                try:
-                    if os.path.getsize(fpath) > _SEARCH_MAX_FILE_SIZE:
-                        continue
-                except OSError:
-                    continue
-                yield fpath
+        for abs_path, _rel in code_graph.project_files(full, patterns=patterns,
+                                                      include_ignored=include_ignored, named=named):
+            yield abs_path
 
     for fpath in _candidates():
         try:

@@ -250,9 +250,11 @@ def normalize_last_run(raw):
         value = raw.get(key)
         if value is not None and not isinstance(value, str):
             return None, f"last_run.{key} 类型非法"
+    from .run_ledger import normalize as normalize_ledger
     return {
         "version": RUN_RECORD_VERSION,
         "id": run_id,
+        "ledger": normalize_ledger(raw.get("ledger")),
         "task_id": task_id,
         "initial_task_id": initial_task_id if isinstance(initial_task_id, str) else task_id,
         "phase": phase,
@@ -501,6 +503,15 @@ def begin_run(sess, *, task_id=None, ui=None):
     但要明确告诉用户并记 error 日志，不假装恢复点已经建立。
     """
     from .verification import reset_verification, restore_obligations
+    from .run_ledger import RunLedger
+
+    previous_ledger = getattr(sess, "run_ledger", None)
+    if previous_ledger is not None:
+        previous_ledger.close()
+    model = _model_of(sess) or {"id": "unknown", "name": "未知模型", "type": "unknown"}
+    sess.run_ledger = RunLedger(model, parent=getattr(sess, "parent_run_ledger", None))
+    sess.run_round_index = 0
+    sess.cache_prefix_changed = False
 
     # B09b：新的一轮开始，上一轮的保存失败标记就此作废（每轮各自评估）。
     sess.last_run_save_failed = False
@@ -528,6 +539,7 @@ def begin_run(sess, *, task_id=None, ui=None):
         "source": describe_source(getattr(sess, "chat_history", None) or []),
         "evidence": {"changed_files": [], "validation_runs": [], "diff_reviewed": False},
         "model": _model_of(sess),
+        "ledger": _ledger_snapshot(sess),
         "workspace": _capture_workspace(sess, None),
     }
     with sess.snapshot_lock:
@@ -585,6 +597,12 @@ def collect_evidence(verification):
     }
 
 
+def _ledger_snapshot(sess):
+    from .config import MODEL_PRICING
+    ledger = getattr(sess, "run_ledger", None)
+    return ledger.snapshot(MODEL_PRICING) if ledger is not None else None
+
+
 def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
     """统一收尾：正常完成、取消、异常、提前返回都走这里。
 
@@ -621,6 +639,9 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
         if ending_task_id:
             run["task_id"] = ending_task_id
         run["evidence"] = collect_evidence(getattr(sess, "verification", None))
+        # 这里**不关账本**：explore 跑满上限后还会补一次模型调用，那次仍属于本轮。
+        # 账本到下一轮 begin_run 才关，僵尸线程的迟到记录照样被拦在外面。
+        run["ledger"] = _ledger_snapshot(sess)
         # worktree 可能是开跑之后才挂上的，收尾时按实际落点再刷一次。
         run["work_dir"] = _work_dir_of(sess) or run.get("work_dir") or ""
         sess.last_run = run
@@ -628,6 +649,10 @@ def finalize_run(sess, run, result, *, ui=None) -> FinalizeReport:
     refresh_pending_verification(sess, run_id=run["id"])
     _refresh_workspace(sess)
     outcome = save_snapshot(sess)
+    from .run_ledger import append_record
+    append_record({"run_id": run["id"], "session_id": getattr(sess, "current_session_id", None),
+                   "model": run.get("model"), "started_at": run["started_at"],
+                   "ended_at": run["ended_at"], "outcome": run["outcome"], "ledger": run["ledger"]})
     with sess.snapshot_lock:
         if getattr(sess, "active_run_id", None) == run["id"]:
             sess.active_run_id = None
@@ -688,6 +713,7 @@ def build_result_snapshot(sess, run, *, save=None, source="live"):
         "ended_at": run.get("ended_at") or "",
         "source": dict(run.get("source") or {}),
         "evidence": _normalize_evidence(run.get("evidence")),
+        "ledger": run.get("ledger"),
         "pending_verification": dict(pending),
         # B04：继续入口要的事实。模型是**这一轮记录的**稳定标识（继续前据此找回、找不到就
         # 要求重选）；计划进度是模型自己勾的，卡片上照实标成"模型记录"，不当验收结论。

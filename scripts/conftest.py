@@ -3,6 +3,16 @@
 使用方法：在测试脚本里加
     from conftest import project_dir, isolated_memory, ...
 或直接 pytest scripts/test_xxx.py（pytest 会自动发现同目录 conftest）
+
+**隔离是默认的，不靠每个用例自觉**：本文件在任何 src 模块被导入之前，用三个环境变量把
+可写数据整体搬到临时目录——`LINGXI_DATA_DIR`（整个数据根，chat_memory 下的会话/索引/主题/
+权限规则/RAG 索引/长期记忆全在内）、`LINGXI_LOG_DIR`（日志）、`LINGXI_CONFIG_PATH`（配置）。
+src/paths.py 导入时读它们算出 APP_DIR / MEMORY_DIR / LOG_DIR / CONFIG_PATH，之后所有模块
+拿到的就都是临时路径，漏开 isolated_memory 的用例也写不到用户真实数据。
+防回归断言见 scripts/test_test_isolation.py。
+
+isolated_memory 仍然有用：它在默认隔离之上再按用例换一层数据根（paths.set_data_dir），
+适合需要"两个互不干扰的数据目录"或要断言具体落盘位置的用例。
 """
 import os
 import sys
@@ -11,12 +21,20 @@ import tempfile
 import pytest
 
 # ── 测试隔离：必须在任何 src 模块被导入之前做（pytest 先加载本文件，再收集测试模块）──
-# 1. 日志写进临时目录：src/paths.py 一导入就把日志接到程序目录下的 logs/当天.log（还会清理
+# 1. 整个应用数据根搬进临时目录：src/paths.py 一导入就按 APP_DIR 拼死 MEMORY_DIR / MCP_DIR，
+#    各模块再从里面取 chat_memory 下的文件。不拦的话，没用 isolated_memory 的用例直接写用户
+#    真实数据——实测每跑一遍全量，test_file_panel 切主题就把用户的 theme_config.json 翻转一次，
+#    test_rag_sidebar 刷新状态行就打开真实的 rag_index/chroma。
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="lingxi-test-data-")
+os.environ["LINGXI_DATA_DIR"] = _TEST_DATA_DIR
+os.makedirs(os.path.join(_TEST_DATA_DIR, "chat_memory"), exist_ok=True)
+
+# 2. 日志写进临时目录：src/paths.py 一导入就把日志接到程序目录下的 logs/当天.log（还会清理
 #    30 天前的旧日志），不拦的话每跑一遍测试，用户真实的日志里就混进一大串测试记录。
 _TEST_LOG_DIR = tempfile.mkdtemp(prefix="lingxi-test-logs-")
 os.environ["LINGXI_LOG_DIR"] = _TEST_LOG_DIR
 
-# 2. 不读开发者本地 config.json：src/config.py 一导入就把整份配置固化成模块常量，之后测试
+# 3. 不读开发者本地 config.json：src/config.py 一导入就把整份配置固化成模块常量，之后测试
 #    改不动。直接读真实配置会让**测试结果随个人配置而变**——实测有人把 responses_models
 #    留空，scripts/test_responses_model.py 就挂 6 个。指到一个不存在的临时路径后，config.py
 #    的每个 _config.get(...) 都走代码里的默认值；需要特定配置的测试自己 monkeypatch 常量
@@ -29,14 +47,14 @@ os.environ["LINGXI_CONFIG_PATH"] = os.path.join(_TEST_CONFIG_DIR, "config.json")
 # 确保能 import src
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# 2. 不启动用户配置的 MCP 服务：src/agent.py 一导入就开后台线程，按真实 config.json 用 npx
+# 4. 不启动用户配置的 MCP 服务：src/agent.py 一导入就开后台线程，按真实 config.json 用 npx
 #    把它们拉起来；各测试自己的 monkeypatch 晚于这个线程，两边抢先后。线程里是运行时才取
 #    mcp_client.init_mcp，所以在这里先换掉就一定拿到空的。
 import src.mcp_client as _mcp_client  # noqa: E402
 
 _mcp_client.init_mcp = lambda: []
 
-# 3. 测试大多不挂界面（state.ui_ref = None）。正常程序没有界面时一律拒绝改文件 / 跑命令
+# 5. 测试大多不挂界面（state.ui_ref = None）。正常程序没有界面时一律拒绝改文件 / 跑命令
 #    （fail-closed），测试是明确的无界面环境、自己在临时目录里，显式打开放行。
 #    要测"没界面就拒绝"的用例自己 monkeypatch 回 False。
 import src.state as _state  # noqa: E402
@@ -51,6 +69,7 @@ def pytest_unconfigure(config):
     logging.shutdown()
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
     shutil.rmtree(_TEST_CONFIG_DIR, ignore_errors=True)
+    shutil.rmtree(_TEST_DATA_DIR, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

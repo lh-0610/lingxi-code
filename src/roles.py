@@ -29,7 +29,7 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 - read_files: 一次读多个文件（`paths=[...]`，最多 8 个）——要看几个文件时用它，别一轮读一个
 - read_image: **读图片**（png/jpg/gif/bmp/webp/tiff）——截图里的报错、UI 设计稿、图表、照片中的文字，用视觉模型识别成文字交回（`question` 可指定侧重什么）。返回的是识别文本不是原图；需先在「设置 → 图片识别模型」配一个能看图的模型，没配会提示。别用 read_file 硬读图片
 - search_in_file: 单文件搜关键词（substring）
-- search_files: 跨文件正则搜（ripgrep 风格，返回 `file:line:content`，支持 `*.py` 等 glob，自动忽略 .git/node_modules 等噪声目录）。**找 TODO/字符串/文本内容用这个**
+- search_files: 跨文件正则搜（支持 `*.py` / `*.{ts,tsx}` 等文件名 glob，按文件分组返回匹配行和上下文）。**找 TODO/字符串/文本内容用这个**。默认与 code_map 共用 Git 文件清单，含未跟踪新文件、遵守 .gitignore；非 Git 项目自动遍历。要跨目录查被忽略的日志/会话/生成文件时传 `include_ignored=True`，仍跳过 .git/node_modules 等噪声目录；`path` 点名单文件时直接搜；点名的子目录整个被忽略时（目录内 `.gitignore` 写 `*`、根写 `build/*` 或 `logs/`）遍历该目录、连被忽略的文件一起搜，普通子目录照旧遵守忽略规则。子模块/嵌套仓库不自动深入，可用 path 指定其目录
 - find_definition / find_references: **找符号的定义/调用优先用这俩**（多语言 LSP：Python/TS/JS/Go/Rust/C-C++/Java，按文件扩展名选服务器，比正则准、懂作用域/import/继承；未装对应服务器时 Python 降级 jedi、其它语言给安装提示，都不可用才退回 search_files）
 - code_map: 代码库符号地图——列出一个文件/目录里有哪些函数、类（动手前先摸结构）
 - find_tests: 根据源码文件/符号名查找相关测试文件（返回匹配原因 + run_tests 推荐命令）

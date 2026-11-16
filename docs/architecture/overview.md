@@ -34,7 +34,9 @@ src/                     # 主代码
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
   llm_errors.py          # 模型请求错误分类（限流/上下文溢出/鉴权/瞬时）+ Retry-After 解析 + 重试策略
   run_records.py         # 运行身份（run_id/来源/终态）+ 统一 begin/finalize + inflight sidecar + 完成回执 + 待验证义务归一化 + 结果快照
-  result_view.py         # 运行结果快照 → 给人看的结论（纯函数、不依赖 Qt；标题/检查行/过期/保存提示/能否继续的判定都在这里）
+  run_ledger.py          # 运行账本（纯逻辑、不依赖 Qt）：按运行×模型累计用量/工具统计 + 只从 config 取单价算费用 + 严格校验 + JSONL 追加
+  cache_fingerprints.py  # 前缀缓存指纹与比对（纯逻辑、不依赖 Qt，只存哈希）：发送前找第一处不同 + 命中率骤降判定，离线回放可复用
+  result_view.py         # 运行结果快照 → 给人看的结论（纯函数、不依赖 Qt；标题/检查行/过期/保存提示/用量行/能否继续的判定都在这里）
   recovery.py            # 恢复检查与继续入口（B04）：主线程预检 / worker 里现场核对 / 补齐悬空调用 / 把结果未知的操作并入待验证义务 / 恢复说明
   workspace_anchor.py    # 现场锚点（B04）：涉及文件指纹 + HEAD/分支/根提交；恢复时比对，判断"还是不是那个现场、那个仓库"
   task_state.py          # 任务身份、来源追溯与边界控制（B05）：任务 ID / 白名单 / 固定限制校验 / 计划变动比对 / 新任务切换与撤销
@@ -92,11 +94,13 @@ src/                     # 主代码
     settings_dialog.py   # 设置弹窗（provider 卡片式 API key + 自定义模型增删改）
     helpers.py           # _make_button_icon / _build_image_content_block / _escape
     prefs.py             # UI 偏好持久化（关闭按钮选择等）
-    _base.py             # 共享 BASE_DIR / CONFIG_PATH / THEME_CONFIG_PATH 常量
+    _base.py             # 共享 BASE_DIR / CONFIG_PATH 常量（chat_memory 下的文件路径走 paths 的函数、调用时取，别在这里拼常量）
 
 scripts/                 # pytest 测试套件 + conftest fixtures
-  conftest.py            #   **测试隔离在这里、且在任何 src 导入之前**：LINGXI_LOG_DIR 指向临时目录（paths.py 一导入就接日志、
-                         #   清理旧日志），init_mcp 换成空函数（agent.py 一导入就开线程按真实 config 拉起 MCP 服务）
+  conftest.py            #   **测试默认隔离在这里、且在任何 src 导入之前**：LINGXI_DATA_DIR 把整个数据根搬进临时目录
+                         #   （chat_memory 下的一切，漏开 isolated_memory 的用例也写不到用户数据），LINGXI_LOG_DIR 指向临时目录
+                         #   （paths.py 一导入就接日志、清理旧日志），LINGXI_CONFIG_PATH 指向不存在的临时路径（全走代码默认值），
+                         #   init_mcp 换成空函数（agent.py 一导入就开线程按真实 config 拉起 MCP 服务）；守这条线的是 test_test_isolation.py
   measure_save_cost.py   #   非 pytest：量典型/长会话的保存耗时与字节数（要不要上增量日志得先有数)
   evals/                 # **agent 行为评测集**（真调 API、不进 pytest；详见 evals/README.md）
     runner.py            #   fixture 全新副本 + HeadlessUI 驱动 + 8 类判定（含 tool_called）+ 多次取通过率

@@ -207,8 +207,9 @@ def record_summary(record: dict) -> str:
     if record.get("error"):
         return f"⚠ {ts}  {model}  失败"
     usage = (record.get("response") or {}).get("usage", {})
-    total = usage.get("total", 0)
-    return f"{ts}  {model}  {elapsed/1000:.1f}s · {total}tok"
+    total = usage.get("total")
+    tokens = f"{total}tok" if isinstance(total, int) else "用量未知"
+    return f"{ts}  {model}  {elapsed/1000:.1f}s · {tokens}"
 
 
 def record_to_json(record: dict, indent: int = 2) -> str:

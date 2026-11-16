@@ -386,6 +386,14 @@ def _clear_progress(sess):
         sess.last_committed_operation = None
         sess.recent_operations = []
         sess.active_run_id = None
+        if sess.run_ledger is not None:
+            sess.run_ledger.close()
+        sess.run_ledger = None
+        sess.parent_run_ledger = None
+        sess.run_round_index = 0
+        sess.cache_prefix = None
+        sess.cache_last_usage = None
+        sess.cache_prefix_changed = False
         # 结果卡的快照缓存也要清：重绘优先读它，不清的话"新建对话"之后
         # 旧那一轮的结果卡会重新画出来，而 last_run 明明已经空了。
         sess.last_result = None
@@ -1165,6 +1173,14 @@ def load_session(session_id, *, session=None):
         logger.warning(f"会话 {session_id} 的进度无法恢复：{progress_error}")
 
     tgt = _session_mod.current_session() if session is None else session
+    if tgt.run_ledger is not None:
+        tgt.run_ledger.close()
+    tgt.run_ledger = None
+    tgt.parent_run_ledger = None
+    tgt.run_round_index = 0
+    tgt.cache_prefix = None
+    tgt.cache_last_usage = None
+    tgt.cache_prefix_changed = False
     if tgt.current_session_id != session_id:
         tgt.background_owner_id = uuid.uuid4().hex
     if session is None:
