@@ -88,7 +88,7 @@ src/                     # 主代码
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
     queue_panel.py       # 输入队列面板（B09b）：排队 N 条 / 暂停横幅 / 编号列表 / 已发送折叠，只画不判
     task_panel.py        # 停靠在窗口右侧的任务面板与限制编辑对话框（B05）：要求/计划/执行状态/验证证据，可撤销横幅，硬预算校验
-    browser_panel.py     # 文件面板里的「浏览器」标签：地址栏 + 模型正在操作的徽标 + 嵌入 page.get_browser().view（和模型操作同一个页面）+ F12 开发者工具
+    browser_panel.py     # 文件面板里的浏览器标签（设计稿「浏览器面板 · 三种状态」）：工具栏（后退/前进/刷新、地址胶囊带来源标签、F12、更多）+ 加载条 + 空白页（后台任务里的本机服务、最近打开）/ 嵌入 page.get_browser().view（和模型操作同一个页面；模型操作时描边 + 底部状态卡带「停止」）/ 自己的连不上页；开发者工具停靠在页面下方
     file_panel.py        # 停靠在对话区右侧的文件面板（也是浏览器 / 后台 / 调试标签的停靠栏，后两者走 open_widget_tab：控件常驻复用，关标签只摘下隐藏）：点改动的文件 / 点正文里的文件路径开标签页（同一个文件不重复开），顶部路径、正文带行号、新增绿/删除红，带行号打开时滚到那一行，只画不判（差异由 ChatUI 用 tools_git.file_diff_lines 取好交进来）
     syntax_highlight.py  # 文件面板的语法高亮：tree-sitter 划出每行的「哪一段是哪一类」，只回字符范围不碰 Qt / 主题；Python / JS / TS / TSX 用单语言包的 highlights.scm，其余语言按节点类型名分类，认不出语言 / 没语法库 / 太大就返回空（照原样显示）
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认

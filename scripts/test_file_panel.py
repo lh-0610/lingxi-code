@@ -537,13 +537,16 @@ def test_browser_tab_lifecycle(browser_ui, qapp, browser_server):
     assert page.is_browser_open() is True
     assert BROWSER_KEY in ui.file_panel.paths()
     assert ui.file_panel.current_path() == BROWSER_KEY
-    # 标签文字走 LeftSide QLabel（ElideMiddle 对 CJK 误判余量，tabText 会被截成"..."）
-    from PySide6.QtWidgets import QTabBar, QLabel
+    # 标签内容走 LeftSide 按钮（ElideMiddle 对 CJK 误判余量，tabText 会被截成"..."）：
+    # 设计稿是页面图标 + 页面标题，加载完显示页面标题
+    from PySide6.QtWidgets import QTabBar
+    from src.ui.file_panel import _BrowserTabLabel
     bi = ui.file_panel._tab_index(BROWSER_KEY)
     tab_label = ui.file_panel.tabs.tabButton(bi, QTabBar.LeftSide)
-    assert isinstance(tab_label, QLabel) and tab_label.text() == "浏览器"
+    assert isinstance(tab_label, _BrowserTabLabel)
     assert ui.file_panel.tabs.tabText(bi) == ""
     assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+    assert _wait_page(qapp, lambda: tab_label.text() == "表单页"), tab_label.text()
 
     ui.file_panel.open_file("a.py", [(1, "ctx", "x = 1")])
     _pump(qapp)
@@ -571,19 +574,124 @@ def test_browser_tab_lifecycle(browser_ui, qapp, browser_server):
     assert not ui.file_panel.isVisible()
 
 
-def test_browser_badge_follows_bridge_activity(browser_ui, qapp, browser_server):
+def test_status_card_follows_bridge_activity(browser_ui, qapp, browser_server):
+    """模型操作页面：页面描靛蓝边 + 底部状态卡「灵犀正在点击」，标签上出小圆点；
+    动作之间的短空档不收（免得一闪一闪），停下一会儿才收。"""
+    import time
     from src.browser.bridge import get_bridge
     ui = browser_ui
     ui.file_panel.open_browser(browser_server + "/form.html")
     _pump(qapp)
     view = ui.file_panel._browser_view
+    label = ui.file_panel._browser_tab_label
     get_bridge().activity.emit("点击")
     _pump(qapp)
-    assert view.badge.isVisible()
-    assert "模型正在操作浏览器" in view.badge.text() and "点击" in view.badge.text()
+    assert view.status_card.isVisible() and view.model_active
+    assert view.status_card.title.text() == "灵犀正在点击"
+    assert view.page_frame.property("active") == "true"
+    assert label.dot.isVisible()
     get_bridge().activity.emit("")
     _pump(qapp)
-    assert not view.badge.isVisible()
+    assert view.status_card.isVisible(), "动作之间的空档不收"
+    get_bridge().activity.emit("输入")
+    _pump(qapp)
+    assert "第 2 步" in view.status_card.sub.text()
+    get_bridge().activity.emit("")
+    deadline = time.time() + 3
+    while view.model_active and time.time() < deadline:
+        _pump(qapp, 2)
+        time.sleep(0.05)
+    assert not view.status_card.isVisible() and not label.dot.isVisible()
+    assert view.page_frame.property("active") == "false"
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_status_card_stop_stops_the_driving_session(browser_ui, qapp, browser_server, monkeypatch):
+    from src import session
+    from src.browser import bridge as _bridge
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    view = ui.file_panel._browser_view
+    bg_sess = session.Session()                    # 在后台驱动浏览器的另一个会话
+    monkeypatch.setattr(_bridge.get_bridge(), "_driver", bg_sess)
+    _bridge.get_bridge().activity.emit("点击")
+    _pump(qapp)
+    view.status_card.stop_btn.click()
+    _pump(qapp)
+    assert bg_sess.stop_flag is True
+    assert session.get_active().stop_flag is not True, "前台会话不受牵连"
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_empty_state_lists_local_services_and_recent(browser_ui, qapp, browser_server):
+    from src import background as bg
+    from src import session
+    from src.browser import security
+    from src.ui import browser_panel
+
+    class _Proc:
+        pid = 0
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    ident = bg.capture_session_identity(session.get_active())
+    bg_id = bg.start("python -m http.server", _Proc(), cwd=".", project=None, **ident,
+                     spawn_reader=False)
+    bg.append_output(bg_id, "Serving on " + browser_server + "/\n")
+    try:
+        ui = browser_ui
+        ui.file_panel.open_browser("")
+        _pump(qapp)
+        view = ui.file_panel._browser_view
+        assert view.content.currentWidget() is view.empty
+        assert view.tab_title() == "新标签页"
+        assert len(view.empty.service_buttons) == 1
+        view.empty.service_buttons[0].click()
+        assert _wait_page(qapp, lambda: view.content.currentWidget() is view.page_frame)
+        sess = session.get_active()
+        assert security.parse_origin(browser_server) in sess.browser_origin_allowlist, \
+            "人点「打开」灵犀自己起的服务 = 信任这个来源（同后台面板）"
+        # 「最近打开」是进程内的列表，前面的用例可能已经记过这个地址：等页面真的加载完再看
+        assert _wait_page(qapp, lambda: view.page_url().startswith(browser_server)
+                          and not view._loading)
+        assert any(r["url"].startswith(browser_server) for r in browser_panel.recent_pages())
+        assert view.chip.isVisible() and view.chip.text() == "本机 · 已信任", view.chip.text()
+        ui.file_panel.close_all()
+        _pump(qapp, 20)
+    finally:
+        with bg._LOCK:
+            bg._tasks.pop(bg_id, None)
+
+
+def test_connection_refused_shows_our_error_page(browser_ui, qapp):
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()                                      # 拿一个此刻没人监听的端口
+    ui = browser_ui
+    ui.file_panel.open_browser(f"http://127.0.0.1:{port}/")
+    view = ui.file_panel._browser_view
+    assert _wait_page(qapp, lambda: view.failed, timeout=15)
+    assert view.content.currentWidget() is view.error_page
+    assert view.error_page.title.text() == f"连不上 127.0.0.1:{port}"
+    assert "没有服务在运行" in view.error_page.body.text()
+    assert view.error_page.background_btn.isVisibleTo(view.error_page), "本机地址才给「去后台看看」"
+    assert ui.file_panel._browser_tab_label.text() == "无法访问"
+    seen = []
+    ui.file_panel.background_requested.connect(lambda: seen.append(1))
+    view.error_page.background_btn.click()
+    assert seen == [1]
     ui.file_panel.close_all()
     _pump(qapp, 20)
 
@@ -622,7 +730,8 @@ def test_invalid_url_flashes_and_does_not_navigate(browser_ui, qapp, browser_ser
     _pump(qapp, 20)
 
 
-def test_f12_opens_devtools(browser_ui, qapp, browser_server):
+def test_f12_docks_devtools_under_the_page(browser_ui, qapp, browser_server):
+    """设计稿：开发者工具停靠在页面下方（不是另一个窗口），再按 F12 收起；能弹出成单独窗口。"""
     from src.browser import page
     ui = browser_ui
     ui.file_panel.open_browser(browser_server + "/form.html")
@@ -635,7 +744,18 @@ def test_f12_opens_devtools(browser_ui, qapp, browser_server):
     QTest.keyClick(view.address, Qt.Key_F12)
     _pump(qapp, 10)
     b = page.get_browser()
-    assert getattr(b, "_devtools_view", None) is not None, "F12 应开出 DevTools"
+    assert view.devtools_panel.isVisible() and view._devtools_view is not None
+    assert not view._devtools_view.isWindow(), "停靠在面板里"
+    assert b.page.devToolsPage() is view._devtools_view.page()
+    assert view.devtools_btn.isChecked()
+    QTest.keyClick(view.address, Qt.Key_F12)
+    _pump(qapp, 5)
+    assert not view.devtools_panel.isVisible() and not view.devtools_btn.isChecked()
+    view._open_devtools()
+    view.devtools_popout_btn.click()
+    _pump(qapp, 10)
+    assert not view.devtools_panel.isVisible()
+    assert getattr(b, "_devtools_view", None) is not None, "弹出成单独窗口"
     b._devtools_view.close()
     ui.file_panel.close_all()
     _pump(qapp, 20)

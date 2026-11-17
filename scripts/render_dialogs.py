@@ -115,6 +115,7 @@ def main(out_dir):
             QTimer.singleShot(0, ui, snap)
             open_it()
     saved += _render_dock(app, ui, out_dir)
+    saved += _render_browser(app, ui, out_dir)
     ui.close()
     app.processEvents()
     ui.deleteLater()
@@ -139,6 +140,97 @@ class _FakeProc:
 
     def kill(self):
         self.code = -9
+
+
+def _wait(app, cond, timeout=15.0):
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        app.processEvents()
+        if cond():
+            return True
+        time.sleep(0.03)
+    return False
+
+
+def _render_browser(app, ui, out_dir):
+    """第 4 批：浏览器标签的三种状态（空白 / 模型操作中 / 连不上）。本机起一个小页面当被测站点。"""
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from src import background as bg
+    from src import session as _session
+    from src.browser import page
+    from src.browser.bridge import get_bridge
+
+    html = ("<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><title>登录 · Shop Admin"
+            "</title></head><body style='font-family:sans-serif;background:#f7f8fa'>"
+            "<div style='margin:60px auto;width:260px;background:#fff;border:1px solid #e3e4ea;"
+            "border-radius:12px;padding:22px'><h3>登录 Shop Admin</h3>"
+            "<p>用户名</p><input style='width:100%'><p>密码</p><input type='password' "
+            "style='width:100%'><p><button style='width:100%'>登录</button></p></div></body></html>")
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    ident = bg.capture_session_identity(_session.get_active())
+    bg_id = bg.start("npm run dev", _FakeProc(None), cwd="D:/lingxi-code/web",
+                     project="D:/lingxi-code", **ident, spawn_reader=False)
+    bg.append_output(bg_id, f"  Local:   {base}/login\n")
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    dead = s.getsockname()[1]
+    s.close()
+    shots = []
+    ui.resize(1400, 860)
+    try:
+        for theme_name in ("light", "dark"):
+            if ui.theme != theme_name:
+                ui.theme = theme_name
+                ui._apply_theme()
+                ui._redraw_chat()
+            ui.file_panel.open_browser("")
+            _wait(app, lambda: ui.file_panel._browser_view is not None, 5)
+            view = ui.file_panel._browser_view
+            _wait(app, lambda: view.content.currentWidget() is view.empty, 5)
+            path = os.path.join(out_dir, f"15_browser_empty_{theme_name}.png")
+            ui.grab().save(path)
+            shots.append(path)
+            view.empty.service_buttons[0].click()
+            _wait(app, lambda: view.page_url().startswith(base) and not view._loading)
+            _wait(app, lambda: view.tab_title() == "登录 · Shop Admin", 5)
+            get_bridge().activity.emit("输入")
+            _wait(app, lambda: False, 0.3)
+            path = os.path.join(out_dir, f"16_browser_active_{theme_name}.png")
+            ui.grab().save(path)
+            shots.append(path)
+            get_bridge().activity.emit("")
+            view.navigate(f"http://127.0.0.1:{dead}/")
+            _wait(app, lambda: view.failed)
+            _wait(app, lambda: False, 0.3)
+            path = os.path.join(out_dir, f"17_browser_error_{theme_name}.png")
+            ui.grab().save(path)
+            shots.append(path)
+            ui.file_panel.close_all()
+            _wait(app, lambda: not page.is_browser_open(), 5)
+    finally:
+        srv.shutdown()
+        with bg._LOCK:
+            bg._tasks.pop(bg_id, None)
+    return shots
 
 
 def _render_dock(app, ui, out_dir):

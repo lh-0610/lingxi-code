@@ -40,12 +40,16 @@ class BrowserBridge(QObject):
         self._page_loading = False    # 页面有导航在途（含用户/页面自己发起的），在途时不清缓存
         self._pending = []            # 等回调的在途请求：关浏览器时立刻回"浏览器已关闭"，不等超时
         self._ref_seed = 0            # ref 编号跨文档单调递增的种子（换页不归零）
+        self._driver = None           # 最近一次发请求的会话（worker 线程里的 current_session）
         self.request.connect(self._handle)   # 跨线程自动 QueuedConnection
 
     # ── worker 线程入口 ──────────────────────────────────────────
     def call(self, op, timeout=30, **args):
         if self._closed:
             return {"ok": False, "error": "browser closed"}
+        # 记下是哪个会话在驱动浏览器：面板状态卡的「停止」停的是它，不是碰巧在前台的那个
+        from src import session as _session_mod
+        self._driver = _session_mod.current_session()
         holder, ev = {}, threading.Event()
         req = {"op": op, "args": args, "holder": holder, "ev": ev, "wait_timeout": timeout}
         t0 = time.perf_counter()
@@ -64,6 +68,10 @@ class BrowserBridge(QObject):
         if isinstance(r, dict):
             r["wallMs"] = round((time.perf_counter() - t0) * 1000)
         return r
+
+    def driver_session(self):
+        """最近一次让浏览器干活的会话（没有就 None）。面板状态卡「停止」和来源标签用。"""
+        return self._driver
 
     def shutdown(self):
         self._closed = True

@@ -881,11 +881,25 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.file_panel.max_width_fn = self._file_panel_max_width
         self.file_panel.width_changed.connect(self._on_file_panel_width_changed)
         self.file_panel.closed.connect(self._on_file_panel_closed)
+        self.file_panel.browser_stop_requested.connect(self._stop_browser_driver)
+        self.file_panel.background_requested.connect(self._open_background_panel)
         # 模型首次拉起浏览器 → 自动开面板标签并切过去（复审 7：用户看得见、view 不 hidden）
         from ..browser import page as _bpage
         _bpage._notifier.browser_created.connect(self._on_model_browser_created)
         # 出现 / 消失 / 变宽都会改变对话栏宽度：输入框和顶栏折叠档位要跟着重算
         self.file_panel.installEventFilter(self)
+
+    def _stop_browser_driver(self):
+        """浏览器状态卡「停止」：停的是正在驱动浏览器的会话。它就是前台会话时走停止按钮那一套；
+        在后台跑的会话只置它的 stop_flag（桥的分片等待每 0.3s 看一次，立刻返回"已停止"）。"""
+        from .. import session as _session
+        from ..browser.bridge import get_bridge
+        sess = get_bridge().driver_session()
+        if sess is None or sess is _session.get_active():
+            self._force_stop_generation()
+            self._update_btn_state("enabled" if self._has_input else "disabled")
+        else:
+            sess.stop_flag = True
 
     def _on_model_browser_created(self):
         self.file_panel.open_browser("")
