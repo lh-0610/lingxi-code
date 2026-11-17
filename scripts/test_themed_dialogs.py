@@ -12,7 +12,7 @@ import tokenize
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit, QWidget
 
@@ -502,3 +502,233 @@ def test_settings_delete_custom_model_is_danger(qapp, tmp_path, monkeypatch):
         dlg.deleteLater()
         qapp.sendPostedEvents(None, QEvent.DeferredDelete)
         qapp.processEvents()
+
+
+# ── 第 2 批：自带窗框的 QDialog 换成窗内卡片 ─────────────────────────
+
+class TestCardDialog:
+    def test_inline_overlay_with_scrim_and_requested_size(self, host):
+        seen = []
+        drive(host, lambda d: (seen.append((d.isWindow(), d.parentWidget(), d._scrim,
+                                            d.card.size(), d.size())), d.reject()))
+        dlg = dialogs.CardDialog(host, title="标题", width=520, height=300)
+        dlg.exec()
+        is_window, parent, scrim, card, size = seen[0]
+        # 窗内覆盖层：父窗口里的子控件，不是另一个顶层窗（主窗口标题栏按钮才点得动）
+        assert is_window is False and parent is host
+        assert scrim is True and size == host.size()
+        assert (card.width(), card.height()) == (520, 300)
+
+    def test_card_shrinks_to_small_window(self, qapp):
+        small = QWidget()
+        small.resize(600, 400)
+        small.show()
+        qapp.processEvents()
+        seen = []
+        drive(small, lambda d: (seen.append(d.card.size()), d.reject()))
+        dialogs.CardDialog(small, title="大", width=800, height=620).exec()
+        assert seen[0].width() <= 600 - 2 * dialogs.CardDialog.MARGIN
+        assert seen[0].height() <= 400 - 2 * dialogs.CardDialog.MARGIN
+        small.deleteLater()
+
+    def test_escape_and_close_button_reject(self, host):
+        from PySide6.QtWidgets import QDialog
+        drive(host, lambda d: QTest.keyClick(d, Qt.Key_Escape))
+        assert dialogs.CardDialog(host, title="x").exec() == QDialog.Rejected
+        drive(host, lambda d: QTest.mouseClick(d.close_button, Qt.LeftButton))
+        assert dialogs.CardDialog(host, title="x").exec() == QDialog.Rejected
+
+    def test_enter_in_line_edit_triggers_default_save(self, host):
+        """自定义模型编辑器：填好字段在输入框里按 Enter = 保存（和原来 setDefault 一致）。"""
+        from src.ui.settings_dialog import _CustomModelEditor
+        dlg = _CustomModelEditor(host, {"name": "m", "model_id": "id-1"})
+
+        def act(d):
+            assert d.save_btn.isDefault()
+            d.f_name.setFocus()
+            QTest.keyClick(d.f_name, Qt.Key_Return)
+        drive(host, act)
+        dlg.exec()
+        assert dlg.result_data and dlg.result_data["model_id"] == "id-1"
+        assert dlg.body.layout() is not None and dlg.save_btn.role == dialogs.PRIMARY
+
+    def test_text_viewer_copy_all(self, host):
+        dlg = dialogs.TextViewerDialog(host, "验证输出", "line1\nline2")
+
+        def act(d):
+            QTest.mouseClick(d.copy_button, Qt.LeftButton)
+            d.reject()
+        drive(host, act)
+        dlg.exec()
+        assert QApplication.clipboard().text() == "line1\nline2"
+        assert dlg.copy_button.text() == "已复制"
+
+
+class TestSettingsCard:
+    @pytest.fixture()
+    def settings(self, qapp, host, tmp_path, monkeypatch):
+        from src.ui import settings_dialog as sd
+        cfg = tmp_path / "config.json"
+        cfg.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(sd, "CONFIG_PATH", str(cfg))
+        dlg = sd.SettingsDialog(host)
+        yield dlg
+        dlg.deleteLater()
+        qapp.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_left_nav_replaces_tab_bar(self, settings, host):
+        seen = []
+
+        def act(d):
+            seen.append((d.card.size(), d.tabs.tabBar().isVisible()))
+            seen.append(d.save_btn.isDefault())         # 打开期间保存是默认按钮（Enter）
+            QTest.mouseClick(d.nav_buttons[3], Qt.LeftButton)
+            seen.append((d.tabs.currentIndex(), [b.isChecked() for b in d.nav_buttons]))
+            d.reject()
+        drive(host, act)
+        settings.exec()
+        (size, bar_visible), save_default, (idx, checked) = seen
+        # host 是 880×600：高度缩到窗口里留边，宽度照设计稿 800
+        assert (size.width(), size.height()) == (800, 600 - 2 * dialogs.CardDialog.MARGIN)
+        assert save_default is True
+        assert bar_visible is False
+        assert idx == 3 and checked == [False, False, False, True, False]
+        assert [b.text() for b in settings.nav_buttons] == ["模型", "远程", "知识库", "权限", "高级"]
+        assert settings.hint_label.text() == "密钥和 Base URL 改动要重启应用才生效"
+        assert settings.cancel_btn.role == dialogs.SECONDARY
+
+    @pytest.mark.parametrize("name", ["light", "dark"])
+    def test_nav_and_card_follow_theme(self, qapp, host, tmp_path, monkeypatch, name):
+        from src.ui import settings_dialog as sd
+        theme.set_active_theme(name)
+        monkeypatch.setattr(sd, "CONFIG_PATH", str(tmp_path / "none.json"))
+        dlg = sd.SettingsDialog(host)
+        p = theme.THEMES[name]
+        assert p["dlg_nav_active_bg"] in dlg.body.styleSheet()
+        assert p["dlg_nav_bg"] in dlg.body.styleSheet()
+        assert f"background: {p['dlg_bg']}" in dlg.styleSheet()
+        dlg.deleteLater()
+
+
+class TestQuitConfirm:
+    def test_enter_keeps_running(self, host):
+        from PySide6.QtWidgets import QDialog
+        from src.ui.widgets import QuitConfirmDialog
+        drive(host, lambda d: key(d, Qt.Key_Return))
+        dlg = QuitConfirmDialog("1 个对话还在运行", host)
+        assert dlg.exec() == QDialog.Rejected
+        assert dlg.danger and dlg.buttons["quit"].role == dialogs.DANGER
+
+    def test_click_quit_accepts(self, host):
+        from PySide6.QtWidgets import QDialog
+        from src.ui.widgets import QuitConfirmDialog
+        drive(host, lambda d: click(d, "quit"))
+        assert QuitConfirmDialog("1 个后台命令还在运行", host).exec() == QDialog.Accepted
+
+
+def test_no_native_framed_dialogs_in_ui():
+    """对话框一律是 dialogs.CardDialog / ThemedDialog（窗内卡片）；后台任务和调试是右侧停靠栏的
+    标签（第 3 批），也不再是独立窗口。"""
+    import ast
+    allowed = {"dialogs.py"}
+    hits = []
+    for name in sorted(os.listdir(_UI_DIR)):
+        if not name.endswith(".py") or name in allowed:
+            continue
+        with open(os.path.join(_UI_DIR, name), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    if isinstance(base, ast.Name) and base.id == "QDialog":
+                        hits.append(f"{name}:{node.lineno} class {node.name}(QDialog)")
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id in ("QDialog", "QDialogButtonBox"):
+                hits.append(f"{name}:{node.lineno} {node.func.id}(...)")
+    assert not hits, "还有自带窗框的对话框：" + ", ".join(hits)
+
+
+class TestInlineOverlay:
+    """弹窗是主窗口里的覆盖层：标题栏按钮照常可点（不是应用级模态顶层窗），窗口缩放跟着变，
+    焦点和按键收在卡片里，关掉后焦点还回去。"""
+
+    def test_not_an_app_modal_window(self, host):
+        seen = []
+        drive(host, lambda d: (seen.append((QApplication.activeModalWidget(), d.isWindow())),
+                               key(d, Qt.Key_Escape)))
+        dialogs.information(host, "提示", "x")
+        modal, is_window = seen[0]
+        assert modal is None and is_window is False
+
+    def test_follows_window_resize(self, host, qapp):
+        seen = []
+
+        def act(d):
+            host.resize(1200, 820)
+            qapp.processEvents()
+            seen.append((d.size(), d.card.size()))
+            d.reject()
+        drive(host, act)
+        dialogs.CardDialog(host, title="设置", width=800, height=620).exec()
+        size, card = seen[0]
+        assert (size.width(), size.height()) == (1200, 820)
+        assert (card.width(), card.height()) == (800, 620)     # 窗口够大了，不再缩
+
+    def test_tab_stays_inside(self, host):
+        from PySide6.QtWidgets import QLineEdit as _LE
+        outside = _LE(host)
+        outside.show()
+        seen = []
+
+        def act(d):
+            for _ in range(6):
+                QTest.keyClick(d.focusWidget() or d, Qt.Key_Tab)
+                seen.append(d.isAncestorOf(QApplication.focusWidget() or d.focusWidget()))
+            key(d, Qt.Key_Escape)
+        drive(host, act)
+        dialogs.question(host, "确认？", "x")
+        assert seen and all(seen)
+
+    def test_window_shortcuts_do_not_fire(self, host):
+        from PySide6.QtGui import QKeySequence, QShortcut
+        fired = []
+        sc = QShortcut(QKeySequence("Ctrl+K"), host)
+        sc.activated.connect(lambda: fired.append(1))
+
+        def act(d):
+            QTest.keyClick(d.focusWidget() or d, Qt.Key_K, Qt.ControlModifier)
+            key(d, Qt.Key_Escape)
+        drive(host, act)
+        dialogs.question(host, "确认？", "x")
+        assert fired == []
+
+    def test_scrim_swallows_clicks(self, qapp):
+        class Host(QWidget):
+            clicks = 0
+
+            def mousePressEvent(self, e):
+                Host.clicks += 1
+        h = Host()
+        h.resize(800, 600)
+        h.show()
+        qapp.processEvents()
+
+        def act(d):
+            QTest.mouseClick(d, Qt.LeftButton, pos=d.rect().topLeft() + QPoint(5, 5))
+            d.reject()
+        drive(h, act)
+        dialogs.CardDialog(h, title="x").exec()
+        assert Host.clicks == 0
+        h.deleteLater()
+
+    def test_focus_returns_after_close(self, host, qapp):
+        from PySide6.QtWidgets import QLineEdit as _LE
+        entry = _LE(host)
+        entry.show()
+        host.activateWindow()
+        entry.setFocus()
+        qapp.processEvents()
+        drive(host, lambda d: key(d, Qt.Key_Escape))
+        dialogs.question(host, "确认？", "x")
+        qapp.processEvents()
+        assert host.focusWidget() is entry

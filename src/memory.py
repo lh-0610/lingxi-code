@@ -929,6 +929,12 @@ def _save_session_locked(*, session=None, started=None):
         if k not in data:
             data[k] = v
 
+    # 只有对话真的变了才算"新活动"、刷新 updated（侧栏按它排序）。切会话时会先把当前会话
+    # 存一遍——内容没变也照样刷新的话，看过一眼就跳到分组最前（用户实测：点谁谁跑到第一个）。
+    touched = not existing or existing.get("messages") != data["messages"]
+    if not touched and existing.get("updated"):
+        data["updated"] = existing["updated"]
+
     with _LOCK:
         # 正文先写、索引后写：正文是唯一真数据，索引丢了能补，正文丢了补不回来。
         _atomic_write_json(session_file, data)
@@ -948,7 +954,7 @@ def _save_session_locked(*, session=None, started=None):
             written_bytes = 0
         try:
             _update_index(current_session_id, title, current_project,
-                          session_kind=session_kind, rag_kb_dir=rag_kb_dir)
+                          session_kind=session_kind, rag_kb_dir=rag_kb_dir, touch=touched)
         except Exception as index_error:
             # 正文已落盘、索引没跟上：登记一条待修记录，下次读盘时**只**补这个 id。
             # 仍然把错误带出去——不能报"已保存"，调用方要知道这次没完全成功；
@@ -1099,9 +1105,10 @@ def maybe_generate_session_title():
     logger.info(f"自动标题已生成: {state.current_session_id} - {title}")
 
 
-def _update_index(session_id, title, project=None, session_kind="code", rag_kb_dir=""):
-    """更新索引条目：已存在的原地更新（刷新 updated，把它带回列表的近期位置），
-    新会话插到最前。
+def _update_index(session_id, title, project=None, session_kind="code", rag_kb_dir="",
+                  touch=True):
+    """更新索引条目：已存在的原地更新（touch=True 时刷新 updated，把它带回列表的近期位置；
+    对话内容没变的保存传 touch=False，不改排序），新会话插到最前。
 
     索引**全量保留**，不做任何数量截断：会话历史是用户数据，删除只能由用户主动
     发起（delete_session 连正文一起删）。早先这里把索引截断到 SESSION_HISTORY_LIMIT=50，
@@ -1117,7 +1124,8 @@ def _update_index(session_id, title, project=None, session_kind="code", rag_kb_d
         for item in index:
             if item["id"] == session_id:
                 item["title"] = title
-                item["updated"] = datetime.now().isoformat()
+                if touch or not item.get("updated"):
+                    item["updated"] = datetime.now().isoformat()
                 item["project"] = project
                 item["session_kind"] = session_kind
                 item["rag_kb_dir"] = rag_kb_dir

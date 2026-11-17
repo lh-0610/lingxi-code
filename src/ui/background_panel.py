@@ -1,8 +1,9 @@
 """B10b 后台任务面板：只消费管理器快照，不持有 Popen 或会话执行权。
 
-这是用户主动打开的应用级管理入口；模型工具仍受各自会话令牌约束。
-停止在 Python 工作线程执行，完成信号按 bg_id 回到主线程；隐藏窗口只停刷新，
-不停止命令。窗口销毁后的回执可以丢弃，实际进程状态仍由 background 管理。
+这是用户主动打开的应用级管理入口；模型工具仍受各自会话令牌约束。现在停靠在对话区右侧
+（文件面板的「后台」标签，不再是独立窗口）。停止在 Python 工作线程执行，完成信号按 bg_id
+回到主线程；标签切走 / 面板收起 / 主窗口藏进托盘都只是隐藏，只停刷新，不停止命令。
+控件销毁后的回执可以丢弃，实际进程状态仍由 background 管理。
 """
 import os
 import threading
@@ -10,7 +11,7 @@ import threading
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot, QSize, QRectF
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QPlainTextEdit, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QStyledItemDelegate, QStyleOptionViewItem, QStyle, QLayout,
 )
@@ -107,9 +108,10 @@ def _stop_in_thread(bg_id, events):
 class _TaskTree(QTreeWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 窄窗时保留可读的命令列，多余宽度走水平滚动，不把命令压成两三个字。
-        other = sum(self.header().sectionSize(i) for i in range(1, 5))
-        self.header().resizeSection(0, max(220, self.viewport().width() - other))
+        # 停靠栏里只显示 命令 / 状态 / 耗时 三列：命令列吃掉剩下的宽度、末尾省略（完整命令和
+        # 来源在悬停提示与「任务信息」里），不横向滚动。
+        other = sum(self.header().sectionSize(i) for i in range(1, 5) if not self.isColumnHidden(i))
+        self.header().resizeSection(0, max(120, self.viewport().width() - other))
 
 
 class _TaskDelegate(QStyledItemDelegate):
@@ -117,7 +119,7 @@ class _TaskDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
-        size.setHeight(max(46, size.height()))
+        size.setHeight(max(40, size.height()))
         return size
 
     def paint(self, painter, option, index):
@@ -146,8 +148,10 @@ class _TaskDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-class BackgroundPanel(QDialog):
-    """可重复打开的非模态窗口；主线程定时快照、工作线程停止。"""
+class BackgroundPanel(QFrame):
+    """停靠栏「后台」标签的内容，可重复打开；主线程定时快照、工作线程停止。"""
+
+    running_count_changed = Signal(int)
 
     def __init__(self, color_getter, parent=None):
         super().__init__(parent)
@@ -158,15 +162,14 @@ class BackgroundPanel(QDialog):
         self._feedback = {}
         self._refresh_error = ""
         self._output_id = None
+        self._last_running = None
         self.setObjectName("backgroundPanel")
         self.setWindowTitle("后台任务")
-        self.resize(1040, 760)
-        self.setMinimumSize(600, 560)
-        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.resize(460, 760)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(12)
         # 固定的 560px 下限小于部分字体下的内容最小高度。让布局按实际控件
         # 更新窗口下限，而不是把最后的输出区挤成一条线或画到父控件外。
         layout.setSizeConstraint(QLayout.SetMinimumSize)
@@ -179,7 +182,11 @@ class BackgroundPanel(QDialog):
         subtitle = QLabel("查看后台命令的运行状态与输出")
         subtitle.setObjectName("backgroundSubtitle")
         title_group.addWidget(subtitle)
-        top.addLayout(title_group, 1)
+        # 停靠栏顶部已经写了「后台任务」和说明，这里的标题不再重复显示（对象保留给样式和测试）
+        title.hide()
+        subtitle.hide()
+        top.addLayout(title_group, 0)
+        top.addStretch(1)
         self.scope_combo = QComboBox()
         self.scope_combo.setMinimumWidth(122)
         self.scope_combo.setFixedHeight(36)
@@ -211,9 +218,6 @@ class BackgroundPanel(QDialog):
         layout.addWidget(self.list_note)
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.setChildrenCollapsible(False)
-        margins = layout.contentsMargins()
-        self.splitter.setMinimumWidth(
-            self.minimumWidth() - margins.left() - margins.right())
         layout.addWidget(self.splitter, 1)
         self.tree = _TaskTree()
         self.tree.setHeaderLabels(["命令", "状态", "来源 / 项目", "耗时", "退出码"])
@@ -228,10 +232,16 @@ class BackgroundPanel(QDialog):
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.Interactive)
-        for index, width in ((1, 200), (2, 190), (3, 72), (4, 66)):
-            header.setSectionResizeMode(index, QHeaderView.Interactive)
+        for index, width in ((1, 128), (2, 190), (3, 64), (4, 66)):
+            header.setSectionResizeMode(index, QHeaderView.Fixed)
             header.resizeSection(index, width)
         header.setMinimumSectionSize(50)
+        # 停靠栏只有 460 宽（设计稿「右侧面板 · 后台任务」）：不要表头，只留 命令 / 状态 / 耗时，
+        # 来源 / 项目和退出码在悬停提示与「任务信息」里；不横向滚动
+        self.tree.setHeaderHidden(True)
+        self.tree.setColumnHidden(2, True)
+        self.tree.setColumnHidden(4, True)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tree.itemSelectionChanged.connect(self._select)
         self.splitter.addWidget(self.tree)
 
@@ -334,15 +344,12 @@ class BackgroundPanel(QDialog):
         self.splitter.setSizes([220, 430])
 
         bottom = QHBoxLayout()
-        hint = QLabel("关闭面板不会停止命令。退出状态仅代表主进程，任务验证请查看结果卡。")
+        hint = QLabel("收起面板不会停止命令。退出状态仅代表主进程，任务验证请查看结果卡。")
         hint.setObjectName("backgroundFootnote")
         hint.setToolTip("仅显示本次应用启动的记录，重启后不恢复进程控制。\n"
                         "主进程退出不证明所有子进程已退出，也不代表任务已验证。")
         hint.setWordWrap(True)
         bottom.addWidget(hint, 1)
-        close_btn = QPushButton("完成")
-        close_btn.clicked.connect(self.close)
-        bottom.addWidget(close_btn)
         layout.addLayout(bottom)
         self._events = _StopEvents(self)
         self._events.completed.connect(self._stop_finished, Qt.QueuedConnection)
@@ -355,7 +362,7 @@ class BackgroundPanel(QDialog):
         c = self._color
         arrow = os.path.join(BASE_DIR, "icons", "chevron_down.svg").replace("\\", "/")
         self.setStyleSheet(
-            f"QDialog#backgroundPanel {{ background: {c('sidebar_bg')}; }}"
+            f"QFrame#backgroundPanel {{ background: transparent; }}"
             f"QWidget {{ color: {c('text')}; font-size: 13px; }}"
             f"QLabel {{ background: transparent; }}"
             f"QLabel#backgroundTitle {{ font-size: 20px; font-weight: 600; }}"
@@ -365,8 +372,9 @@ class BackgroundPanel(QDialog):
             f"QLabel#backgroundFootnote {{ color: {c('text_dim')}; font-size: 12px; }}"
             f"QLabel#backgroundListNote {{ color: {c('badge_warn_text')}; padding: 8px; }}"
             f"QLabel#backgroundStatus {{ font-weight: 600; }}"
+            # padding：滚动区里的视口是方的，贴着边框画会把圆角盖掉（四个角缺一块），往里收 3px
             f"QTreeWidget#backgroundTree {{ border: 1px solid {c('input_border')}; border-radius: 10px; "
-            f"background: {c('win_bg')}; color: {c('text')}; outline: none; "
+            f"padding: 3px; background: {c('win_bg')}; color: {c('text')}; outline: none; "
             f"selection-background-color: {c('history_active_bg')}; selection-color: {c('text')}; }}"
             f"QTreeWidget::item {{ padding: 7px 8px; border-bottom: 1px solid {c('header_border')}; }}"
             f"QTreeWidget::item:hover {{ background: {c('history_hover_bg')}; }}"
@@ -468,6 +476,9 @@ class BackgroundPanel(QDialog):
         ended = sum(s["running"] is False for s in snapshots)
         counts = f"{len(snapshots)} 个任务    {running} 运行中    {ended} 已退出"
         self.count_label.setText(counts + (f"    {unknown} 状态未知" if unknown else ""))
+        if running != self._last_running:
+            self._last_running = running
+            self.running_count_changed.emit(running)      # 停靠栏「后台」标签上的数字
         self.live_label.setText("● 每 0.5 秒刷新")
         empty_note = ("当前会话没有后台任务，可切换到“全部会话”查看其他来源。"
                       if owner else "还没有后台任务。让灵犀在后台运行命令后，即可在这里查看。")
@@ -494,7 +505,9 @@ class BackgroundPanel(QDialog):
                       "—" if snap["exit_code"] is None else str(snap["exit_code"])]
             for column, value in enumerate(values):
                 item.setText(column, value)
-            item.setToolTip(0, snap["command"][:2000])
+            exit_text = "—" if snap["exit_code"] is None else str(snap["exit_code"])
+            item.setToolTip(0, snap["command"][:2000] + f"\n来源：{source}\n项目：{project}"
+                            f"\n退出码：{exit_text}")
             item.setToolTip(1, status)
             item.setToolTip(2, source + "\n项目：" + project)
             item.setForeground(1, QColor(self._color(color)))

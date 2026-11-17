@@ -8,13 +8,13 @@
 import os
 
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize, QRectF
-from PySide6.QtGui import QIcon, QPainter, QFont, QFontMetrics, QColor, QPalette
+from PySide6.QtGui import QPainter, QFont, QFontMetrics, QColor, QPalette
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QTextBrowser,
+    QHBoxLayout, QLabel, QMenu, QTextBrowser,
     QTextEdit, QVBoxLayout, QWidget, QStyle, QStyledItemDelegate,
 )
 
-from ._base import BASE_DIR
+from .dialogs import ThemedDialog
 
 
 class SignalBridge(QObject):
@@ -642,78 +642,18 @@ class GeneratingBadge(QWidget):
         self.setToolTip(text)
 
 
-class QuitConfirmDialog(QDialog):
+class QuitConfirmDialog(ThemedDialog):
     """退出软件前的确认，只在还有对话或后台命令在跑时弹。
 
-    默认按钮是「取消」：误点了退出，按 Enter / Esc 都不会把正在跑的任务杀掉。
+    危险样式的主题弹窗：默认聚焦「取消」，Enter / Esc 都不会把正在跑的任务杀掉，
+    只有点「仍然退出」才 Accepted。托盘里退出时主窗口是隐藏的，弹窗就只开卡片、屏幕居中。
     """
 
     def __init__(self, busy: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("退出灵犀")
-        self.setModal(True)
-        self.setFixedSize(420, 190)
-
-        icon_path = os.path.join(BASE_DIR, "icon.ico")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(26, 20, 26, 18)
-        root.setSpacing(12)
-
-        text_col = QVBoxLayout()
-        text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(8)
-
-        title = QLabel("还有任务在运行，确定退出？")
-        title.setObjectName("closeTitle")
-        title.setWordWrap(True)
-        text_col.addWidget(title)
-
-        desc = QLabel(f"{busy}，退出会中断它们。只想关掉窗口的话点右上角 ×，任务会在后台继续。")
-        desc.setObjectName("closeDescription")
-        desc.setWordWrap(True)
-        text_col.addWidget(desc)
-        root.addLayout(text_col)
-        root.addStretch()
-
-        buttons = QHBoxLayout()
-        buttons.setContentsMargins(0, 0, 0, 0)
-        buttons.setSpacing(10)
-        buttons.addStretch()
-
-        quit_btn = QPushButton("仍然退出")
-        quit_btn.setObjectName("closeSecondaryButton")
-        quit_btn.setAutoDefault(False)
-        quit_btn.clicked.connect(self.accept)
-
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setObjectName("closePrimaryButton")
-        cancel_btn.setDefault(True)
-        cancel_btn.clicked.connect(self.reject)
-
-        for btn in (quit_btn, cancel_btn):
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumSize(92, 32)
-            buttons.addWidget(btn)
-
-        root.addLayout(buttons)
-        self._apply_style()
-
-    def _apply_style(self):
-        from .theme import color as c   # 配色跟当前主题（设计稿状态 5）
-        accent = c("mv_indigo")
-        border = c("mv_chip_border")
-
-        self.setStyleSheet(
-            f"QuitConfirmDialog {{ background: {c('mv_view_bg')}; color: {c('mv_text')}; }}\n"
-            f"#closeTitle {{ color: {c('mv_text')}; font-size: 16px; font-weight: 600; }}\n"
-            f"#closeDescription {{ color: {c('mv_text_sec')}; font-size: 13px; }}\n"
-            f"#closePrimaryButton, #closeSecondaryButton {{ border-radius: 8px;"
-            f" padding: 5px 12px; font-size: 13px; background: {c('mv_card_bg')};"
-            f" color: {c('mv_text3')}; border: 1px solid {border}; }}\n"
-            f"#closeSecondaryButton:hover {{ border-color: {c('mv_chip_hover')}; }}\n"
-            f"#closePrimaryButton {{ background: {accent}; border-color: {accent};"
-            f" color: {c('mv_view_bg')}; font-weight: 600; }}\n"
-        )
+        from .dialogs import DANGER, SECONDARY, Action
+        super().__init__(
+            parent, title="还有任务在运行，确定退出？",
+            text=f"{busy}，退出会中断它们。",
+            informative="只想关掉窗口的话点右上角 ×，任务会在后台继续。",
+            actions=[Action("cancel", "取消", SECONDARY), Action("quit", "仍然退出", DANGER)],
+            tone="warning", glyph="warning", danger=True, escape="cancel")

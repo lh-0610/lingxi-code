@@ -1,15 +1,15 @@
-"""F12 Debug Inspector 对话框。
+"""调试面板（原 F12 Debug Inspector 独立窗口，现在是右侧停靠栏的「调试」标签）。
 
-像浏览器 F12 网络面板那样：左侧列出每次 LLM 调用，右侧看请求 / 响应详情。
+像浏览器 F12 网络面板那样：上面列出每次 LLM 调用，下面看请求 / 响应详情。
 - 数据从 src.debug_log 全局 recorder 拿
-- 非模态：开着 inspector 还能继续聊
-- F12 切换显示，再按一次关闭
+- 停靠在对话区右边，不弹窗、不挡对话；F12 打开 / 收起这个标签
+- 原来的独立窗口要自己置顶、模态框打开时让出置顶、首次贴到主窗口旁边——停靠后这些都不需要了
 """
 import json
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QCheckBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QPushButton, QSplitter, QTextBrowser, QVBoxLayout, QApplication,
 )
 
@@ -29,35 +29,25 @@ def _usage_num(usage, key):
     return value if isinstance(value, int) else "未知"
 
 
-class DebugInspector(QDialog):
-    """F12 触发的非模态调试窗口。"""
+class DebugInspector(QFrame):
+    """右侧停靠栏「调试」标签的内容（F12 打开 / 收起）。"""
 
     def __init__(self, parent=None):
-        # 不传 parent 否则会跟着主窗口的 stacking/最小化走，达不到"并列两个窗口"
-        super().__init__(None)
-        self.setWindowTitle("灵犀 Debug Inspector")
-        # 默认尺寸做小，主窗口边上能并排站住
-        self.resize(720, 620)
-        self._parent_window = parent  # 自己持引用做定位用
-        # 非模态：主窗口能正常聊
-        self.setModal(False)
-        # 让它"浮在主窗口上方"但不抢全局焦点——切到主窗口聊天时 Inspector 还能看见
-        flags = self.windowFlags()
-        flags |= Qt.WindowStaysOnTopHint
-        # 关掉 dialog 的"问号"按钮
-        flags &= ~Qt.WindowContextHelpButtonHint
-        self.setWindowFlags(flags)
+        super().__init__(parent)
+        self.setObjectName("debugInspector")
+        self.setWindowTitle("调试")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 8)
-        root.setSpacing(6)
+        root.setContentsMargins(0, 4, 0, 0)
+        root.setSpacing(8)
 
         # ── 顶部工具栏 ──
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
-        tip = QLabel("内存中最近 50 次 LLM 调用 · 关 app 清空")
-        tip.setStyleSheet("color: #888; font-size: 12px;")
-        top.addWidget(tip)
+        tip = QLabel("最近 50 次模型调用 · 关闭程序后清空")
+        tip.setObjectName("debugTip")
+        tip.setWordWrap(True)
+        top.addWidget(tip, 1)
         top.addStretch()
         self.follow_check = QCheckBox("跟随最新")
         self.follow_check.setChecked(True)
@@ -65,20 +55,18 @@ class DebugInspector(QDialog):
         clear_btn = QPushButton("清空")
         clear_btn.clicked.connect(self._on_clear)
         top.addWidget(clear_btn)
-        copy_btn = QPushButton("复制选中 JSON")
+        copy_btn = QPushButton("复制这次调用")
         copy_btn.clicked.connect(self._on_copy)
         top.addWidget(copy_btn)
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.hide)
-        top.addWidget(close_btn)
         root.addLayout(top)
 
-        # ── 主体：左列表 / 右详情 ──
-        split = QSplitter(Qt.Horizontal)
+        # ── 主体：上列表 / 下详情（停靠栏窄，左右分栏放不下）──
+        split = QSplitter(Qt.Vertical)
         split.setHandleWidth(6)
+        split.setChildrenCollapsible(False)
 
         self.list_widget = QListWidget()
-        self.list_widget.setMinimumWidth(220)
+        self.list_widget.setMinimumHeight(120)
         self.list_widget.currentItemChanged.connect(self._on_select)
         split.addWidget(self.list_widget)
 
@@ -92,9 +80,9 @@ class DebugInspector(QDialog):
         self.detail.setFont(font)
         split.addWidget(self.detail)
 
-        split.setStretchFactor(0, 1)
+        split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
-        split.setSizes([260, 840])
+        split.setSizes([240, 420])
         root.addWidget(split, 1)
 
         self._apply_style()
@@ -109,62 +97,6 @@ class DebugInspector(QDialog):
         # 默认选中最新一条
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(0)
-
-    # 标志：是不是第一次 show（用于自动定位到主窗口边上）
-    _has_positioned = False
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self._has_positioned:
-            self._dock_beside_parent()
-            self._has_positioned = True
-
-    def event(self, event):
-        # 设置、确认框、文件选择这类应用级模态框打开时，本窗口会被锁住不能点；要是还置顶，
-        # 就会盖住那个对话框，两边都点不了，只能按 Esc。被锁住期间让出置顶、退到后面，解锁后恢复。
-        etype = event.type()
-        if etype == QEvent.WindowBlocked:
-            self._set_on_top(False)
-        elif etype == QEvent.WindowUnblocked:
-            self._set_on_top(True)
-        return super().event(event)
-
-    def _set_on_top(self, on: bool):
-        handle = self.windowHandle()
-        if handle is None or not self.isVisible():
-            return
-        # 改 QWindow 的标志而不是 QWidget.setWindowFlags：后者会把窗口先藏起来再显示
-        handle.setFlag(Qt.WindowStaysOnTopHint, on)
-        if on:
-            self.raise_()
-        else:
-            self.lower()
-
-    def _dock_beside_parent(self):
-        """第一次 show 时，自动把 Inspector 贴到主窗口右侧（屏幕装不下则贴左边）。"""
-        pw = self._parent_window
-        if pw is None or not pw.isVisible():
-            return
-        try:
-            screen = pw.screen().availableGeometry()
-        except Exception:
-            return
-        main_geo = pw.frameGeometry()
-        my_w, my_h = self.width(), self.height()
-        gap = 8
-        # 优先贴右侧
-        right_x = main_geo.right() + gap
-        if right_x + my_w <= screen.right():
-            x = right_x
-        else:
-            # 右侧装不下，试试左侧
-            left_x = main_geo.left() - my_w - gap
-            x = left_x if left_x >= screen.left() else screen.right() - my_w - gap
-        y = max(screen.top(), main_geo.top())
-        # 别让高度超出屏幕
-        if y + my_h > screen.bottom():
-            y = max(screen.top(), screen.bottom() - my_h)
-        self.move(x, y)
 
     # ── 槽 ──
 
@@ -380,12 +312,22 @@ class DebugInspector(QDialog):
 
         return summary + err_block + request_block + response_block + raw_block
 
+    def apply_theme(self):
+        """切主题时由停靠栏调；详情是现画的 HTML，重画当前这条。"""
+        self._apply_style()
+        current = self.list_widget.currentItem()
+        if current is not None:
+            self._on_select(current, None)
+
     def _apply_style(self):
         c = theme_color
         self.setStyleSheet(
-            f"QDialog, QWidget {{ background:{c('mv_view_bg')}; color:{c('mv_text')}; }}"
+            f"QFrame#debugInspector {{ background: transparent; color:{c('mv_text')}; }}"
+            f"QLabel#debugTip {{ color:{c('mv_text_sec')}; font-size:12px; background: transparent; }}"
+            "QSplitter { background: transparent; }"
+            # padding：视口是方的，贴边画会盖住圆角，往里收一点
             f"QListWidget {{ background:{c('mv_result_bg')}; border:1px solid {c('mv_card_border')}; border-radius:6px;"
-            f"  font-family:{UI_CSS}; font-size:12px; color:{c('mv_text')}; }}"
+            f"  padding:2px; font-family:{UI_CSS}; font-size:12px; color:{c('mv_text')}; }}"
             f"QListWidget::item {{ padding:8px 10px; border-bottom:1px solid {c('mv_result_border')}; }}"
             f"QListWidget::item:selected {{ background:{c('mv_indigo_soft')}; color:{c('mv_indigo')}; }}"
             f"QTextBrowser {{ background:{c('mv_view_bg')}; border:1px solid {c('mv_card_border')}; border-radius:6px;"

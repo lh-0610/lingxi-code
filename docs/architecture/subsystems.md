@@ -39,7 +39,7 @@
 ## 会话历史保留与侧栏加载更多
 - **索引全量保留，删除只能由用户发起**：`_update_index` 不做任何数量截断，新会话插最前、旧条目原地更新（刷新 `updated`）。早先索引截断到 `SESSION_HISTORY_LIMIT=50` 并把挤出名额的会话**正文一并删掉**——内存里还开着的靠注册表检查幸免，没打开的连正文带索引一起消失且无法恢复。`SESSION_HISTORY_LIMIT` 常量已废除：不要把"历史保留"和"界面展示数量"混为一谈。
 - **展示数量是界面状态**（`limits.SIDEBAR_GROUP_VISIBLE_INITIAL/STEP`，各 30）：侧栏每个分组初始显示 30 条，组尾「加载更多」按步长追加；每组按 `collapse_key`（项目路径 / 无项目 / RAG 专用键）**独立计数**——RAG 与编码"无项目"都以 project=None 渲染，计数与折叠共用同一套键区分，互不串用。计数是内存级（`_group_visible_counts`），普通刷新（重渲染）不重置；删除会话后剩余不足时按钮自然消失。
-- **排序**：更新时间倒序，同刻按 id 倒序（id 含"年月日_时分秒_微秒"，跨重启稳定）。保存旧会话会刷新它的 `updated`，把它带回所在分组的近期位置。
+- **排序**：更新时间倒序，同刻按 id 倒序（id 含"年月日_时分秒_微秒"，跨重启稳定）。**只有对话内容变了的保存才刷新 `updated`**（`save_session_report` 比对正文 messages，没变就沿用旧值、`_update_index(touch=False)`），把有新活动的会话带回所在分组的近期位置。切会话前会先把当前会话存一遍——早先每次保存都刷新，看过一眼的会话就被顶到最前（用户实测：点谁谁跑到第一个），守它的是 `scripts/test_session_order_on_switch.py`。
 - **正常保存永不触发历史清理**；用户主动删除（`delete_session`）连正文 + 索引条目 + 索引修复登记 + inflight sidecar 一起删，修复路径以正文为唯一真相（正文不在 → 销案不复活），已删除的会话不会因后续保存、索引修复或重启复活。不做孤儿 JSON 扫描重建索引——那会复活用户主动删除的会话，也不声称能恢复已被旧代码删除的数据。
 
 ## 对话时间轴：编辑 / 回退 / 分叉（src/memory.py + src/ui/timeline.py）
@@ -96,10 +96,12 @@
 
 ## 主题弹窗（src/ui/dialogs.py）
 - **`src/ui/` 里不用原生 QMessageBox / QInputDialog**，一律走 `dialogs`（守它的是 `scripts/test_themed_dialogs.py::test_no_native_message_or_input_boxes_in_ui`，按 tokenize 只看代码里的名字）。QFileDialog 文件选择框和托盘气泡保留原生。设计稿是画布「灵犀弹窗设计」：无边框、背后一层变暗的遮罩、中间一张宽 440 圆角 14 的卡片；颜色全取 `theme` 的 `dlg_*` token（打开那一刻按当前主题取），明暗两套 key 必须一一对应
-- **实现**：`ThemedDialog` 是 `Qt.Dialog | FramelessWindowHint` + 透明背景的 QDialog，几何盖住父窗口的客户区，`paintEvent` 只画遮罩，卡片在中间偏上（上下留白 4:6）；父窗口不可见（最小化 / 进托盘）或没有父窗口时只开卡片大小、屏幕居中、不画遮罩。仍是模态 `exec()`，调用处保持同步写法，只能在主线程调
+- **实现：窗内覆盖层**（`_OverlayMixin`，ThemedDialog / CardDialog 共用）：有可见的父窗口时，弹窗是**父窗口里的子控件**（`Qt.Widget`），盖满客户区画遮罩，卡片在中间偏上（上下留白 4:6）。最早做成盖在父窗口上的无边框顶层窗，结果是应用级模态——Windows 下主窗口标题栏的最小化 / 最大化 / 关闭都点不动（用户实测），窗口放大后遮罩也不跟着变。现在：标题栏按钮照常可点；父窗口装事件过滤器，缩放时遮罩和卡片跟着重排；遮罩吞掉鼠标；Tab 焦点只在弹窗里转（`focusNextPrevChild`）；`ShortcutOverride` 在弹窗接住，主窗口的快捷键不会越过弹窗触发；没处理的按键不往主窗口冒；关掉后焦点还给打开前的控件。仍是 `exec()`（QDialog 自己的局部事件循环），调用处保持同步写法，只能在主线程调。父窗口不可见（最小化 / 进托盘）或没给 parent 时退回无边框顶层窗：只开卡片大小、屏幕居中、不画遮罩
 - **API 对齐 QMessageBox**：`question / information / warning / critical / success` 返回 `StandardButton`（数值与 QMessageBox 一致），`labels={dialogs.Yes: "删除"}` 改按钮字；`choose` 多出口返回动作 key（Esc / 关闭返回 None）；`get_text` 同 `QInputDialog.getText` 返回 `(文本, 是否确定)`；`confirm_danger` 返回 bool。图标底色表示类型：info 靛蓝 / success 绿 / warning 琥珀 / error 红，`glyph` 另选图形（rewind / trash / folder …）。路径和报错放 `detail`（灰色等宽框，带「复制」，长路径无空格也能折行：用 QTextEdit 不用 QLabel）
 - **键盘**：Esc = 取消（关闭按钮、Alt+F4 同）；Enter = 默认按钮——普通对话框默认主按钮，调用方给了 `default` 按它（回退对话、移除项目沿用原来的默认「取消」），焦点在别的按钮上时按那个；**危险对话框（`danger=True`）默认聚焦取消，Enter 永远等于取消**，危险按钮只能点或 Tab 过去按空格（原来「跳过权限确认」的 QMessageBox 按 Enter 就直接切了）。按钮自绘（`DialogButton`）：主窗口的全局 QSS 会继承下来，焦点环又要画在按钮外面，QSS 盒模型做不到；autoDefault 关掉，Enter 统一由对话框处理
 - **危险样式的调用点**：跳过权限确认（琥珀图标 + 红按钮「仍要切换」）、删除自定义模型。危险按钮实心 #c43d27（深色主题 #f09a8d 配深色字），对比度都过 4.5:1（测试里算）
+- **表单对话框用 `CardDialog`**（设计稿「设置对话框 · 应用内外框」）：同样是无边框透明窗 + 遮罩，卡片圆角 16，顶部 56 高的标题栏（标题 + 关闭），中间 `self.body` 由子类排，底部 64 高的操作栏（左边一行说明 `set_hint`，右边 `add_button(文字, 角色, 槽, default=)`）。卡片按请求的宽高放中间，窗口小了就缩到窗口里留 32 边；Esc / 关闭 = reject，Enter 走 QDialog 的默认按钮。**子类的内容样式设到 `self.body` 上**，设到对话框本身会把遮罩和卡片的样式盖掉。用它的：设置（800×620，原来的 QTabWidget 只藏起标签栏，左侧 168 宽的导航按钮切页；roles / logs / config / 关于收在导航底部；重启提示从顶部横幅挪到操作栏说明）、自定义模型编辑、编辑固定限制（字数 / 拒绝保存的说明在编辑框下面，放操作栏会被挤成几行裁掉）、只读长文本 `TextViewerDialog`（验证输出，带「复制全部」）。退出确认 `QuitConfirmDialog` 是危险样式的 ThemedDialog（托盘里退出时主窗口隐藏，只开卡片、屏幕居中）；编辑消息 / 编辑排队消息改用 `get_text(multiline=True, banner=…, rows=6)`（设计稿是 4 行，消息编辑给到 6 行），Ctrl+Enter 确定
+- **`src/ui/` 里除 dialogs.py 外没有直接用 QDialog 的了**：后台任务和调试（原 F12 独立置顶窗口）在第 3 批改成了右侧停靠栏的「后台」「调试」标签（`file_panel.open_widget_tab`，见 [background.md](background.md)）；`test_no_native_framed_dialogs_in_ui` 用 AST 守着不再出现 `class X(QDialog)` / `QDialog(...)` / `QDialogButtonBox(...)`
 - **测试写法**：exec 是阻塞的，先挂带 receiver 的零秒定时器，等 `dialogs.active_dialog()` 出现再按键 / 点按钮（`test_themed_dialogs.drive`），另挂 5 秒安全阀防卡死；只想跳过弹窗的用例 patch `dialogs.ThemedDialog.exec` 或 `dialogs.get_text`。offscreen 下 `QTest.keyClicks` 打中文字符会卡住，输入框用 `setText`
 
 ## 侧栏浏览器（src/browser/ + tools_browser.py + ui/browser_panel.py）

@@ -344,20 +344,10 @@ class QueueDispatchMixin:
     def _show_queue_edit_dialog(self, item):
         """编辑排队消息的对话框。独立成方法：测试可整只替换，不必戳控件树。
         返回新正文（strip 过）；取消返回 None。"""
-        from PySide6.QtWidgets import QDialog, QPlainTextEdit, QVBoxLayout, QDialogButtonBox
-        dlg = QDialog(self)
-        dlg.setWindowTitle("编辑排队消息")
-        edit = QPlainTextEdit(item.get("text") or "")
-        edit.setMinimumSize(560, 220)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(edit)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        lay.addWidget(buttons)
-        if dlg.exec() != QDialog.Accepted:
-            return None
-        return edit.toPlainText().strip()
+        from . import dialogs
+        text, ok = dialogs.get_text(self, "编辑排队消息", "消息内容", item.get("text") or "",
+                                    ok_text="保存", multiline=True, rows=6)
+        return text.strip() if ok else None
 
     def _on_queue_edit_requested(self, item_id):
         from .. import input_queue as _iq

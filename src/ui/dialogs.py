@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass
 from enum import IntFlag
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
@@ -227,6 +227,8 @@ class DialogButton(QPushButton):
         c = self.colors()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.45)              # 不可用：整颗按钮变淡（如限制超字数时的「保存」）
         body = QRectF(self.rect()).adjusted(_RING, _RING, -_RING, -_RING)
         radius = 8 if self.role == TEXT else 10
         if self.hasFocus():
@@ -244,8 +246,6 @@ class DialogButton(QPushButton):
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
         text_color = qcolor(c["text"])
-        if not self.isEnabled():
-            text_color.setAlphaF(0.5)
         p.setPen(text_color)
         p.setFont(self.font())
         fm = QFontMetrics(self.font())
@@ -282,7 +282,123 @@ class Action:
     role: str = SECONDARY
 
 
-class ThemedDialog(QDialog):
+class _OverlayMixin:
+    """窗内覆盖层：有可见的父窗口时，弹窗是**父窗口里的子控件**，不是另一个顶层窗口。
+
+    早先是盖在父窗口上的无边框顶层窗：应用级模态，Windows 下主窗口标题栏的最小化 / 最大化 /
+    关闭都点不动（用户实测），窗口放大后遮罩也不跟着变。改成子控件后：
+    - 标题栏按钮照常能点；主窗口缩放时遮罩和卡片跟着重排（父窗口装事件过滤器）
+    - 仍然 ``exec()`` 同步返回（QDialog 自己的局部事件循环），调用处写法不变
+    - 遮罩盖满客户区，鼠标点不到下面；Tab 焦点只在卡片里转；主窗口的快捷键在弹窗打开时不触发
+      （ShortcutOverride 在这里接住，按键照常交给弹窗里的控件）；没处理的按键不往主窗口冒
+    - 关掉后焦点还给打开前的那个控件
+    没有可见父窗口（最小化、藏进托盘、没给 parent）时退回无边框顶层窗，屏幕居中、不画遮罩。
+    """
+
+    def _overlay_parent(self, parent):
+        self._anchor = _anchor_window(parent)
+        return self._anchor if self._anchor is not None else parent
+
+    def _setup_overlay(self):
+        self._inline = self._anchor is not None
+        self._scrim = self._inline
+        self._return_focus = None
+        if self._inline:
+            self.setWindowFlags(Qt.Widget)
+            self.setFocusPolicy(Qt.StrongFocus)
+            self._anchor.installEventFilter(self)
+        else:
+            self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+
+    def _place_overlay(self):
+        """内联时盖满父窗口；返回父窗口当前大小（卡片按它限宽高）。"""
+        win = self._anchor
+        self.setGeometry(win.rect())
+        self.raise_()
+        return win.size()
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if obj is self._anchor and event.type() == QEvent.Resize and self.isVisible():
+            self._place()
+        return super().eventFilter(obj, event)
+
+    def event(self, ev):
+        from PySide6.QtCore import QEvent
+        if getattr(self, "_inline", False) and ev.type() == QEvent.ShortcutOverride:
+            ev.accept()               # 主窗口的快捷键别越过弹窗触发；按键照常送给焦点控件
+            return True
+        return super().event(ev)
+
+    def _overlay_shown(self):
+        if self not in _open_dialogs:
+            _open_dialogs.append(self)
+        if self._inline:
+            fw = QApplication.focusWidget()
+            if fw is not None and not self.isAncestorOf(fw):
+                self._return_focus = fw
+
+    def _overlay_done(self):
+        if self in _open_dialogs:
+            _open_dialogs.remove(self)
+        if self._inline:
+            try:
+                self._anchor.removeEventFilter(self)
+            except RuntimeError:
+                pass
+            fw = self._return_focus
+            self._return_focus = None
+            if fw is not None:
+                import shiboken6
+                if shiboken6.isValid(fw) and fw.isVisible():
+                    fw.setFocus(Qt.OtherFocusReason)
+
+    def focusNextPrevChild(self, nxt):
+        if not getattr(self, "_inline", False):
+            return super().focusNextPrevChild(nxt)
+        # Tab 只在弹窗里转：沿焦点链找下一个属于本弹窗、能接 Tab 焦点的控件
+        cur = self.focusWidget() or self
+        w = cur
+        for _ in range(1000):
+            w = w.nextInFocusChain() if nxt else w.previousInFocusChain()
+            if w is cur:
+                break
+            if (self.isAncestorOf(w) and w.isVisibleTo(self) and w.isEnabled()
+                    and (w.focusPolicy() & Qt.TabFocus) == Qt.TabFocus):
+                w.setFocus(Qt.TabFocusReason if nxt else Qt.BacktabFocusReason)
+                return True
+        return True
+
+    def _focus_first_child(self):
+        fw = QApplication.focusWidget()
+        if fw is not None and self.isAncestorOf(fw):
+            return
+        self.setFocus(Qt.OtherFocusReason)
+        self.focusNextPrevChild(True)
+
+    def mousePressEvent(self, event):
+        event.accept()                # 点在遮罩上：吞掉，不传给下面的主窗口
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        event.accept()
+
+    def wheelEvent(self, event):
+        event.accept()
+
+    def paintEvent(self, event):
+        if not self._scrim:
+            return
+        p = QPainter(self)
+        p.fillRect(self.rect(), qcolor(tok("dlg_scrim")))
+        p.end()
+
+
+class ThemedDialog(_OverlayMixin, QDialog):
     """一张卡片 + 遮罩。所有便捷函数都落到这里；``exec()`` 后读 ``result_key``。
 
     参数里只有 title / actions 是必须的，其余按需出现：
@@ -297,14 +413,11 @@ class ThemedDialog(QDialog):
                  default=None, escape=None, danger: bool = False, stacked: bool = False,
                  rich_text: bool = False, input_label: str | None = None, input_text: str = "",
                  input_placeholder: str = "", multiline: bool = False, show_icon: bool = True,
-                 copyable: bool = True):
-        self._anchor = _anchor_window(parent)
-        super().__init__(parent)
+                 copyable: bool = True, input_rows: int = 4):
+        super().__init__(self._overlay_parent(parent))
         self.setObjectName("lxDialog")
         self.setWindowTitle(title)
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setModal(True)
+        self._setup_overlay()
         self.danger = danger
         self.tone = tone if tone in TONES else "info"
         self.result_key = escape
@@ -312,7 +425,7 @@ class ThemedDialog(QDialog):
         self._actions = [a if isinstance(a, Action) else Action(*a) for a in actions]
         self._detail_text = detail
         self._multiline = multiline
-        self._scrim = self._anchor is not None
+        self._input_rows = max(2, int(input_rows))
         self.buttons: dict = {}
         self.input = None
         self.copy_button = None
@@ -333,6 +446,9 @@ class ThemedDialog(QDialog):
             default = (primary[0] if primary
                        else escape if escape in keys else keys[-1] if keys else None)
         self.default_key = default
+        if default in self.buttons:
+            # 标成 default：findChildren 一眼能看出默认是谁；Enter 仍由 keyPressEvent 统一处理
+            self.buttons[default].setDefault(True)
         self._place()
 
     # ── 构造 ──
@@ -493,7 +609,7 @@ class ThemedDialog(QDialog):
             if self._multiline:
                 self.input = QPlainTextEdit(self.card)
                 self.input.setPlainText(input_text)
-                self.input.setFixedHeight(4 * 22 + 22)
+                self.input.setFixedHeight(self._input_rows * 22 + 22)
                 self.input.setTabChangesFocus(True)
                 self.input.installEventFilter(self)      # Ctrl+Enter 确定
             else:
@@ -654,16 +770,14 @@ QLineEdit#lxDlgInput:focus, QPlainTextEdit#lxDlgInput:focus {{
     # ── 位置 ──
     def _place(self):
         """有可见的父窗口：整个盖住它的客户区，卡片在中间偏上；没有就只是卡片大小、屏幕居中。"""
-        if self._anchor is not None:
-            win = self._anchor
-            top_left = win.mapToGlobal(QPoint(0, 0))
-            self.setGeometry(QRect(top_left, win.size()))
+        if self._inline:
+            size = self._place_overlay()
             lay = self.layout()
             # 中间偏上：上下留白 4:6
             card_h = self.card.heightForWidth(CARD_WIDTH)
             if card_h < 0:
                 card_h = self.card.sizeHint().height()
-            spare = max(0, win.height() - card_h)
+            spare = max(0, size.height() - card_h)
             lay.setContentsMargins(0, int(spare * 0.4), 0, spare - int(spare * 0.4))
         else:
             margin = 48
@@ -690,9 +804,9 @@ QLineEdit#lxDlgInput:focus, QPlainTextEdit#lxDlgInput:focus {{
             self.finish(accept[0])
 
     def showEvent(self, event):
+        self._place()
         super().showEvent(event)
-        if self not in _open_dialogs:
-            _open_dialogs.append(self)
+        self._overlay_shown()
         if self.input is not None:
             self.input.setFocus(Qt.OtherFocusReason)
             if isinstance(self.input, QLineEdit):
@@ -701,8 +815,7 @@ QLineEdit#lxDlgInput:focus, QPlainTextEdit#lxDlgInput:focus {{
             self.buttons[self.default_key].setFocus(Qt.OtherFocusReason)
 
     def done(self, r):
-        if self in _open_dialogs:
-            _open_dialogs.remove(self)
+        self._overlay_done()
         super().done(r)
 
     def eventFilter(self, obj, event):
@@ -735,22 +848,202 @@ QLineEdit#lxDlgInput:focus, QPlainTextEdit#lxDlgInput:focus {{
                 self.finish(self.default_key)
             return
         super().keyPressEvent(event)
+        event.accept()                    # 没处理的键也不往主窗口冒（内联时主窗口是父控件）
 
     def reject(self):
         # 系统关闭（Alt+F4 等）也算取消
         self.result_key = self._escape_key
         super().reject()
 
-    def paintEvent(self, event):
-        if not self._scrim:
-            return
-        p = QPainter(self)
-        p.fillRect(self.rect(), qcolor(tok("dlg_scrim")))
-        p.end()
+
+# ── 窗内卡片外框（设置、编辑器这类表单对话框）──────────────────────────
+
+class CardDialog(_OverlayMixin, QDialog):
+    """自带窗框的 QDialog 换成的窗内卡片：遮罩 + 圆角 16 的卡片，顶部标题栏（标题 + 关闭），
+    中间 ``self.body`` 由子类自己排，底部可选的操作栏（左边一行说明，右边按钮）。
+
+    设计稿是画布里的「设置对话框 · 应用内外框」板。和 ThemedDialog 一样是父窗口里的覆盖层
+    （见 _OverlayMixin）；卡片按请求的宽高放在中间，窗口太小就缩到窗口里留 32 的边。
+    键盘沿用 QDialog：Esc 取消，Enter 触发 ``default=True`` 的那个按钮。
+
+    子类的内容样式设到 ``self.body`` 上（别设到对话框本身：那会盖掉遮罩和卡片的样式）。
+    """
+
+    MARGIN = 32
+
+    def __init__(self, parent=None, *, title: str, width: int = 520, height: int | None = None,
+                 footer: bool = True, hint: str = ""):
+        super().__init__(self._overlay_parent(parent))
+        self.setObjectName("lxSheet")
+        self.setWindowTitle(title)
+        self._setup_overlay()
+        self._req_size = (width, height)
+        dpr = _dpr(parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.card = QFrame(self)
+        self.card.setObjectName("lxSheetCard")
+        self.card.setAttribute(Qt.WA_StyledBackground, True)
+        shadow = QGraphicsDropShadowEffect(self.card)
+        shadow.setBlurRadius(64)
+        shadow.setOffset(0, 24)
+        shadow.setColor(qcolor(tok("dlg_shadow")))
+        self.card.setGraphicsEffect(shadow)
+        outer.addWidget(self.card, 0, Qt.AlignCenter)
+
+        col = QVBoxLayout(self.card)
+        col.setContentsMargins(1, 1, 1, 1)          # 让出 1px 描边，内容不压在圆角边线上
+        col.setSpacing(0)
+
+        header = QWidget(self.card)
+        header.setObjectName("lxSheetHeader")
+        header.setFixedHeight(56)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(24, 0, 12, 0)
+        self.title_label = QLabel(title, header)
+        self.title_label.setObjectName("lxSheetTitle")
+        hl.addWidget(self.title_label, 1)
+        self.close_button = QPushButton(header)
+        self.close_button.setObjectName("lxSheetClose")
+        self.close_button.setFixedSize(36, 36)
+        self.close_button.setCursor(Qt.PointingHandCursor)
+        self.close_button.setAutoDefault(False)
+        self.close_button.setFocusPolicy(Qt.NoFocus)
+        self.close_button.setAccessibleName("关闭")
+        self.close_button.setToolTip("关闭（Esc）")
+        self.close_button.setIcon(_svg_pixmap(_CLOSE_GLYPH, tok("dlg_body"), 14, view=16,
+                                              stroke=1.6, dpr=dpr))
+        self.close_button.setIconSize(QSize(14, 14))
+        self.close_button.clicked.connect(self.reject)
+        hl.addWidget(self.close_button)
+        col.addWidget(header)
+
+        self.body = QWidget(self.card)
+        self.body.setObjectName("lxSheetBody")
+        col.addWidget(self.body, 1)
+
+        self.footer = None
+        self.footer_layout = None
+        self.hint_label = None
+        if footer:
+            self.footer = QWidget(self.card)
+            self.footer.setObjectName("lxSheetFooter")
+            self.footer.setFixedHeight(64)
+            self.footer_layout = QHBoxLayout(self.footer)
+            self.footer_layout.setContentsMargins(24, 0, 24 - _RING, 0)
+            self.footer_layout.setSpacing(10 - 2 * _RING)
+            self.hint_label = QLabel(hint, self.footer)
+            self.hint_label.setObjectName("lxSheetHint")
+            self.hint_label.setWordWrap(True)
+            self.footer_layout.addWidget(self.hint_label, 1)
+            col.addWidget(self.footer)
+        self.setStyleSheet(self._frame_qss())
+
+    def add_button(self, text, role=SECONDARY, slot=None, *, default=False) -> DialogButton:
+        """往底部操作栏加一个按钮（从左往右排在说明文字后面）。"""
+        btn = DialogButton(text, role, None, self.footer)
+        if slot is not None:
+            btn.clicked.connect(slot)
+        if default:
+            btn.setDefault(True)          # QDialog 的 Enter 认它
+        self.footer_layout.addWidget(btn)
+        return btn
+
+    def set_hint(self, text: str):
+        if self.hint_label is not None:
+            self.hint_label.setText(text)
+
+    def _frame_qss(self) -> str:
+        t = tok
+        return f"""
+QDialog#lxSheet {{ background: transparent; }}
+QFrame#lxSheetCard {{ background: {t('dlg_bg')}; border: 1px solid {t('dlg_border')};
+    border-radius: 16px; }}
+QWidget#lxSheetHeader {{ background: transparent; border: none;
+    border-bottom: 1px solid {t('dlg_border')}; }}
+QWidget#lxSheetFooter {{ background: transparent; border: none;
+    border-top: 1px solid {t('dlg_border')}; }}
+QWidget#lxSheetBody {{ background: transparent; }}
+QLabel#lxSheetTitle {{ font-family: {UI_CSS}; font-size: 16px; font-weight: 600;
+    color: {t('dlg_title')}; background: transparent; }}
+QLabel#lxSheetHint {{ font-family: {UI_CSS}; font-size: 12px; color: {t('dlg_body')};
+    background: transparent; }}
+QPushButton#lxSheetClose {{ background: transparent; border: none; border-radius: 8px; }}
+QPushButton#lxSheetClose:hover {{ background: {t('dlg_hover_bg')}; }}
+QPushButton#lxDlgBtn_primary, QPushButton#lxDlgBtn_secondary,
+QPushButton#lxDlgBtn_danger {{ font-family: {UI_CSS}; font-size: 14px; }}
+QPushButton#lxDlgBtn_primary, QPushButton#lxDlgBtn_danger {{ font-weight: 600; }}
+QPushButton#lxDlgBtn_text {{ font-family: {UI_CSS}; font-size: 13px; }}
+"""
+
+    def _place(self):
+        w, h = self._req_size
+        if h is None:
+            self.card.setFixedWidth(w)
+            h = self.card.sizeHint().height()
+        if self._inline:
+            size = self._place_overlay()
+            w = min(w, max(320, size.width() - 2 * self.MARGIN))
+            h = min(h, max(240, size.height() - 2 * self.MARGIN))
+            self.card.setFixedSize(w, h)
+            self.layout().setContentsMargins(0, 0, 0, 0)
+        else:
+            screen = QGuiApplication.primaryScreen()
+            area = screen.availableGeometry() if screen is not None else QRect(0, 0, 1280, 800)
+            w = min(w, area.width() - 2 * self.MARGIN)
+            h = min(h, area.height() - 2 * self.MARGIN)
+            self.card.setFixedSize(w, h)
+            m = 48
+            self.layout().setContentsMargins(m, m // 2, m, m + 12)
+            ww, wh = w + 2 * m, h + m // 2 + m + 12
+            self.setGeometry(QRect(area.center().x() - ww // 2, area.center().y() - wh // 2, ww, wh))
+
+    def showEvent(self, event):
+        self._place()
+        super().showEvent(event)
+        self._overlay_shown()
+        if self._inline:
+            self._focus_first_child()
+
+    def done(self, r):
+        self._overlay_done()
+        super().done(r)
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)      # Esc 取消、Enter 触发默认按钮（QDialog 自带）
+        event.accept()                    # 没处理的键也不往主窗口冒
+
+
+class TextViewerDialog(CardDialog):
+    """只读长文本（验证输出、完整日志）：等宽、可选中，底部「复制」+「关闭」。"""
+
+    def __init__(self, parent, title: str, text: str):
+        super().__init__(parent, title=title, width=760, height=520)
+        lay = QVBoxLayout(self.body)
+        lay.setContentsMargins(20, 16, 20, 16)
+        self.text_box = QPlainTextEdit(self.body)
+        self.text_box.setObjectName("lxSheetText")
+        self.text_box.setReadOnly(True)
+        self.text_box.setPlainText(text)
+        self.text_box.setFont(mono_font(13))
+        lay.addWidget(self.text_box)
+        self.body.setStyleSheet(
+            f"QPlainTextEdit#lxSheetText {{ background: {tok('dlg_code_bg')};"
+            f" border: 1px solid {tok('dlg_code_border')}; border-radius: 10px; padding: 8px 10px;"
+            f" color: {tok('dlg_title')}; font-family: {MONO_CSS}; font-size: 13px;"
+            f" selection-background-color: {tok('dlg_focus_ring')}; selection-color: {tok('dlg_title')}; }}")
+        self.copy_button = self.add_button("复制全部", SECONDARY, self._copy)
+        self.add_button("关闭", PRIMARY, self.accept, default=True)
+
+    def _copy(self):
+        QApplication.clipboard().setText(self.text_box.toPlainText())
+        self.copy_button.setText("已复制")
+        QTimer.singleShot(1500, self, lambda: self.copy_button.setText("复制全部"))
 
 
 def active_dialog():
-    """最上面那个正开着的主题弹窗（测试和截图脚本用）。"""
+    """最上面那个正开着的主题弹窗或卡片对话框（测试和截图脚本用）。"""
     return _open_dialogs[-1] if _open_dialogs else None
 
 
@@ -852,13 +1145,14 @@ def choose(parent, title, text="", actions=(), *, tone="warning", glyph=None, st
 
 
 def get_text(parent, title, label, text="", *, placeholder="", ok_text="确定",
-             cancel_text="取消", multiline=False, banner="") -> tuple[str, bool]:
+             cancel_text="取消", multiline=False, banner="", rows=4) -> tuple[str, bool]:
     """输入框，用法同 ``QInputDialog.getText``：返回 ``(文本, 是否确定)``。
     单行时 Enter 确定；多行时 Ctrl+Enter 确定。Esc 取消。"""
     acts = [Action(Cancel, cancel_text, SECONDARY), Action(Ok, ok_text, PRIMARY)]
     dlg = ThemedDialog(parent, title=title, actions=acts, tone="info", show_icon=False,
                        escape=Cancel, default=Ok, input_label=label, input_text=text,
-                       input_placeholder=placeholder, multiline=multiline, banner=banner)
+                       input_placeholder=placeholder, multiline=multiline, banner=banner,
+                       input_rows=rows)
     dlg.exec()
     if isinstance(dlg.input, QPlainTextEdit):
         value = dlg.input.toPlainText()

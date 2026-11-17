@@ -319,6 +319,10 @@ THEMES = {
         "dlg_input_bg": "#ffffff",
         "dlg_input_border": "#dadde6",
         "dlg_input_focus": "#5b6cf0",
+        # 卡片对话框左侧导航（设置）
+        "dlg_nav_bg": "#f7f8fa",
+        "dlg_nav_active_bg": "#eef0fe",
+        "dlg_nav_active_text": "#4a59e0",
     },
     "dark": {
         # 主表面
@@ -625,6 +629,9 @@ THEMES = {
         "dlg_input_bg": "#1b1e24",
         "dlg_input_border": "#3a3f4b",
         "dlg_input_focus": "#7b89f7",
+        "dlg_nav_bg": "#1b1e24",
+        "dlg_nav_active_bg": "#262b45",
+        "dlg_nav_active_text": "#95a0fa",
     },
 }
 

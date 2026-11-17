@@ -16,7 +16,7 @@ Agent 工具调用 · 写盘确认闸门 · 改完自检的验证闭环 · RAG �
 | [core.md](docs/architecture/core.md) | 对话核心、项目（工作区）、`agent` facade、多会话并发、Prompt 缓存分层与前缀断裂检测、主循环边界与错误恢复 | `agent.py` `streaming.py` `session.py` `state.py` `roles.py` `cache_fingerprints.py` `llm_errors.py` `projects.py` |
 | [runs-and-recovery.md](docs/architecture/runs-and-recovery.md) | 运行记录与中断恢复（B03）、运行账本（用量/费用/工具统计）、工具边界 inflight sidecar、运行结果卡（B06）、恢复检查与继续任务（B04） | `run_records.py` `run_ledger.py` `result_view.py` `ui/result_card.py` `ui/run_results.py` `recovery.py` `workspace_anchor.py` |
 | [tasks-and-input-queue.md](docs/architecture/tasks-and-input-queue.md) | 任务身份与要求/计划分离（B05）、统一退出屏障（B09a）、运行中输入队列（B09b） | `task_state.py` `ui/task_panel.py` `input_queue.py` `ui/queue_panel.py` `ui/send.py` `ui/run_admission.py` `ui/queue_dispatch.py` |
-| [background.md](docs/architecture/background.md) | 后台进程管理（B10a）、后台任务面板（B10b） | `background.py` `ui/background_panel.py` |
+| [background.md](docs/architecture/background.md) | 后台进程管理（B10a）、后台任务面板（B10b，右侧停靠栏的「后台」标签） | `background.py` `ui/background_panel.py` |
 | [undo-and-verification.md](docs/architecture/undo-and-verification.md) | 文件改动的安全撤销（B11a）、验证闭环与自动修复 | `file_history.py` `file_transaction.py` `verification.py`，以及写盘工具 |
 | [tools.md](docs/architecture/tools.md) | 工具列表、计划稳定性、改后自我校验 | `tools*.py`：新增或修改工具 |
 | [subsystems.md](docs/architecture/subsystems.md) | 子 Agent 与 worktree、代码导航、持久化、会话历史、角色卡、托盘、MCP、RAG、长期记忆、侧栏浏览器、主题弹窗、持久化文件清单 | `subagent.py` `worktree.py` `lsp_client.py` `codeintel.py` `memory*.py` `mcp_client.py` `rag/` `floating.py` `browser/` `tools_browser.py` `ui/browser_panel.py` `ui/dialogs.py` |
@@ -70,7 +70,7 @@ python scripts/replay_sessions.py
 - **新增 UI 子模块**：`src/ui/` 下放，注意从 `..` 引父包（`from .. import agent`），从 `.` 引同级（`from .theme import ...`）；`__init__.py` 只对外暴露 `ChatUI` / `SettingsDialog`
 
 ### Qt 相关
-- **弹窗一律用 `src/ui/dialogs.py`**（主题卡片 + 遮罩，API 对齐 QMessageBox / QInputDialog），`src/ui/` 里不许再出现 QMessageBox / QInputDialog（有测试守着）；删除、跳过权限确认这类危险操作用 `confirm_danger`（默认聚焦取消、Enter 等于取消）。QFileDialog 保留原生
+- **弹窗一律用 `src/ui/dialogs.py`**（主题卡片 + 遮罩，API 对齐 QMessageBox / QInputDialog），`src/ui/` 里不许再出现 QMessageBox / QInputDialog（有测试守着）；删除、跳过权限确认这类危险操作用 `confirm_danger`（默认聚焦取消、Enter 等于取消）。表单类对话框继承 `dialogs.CardDialog`（内容样式设到 `self.body`），不要再写自带窗框的 `QDialog`。QFileDialog 保留原生
 - 高 DPI：`QT_ENABLE_HIGHDPI_SCALING=1` + `setHighDpiScaleFactorRoundingPolicy(PassThrough)`
 - 任务栏图标：`SetCurrentProcessExplicitAppUserModelID("lingxi.ai.desktop")`
 - QTextBrowser **不支持 `<style>`**，Markdown HTML 必须 inline 样式

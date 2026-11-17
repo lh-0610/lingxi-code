@@ -89,18 +89,18 @@ src/                     # 主代码
     queue_panel.py       # 输入队列面板（B09b）：排队 N 条 / 暂停横幅 / 编号列表 / 已发送折叠，只画不判
     task_panel.py        # 停靠在窗口右侧的任务面板与限制编辑对话框（B05）：要求/计划/执行状态/验证证据，可撤销横幅，硬预算校验
     browser_panel.py     # 文件面板里的「浏览器」标签：地址栏 + 模型正在操作的徽标 + 嵌入 page.get_browser().view（和模型操作同一个页面）+ F12 开发者工具
-    file_panel.py        # 停靠在对话区右侧的文件面板：点改动的文件 / 点正文里的文件路径开标签页（同一个文件不重复开），顶部路径、正文带行号、新增绿/删除红，带行号打开时滚到那一行，只画不判（差异由 ChatUI 用 tools_git.file_diff_lines 取好交进来）
+    file_panel.py        # 停靠在对话区右侧的文件面板（也是浏览器 / 后台 / 调试标签的停靠栏，后两者走 open_widget_tab：控件常驻复用，关标签只摘下隐藏）：点改动的文件 / 点正文里的文件路径开标签页（同一个文件不重复开），顶部路径、正文带行号、新增绿/删除红，带行号打开时滚到那一行，只画不判（差异由 ChatUI 用 tools_git.file_diff_lines 取好交进来）
     syntax_highlight.py  # 文件面板的语法高亮：tree-sitter 划出每行的「哪一段是哪一类」，只回字符范围不碰 Qt / 主题；Python / JS / TS / TSX 用单语言包的 highlights.scm，其余语言按节点类型名分类，认不出语言 / 没语法库 / 太大就返回空（照原样显示）
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理；行内代码里的项目文件路径在这里变成 lingxi-file: 链接（只认真实存在的文件，代码块不处理）
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开）
     sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组）+ 项目添加/切换/移除 + 会话行右键重命名 + 跨会话搜索框（标题/正文，worker 扫描经 bridge.session_search_done 回主线程渲染结果，点击跳转）
     header.py            # HeaderMixin：顶栏（撤销/隔离/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描。模型与思考强度已挪到输入框底栏的模型按钮（model_btn / _show_model_menu）。计划|执行同样在底栏的模式按钮
-    debug_inspector.py   # F12 调试弹窗（请求/响应/usage 可视化）
-    dialogs.py           # 主题弹窗（取代原生 QMessageBox / QInputDialog）：遮罩 + 宽 440 圆角 14 的卡片，question / confirm_danger / success / critical / information / warning / choose（多出口）/ get_text（输入），返回值对齐 QMessageBox；详见 subsystems.md「主题弹窗」节
+    debug_inspector.py   # 调试面板（请求/响应/usage 可视化）：右侧停靠栏的「调试」标签，F12 打开 / 收起（原来是独立置顶窗口）
+    dialogs.py           # 主题弹窗（取代原生 QMessageBox / QInputDialog）：遮罩 + 宽 440 圆角 14 的卡片，question / confirm_danger / success / critical / information / warning / choose（多出口）/ get_text（输入），返回值对齐 QMessageBox；CardDialog = 表单对话框的窗内卡片外框（标题栏 + body + 底部操作栏），TextViewerDialog = 只读长文本；详见 subsystems.md「主题弹窗」节
     theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色，dlg_* 是主题弹窗的）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
-    widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / CloseConfirmDialog / FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）
-    settings_dialog.py   # 设置弹窗（provider 卡片式 API key + 自定义模型增删改）
+    widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / QuitConfirmDialog（危险样式主题弹窗）/ FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）
+    settings_dialog.py   # 设置弹窗（CardDialog 800×620：左侧分类导航 + 可滚动表单 + 底部取消 / 保存；provider 卡片式 API key + 自定义模型增删改）
     helpers.py           # _make_button_icon / _build_image_content_block / _escape
     prefs.py             # UI 偏好持久化（关闭按钮选择等）
     _base.py             # 共享 BASE_DIR / CONFIG_PATH 常量（chat_memory 下的文件路径走 paths 的函数、调用时取，别在这里拼常量）

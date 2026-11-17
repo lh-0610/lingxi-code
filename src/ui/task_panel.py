@@ -25,7 +25,6 @@ from typing import Any, Callable
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -40,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from .. import memory
 from .. import task_state as _ts
+from . import dialogs as _dialogs
 from .fonts import MONO_CSS
 from .theme import color as _theme_color
 
@@ -61,7 +61,7 @@ def _one_line(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
-class EditConstraintsDialog(QDialog):
+class EditConstraintsDialog(_dialogs.CardDialog):
     """编辑固定限制对话框。
 
     - 仅用户可修改或删除
@@ -70,31 +70,24 @@ class EditConstraintsDialog(QDialog):
     """
 
     def __init__(self, parent: QWidget | None, sess: Any, on_saved: Callable[[], None] | None = None):
-        super().__init__(parent)
+        super().__init__(parent, title="编辑固定限制", width=460, height=430)
         self.sess = sess
         self.on_saved = on_saved
-        self.setWindowTitle("编辑固定限制")
-        self.setFixedWidth(460)
-        self.setMinimumHeight(340)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
+        layout = QVBoxLayout(self.body)
+        layout.setContentsMargins(24, 16, 24, 14)
         layout.setSpacing(10)
         self._apply_style()
 
-        title = QLabel("编辑固定限制", self)
-        title.setObjectName("dlgTitle")
-        layout.addWidget(title)
         # 提示说明：行首的 -、*、编号也按原文保存，写在悬停提示里，不占地方
-        hint = QLabel("每行一条，按原文保存，从下一轮起对这个任务一直生效。只有你能在这里改，模型改不了。", self)
+        hint = QLabel("每行一条，按原文保存，从下一轮起对这个任务一直生效。只有你能在这里改，模型改不了。", self.body)
         hint.setObjectName("dlgHint")
         hint.setWordWrap(True)
         hint.setToolTip("行首的 -、*、编号等字符都算内容；已保存的条目再次保存不会被改动。")
         layout.addWidget(hint)
 
         # 文本框
-        self.editor = QPlainTextEdit(self)
+        self.editor = QPlainTextEdit(self.body)
         self.editor.setAccessibleName("固定限制")
         self.editor.setPlaceholderText("每行一条，例如：\n必须兼容 Windows\n不改对外行为，测试要全部通过\n导出格式必须支持 CSV")
         task = getattr(sess, "current_task", None)
@@ -107,49 +100,27 @@ class EditConstraintsDialog(QDialog):
         self.editor.textChanged.connect(self._on_text_changed)
         layout.addWidget(self.editor, 1)
 
-        # 字符计数与底部按钮
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(10)
-
-        self.char_count_label = QLabel(self)
+        # 字符计数 / 拒绝保存的说明放在编辑框下面（说明较长，放底栏会被挤成好几行裁掉）
+        self.char_count_label = QLabel(self.body)
         self.char_count_label.setObjectName("dlgCount")
-        self.char_count_label.setWordWrap(True)      # 拒绝保存的说明较长，不换行会撑宽定宽对话框被裁掉
-        bottom_row.addWidget(self.char_count_label, 1)
+        self.char_count_label.setWordWrap(True)
+        layout.addWidget(self.char_count_label)
 
-        self.cancel_btn = QPushButton("取消", self)
-        self.cancel_btn.setCursor(Qt.PointingHandCursor)
-        self.cancel_btn.clicked.connect(self.reject)
-        bottom_row.addWidget(self.cancel_btn)
-
-        self.save_btn = QPushButton("保存限制", self)
-        self.save_btn.setObjectName("dlgPrimary")
-        self.save_btn.setCursor(Qt.PointingHandCursor)
-        self.save_btn.setDefault(True)
-        self.save_btn.clicked.connect(self._on_save)
-        bottom_row.addWidget(self.save_btn)
-
-        layout.addLayout(bottom_row)
+        self.cancel_btn = self.add_button("取消", _dialogs.SECONDARY, self.reject)
+        self.save_btn = self.add_button("保存限制", _dialogs.PRIMARY, self._on_save, default=True)
         self._on_text_changed()
 
     def _apply_style(self):
         """配色取当前主题（深色下不能是白底），样式集中在对话框自己的样式表里。"""
         c = _theme_color
-        self.setStyleSheet(
-            f"QDialog {{ background: {c('mv_view_bg')}; }}"
-            f"QLabel {{ background: transparent; color: {c('mv_text')}; font-size: 13px; }}"
-            f"QLabel#dlgTitle {{ font-size: 16px; font-weight: 600; }}"
-            f"QLabel#dlgHint {{ color: {c('mv_text_sec')}; }}"
+        self.body.setStyleSheet(
+            f"QLabel {{ background: transparent; color: {c('dlg_title')}; font-size: 13px; }}"
+            f"QLabel#dlgHint {{ color: {c('dlg_body')}; }}"
             f"QLabel#dlgCount {{ color: {c('mv_text_sec')}; font-size: 12px; }}"
             f"QLabel#dlgCount[error=\"true\"] {{ color: {c('mv_err_text')}; font-weight: 600; }}"
-            f"QPlainTextEdit {{ border: 1px solid {c('mv_chip_border')}; border-radius: 8px; padding: 8px 10px;"
-            f" font-size: 13px; background: {c('mv_card_bg')}; color: {c('mv_text')}; }}"
-            f"QPlainTextEdit:focus {{ border-color: {c('mv_indigo')}; }}"
-            f"QPushButton {{ border: 1px solid {c('mv_chip_border')}; border-radius: 8px; padding: 6px 14px;"
-            f" background: {c('mv_card_bg')}; color: {c('mv_text3')}; font-size: 13px; }}"
-            f"QPushButton:hover {{ border-color: {c('mv_chip_hover')}; }}"
-            f"QPushButton#dlgPrimary {{ border: none; background: {c('mv_indigo')}; color: {c('mv_view_bg')};"
-            f" font-weight: 600; }}"
-            f"QPushButton#dlgPrimary:disabled {{ background: {c('mv_muted3')}; }}")
+            f"QPlainTextEdit {{ border: 1px solid {c('dlg_input_border')}; border-radius: 10px;"
+            f" padding: 8px 10px; font-size: 14px; background: {c('dlg_input_bg')}; color: {c('dlg_title')}; }}"
+            f"QPlainTextEdit:focus {{ border-color: {c('dlg_input_focus')}; }}")
 
     def _set_count_error(self, error: bool):
         if self.char_count_label.property("error") != ("true" if error else "false"):

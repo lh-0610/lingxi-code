@@ -69,25 +69,11 @@ class TimelineMixin:
     def _show_timeline_edit_dialog(self, old_text, note=None):
         """编辑消息对话框。返回新正文（strip 过）；取消返回 None。独立成方法便于测试整只替换。
         note 非空时在编辑框上方显示一行提醒（如「图片不会保留」）。"""
-        from PySide6.QtWidgets import (QDialog, QPlainTextEdit, QVBoxLayout,
-                                       QDialogButtonBox, QLabel)
-        dlg = QDialog(self)
-        dlg.setWindowTitle("编辑消息")
-        lay = QVBoxLayout(dlg)
-        if note:
-            lbl = QLabel(note)
-            lbl.setWordWrap(True)
-            lay.addWidget(lbl)
-        edit = QPlainTextEdit(old_text)
-        edit.setMinimumSize(560, 220)
-        lay.addWidget(edit)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        lay.addWidget(buttons)
-        if dlg.exec() != QDialog.Accepted:
-            return None
-        return edit.toPlainText().strip()
+        # 设计稿六种之 5：琥珀提醒条 + 多行输入，Ctrl+Enter 重新发送
+        from . import dialogs
+        text, ok = dialogs.get_text(self, "编辑消息", "消息内容", old_text,
+                                    ok_text="重新发送", multiline=True, banner=note or "", rows=6)
+        return text.strip() if ok else None
 
     def _confirm_rewind(self):
         from . import dialogs

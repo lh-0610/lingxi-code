@@ -9,7 +9,9 @@
   注释、数字、函数 / 类名分开上色，见 ui/syntax_highlight.py）——整行底色保留，颜色只叠在
   文字上；认不出语言、没装语法库或文件太大时就不高亮，照原样显示；
 - 配色全部现取当前主题（亮色 / 暗色），不用模块级常量——切主题时要能跟着变；
-- 左边缘可以拖动改宽度（和任务面板同一套手感），宽度由 ChatUI 记进界面偏好。
+- 左边缘可以拖动改宽度（和任务面板同一套手感），宽度由 ChatUI 记进界面偏好；
+- 除了文件和浏览器，「后台」（后台任务）和「调试」（原 F12 独立窗口）也是这里的标签
+  （open_widget_tab）：控件由 ChatUI 持有、常驻复用，关标签只是摘下来藏起，不销毁、不停命令。
 
 面板只负责画：差异内容由 ChatUI 用 tools_git.file_diff_lines 取好后交进来。
 """
@@ -56,6 +58,8 @@ def _norm(path: str) -> str:
 
 # 浏览器标签的哨兵 tabData（不是文件路径）：paths() 只用来判面板空不空，无持久化顾虑
 BROWSER_KEY = "lingxi:browser"
+BACKGROUND_KEY = "lingxi:background"
+DEBUG_KEY = "lingxi:debug"
 
 
 def _mix(color: str, base: str, ratio: float) -> QColor:
@@ -125,6 +129,7 @@ class FilePanel(QFrame):
         self._browser_view = None               # 浏览器标签内容（第一次 open_browser 才创建，懒加载）
         self._browser_tab_label = None          # 浏览器标签文字（LeftSide 按钮，见 open_browser）
         self._browser_last_url = ""             # 手动入口复用的上次地址
+        self._widget_tabs: dict[str, dict] = {}  # 后台 / 调试这类常驻控件标签：key → 控件与文案
         self._build_ui()
         self.apply_theme()
 
@@ -153,18 +158,23 @@ class FilePanel(QFrame):
             f"QPushButton#filePanelBrowser {{ border: 1px solid {chip}; border-radius: 6px;"
             f" background: transparent; color: {sec}; font-size: 12px; padding: 2px 8px; }}"
             f"QPushButton#filePanelBrowser:hover {{ background: {self._t('mv_indigo_soft')}; color: {text}; }}"
-            # 标签：选中态用卡片底色 + 主文字色，和消息流里的卡片同一套观感
-            "QTabBar { background: transparent; }"
-            f"QTabBar::tab {{ background: transparent; color: {sec}; padding: 4px 8px;"
-            f" margin-right: 2px; border-radius: 6px; font-size: 12px; }}"
-            f"QTabBar::tab:selected {{ background: {self._t('mv_card_bg')}; color: {text};"
-            f" border: 1px solid {chip}; }}"
-            f"QTabBar::tab:hover {{ color: {text}; }}"
-            f"QPushButton#fileTabClose {{ border: none; background: transparent; color: {sec};"
-            " font-size: 13px; padding: 0px; }"
-            f"QPushButton#fileTabClose:hover {{ color: {self._t('mv_bad')}; }}"
+            # 标签（设计稿「右侧面板」）：平铺文字 + 选中的那个底下一条 2px 靛蓝线，整条标签栏底下一条细线
+            f"QTabBar#fileTabs {{ background: transparent; border: none;"
+            f" border-bottom: 1px solid {line}; }}"
+            f"QTabBar::tab {{ background: transparent; color: {sec}; padding: 0 6px; min-height: 32px; min-width: 0px;"
+            f" margin-right: 2px; border: none; border-bottom: 2px solid transparent; font-size: 13px; }}"
+            f"QTabBar::tab:selected {{ color: {self._t('dlg_nav_active_text')}; font-weight: 600;"
+            f" border-bottom: 2px solid {self._t('dlg_nav_active_text')}; }}"
+            f"QTabBar::tab:hover:!selected {{ color: {text}; }}"
+            # 标签上的关闭：22px 的点击区、12px 的线性 ×，悬停给一块浅底（原来 13px 的「×」字太小）
+            "QPushButton#fileTabClose { border: none; background: transparent; border-radius: 6px;"
+            " padding: 0px; margin-left: 2px; }"
+            f"QPushButton#fileTabClose:hover {{ background: {self._t('dlg_hover_bg')}; }}"
             f"QStackedWidget#fileStack {{ background: transparent; border: none; }}"
         )
+        icon = self._close_icon()
+        for btn in self.tabs.findChildren(QPushButton, "fileTabClose"):
+            btn.setIcon(icon)
         for view in self._panes.values():
             view.apply_theme(self._t("mv_view_bg"), self._t("mv_text"))
             self._fill(view, self._rows.get(self._path_of(view)) or [])
@@ -272,12 +282,7 @@ class FilePanel(QFrame):
         index = self.tabs.addTab(name)
         self.tabs.setTabData(index, rel_path)
         self.tabs.setTabToolTip(index, key)
-        btn = QPushButton("×", self.tabs)
-        btn.setObjectName("fileTabClose")
-        btn.setFixedSize(16, 16)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setToolTip(f"关闭 {name}")
-        btn.clicked.connect(lambda _checked=False, p=key: self.close_file(p))
+        btn = self._tab_close_button(f"关闭 {name}", lambda _checked=False, p=key: self.close_file(p))
         self.tabs.setTabButton(index, QTabBar.RightSide, btn)
         self.tabs.setCurrentIndex(index)
         # addTab 就会发 currentChanged，那时 tabData 还没设上（_sync_header 读到空路径就退出了）；
@@ -306,17 +311,13 @@ class FilePanel(QFrame):
         # 标签文字走 LeftSide 按钮而非 tabText：ElideMiddle 对 CJK 会误判余量把
         # "浏览器"截成"..."（原生字体下实测），elide 只作用 tabText，按钮文字不受影响
         label = QLabel("浏览器", self.tabs)
-        label.setStyleSheet("background: transparent; font-size: 12px;")
+        label.setStyleSheet(self._tab_label_qss(False))
         self.tabs.setTabButton(index, QTabBar.LeftSide, label)
         self._browser_tab_label = label
         self.tabs.setTabData(index, BROWSER_KEY)
         self.tabs.setTabToolTip(index, "模型可操作的侧边栏浏览器（F12 开发者工具）")
-        btn = QPushButton("×", self.tabs)
-        btn.setObjectName("fileTabClose")
-        btn.setFixedSize(16, 16)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setToolTip("关闭浏览器标签")
-        btn.clicked.connect(lambda _checked=False: self.close_file(BROWSER_KEY))
+        btn = self._tab_close_button("关闭浏览器标签",
+                                     lambda _checked=False: self.close_file(BROWSER_KEY))
         self.tabs.setTabButton(index, QTabBar.RightSide, btn)
         view.closed.connect(lambda: self.close_file(BROWSER_KEY))
         self.tabs.setCurrentIndex(index)
@@ -325,9 +326,71 @@ class FilePanel(QFrame):
         self._sync_header()
         self._show_self()
 
+    def open_widget_tab(self, key: str, label_text: str, widget: QWidget, *, header: str,
+                        hint: str, tooltip: str = ""):
+        """开一个常驻控件标签（后台 / 调试）：已开就切过去。控件由调用方持有，关标签只摘下来
+        藏起，不销毁——再开还是同一个控件（后台面板的选中项、调试面板的记录都还在）。"""
+        index = self._tab_index(key)
+        if index < 0:
+            self.stack.addWidget(widget)
+            index = self.tabs.addTab("")
+            # 文字走 LeftSide 按钮：同浏览器标签，ElideMiddle 对 CJK 会误判余量截成"..."
+            label = QLabel(label_text, self.tabs)
+            label.setStyleSheet(self._tab_label_qss(False))
+            self.tabs.setTabButton(index, QTabBar.LeftSide, label)
+            self.tabs.setTabData(index, key)
+            if tooltip:
+                self.tabs.setTabToolTip(index, tooltip)
+            btn = self._tab_close_button(f"收起「{label_text}」标签",
+                                         lambda _checked=False, k=key: self.close_file(k))
+            self.tabs.setTabButton(index, QTabBar.RightSide, btn)
+            self._widget_tabs[key] = {"widget": widget, "label": label, "text": label_text,
+                                      "header": header, "hint": hint, "badge": 0}
+        self.tabs.setCurrentIndex(index)
+        self._on_tab_changed(index)
+        self._show_self()
+
+    def set_tab_badge(self, key: str, count: int):
+        """标签文字后面的数字（后台标签：还在运行的命令数）；0 不显示。"""
+        entry = self._widget_tabs.get(key)
+        if entry is None:
+            return
+        entry["badge"] = max(0, int(count or 0))
+        label = entry["label"]
+        if shiboken6.isValid(label):
+            label.setText(f"{entry['text']} {entry['badge']}" if entry["badge"] else entry["text"])
+            label.adjustSize()
+            index = self._tab_index(key)
+            if index >= 0:
+                # 标签宽度是按放上去时的按钮大小算的；重新挂一次让标签栏按新文字重排，不然数字被裁掉
+                self.tabs.setTabButton(index, QTabBar.LeftSide, label)
+                label.show()          # setTabButton 会先把"旧按钮"藏起来——旧的就是它自己
+
+    def is_tab_current(self, key: str) -> bool:
+        return self.isVisible() and _norm(self.current_path()) == key
+
+    def _detach_widget_tab(self, key: str):
+        entry = self._widget_tabs.pop(key, None)
+        if entry is None:
+            return
+        widget = entry["widget"]
+        if shiboken6.isValid(widget):
+            self.stack.removeWidget(widget)
+            widget.hide()                 # 后台面板隐藏只停刷新，不停命令
+
     def close_file(self, rel_path: str):
         """关掉一个标签页；最后一个关掉时面板一起收起。"""
         key = _norm(rel_path)
+        if key in self._widget_tabs:
+            index = self._tab_index(key)
+            if index >= 0:
+                self.tabs.removeTab(index)
+            self._detach_widget_tab(key)
+            if self.tabs.count() == 0:
+                self.close_all()
+            else:
+                self._on_tab_changed(self.tabs.currentIndex())
+            return
         if key == BROWSER_KEY:
             index = self._tab_index(key)
             if index < 0:
@@ -379,6 +442,8 @@ class FilePanel(QFrame):
         self._hints.clear()
         while self.tabs.count():
             self.tabs.removeTab(0)
+        for key in list(self._widget_tabs):
+            self._detach_widget_tab(key)
         self._sync_header()
         self.setVisible(False)
         self.closed.emit()
@@ -403,13 +468,49 @@ class FilePanel(QFrame):
         self.stack.setCurrentIndex(index)
         self._sync_header()
 
+    def _close_icon(self):
+        from PySide6.QtGui import QIcon
+        from .dialogs import _CLOSE_GLYPH, _svg_pixmap
+        dpr = self.devicePixelRatioF() if self.isVisible() else 2.0
+        return QIcon(_svg_pixmap(_CLOSE_GLYPH, self._t("mv_text_sec"), 12, view=16, stroke=1.8,
+                                 dpr=max(dpr, 1.0)))
+
+    def _tab_close_button(self, tooltip: str, slot) -> QPushButton:
+        """标签上的关闭按钮：线性 × 图标（跟主题换色），22px 点击区。"""
+        from PySide6.QtCore import QSize
+        btn = QPushButton(self.tabs)
+        btn.setObjectName("fileTabClose")
+        btn.setFixedSize(22, 22)
+        btn.setIcon(self._close_icon())
+        btn.setIconSize(QSize(12, 12))
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolTip(tooltip)
+        btn.setAccessibleName(tooltip)
+        btn.clicked.connect(slot)
+        return btn
+
+    def _tab_label_qss(self, selected: bool) -> str:
+        """浏览器 / 后台 / 调试标签的文字是 LeftSide 上的 QLabel，不吃 QTabBar::tab 的颜色，
+        选中态（靛蓝 + 加粗）自己刷，和文件标签的 :selected 一致。"""
+        color = self._t("dlg_nav_active_text") if selected else self._t("mv_text_sec")
+        weight = 600 if selected else 400
+        return (f"background: transparent; font-size: 13px; padding-left: 4px;"
+                f" color: {color}; font-weight: {weight};")
+
     def _sync_header(self):
         key = _norm(self.current_path())
         if self._browser_tab_label is not None and shiboken6.isValid(self._browser_tab_label):
             # QLabel 不继承 QTabBar::tab 的 color，选中/未选中自己刷
-            color = self._t("text") if key == BROWSER_KEY else self._t("mv_text_sec")
-            self._browser_tab_label.setStyleSheet(
-                f"background: transparent; font-size: 12px; color: {color};")
+            self._browser_tab_label.setStyleSheet(self._tab_label_qss(key == BROWSER_KEY))
+        for wkey, entry in self._widget_tabs.items():
+            if shiboken6.isValid(entry["label"]):
+                entry["label"].setStyleSheet(self._tab_label_qss(key == wkey))
+        if key in self._widget_tabs:
+            entry = self._widget_tabs[key]
+            self.path_label.setText(entry["header"])
+            self.path_label.setToolTip(entry["header"])
+            self.hint_label.setText(entry["hint"])
+            return
         if key == BROWSER_KEY:
             self.path_label.setText("浏览器")
             self.path_label.setToolTip("模型可操作的侧边栏浏览器")

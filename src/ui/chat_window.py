@@ -218,6 +218,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._style_settings_btn()
         if getattr(self, "_background_panel", None) is not None:
             self._background_panel.apply_theme()
+        if getattr(self, "_debug_inspector", None) is not None:
+            self._debug_inspector.apply_theme()
         if hasattr(self, "chat_area"):
             self._style_chat_area()
         if hasattr(self, "queue_panel"):
@@ -2375,20 +2377,23 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                     )
 
     def _open_background_panel(self):
-        """用户主动打开的应用级入口，不改变当前会话或模型的工具权限。"""
+        """用户主动打开的应用级入口，不改变当前会话或模型的工具权限。
+        停靠在对话区右边的「后台」标签（原来是独立窗口）；面板只建一次，收起再开还是它。"""
         from .background_panel import BackgroundPanel
+        from .file_panel import BACKGROUND_KEY
         if getattr(self, "_background_panel", None) is None:
-            self._background_panel = BackgroundPanel(self._t, self)
+            self._background_panel = BackgroundPanel(self._t, self.file_panel)
             self._background_panel.open_browser_fn = self._open_browser_in_panel
-        self._background_panel.show()
-        self._background_panel.raise_()
-        self._background_panel.activateWindow()
-
-    def hideEvent(self, event):
-        # 主窗隐藏到托盘时同时停面板刷新；后台命令沿用应用退出清理规则。
-        if getattr(self, "_background_panel", None) is not None:
-            self._background_panel.hide()
-        super().hideEvent(event)
+            self._background_panel.running_count_changed.connect(
+                lambda n: self.file_panel.set_tab_badge(BACKGROUND_KEY, n))
+        self.file_panel.open_widget_tab(
+            BACKGROUND_KEY, "后台", self._background_panel, header="后台任务",
+            hint="后台命令的运行状态与输出 · 收起面板不会停止命令",
+            tooltip="后台命令（run_command 后台启动的 dev server 等）")
+        self._background_panel.refresh()
+        # 面板构造时已经刷过一次（那时信号还没接上）：标签上的运行数这里补一次，之后有变化才发信号
+        self.file_panel.set_tab_badge(BACKGROUND_KEY, self._background_panel._last_running or 0)
+        self._settle_file_panel()
 
     def closeEvent(self, event):
         # main.py 挂上系统托盘后会把 _hide_on_close 置 True；没挂（测试里直接建的窗口）就是普通关窗。
@@ -2482,18 +2487,20 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         super().keyPressEvent(event)
 
     def _toggle_debug_inspector(self):
-        """F12：唤出 / 关闭 Debug Inspector（非模态，懒构造）。"""
+        """F12：打开 / 收起右侧停靠栏的「调试」标签（原来是独立的置顶窗口，懒构造、常驻复用）。"""
+        from .file_panel import DEBUG_KEY
+        if self.file_panel.is_tab_current(DEBUG_KEY):
+            self.file_panel.close_file(DEBUG_KEY)
+            return
         insp = getattr(self, "_debug_inspector", None)
         if insp is None:
             from .debug_inspector import DebugInspector
-            insp = DebugInspector(self)
+            insp = DebugInspector(self.file_panel)
             self._debug_inspector = insp
-        if insp.isVisible():
-            insp.hide()
-        else:
-            insp.show()
-            insp.raise_()
-            insp.activateWindow()
+        self.file_panel.open_widget_tab(
+            DEBUG_KEY, "调试", insp, header="调试",
+            hint="每次模型调用的请求、响应和用量 · F12 收起", tooltip="F12")
+        self._settle_file_panel()
 
 
     # ---- #7 Ctrl+F in-chat search ----
@@ -2605,16 +2612,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
     _RESUME_WAIT_LIMIT = 150      # × 100ms = 15s，旧 worker 还没退就放弃并明说
 
     def _show_text_dialog(self, title, text):
-        from PySide6.QtWidgets import QDialog, QPlainTextEdit, QVBoxLayout
-        dlg = QDialog(self)
-        dlg.setWindowTitle(title)
-        dlg.resize(760, 520)
-        lay = QVBoxLayout(dlg)
-        box = QPlainTextEdit()
-        box.setReadOnly(True)
-        box.setPlainText(text)
-        lay.addWidget(box)
+        from .dialogs import TextViewerDialog
+        dlg = TextViewerDialog(self, title, text)
         dlg.exec()
+        dlg.deleteLater()
 
     def _on_plan_update(self, sess, items):
         """信号排队期间可能切会话或更新计划；只显示当前会话的最新快照。"""

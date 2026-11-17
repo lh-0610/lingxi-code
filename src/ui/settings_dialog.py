@@ -1,6 +1,7 @@
-"""设置弹窗（VSCode 风格的可编辑配置面板）。
+"""设置弹窗（窗内卡片：左侧分类导航 + 右侧可滚动表单 + 底部取消 / 保存）。
 
-直接读写 config.json，保存后提示重启生效。
+直接读写 config.json，保存后提示重启生效。外框是 dialogs.CardDialog（设计稿「设置对话框 ·
+应用内外框」），表单样式设在 self.body 上，配色全取当前主题。
 """
 import json
 import os
@@ -9,7 +10,7 @@ import sys
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QTabWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -27,7 +28,7 @@ from ..limits import CONTEXT_TRIM_TOKENS_DEFAULT as _CONTEXT_TRIM_TOKENS_DEFAULT
 def _settings_palette() -> dict:
     """设置相关对话框的配色：全部取当前主题的 token，深浅色跟主窗口一致。"""
     return {
-        "bg": theme_color("mv_view_bg"),
+        "bg": theme_color("dlg_bg"),          # 和卡片底色一致（深色下卡片比主窗口亮一档）
         "fg": theme_color("mv_text"),
         "muted": theme_color("mv_text_sec"),
         "border": theme_color("mv_chip_border"),
@@ -108,24 +109,25 @@ class _ResizableTextEdit(QTextEdit):
         p.end()
 
 
-class SettingsDialog(QDialog):
+class SettingsDialog(dialogs.CardDialog):
     """直接在 UI 里编辑 config.json。保存后写回文件，提示重启生效。
 
-    布局：
-      [重启提示 banner]
-      ┌──────────────────────┐
-      │ 滚动表单（按分类）    │
-      │  - 大模型 API 密钥    │
-      │  - 本地服务           │
-      └──────────────────────┘
-      [打开 roles] [打开 logs] [关于]  .....  [取消] [保存]
+    布局（窗内卡片 800×620）：
+      设置                                              ×
+      ┌────────┬──────────────────────────────────────┐
+      │ 模型   │ 滚动表单（当前分类）                   │
+      │ 远程   │                                      │
+      │ 知识库 │                                      │
+      │ 权限   │                                      │
+      │ 高级   │                                      │
+      │ roles / logs / config / 关于                  │
+      └────────┴──────────────────────────────────────┘
+      密钥和 Base URL 改动要重启应用才生效        [取消] [保存]
     """
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("设置")
-        self.resize(680, 640)
-        self.setModal(True)
+        super().__init__(parent, title="设置", width=800, height=620,
+                         hint="密钥和 Base URL 改动要重启应用才生效")
         self._parent_window = parent
 
         try:
@@ -136,16 +138,25 @@ class SettingsDialog(QDialog):
 
         self.fields = {}
 
-        root = QVBoxLayout(self)
+        root = QHBoxLayout(self.body)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        banner = QLabel("修改密钥 / Base URL 后需重启应用才能生效")
-        banner.setObjectName("settingsBanner")
-        banner.setWordWrap(True)
-        root.addWidget(banner)
+        # 左侧分类导航（设计稿）：页面本身仍放在 QTabWidget 里，只把标签栏藏起来
+        nav = QWidget(self.body)
+        nav.setObjectName("settingsNav")
+        nav.setAttribute(Qt.WA_StyledBackground, True)
+        nav.setFixedWidth(168)
+        nav_lay = QVBoxLayout(nav)
+        nav_lay.setContentsMargins(10, 14, 10, 14)
+        nav_lay.setSpacing(2)
+        root.addWidget(nav)
 
         tabs = QTabWidget()
+        tabs.setObjectName("settingsTabs")
+        tabs.setDocumentMode(True)
+        tabs.tabBar().hide()
+        self.tabs = tabs
 
         # ── 🤖 模型 tab ──
         m_scroll, m = self._make_tab()
@@ -319,12 +330,27 @@ class SettingsDialog(QDialog):
 
         root.addWidget(tabs, 1)
 
-        # 底部按钮区
-        bottom = QWidget()
-        bottom.setObjectName("settingsBottom")
-        bottom_layout = QHBoxLayout(bottom)
-        bottom_layout.setContentsMargins(16, 10, 16, 12)
-        bottom_layout.setSpacing(8)
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        self.nav_buttons = []
+        for i in range(tabs.count()):
+            item = QPushButton(tabs.tabText(i), nav)
+            item.setObjectName("settingsNavItem")
+            item.setCheckable(True)
+            item.setCursor(Qt.PointingHandCursor)
+            item.setIcon(tabs.tabIcon(i))
+            item.setIconSize(QSize(16, 16))
+            item.setFixedHeight(36)
+            item.setAccessibleName(f"设置分类：{tabs.tabText(i)}")
+            item.clicked.connect(lambda _=False, idx=i: self.tabs.setCurrentIndex(idx))
+            self._nav_group.addButton(item, i)
+            self.nav_buttons.append(item)
+            nav_lay.addWidget(item)
+        tabs.currentChanged.connect(lambda idx: self.nav_buttons[idx].setChecked(True)
+                                    if 0 <= idx < len(self.nav_buttons) else None)
+        if self.nav_buttons:
+            self.nav_buttons[tabs.currentIndex()].setChecked(True)
+        nav_lay.addStretch(1)
 
         open_roles = QPushButton("roles")
         open_roles.setIcon(self._settings_icon("folder_lucide.svg"))
@@ -355,24 +381,15 @@ class SettingsDialog(QDialog):
         about_btn.setCursor(Qt.PointingHandCursor)
         about_btn.clicked.connect(self._about)
 
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.clicked.connect(self.reject)
+        # 目录直达和「关于」不是设置项，收在导航底部，做成安静的小链接
+        for link in (open_roles, open_logs, open_config, about_btn):
+            link.setObjectName("settingsNavLink")
+            link.setIconSize(QSize(14, 14))
+            link.setFixedHeight(28)
+            nav_lay.addWidget(link)
 
-        save_btn = QPushButton("保存")
-        save_btn.setObjectName("settingsSaveBtn")
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setDefault(True)
-        save_btn.clicked.connect(self._save)
-
-        bottom_layout.addWidget(open_roles)
-        bottom_layout.addWidget(open_logs)
-        bottom_layout.addWidget(open_config)
-        bottom_layout.addWidget(about_btn)
-        bottom_layout.addStretch()
-        bottom_layout.addWidget(cancel_btn)
-        bottom_layout.addWidget(save_btn)
-        root.addWidget(bottom)
+        self.cancel_btn = self.add_button("取消", dialogs.SECONDARY, self.reject)
+        self.save_btn = self.add_button("保存", dialogs.PRIMARY, self._save, default=True)
 
         self._apply_dialog_style()
 
@@ -405,6 +422,10 @@ class SettingsDialog(QDialog):
         icon = QIcon()
         icon.addPixmap(_render(normal), QIcon.Normal)
         icon.addPixmap(_render(active), QIcon.Active)
+        # 选中的导航项（checkable 按钮 On 态）用导航高亮色
+        on = theme_color("dlg_nav_active_text")
+        icon.addPixmap(_render(on), QIcon.Normal, QIcon.On)
+        icon.addPixmap(_render(on), QIcon.Active, QIcon.On)
         return icon
 
     # ── 权限规则（确认卡上「允许并记住」落盘的那层）──────────────────
@@ -508,6 +529,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.viewport().setObjectName("settingsViewport")   # 背景跟主题（见 _apply_dialog_style）
         page = QWidget()
         page.setObjectName("settingsPage")
@@ -569,6 +591,7 @@ class SettingsDialog(QDialog):
         if hint:
             hint_lbl = QLabel(hint)
             hint_lbl.setObjectName("providerCardHint")
+            hint_lbl.setWordWrap(True)      # 不折行的话长提示会把整页撑出横向滚动条
             v.addWidget(hint_lbl)
 
         # 字段
@@ -1180,18 +1203,29 @@ class SettingsDialog(QDialog):
         p = _settings_palette()
         bg, fg, muted, border = p["bg"], p["fg"], p["muted"], p["border"]
         accent, accent_hover, on_accent = p["accent"], p["accent_hover"], p["on_accent"]
-        banner_bg = theme_color("mv_gate_bg")
-        banner_fg = theme_color("mv_gate_text")
-        banner_border = theme_color("mv_gate_border")
         input_bg, input_focus_bg = p["input_bg"], p["input_focus_bg"]
-        bottom_bg = theme_color("mv_header_bg")
+        nav_bg = theme_color("dlg_nav_bg")
+        nav_active_bg = theme_color("dlg_nav_active_bg")
+        nav_active_fg = theme_color("dlg_nav_active_text")
+        hover_bg = theme_color("dlg_hover_bg")
+        from .fonts import UI_CSS
         check_icon = os.path.join(BASE_DIR, "icons", "check_white.svg").replace("\\", "/")
         arrow_icon = os.path.join(BASE_DIR, "icons", "chevron_down.svg").replace("\\", "/")
 
-        self.setStyleSheet(
-            f"QDialog {{ background: {bg}; color: {fg}; }}\n"
-            f"#settingsBanner {{ background: {banner_bg}; color: {banner_fg};"
-            f" border-bottom: 1px solid {banner_border}; padding: 9px 18px; font-size: 12px; }}\n"
+        self.body.setStyleSheet(
+            f"#lxSheetBody {{ background: transparent; color: {fg}; }}\n"
+            f"#settingsNav {{ background: {nav_bg}; border-right: 1px solid {theme_color('dlg_border')};"
+            f" border-bottom-left-radius: 15px; }}\n"
+            f"#settingsNavItem {{ background: transparent; border: none; border-radius: 8px;"
+            f" padding: 0 10px; text-align: left; color: {muted}; font-family: {UI_CSS};"
+            f" font-size: 13px; }}\n"
+            f"#settingsNavItem:hover {{ background: {hover_bg}; color: {fg}; }}\n"
+            f"#settingsNavItem:checked {{ background: {nav_active_bg}; color: {nav_active_fg};"
+            f" font-weight: 600; }}\n"
+            f"#settingsNavLink {{ background: transparent; border: none; border-radius: 6px;"
+            f" padding: 0 8px; text-align: left; color: {muted}; font-family: {UI_CSS};"
+            f" font-size: 12px; }}\n"
+            f"#settingsNavLink:hover {{ background: {hover_bg}; color: {nav_active_fg}; }}\n"
             f"#settingsSection {{ color: {muted}; font-size: 12px; font-weight: 600;"
             f" letter-spacing: 1px; padding: 6px 0 0 0; }}\n"
             f"#settingsLabel {{ color: {fg}; font-size: 13px; font-weight: 500; }}\n"
@@ -1220,14 +1254,6 @@ class SettingsDialog(QDialog):
             f" image: url(\"{check_icon}\"); }}\n"
             f"#settingsCheck::indicator:checked:hover {{ background: {accent_hover};"
             f" border-color: {accent_hover}; }}\n"
-            f"#settingsBottom {{ background: {bottom_bg}; border-top: 1px solid {border}; }}\n"
-            f"#settingsBottom QPushButton {{ background: transparent; border: 1px solid {border};"
-            f" border-radius: 6px; padding: 7px 14px; color: {fg}; font-size: 13px; }}\n"
-            f"#settingsBottom QPushButton:hover {{ background: {input_bg};"
-            f" border-color: {accent}; color: {accent}; }}\n"
-            f"#settingsSaveBtn {{ background: {accent}; border-color: {accent}; color: {on_accent}; }}\n"
-            f"#settingsSaveBtn:hover {{ background: {accent_hover}; border-color: {accent_hover};"
-            f" color: {on_accent}; }}\n"
             # ── provider 卡片 + 自定义模型卡片样式 ──
             f"#providerCard {{ background: {input_bg}; border: 1px solid {border};"
             f" border-radius: 8px; }}\n"
@@ -1251,17 +1277,12 @@ class SettingsDialog(QDialog):
             f"QScrollBar::handle:vertical {{ background: {border};"
             f" border-radius: 4px; min-height: 32px; }}\n"
             f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}\n"
-            # ── QTabWidget 样式 ──
-            f"QTabWidget::pane {{ border: 1px solid {border}; border-radius: 6px; top: -1px; }}\n"
-            f"QTabBar::tab {{ background: {input_bg}; color: {muted}; padding: 7px 16px;"
-            f" border: 1px solid {border}; border-bottom: none;"
-            f" border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; }}\n"
-            f"QTabBar::tab:selected {{ background: {bg}; color: {accent}; font-weight: 600; }}\n"
-            f"QTabBar::tab:hover {{ color: {fg}; }}\n"
+            # 标签栏藏起来了（导航在左边），页面区不要框
+            f"QTabWidget#settingsTabs::pane {{ border: none; background: {bg}; }}\n"
         )
 
 
-class _CustomModelEditor(QDialog):
+class _CustomModelEditor(dialogs.CardDialog):
     """编辑单个自定义模型的小对话框。
 
     必填：display_name / model_id / protocol
@@ -1269,15 +1290,12 @@ class _CustomModelEditor(QDialog):
     取消返回，结果存放在 `result_data`（成功后是完整 dict）。
     """
     def __init__(self, parent, initial: dict):
-        super().__init__(parent)
-        self.setWindowTitle("自定义模型")
-        self.setModal(True)
-        self.resize(520, 460)
+        super().__init__(parent, title="自定义模型", width=520)
         self.result_data = None
         self._parent_window = parent
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 14)
+        root = QVBoxLayout(self.body)
+        root.setContentsMargins(24, 18, 24, 18)
         root.setSpacing(12)
 
         # 字段
@@ -1327,21 +1345,8 @@ class _CustomModelEditor(QDialog):
 
         root.addStretch()
 
-        # 按钮
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("保存")
-        save_btn.setObjectName("settingsSaveBtn")
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setDefault(True)
-        save_btn.clicked.connect(self._on_save)
-        btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(save_btn)
-        root.addLayout(btn_row)
+        self.cancel_btn = self.add_button("取消", dialogs.SECONDARY, self.reject)
+        self.save_btn = self.add_button("保存", dialogs.PRIMARY, self._on_save, default=True)
 
         self._apply_style()
 
@@ -1391,11 +1396,10 @@ class _CustomModelEditor(QDialog):
     def _apply_style(self):
         # 和设置对话框同一套配色
         p = _settings_palette()
-        bg, fg, border = p["bg"], p["fg"], p["border"]
-        accent, accent_hover, on_accent = p["accent"], p["accent_hover"], p["on_accent"]
+        fg, border, accent = p["fg"], p["border"], p["accent"]
         input_bg, input_focus_bg = p["input_bg"], p["input_focus_bg"]
-        self.setStyleSheet(
-            f"QDialog {{ background: {bg}; color: {fg}; }}\n"
+        self.body.setStyleSheet(
+            f"#lxSheetBody {{ background: transparent; color: {fg}; }}\n"
             f"#settingsLabel {{ color: {fg}; font-size: 13px; font-weight: 500; }}\n"
             f"#settingsInput {{ background: {input_bg}; border: 1px solid {border};"
             f" border-radius: 6px; padding: 6px 10px; color: {fg}; font-size: 13px;"
@@ -1405,9 +1409,4 @@ class _CustomModelEditor(QDialog):
             f" border-radius: 6px; padding: 6px 10px; color: {fg}; font-size: 13px; min-height: 20px; }}\n"
             f"QComboBox:hover {{ border-color: {accent}; }}\n"
             f"QCheckBox {{ color: {fg}; font-size: 13px; spacing: 6px; }}\n"
-            f"QPushButton {{ background: transparent; border: 1px solid {border};"
-            f" border-radius: 6px; padding: 7px 16px; color: {fg}; font-size: 13px; }}\n"
-            f"QPushButton:hover {{ background: {input_bg}; border-color: {accent}; color: {accent}; }}\n"
-            f"#settingsSaveBtn {{ background: {accent}; border-color: {accent}; color: {on_accent}; }}\n"
-            f"#settingsSaveBtn:hover {{ background: {accent_hover}; border-color: {accent_hover}; }}\n"
         )

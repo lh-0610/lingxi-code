@@ -433,6 +433,8 @@ class TestEditDialogRealQt:
         assert edits and edits[0].toPlainText() == "原始输入"
 
     def test_no_note_means_no_extra_label(self, chat_ui, qt_app, monkeypatch):
-        from PySide6.QtWidgets import QLabel
+        from PySide6.QtWidgets import QFrame, QLabel
         dlg = self._open(chat_ui, monkeypatch, "纯文字", None)
-        assert dlg.findChildren(QLabel) == []
+        # 主题输入框自带标题和「消息内容」标签；没有提醒时不出现琥珀提醒条
+        assert not [f for f in dlg.findChildren(QFrame) if f.objectName() == "lxDlgBanner"]
+        assert [lb.text() for lb in dlg.findChildren(QLabel) if lb.text()] == ["编辑消息", "消息内容"]

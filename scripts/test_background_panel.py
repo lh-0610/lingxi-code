@@ -483,7 +483,7 @@ def test_unknown_process_and_failed_stop_remain_unknown(panel, qapp, monkeypatch
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_narrow_window_preserves_command_width_and_scrollable_diagnostics(panel, qapp, theme):
+def test_narrow_dock_keeps_command_readable_and_diagnostics_scrollable(panel, qapp, theme):
     from src.ui.theme import THEMES
     panel._color = THEMES[theme].__getitem__
     panel.apply_theme()
@@ -493,8 +493,13 @@ def test_narrow_window_preserves_command_width_and_scrollable_diagnostics(panel,
     select(panel, bg_id)
     panel.resize(600, 520)
     qapp.processEvents()
+    # 停靠栏布局：命令列吃掉剩余宽度、不横向滚动；来源 / 退出码列收起，放进悬停提示
     assert panel.tree.columnWidth(0) >= 220
-    assert panel.tree.horizontalScrollBar().maximum() > 0
+    assert panel.tree.horizontalScrollBar().maximum() == 0
+    assert panel.tree.isHeaderHidden()
+    assert panel.tree.isColumnHidden(2) and panel.tree.isColumnHidden(4)
+    item = panel.tree.currentItem()
+    assert "来源：" in item.toolTip(0) and "退出码：" in item.toolTip(0)
     assert panel.output_note.height() <= 85
     assert panel.output_note.verticalScrollBar().maximum() > 0
     assert panel.output.height() >= 90
@@ -591,11 +596,15 @@ def test_real_sidebar_entry_reuses_panel_and_hides_with_main_window(qapp, monkey
     monkeypatch.setattr(ChatUI, "_show_current_model_config_warning", lambda self: None)
     ui = ChatUI()
     try:
+        ui.resize(1400, 860)          # 停靠栏要放得下（窗口太窄时面板先收起，拉宽才显示）
         ui.show()
         qapp.processEvents()
         ui.background_btn.click()
         widget = ui._background_panel
-        assert widget.isVisible() and not widget.isModal() and widget._timer.isActive()
+        # 停靠在对话区右边的「后台」标签，不是独立窗口
+        from src.ui.file_panel import BACKGROUND_KEY
+        assert widget.isVisible() and not widget.isWindow() and widget._timer.isActive()
+        assert ui.file_panel.is_tab_current(BACKGROUND_KEY)
         ui.background_btn.click()
         assert ui._background_panel is widget
         ui.hide()
@@ -741,3 +750,15 @@ def test_command_env_sets_pythonunbuffered(monkeypatch):
     assert env.get("PYTHONUNBUFFERED") == "1"
     monkeypatch.setenv("PYTHONUNBUFFERED", "0")
     assert tools._command_env().get("PYTHONUNBUFFERED") == "0", "用户自己设过就不覆盖"
+
+
+def test_list_corners_stay_rounded(panel, qapp):
+    """滚动区的视口是方的：贴着圆角边框画会把四个角盖掉（用户实测缺角）。
+    视口得往里收几像素，让圆角弧线露出来。"""
+    register()
+    panel.refresh()
+    qapp.processEvents()
+    vp = panel.tree.viewport().geometry()
+    tree = panel.tree.rect()
+    assert vp.left() >= 3 and vp.top() >= 3
+    assert tree.right() - vp.right() >= 3 and tree.bottom() - vp.bottom() >= 3
