@@ -89,10 +89,12 @@ def test_narrow_window_opens_it_as_an_overlay(ui, qapp):
     _pump(qapp)
     host = panel.parentWidget()
     header = ui._header_bar
-    header_bottom = header.mapTo(host, QPoint(0, header.height())).y()
+    # 顶栏横跨对话区和右侧面板，不在浮层的宿主（对话区那一行）里：都换到窗口坐标比
+    header_bottom = header.mapTo(ui, QPoint(0, header.height())).y()
+    panel_top = panel.mapTo(ui, QPoint(0, 0)).y()
     assert panel.isVisible() and ui.task_panel_btn.isChecked()
     assert panel.geometry().right() == host.width() - 1, "浮层贴在窗口最右边"
-    assert panel.y() == header_bottom and panel.geometry().bottom() == host.height() - 1, \
+    assert panel_top == header_bottom and panel.geometry().bottom() == host.height() - 1, \
         "从顶栏下面开始到窗口底：顶栏上开关面板的按钮不能被盖住"
     assert ui.chat_area.width() == chat_width, "浮层盖在对话区上，不改变对话区宽度"
     assert _load_ui_prefs().get("task_panel_collapsed") is None, "浮层只是这一次打开，不改偏好"

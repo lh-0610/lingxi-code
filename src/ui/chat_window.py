@@ -65,6 +65,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from PySide6.QtWidgets import QApplication as _QApp
         from . import context_menus
         context_menus.install(_QApp.instance(), host=self)
+        # 自绘标题栏（Windows）：去掉系统白标题栏，窗口按钮放进自己的顶栏；退路见 titlebar.enabled
+        from . import titlebar as _titlebar
+        self._frameless = _titlebar.FramelessController(self) if _titlebar.enabled() else None
 
         # 设置图标
         icon_path = os.path.join(BASE_DIR, "icon.ico")
@@ -224,6 +227,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._background_panel.apply_theme()
         if getattr(self, "_debug_inspector", None) is not None:
             self._debug_inspector.apply_theme()
+        if getattr(self, "_frameless", None) is not None:
+            self._frameless.buttons.refresh_theme()
         if hasattr(self, "chat_area"):
             self._style_chat_area()
         if hasattr(self, "queue_panel"):
@@ -292,22 +297,37 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._build_sidebar()
         main_layout.addWidget(self.sidebar)
 
-        # 主区域
+        # 主区域：顶栏一整行横跨对话区和右侧面板（窗口按钮在它最右边，参照 Claude 桌面版），
+        # 下面一行才是 对话区 | 文件面板 | 任务面板——右侧面板自己的标签行 / 关闭按钮在顶栏下面，
+        # 不和窗口的最小化 / 关闭挤在一条线上
+        main_col = QWidget()
+        main_col_layout = QVBoxLayout(main_col)
+        main_col_layout.setContentsMargins(0, 0, 0, 0)
+        main_col_layout.setSpacing(0)
+        self._build_header(main_col_layout)
+
+        body = QWidget()
+        body.setObjectName("mainBody")
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        main_col_layout.addWidget(body, 1)
+
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
-
-        self._build_header(right_layout)
         self._build_chat_area(right_layout)
         self._build_input_area(right_layout)
         self._build_footer(right_layout)
+        body_layout.addWidget(right, 1)
 
-        main_layout.addWidget(right, 1)
+        main_layout.addWidget(main_col, 1)
 
         # 任务面板在最右侧，像 Claude / Codex 的侧栏一样由顶栏按钮开关；
         # 窗口放不下时改成盖在对话区上的浮层（见 _apply_task_panel_collapse）
-        self._main_layout = main_layout
+        main_layout = body_layout
+        self._main_layout = body_layout
         self._build_plan_panel()
         self._task_panel_docked = True
         # 文件面板紧挨着对话区（在任务面板左边），默认收起；点"改动的文件"才出来
@@ -750,7 +770,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if host is None:
             return
         header = getattr(self, "_header_bar", None)
-        top = header.mapTo(host, QPoint(0, header.height())).y() if header is not None else 0
+        # 顶栏现在在面板宿主（对话区那一行）的上面，不在宿主里：宿主的 0 就是顶栏下沿
+        if header is not None and host.isAncestorOf(header):
+            top = header.mapTo(host, QPoint(0, header.height())).y()
+        else:
+            top = 0
         width = min(self.plan_panel.width(), max(self.plan_panel.MIN_WIDTH, host.width() - 120))
         self.plan_panel.setFixedWidth(width)
         self.plan_panel.setGeometry(host.width() - width, top, width, host.height() - top)
@@ -1802,6 +1826,29 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._apply_task_panel_collapse()
         self._apply_file_panel_collapse()
         self._refresh_header_compactness()
+
+    # ── 自绘标题栏（ui/titlebar）──
+
+    def nativeEvent(self, event_type, message):
+        fc = getattr(self, "_frameless", None)
+        if fc is not None:
+            handled = fc.handle(event_type, message)
+            if handled is not None:
+                return handled
+        return super().nativeEvent(event_type, message)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        fc = getattr(self, "_frameless", None)
+        if fc is not None:
+            fc.apply_native_frame()
+            fc.buttons.sync_state()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        fc = getattr(self, "_frameless", None)
+        if fc is not None and event.type() == event.Type.WindowStateChange:
+            fc.buttons.sync_state()
 
 
     def _pick_image(self):

@@ -309,6 +309,10 @@ class SettingsDialog(dialogs.CardDialog):
         search_hint.setWordWrap(True)
         a.addWidget(search_hint)
 
+        self._add_section(a, "窗口")
+        self._add_bool(a, "native_title_bar",
+                       "使用系统标题栏（自绘标题栏在你的电脑上显示不对时打开；重启生效）")
+
         self._add_section(a, "MCP（高级 · 可选）")
         self._add_bool(a, "mcp_enabled",
                        "启用 MCP（连接外部工具服务器）", default=True)

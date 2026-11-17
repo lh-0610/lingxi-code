@@ -102,6 +102,11 @@ class HeaderMixin:
         self.theme_btn.clicked.connect(self._toggle_theme)
         layout.addWidget(self.theme_btn)
 
+        # 侧栏浏览器（模型和人共用的那个页面）：已开就切过去，关过就开上次的地址，没有就空白页
+        self.browser_btn = self._header_button("", "icon", "浏览器：模型和你共用的侧栏页面")
+        self.browser_btn.clicked.connect(lambda _=False: self._open_browser_from_header())
+        layout.addWidget(self.browser_btn)
+
         # 任务面板开关：面板停靠在右侧，这里收起 / 展开（选择会被记住）
         self.task_panel_btn = self._header_button("", "icon", "任务面板：要求、计划、验证状态与证据")
         self.task_panel_btn.setCheckable(True)
@@ -110,8 +115,19 @@ class HeaderMixin:
         self._style_task_panel_btn()
         layout.addWidget(self.task_panel_btn)
 
+        # 自绘标题栏（Windows）：最小化 / 最大化 / 关闭排在顶栏这一行最右边，贴着窗口右边缘
+        fc = getattr(self, "_frameless", None)
+        if fc is not None:
+            layout.addSpacing(8)
+            layout.addWidget(fc.buttons, 0, Qt.AlignTop)
+            layout.setContentsMargins(12, 0, 0, 0)
+
         parent_layout.addWidget(header)
         self._refresh_header_icons()
+
+    def _open_browser_from_header(self):
+        self.file_panel.open_last_browser()
+        self._settle_file_panel()
 
     def _header_button(self, text, kind, tip=""):
         btn = QPushButton(text)
@@ -146,6 +162,7 @@ class HeaderMixin:
             ("role_btn", "user.svg"),
             ("search_btn", "search.svg"),
             ("theme_btn", "moon.svg" if self.theme == "light" else "sun.svg"),
+            ("browser_btn", "globe.svg"),
             ("task_panel_btn", "panel-right.svg"),
         )
         for attr, icon in specs:

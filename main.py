@@ -12,9 +12,28 @@ except Exception:
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QIcon
+
+def _use_rhi_compositing() -> bool:
+    """主窗口一开始就走 GPU 合成（QT_WIDGETS_RHI）。不这样的话，第一次嵌入浏览器页面时
+    Qt 会把主窗口的原生句柄销毁重建（实测句柄变了）：窗口闪一下，自绘标题栏加回去的窗框样式
+    也跟着丢（拖边改大小、贴边分屏失效）。设置里选「使用系统标题栏」时一并退回原来的方式。"""
+    if sys.platform != "win32" or "QT_WIDGETS_RHI" in os.environ:
+        return False
+    try:
+        import json
+        from src.paths import CONFIG_PATH
+        with open(CONFIG_PATH, encoding="utf-8-sig") as f:
+            return not bool(json.load(f).get("native_title_bar", False))
+    except Exception:
+        return True
+
+
+if _use_rhi_compositing():
+    os.environ["QT_WIDGETS_RHI"] = "1"
+
+from PySide6.QtWidgets import QApplication  # noqa: E402  上面先定渲染方式的环境变量
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtGui import QFont, QIcon  # noqa: E402
 
 # 兼容 PyInstaller 打包：打包后资源位于 sys._MEIPASS
 if getattr(sys, "frozen", False):

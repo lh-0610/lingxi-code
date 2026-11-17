@@ -964,10 +964,11 @@ def test_model_open_opens_tab_and_view_visible(ui, qapp, fp_server, monkeypatch)
 
 
 def test_manual_open_browser_button(ui, qapp, fp_server):
-    """14：标签栏手动入口开空白页；关后再点复用上次地址。"""
+    """14：顶栏的地球按钮（原来在右侧栏标签行，挪到顶栏）开空白页；关后再点复用上次地址。"""
     from src.browser import page as page_mod
     from src.ui.file_panel import BROWSER_KEY
-    ui.file_panel.open_browser_btn.click()
+    assert not hasattr(ui.file_panel, "open_browser_btn"), "右侧栏标签行不再放浏览器入口"
+    ui.browser_btn.click()
     _pump(qapp, 10)
     assert BROWSER_KEY in ui.file_panel.paths()
     ui.file_panel.open_browser(fp_server + "/form.html")
@@ -975,7 +976,7 @@ def test_manual_open_browser_button(ui, qapp, fp_server):
     ui.file_panel.close_file(BROWSER_KEY)
     _pump(qapp, 10)
     assert BROWSER_KEY not in ui.file_panel.paths()
-    ui.file_panel.open_browser_btn.click()
+    ui.browser_btn.click()
     _pump(qapp, 20)
     assert BROWSER_KEY in ui.file_panel.paths()
     import time

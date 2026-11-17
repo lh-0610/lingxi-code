@@ -189,7 +189,6 @@ class FilePanel(QFrame):
         line = self._t("sidebar_border")
         text = self._t("text")
         sec = self._t("mv_text_sec")
-        chip = self._t("mv_chip_border")
         self.setStyleSheet(
             f"QFrame#filePanel {{ background: {bg}; border: none; border-left: 1px solid {line}; }}"
             f"QLabel#filePanelPath {{ font-family: {MONO_CSS}; font-size: 12px; color: {text};"
@@ -198,9 +197,6 @@ class FilePanel(QFrame):
             f"QPushButton#filePanelClose {{ border: none; border-radius: 6px; background: transparent;"
             f" color: {sec}; font-size: 14px; }}"
             f"QPushButton#filePanelClose:hover {{ background: {self._t('mv_indigo_soft')}; color: {text}; }}"
-            f"QPushButton#filePanelBrowser {{ border: 1px solid {chip}; border-radius: 6px;"
-            f" background: transparent; color: {sec}; font-size: 12px; padding: 2px 8px; }}"
-            f"QPushButton#filePanelBrowser:hover {{ background: {self._t('mv_indigo_soft')}; color: {text}; }}"
             # 标签（设计稿「右侧面板」）：平铺文字 + 选中的那个底下一条 2px 靛蓝线，整条标签栏底下一条细线
             f"QWidget#filePanelTabRow {{ background: transparent; border: none;"
             f" border-bottom: 1px solid {line}; }}"
@@ -263,17 +259,9 @@ class FilePanel(QFrame):
         self.close_btn.setObjectName("filePanelClose")
         self.close_btn.setFixedSize(28, 28)
         self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setToolTip("收起面板（标签都会关掉；后台命令不会停）")
+        self.close_btn.setToolTip("关闭右侧面板（标签都会关掉；后台命令不会停）")
         self.close_btn.setAccessibleName("收起面板")
         self.close_btn.clicked.connect(self.close_all)
-
-        # 用户手动开浏览器入口（复审 14）：空白页或上次地址
-        self.open_browser_btn = QPushButton("浏览器", tab_row)
-        self.open_browser_btn.setObjectName("filePanelBrowser")
-        self.open_browser_btn.setCursor(Qt.PointingHandCursor)
-        self.open_browser_btn.setToolTip("打开浏览器标签（空白页或上次的地址）")
-        self.open_browser_btn.clicked.connect(
-            lambda: self.open_browser(self._browser_last_url or ""))
 
         top_lay.addWidget(self.path_label, 1)
 
@@ -290,7 +278,6 @@ class FilePanel(QFrame):
         self.tabs.setFocusPolicy(Qt.NoFocus)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         tab_lay.addWidget(self.tabs, 1)
-        tab_lay.addWidget(self.open_browser_btn, 0, Qt.AlignVCenter)
         tab_lay.addWidget(self.close_btn, 0, Qt.AlignVCenter)
         lay.addWidget(tab_row)
 
@@ -397,6 +384,10 @@ class FilePanel(QFrame):
             view.navigate(url)
         self._sync_header()
         self._show_self()
+
+    def open_last_browser(self):
+        """用户手动开浏览器（顶栏的地球按钮，复审 14）：已开就切过去；关过就复用上次地址，没有就空白页。"""
+        self.open_browser(self._browser_last_url or "")
 
     def open_widget_tab(self, key: str, label_text: str, widget: QWidget, *, header: str,
                         hint: str, tooltip: str = ""):

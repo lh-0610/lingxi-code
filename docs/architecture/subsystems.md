@@ -104,6 +104,13 @@
 - **`src/ui/` 里除 dialogs.py 外没有直接用 QDialog 的了**：后台任务和调试（原 F12 独立置顶窗口）在第 3 批改成了右侧停靠栏的「后台」「调试」标签（`file_panel.open_widget_tab`，见 [background.md](background.md)）；`test_no_native_framed_dialogs_in_ui` 用 AST 守着不再出现 `class X(QDialog)` / `QDialog(...)` / `QDialogButtonBox(...)`
 - **测试写法**：exec 是阻塞的，先挂带 receiver 的零秒定时器，等 `dialogs.active_dialog()` 出现再按键 / 点按钮（`test_themed_dialogs.drive`），另挂 5 秒安全阀防卡死；只想跳过弹窗的用例 patch `dialogs.ThemedDialog.exec` 或 `dialogs.get_text`。offscreen 下 `QTest.keyClicks` 打中文字符会卡住，输入框用 `setText`
 
+## 自绘标题栏（src/ui/titlebar.py）
+- **目的**：去掉 Windows 那条白色系统标题栏，最小化 / 最大化 / 关闭放进我们自己的顶栏（用户参照的是 Claude 桌面版顶栏），同时**保留系统窗框的所有行为**：拖边改大小、拖到屏幕边贴边、Win11 鼠标停在最大化键上弹分屏布局、最小化 / 最大化动画、DWM 阴影和圆角
+- **做法**（业内常见的「无边框 + 原生样式加回来」）：`ChatUI.__init__` 里 `FramelessController` 设 `FramelessWindowHint`（Qt 不再留标题栏），第一次 showEvent 用 Win32 把 `WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | 最小化 / 最大化` 加回窗口样式，`DwmExtendFrameIntoClientArea` 留 1px 让阴影出来。`ChatUI.nativeEvent` 交给控制器：`WM_NCCALCSIZE` 把非客户区收成 0；**最大化时把客户区夹到显示器可用区域里**（`MonitorFromWindow` + `GetMonitorInfo` 的 rcWork），任务栏自动隐藏时底边再留 2px。两个坑（都是实测）：① 不能固定往里收一圈窗框厚度——Qt 自己最大化无边框窗口时已经把窗口摆成正好等于可用区域，再收一圈就成了「伪全屏」：四周露出一圈窗框，底边和右上角被裁掉；系统路径（拖到屏幕顶、系统菜单）最大化时窗口又是超出屏幕 11px 的矩形，夹到可用区域两种都对；② 判断最大化要问系统 `IsZoomed`，这条消息来的时候 Qt 的 `isMaximized()` 还没更新。`WM_NCHITTEST` 走 `hit_test`：四边 6px 改大小（最大化时没有）；顶部 56px 里不是按钮 / 输入框 / 有标签的地方报 `HTCAPTION`（拖动、双击最大化、右键系统菜单都是系统的）；我们的最大化键报 `HTMAXBUTTON`（Win11 分屏布局靠它），这时 Qt 收不到它的鼠标事件，悬停在命中测试里记、点击在 `WM_NCLBUTTONDOWN / UP` 里处理
+- **布局（参照 Claude 桌面版）**：顶栏一整行横跨对话区和右侧面板（`_build_ui`：侧栏 | [顶栏 ; 对话区 | 文件面板 | 任务面板]），窗口按钮 `WindowButtons`（46×56，和顶栏一样高，图标和顶栏按钮在一条线上，关闭键悬停红底白字）是顶栏这一行的最后一项；右侧面板自己的标签行和关闭 × 在顶栏下面。早先窗口按钮浮在窗口右上角、右侧面板的标签行也在最顶上，两个 × 挨在一起分不清（用户实测），所以改成这样
+- **一开始就走 GPU 合成**（main.py 设 `QT_WIDGETS_RHI=1`，Windows 上、没选系统标题栏时）：第一次嵌入浏览器页面（GPU 渲染的控件）时，Qt 会把主窗口的原生句柄销毁重建——窗口闪一下，加回去的窗框样式也丢了（实测句柄变了、WS_THICKFRAME 没了）。一开始就用 GPU 合成，嵌入时句柄不变；`_WinIdWatcher` 在句柄万一变了时重新加窗框样式兜底
+- **只在 Windows 平台插件下启用**（offscreen 测试不走）；`config.json` 的 `native_title_bar: true`（设置 → 高级 → 窗口）退回系统标题栏，重启生效——自绘标题栏在某台机器上显示不对时的退路。测试 `scripts/test_titlebar.py` 测命中测试、让位和按钮；Win32 那一半（贴边、分屏、阴影）只能实机看
+
 ## 右键菜单（src/ui/context_menus.py + browser_panel 的网页菜单）
 - **为什么**：Qt 自带的输入框 / 文本框右键菜单是英文（Undo / Copy / Select All，没加载翻译），Chromium 的网页菜单也是英文（Back / Reload / Inspect）。设计稿是「右键菜单 · 输入框与聊天记录」「右键菜单 · 浏览器网页」两板
 - **文本类控件**：`ChatUI.__init__` 调 `context_menus.install(app, host=self)`，在 QApplication 上装一次事件过滤器。`QEvent.ContextMenu` 落在 QLineEdit / QTextEdit / QPlainTextEdit（事件先到视口，换成编辑框本身）/ 可选中的 QLabel 上、且它的 `contextMenuPolicy` 是默认值时，换成我们的菜单；自己有菜单的控件（CustomContextMenu，比如侧栏会话行）不碰，单个控件要保留原生菜单就设属性 `lx_native_menu`。能编辑的：撤销 / 重做 · 剪切 / 复制 / 粘贴 / 粘贴为纯文本（`acceptRichText` 的 QTextEdit 才有）· 全选，按状态置灰，密码框不给复制剪切；只读的：复制 ·（聊天正文）复制为 Markdown · 引用到输入框 · 链接项 · 全选

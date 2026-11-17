@@ -98,6 +98,7 @@ src/                     # 主代码
     header.py            # HeaderMixin：顶栏（撤销/隔离/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描。模型与思考强度已挪到输入框底栏的模型按钮（model_btn / _show_model_menu）。计划|执行同样在底栏的模式按钮
     debug_inspector.py   # 调试面板（请求/响应/usage 可视化）：右侧停靠栏的「调试」标签，F12 打开 / 收起（原来是独立置顶窗口）
     dialogs.py           # 主题弹窗（取代原生 QMessageBox / QInputDialog）：遮罩 + 宽 440 圆角 14 的卡片，question / confirm_danger / success / critical / information / warning / choose（多出口）/ get_text（输入），返回值对齐 QMessageBox；CardDialog = 表单对话框的窗内卡片外框（标题栏 + body + 底部操作栏），TextViewerDialog = 只读长文本；详见 subsystems.md「主题弹窗」节
+    titlebar.py          # 自绘标题栏（Windows）：FramelessWindowHint + 把原生窗框样式加回来，nativeEvent 处理 NCCALCSIZE / NCHITTEST / 最大化键；三个窗口按钮是顶栏最后一项（顶栏横跨对话区和右侧面板）；config native_title_bar 退回系统标题栏（也不再设 QT_WIDGETS_RHI）
     context_menus.py     # 中文、跟随主题的右键菜单：QApplication 级过滤器把文本类控件（输入框 / 只读文本 / 聊天记录的 QLabel）的默认英文菜单换掉；make_menu / add_item 给网页菜单等复用
     theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色，dlg_* 是主题弹窗的）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
     widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / QuitConfirmDialog（危险样式主题弹窗）/ FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）
