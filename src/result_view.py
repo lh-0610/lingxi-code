@@ -24,6 +24,8 @@ _TITLE_COMPLETED_CHECKED = "本轮执行结束，已执行检查通过"
 # 跑了检查但没全过 / 结论已失效。必须和上面那条分开——只要有一条没解决，
 # 就不能把整轮概括成"检查通过"。
 _TITLE_COMPLETED_UNRESOLVED = "本轮执行结束，检查未全部通过"
+# 项目里没有测试，结论来自浏览器：照实说证据是什么，不写"测试通过"。
+_TITLE_COMPLETED_BROWSER = "本轮执行结束，浏览器检查通过（项目没有测试）"
 _TITLE_INTERRUPTED = "上次运行被中断"
 _TITLE_RUNNING = "本轮仍在运行"
 _TITLE_UNKNOWN = "本轮结果未知"
@@ -38,7 +40,7 @@ _STATUS_LABELS = {
     "unknown": "结果未知",
 }
 
-_KIND_LABELS = {"tests": "测试", "check": "静态检查"}
+_KIND_LABELS = {"tests": "测试", "check": "静态检查", "browser": "浏览器检查"}
 
 # 文件列表超过这个数就折叠（卡片要能读，不是要把改动清单铺满屏幕）。
 FILE_FOLD_THRESHOLD = 8
@@ -60,10 +62,14 @@ def validation_rows(snapshot):
         status = record.get("status") or "unknown"
         checker = record.get("checker") or _KIND_LABELS.get(record.get("kind"), "检查")
         label = _STATUS_LABELS.get(status, "结果未知")
+        if record.get("no_tests") and status == "not_run":
+            label = "项目里没有测试用例"
         detail = []
         code = record.get("exit_code")
         if code is not None:
             detail.append(f"退出码 {code}")
+        elif record.get("kind") == "browser":
+            detail.append("本次页面加载的控制台")   # 浏览器检查本来就没有进程退出码
         else:
             # 没有退出码就照实说没有，**不写 0**——"没跑起来"和"跑了且成功"是两回事。
             detail.append("无退出码")
@@ -82,6 +88,7 @@ def validation_rows(snapshot):
             "exit_code": code,
             "duration_ms": duration if isinstance(duration, int) else 0,
             "stale": bool(record.get("stale")),
+            "no_tests": bool(record.get("no_tests")),
             "detail": "、".join(detail),
             "summary": record.get("summary") or "",
             "reason": record.get("reason") or "",
@@ -148,12 +155,18 @@ def summarize_checks(snapshot):
         return "unresolved"          # 跑过，但结论全部失效
     if all(r["status"] == "passed" for r in fresh):
         return "clear"
+    # 项目里没有测试（"没收集到用例"那条）、改完重开的页面控制台无报错：结论来自浏览器，
+    # 单独一档——标题要照实说证据是浏览器，不能并进"已执行检查通过"让人以为测过了。
+    browser_ok = any(r["kind"] == "browser" and r["status"] == "passed" for r in fresh)
+    rest = [r for r in fresh if not (r.get("no_tests") and r["status"] == "not_run")]
+    if browser_ok and len(rest) < len(fresh) and all(r["status"] == "passed" for r in rest):
+        return "browser_clear"
     return "unresolved"
 
 
 def has_fresh_pass(snapshot):
     """本轮已执行的检查是不是**全部**通过（结果卡据此决定能不能说"检查通过"）。"""
-    return summarize_checks(snapshot) == "clear"
+    return summarize_checks(snapshot) in ("clear", "browser_clear")
 
 
 # 这些终态可以「继续任务」：没做完（停止 / 失败 / 触顶）或做完了但没验证完。
@@ -273,6 +286,8 @@ def describe(snapshot, *, live_run_id=None):
         checks = summarize_checks(snapshot)
         if checks == "clear":
             title, tone = _TITLE_COMPLETED_CHECKED, "ok"
+        elif checks == "browser_clear":
+            title, tone = _TITLE_COMPLETED_BROWSER, "ok"
         elif checks == "unresolved":
             # 跑过检查但没全过。既不能说"检查通过"，也不能只说"回复结束"
             # （那会把一次有失败项的运行说得像纯问答）。

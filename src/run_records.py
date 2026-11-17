@@ -307,7 +307,7 @@ def _normalize_validation_run(raw):
     if out["status"] not in _VALID_EV_STATUS:
         # 认不出的状态退成 unknown，**不退成 passed**：读不懂绝不能变成"检查通过了"。
         out["status"] = "unknown"
-    if out["kind"] not in ("tests", "check"):
+    if out["kind"] not in ("tests", "check", "browser"):
         out["kind"] = "check"
     argv = raw.get("argv")
     out["argv"] = ([str(a) for a in argv] if isinstance(argv, list) else None)
@@ -322,6 +322,8 @@ def _normalize_validation_run(raw):
     if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
         out["evidence_revision"] = revision
     out["stale"] = raw.get("stale") is True
+    if raw.get("no_tests") is True:
+        out["no_tests"] = True
     return out
 
 

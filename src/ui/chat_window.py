@@ -815,13 +815,29 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """点回复正文里的文件链接（`lingxi-file:src/ui/task_panel.py:835`）。
 
         入口和任务面板「改动的文件」一样走文件面板；带行号的打开后滚到那一行。
+        localhost 的 http 链接不走外部浏览器，在侧栏浏览器面板打开（§7.4）。
         """
+        from ..browser import security
+        if (href or "").startswith(("http://", "https://")) and security.is_localhost(href):
+            self._open_browser_in_panel(href)
+            return
         from .markdown_render import parse_file_link
         target = parse_file_link(href)
         if target is None:
             return
         rel_path, line = target
         self._open_file_in_panel(rel_path, line=line)
+        self._settle_file_panel()
+
+    def _open_browser_in_panel(self, url, sess=None):
+        """在浏览器面板打开 url（回复链接 / 后台任务按钮共用）。sess 非空时把来源加进
+        该会话的来源白名单（§7.3：灵犀自己起的 dev server，人点按钮即信任）。"""
+        if sess is not None:
+            from ..browser import security
+            origin = security.parse_origin(url)
+            if origin:
+                sess.browser_origin_allowlist.add(origin)
+        self.file_panel.open_browser(url)
         self._settle_file_panel()
 
     def _open_file_in_panel(self, rel_path, work_dir=None, line: int = 0):
@@ -863,8 +879,14 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.file_panel.max_width_fn = self._file_panel_max_width
         self.file_panel.width_changed.connect(self._on_file_panel_width_changed)
         self.file_panel.closed.connect(self._on_file_panel_closed)
+        # 模型首次拉起浏览器 → 自动开面板标签并切过去（复审 7：用户看得见、view 不 hidden）
+        from ..browser import page as _bpage
+        _bpage._notifier.browser_created.connect(self._on_model_browser_created)
         # 出现 / 消失 / 变宽都会改变对话栏宽度：输入框和顶栏折叠档位要跟着重算
         self.file_panel.installEventFilter(self)
+
+    def _on_model_browser_created(self):
+        self.file_panel.open_browser("")
 
     def _file_panel_max_width(self):
         """拖宽上限：对话栏至少还要留 _FILE_PANEL_MIN_CHAT，别把对话挤没了。"""
@@ -2355,6 +2377,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from .background_panel import BackgroundPanel
         if getattr(self, "_background_panel", None) is None:
             self._background_panel = BackgroundPanel(self._t, self)
+            self._background_panel.open_browser_fn = self._open_browser_in_panel
         self._background_panel.show()
         self._background_panel.raise_()
         self._background_panel.activateWindow()

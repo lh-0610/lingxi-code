@@ -29,6 +29,9 @@ KIND_GIT_WRITE = "git_write"        # git_commit / git_push 等写工具：每�
 KIND_MCP = "mcp"                    # MCP 工具：自动模式也要问；"记住"只记这一个工具
 KIND_SPAWN = "spawn_agents"         # 派子 Agent：子 Agent 改文件、跑命令都不再逐条问，
                                     # 做完直接合并回项目——每次都问、不给"记住"
+KIND_BROWSER = "browser"            # 浏览器动作：问不问由 tools_browser 按 security.decide_action
+                                    # （模式×动作×来源）先判；判到要问就必弹卡（bypass 除外），
+                                    # 不在 auto 模式静默放行。"记住"只进会话来源白名单（第 5 步接）
 ALWAYS_ASK_KINDS = (KIND_GIT_WRITE, KIND_SPAWN)
 
 # 派子 Agent 确认卡上的标题

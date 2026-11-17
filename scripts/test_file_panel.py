@@ -463,3 +463,406 @@ def test_result_card_diff_view_is_read_only(ui, qapp, git_project):
              for k, v in sess.verification.items() if k != "change_revision"}
     assert after == before, "看 diff 不能替模型记「已审阅」"
     assert sess.verification.get("diff_reviewed") is False
+
+
+# ── 浏览器标签（第 6 步）：懒加载 / 生命周期 / 徽标 / 真实交互 / 关闭竞态 ──
+
+@pytest.fixture(scope="module")
+def browser_server():
+    import http.server
+    import os
+    import threading
+    fixtures = os.path.join(os.path.dirname(__file__), "browser_fixtures")
+
+    class _H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=fixtures, **kw)
+
+        def do_GET(self):
+            if self.path.startswith("/slow"):
+                import time
+                time.sleep(8)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"<html><body>slow</body></html>")
+                return
+            super().do_GET()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+@pytest.fixture
+def browser_ui(ui, qapp, browser_server):
+    yield ui
+    from src.browser import page
+    if page.is_browser_open():
+        page.close_browser()
+    _pump(qapp, 20)
+
+
+def _wait_page(qapp, pred, timeout=15):
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        qapp.processEvents()
+        if pred():
+            return True
+        time.sleep(0.01)
+    return pred()
+
+
+def _pump_deletes(qapp, n=30):
+    """deleteLater 的 DeferredDelete 裸 processEvents 不一定派发，显式送一遍。"""
+    from PySide6.QtCore import QEvent
+    for _ in range(n):
+        qapp.processEvents()
+        qapp.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def test_browser_tab_lifecycle(browser_ui, qapp, browser_server):
+    """开标签才创建 view；与文件标签并存；切走隐藏不销毁；关标签释放；能重开。"""
+    from src.browser import page
+    from src.ui.file_panel import BROWSER_KEY
+    ui = browser_ui
+    assert page.is_browser_open() is False, "构造 ChatUI / 文件面板不该拉起浏览器"
+
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    assert page.is_browser_open() is True
+    assert BROWSER_KEY in ui.file_panel.paths()
+    assert ui.file_panel.current_path() == BROWSER_KEY
+    # 标签文字走 LeftSide QLabel（ElideMiddle 对 CJK 误判余量，tabText 会被截成"..."）
+    from PySide6.QtWidgets import QTabBar, QLabel
+    bi = ui.file_panel._tab_index(BROWSER_KEY)
+    tab_label = ui.file_panel.tabs.tabButton(bi, QTabBar.LeftSide)
+    assert isinstance(tab_label, QLabel) and tab_label.text() == "浏览器"
+    assert ui.file_panel.tabs.tabText(bi) == ""
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+
+    ui.file_panel.open_file("a.py", [(1, "ctx", "x = 1")])
+    _pump(qapp)
+    assert "a.py" in ui.file_panel.paths() and BROWSER_KEY in ui.file_panel.paths()
+    browser_index = ui.file_panel._tab_index(BROWSER_KEY)
+    ui.file_panel.tabs.setCurrentIndex(browser_index)
+    _pump(qapp)
+    assert ui.file_panel.stack.currentWidget() is ui.file_panel._browser_view
+    file_index = ui.file_panel._tab_index("a.py")
+    ui.file_panel.tabs.setCurrentIndex(file_index)
+    _pump(qapp)
+    assert page.is_browser_open() is True, "切走只是隐藏，不销毁页面"
+
+    ui.file_panel.close_file(BROWSER_KEY)
+    _pump(qapp, 20)
+    assert page.is_browser_open() is False, "关标签释放 view/page"
+    assert "a.py" in ui.file_panel.paths()
+
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    assert page.is_browser_open() is True, "关了还能重开"
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+    assert page.is_browser_open() is False
+    assert not ui.file_panel.isVisible()
+
+
+def test_browser_badge_follows_bridge_activity(browser_ui, qapp, browser_server):
+    from src.browser.bridge import get_bridge
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    view = ui.file_panel._browser_view
+    get_bridge().activity.emit("点击")
+    _pump(qapp)
+    assert view.badge.isVisible()
+    assert "模型正在操作浏览器" in view.badge.text() and "点击" in view.badge.text()
+    get_bridge().activity.emit("")
+    _pump(qapp)
+    assert not view.badge.isVisible()
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_address_bar_typing_navigates(browser_ui, qapp, browser_server):
+    """真实交互：地址栏键入网址 + 回车 → 页面真的导航过去。"""
+    from src.browser import page
+    ui = browser_ui
+    ui.file_panel.open_browser()
+    _pump(qapp)
+    ui.activateWindow()
+    view = ui.file_panel._browser_view
+    view.address.setFocus()
+    _pump(qapp)
+    QTest.keyClicks(view.address, browser_server + "/form.html")
+    QTest.keyClick(view.address, Qt.Key_Return)
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString()), \
+        "回车后应导航到输入网址"
+    assert _wait_page(qapp, lambda: "表单页" in page.get_browser().page.title()), \
+        "标题随加载完成更新（titleChanged 比 url 晚到）"
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_invalid_url_flashes_and_does_not_navigate(browser_ui, qapp, browser_server):
+    from src.browser import page
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+    view = ui.file_panel._browser_view
+    view.navigate("file:///c:/windows/win.ini")
+    _pump(qapp)
+    assert view.badge.isVisible() and "不支持的协议" in view.badge.text()
+    assert "form.html" in page.get_browser().page.url().toString(), "非法网址不该导航"
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_f12_opens_devtools(browser_ui, qapp, browser_server):
+    from src.browser import page
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    ui.activateWindow()
+    qapp.setActiveWindow(ui)
+    view = ui.file_panel._browser_view
+    view.address.setFocus()
+    _pump(qapp)
+    QTest.keyClick(view.address, Qt.Key_F12)
+    _pump(qapp, 10)
+    b = page.get_browser()
+    assert getattr(b, "_devtools_view", None) is not None, "F12 应开出 DevTools"
+    b._devtools_view.close()
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_close_tab_while_model_operating(browser_ui, qapp, browser_server):
+    """硬要求 3：面板关掉时模型正在加载 → 立刻回"浏览器已关闭"，不崩不卡；之后能重开。"""
+    import threading
+    import time
+    from src.browser import page
+    from src.browser.bridge import get_bridge
+    from src.ui.file_panel import BROWSER_KEY
+    ui = browser_ui
+    ui.file_panel.open_browser()
+    _pump(qapp)
+    b = get_bridge()
+    box = {}
+
+    def worker():
+        box["r"] = b.call("open", timeout=20, url=browser_server + "/slow")
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    assert _wait_page(qapp, lambda: b._open_started, timeout=5), "导航应已开始"
+    t0 = time.perf_counter()
+    ui.file_panel.close_file(BROWSER_KEY)
+    _pump(qapp)
+    t.join(timeout=5)
+    elapsed = (time.perf_counter() - t0) * 1000
+    r = box.get("r")
+    assert r and r["ok"] is False and "浏览器已关闭" in r.get("error", ""), r
+    assert elapsed < 3000, f"应立刻返回，实际 {elapsed:.0f}ms"
+    assert not t.is_alive(), "worker 不该卡死"
+
+    r2 = {}
+
+    def reopen():
+        r2["r"] = b.call("open", timeout=20, url=browser_server + "/form.html")
+
+    t2 = threading.Thread(target=reopen, daemon=True)
+    t2.start()
+    assert _wait_page(qapp, lambda: "r" in r2, timeout=25)
+    assert r2["r"]["ok"] is True, r2
+    assert page.is_browser_open() is True
+    page.close_browser()
+    _pump(qapp, 20)
+
+
+def test_model_close_removes_tab(browser_ui, qapp, browser_server):
+    """模型调 browser_close：view 销毁 → 面板自动收标签。"""
+    from src.browser import page
+    from src.ui.file_panel import BROWSER_KEY
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+    page.close_browser()          # 等价于桥的 close op 对页面的处理
+    _pump_deletes(qapp)
+    assert BROWSER_KEY not in ui.file_panel.paths()
+    assert ui.file_panel._browser_view is None
+
+
+def test_localhost_link_opens_panel_but_public_does_not(browser_ui, qapp, browser_server):
+    from src.browser import page
+    from src.ui.file_panel import BROWSER_KEY
+    ui = browser_ui
+    ui._on_file_link_clicked("https://example.com/article")
+    _pump(qapp)
+    assert BROWSER_KEY not in ui.file_panel.paths(), "公网链接不进侧栏浏览器"
+    ui._on_file_link_clicked(browser_server + "/form.html")
+    _pump(qapp)
+    assert BROWSER_KEY in ui.file_panel.paths()
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_open_browser_in_panel_trusts_origin(browser_ui, qapp):
+    from src import session
+    from src.ui.file_panel import BROWSER_KEY
+    ui = browser_ui
+    sess = session.get_active()
+    ui._open_browser_in_panel("http://localhost:5173/app", sess)
+    _pump(qapp)
+    assert "http://localhost:5173" in sess.browser_origin_allowlist
+    assert BROWSER_KEY in ui.file_panel.paths()
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_chatui_browser_subprocess_exit_zero_and_lazy():
+    """硬要求 1+2：offscreen 子进程构造 ChatUI 后 WebEngine 模块数为 0；
+    开浏览器标签→导航→关标签→销毁窗口→自然退出，退出码必须为 0（profile 常驻回归）。"""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data = tempfile.mkdtemp(prefix="lingxi-browser-ui-")
+    code = (
+        "import functools, http.server, os, threading, time\n"
+        "from PySide6.QtWidgets import QApplication\n"
+        "from PySide6.QtCore import QEvent\n"
+        "app = QApplication([])\n"
+        "from src import models\n"
+        "models._create_llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError('no llm'))\n"
+        "from src.ui import ChatUI\n"
+        "ChatUI._show_current_model_config_warning = lambda self: None\n"
+        "w = ChatUI()\n"
+        "assert not [m for m in __import__('sys').modules if 'WebEngine' in m], 'ChatUI 构造 import 了 WebEngine'\n"
+        "print('lazy-ok', flush=True)\n"
+        "fixtures = os.path.join(os.getcwd(), 'scripts', 'browser_fixtures')\n"
+        "H = functools.partial(http.server.SimpleHTTPRequestHandler, directory=fixtures)\n"
+        "srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)\n"
+        "threading.Thread(target=srv.serve_forever, daemon=True).start()\n"
+        "base = f'http://127.0.0.1:{srv.server_address[1]}'\n"
+        "from src.browser import page\n"
+        "from src.ui.file_panel import BROWSER_KEY\n"
+        "w.file_panel.open_browser(base + '/form.html')\n"
+        "deadline = time.time() + 20\n"
+        "while time.time() < deadline and 'form.html' not in page.get_browser().page.url().toString():\n"
+        "    app.processEvents(); time.sleep(0.01)\n"
+        "assert 'form.html' in page.get_browser().page.url().toString(), '导航失败'\n"
+        "print('loaded', flush=True)\n"
+        "w.file_panel.close_file(BROWSER_KEY)\n"
+        "for _ in range(100):\n"
+        "    app.processEvents()\n"
+        "assert not page.is_browser_open()\n"
+        "w.close(); app.processEvents(); app.processEvents()\n"
+        "w.deleteLater(); app.sendPostedEvents(None, QEvent.DeferredDelete); app.processEvents()\n"
+        "srv.shutdown()\n"
+        "print('done', flush=True)\n"
+    )
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen",
+               QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu",
+               NO_PROXY="localhost,127.0.0.1", no_proxy="localhost,127.0.0.1",
+               PYTHONIOENCODING="utf-8", LINGXI_DATA_DIR=data, LINGXI_LOG_DIR=data)
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=180)
+    assert r.returncode == 0, (
+        f"exit={r.returncode}\nstdout={r.stdout[-500:]!r}\nstderr={r.stderr[-1500:]!r}")
+    assert b"lazy-ok" in r.stdout and b"loaded" in r.stdout and b"done" in r.stdout
+
+
+# ── 复审 7/14：模型开页自动开标签且 view 可见；手动开浏览器入口 ──────────
+
+@pytest.fixture(scope="module")
+def fp_server():
+    import http.server
+    import os
+    import threading
+    fixtures = os.path.join(os.path.dirname(__file__), "browser_fixtures")
+
+    class _H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=fixtures, **kw)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def _fp_run(app, fn, *a, **kw):
+    import threading
+    import time
+    box = {}
+
+    def w():
+        try:
+            box["r"] = fn(*a, **kw)
+        except Exception as e:
+            box["r"] = f"EXC {type(e).__name__}: {e}"
+
+    t = threading.Thread(target=w, daemon=True)
+    t.start()
+    end = time.time() + 40
+    while t.is_alive() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.005)
+    t.join(timeout=2)
+    return box.get("r", "TIMEOUT")
+
+
+def test_model_open_opens_tab_and_view_visible(ui, qapp, fp_server, monkeypatch):
+    """7：模型 browser_open 自动开面板标签，view 显示、页面不 hidden。"""
+    from src import tools_browser as tb
+    from src.browser import page as page_mod
+    from src.browser import security as sec
+    from src.ui.file_panel import BROWSER_KEY
+    from src import session as _session
+    sess = _session.current_session()
+    sess.browser_origin_allowlist.add(sec.parse_origin(fp_server))
+    _fp_run(qapp, tb.browser_open.func, fp_server + "/form.html")
+    _pump(qapp, 20)
+    assert BROWSER_KEY in ui.file_panel.paths(), "模型开页应自动开浏览器标签"
+    view = page_mod._browser.view
+    assert view.isVisible(), "view 应显示（不 hidden）"
+    from src.browser.bridge import get_bridge
+    r = _fp_run(qapp, get_bridge().call, "js", code="document.visibilityState")
+    assert r.get("value") == "visible", r
+    ui.file_panel.close_all()
+    _pump(qapp, 10)
+
+
+def test_manual_open_browser_button(ui, qapp, fp_server):
+    """14：标签栏手动入口开空白页；关后再点复用上次地址。"""
+    from src.browser import page as page_mod
+    from src.ui.file_panel import BROWSER_KEY
+    ui.file_panel.open_browser_btn.click()
+    _pump(qapp, 10)
+    assert BROWSER_KEY in ui.file_panel.paths()
+    ui.file_panel.open_browser(fp_server + "/form.html")
+    _pump(qapp, 10)
+    ui.file_panel.close_file(BROWSER_KEY)
+    _pump(qapp, 10)
+    assert BROWSER_KEY not in ui.file_panel.paths()
+    ui.file_panel.open_browser_btn.click()
+    _pump(qapp, 20)
+    assert BROWSER_KEY in ui.file_panel.paths()
+    import time
+    end = time.time() + 10
+    while time.time() < end and "form.html" not in page_mod._browser.page.url().toString():
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert "form.html" in page_mod._browser.page.url().toString(), "手动入口应复用上次地址"
+    ui.file_panel.close_all()
+    _pump(qapp, 10)

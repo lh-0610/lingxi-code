@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>iframe 页</title></head>
+<body>
+<h1>iframe 测试</h1>
+<button id="top-btn">顶层按钮</button>
+<h2>同源 iframe</h2>
+<iframe src="/form.html" width="600" height="300" title="同源表单"></iframe>
+<h2>跨源 iframe</h2>
+<!-- __CROSS_ORIGIN__ 由测试服务器替换成第二个本地端口（不同端口=跨源），不依赖外网 -->
+<iframe src="__CROSS_ORIGIN__/form.html" width="600" height="200" title="跨源示例"></iframe>
+</body>
+</html>

@@ -22,6 +22,10 @@ _CODE_EXTENSIONS = frozenset({
     ".vue", ".svelte",
 })
 
+# 浏览器里直接跑的脚本：项目没有测试时，改完重开页面、控制台无报错可以顶替测试结论。
+# 只收不经构建就能在浏览器里跑的；.ts / .jsx / .vue 要先编译，页面上看到的未必是改后的代码。
+_BROWSER_SCRIPT_EXTENSIONS = frozenset({".js", ".mjs", ".cjs"})
+
 # 纯文档（说明文字，不会被执行）：改了它不让之前的检查过期。
 # 只收这几种——.txt / .json / .toml 之类可能是测试读的数据或配置，改了照样算过期。
 _PROSE_EXTENSIONS = frozenset({".md", ".markdown", ".rst"})
@@ -36,6 +40,12 @@ def new_verification() -> dict:
         "tests_run": False,       # 是否调过 run_tests
         "tests_passed": None,     # True/False/None（未跑 / 无法确定）
         "tests_reason": "",       # tests_passed=None 时的简短原因
+        # run_tests 没带筛选、确认项目里一个用例都没有（pytest 退出码 5）。只有它为真时，
+        # 浏览器检查才能顶替测试结论——项目有测试就必须照跑。
+        "tests_none_found": False,
+        # 最近一次算数的浏览器检查（mark_browser_check）：页面在最后一次改动之后重新加载、
+        # 读过这次加载的控制台。None = 没有。
+        "browser_check": None,
         "diff_reviewed": False,   # 是否调过 git_diff（写入后）
         "gate_prompted": False,   # 完成闸门是否已提示过一次（两次尝试机制）
         # ── 检查落在哪儿（B04 复核）──
@@ -76,6 +86,9 @@ def reset_verification(v: dict) -> None:
     v["tests_run"] = False
     v["tests_passed"] = None
     v["tests_reason"] = ""
+    v["tests_none_found"] = False
+    v["browser_check"] = None
+    v.pop("browser_last_load", None)
     v["diff_reviewed"] = False
     v["gate_prompted"] = False
     v["tests_roots"] = []
@@ -331,7 +344,7 @@ def record_evidence(v: dict, **fields) -> dict | None:
         "id": f"ev-{uuid.uuid4().hex[:12]}",
         # 归并用这个，不用下面那些被截断过的展示字段
         "identity": identity,
-        "kind": fields.get("kind") if fields.get("kind") in ("tests", "check") else "check",
+        "kind": fields.get("kind") if fields.get("kind") in ("tests", "check", "browser") else "check",
         "run_id": str(fields.get("run_id") or ""),
         "task_id": str(fields.get("task_id") or ""),
         "tool_call_id": str(fields.get("tool_call_id") or ""),
@@ -351,6 +364,9 @@ def record_evidence(v: dict, **fields) -> dict | None:
         # 判过期实际用这个（改纯文档不涨），见 evidence_is_stale
         "evidence_revision": int(v.get("evidence_revision", 0) or 0),
     }
+    if fields.get("no_tests") is True:
+        # 不带筛选跑、项目里一个用例都没有：结果卡据此把它和"没跑起来"分开说
+        record["no_tests"] = True
     records = v.setdefault("evidence", [])
     records.append(record)
     del records[:-_MAX_EVIDENCE]
@@ -381,7 +397,8 @@ def mark_check(v: dict, rel_path: str, passed: bool | None, checker: str = "") -
     v["checks"][rel_path] = {"passed": passed, "checker": checker}
 
 
-def mark_tests(v: dict, passed: bool | None, reason: str = "", *, root: str | None = None) -> None:
+def mark_tests(v: dict, passed: bool | None, reason: str = "", *, root: str | None = None,
+               no_tests: bool = False) -> None:
     """run_tests 工具成功后调用，记录测试结果。
 
     passed: True=全部通过, False=有失败, None=无法确定
@@ -389,15 +406,46 @@ def mark_tests(v: dict, passed: bool | None, reason: str = "", *, root: str | No
     root: 这次测试**实际运行的目录**。只有通过时才记；失败 / 结论不明就清空——
     之后得在对应目录重新跑通，不能靠别处更早的一次绿灯顶替。没有 root 的调用
     不覆盖任何按目录记着的义务。
+    no_tests: 不带筛选地跑、确认项目里没有任何测试用例（只在 passed=None 时有意义）。
     """
     v["tests_run"] = True
     v["tests_passed"] = passed
     v["tests_reason"] = reason
+    v["tests_none_found"] = bool(no_tests) and passed is None
     if passed is True:
         if root:
             _add_root(v, "tests_roots", root)
     else:
         v["tests_roots"] = []
+
+
+def mark_browser_check(v: dict, *, errors: int, url: str, load_revision: int) -> None:
+    """记一次浏览器检查：页面在 load_revision 那个文件版本下加载，这次加载的控制台有
+    errors 条报错。调用方保证 url 是本机页面、读的是加载完成后的那次控制台。"""
+    if not isinstance(v, dict):
+        return
+    v["browser_check"] = {"errors": int(errors), "url": str(url or ""),
+                          "evidence_revision": int(load_revision)}
+
+
+def browser_scripts_only(v: dict) -> bool:
+    """本轮改动的代码文件是不是全都是浏览器直接跑的脚本（.js / .mjs / .cjs）。"""
+    code = v.get("code_dirty_files") or []
+    return bool(code) and all(
+        os.path.splitext(p)[1].lower() in _BROWSER_SCRIPT_EXTENSIONS for p in code)
+
+
+def browser_check_state(v: dict) -> str:
+    """浏览器检查能不能证明当前代码："ok" / "none"（没做过）/ "stale"（之后又改了文件）/
+    "errors"（这次加载有报错）。"""
+    bc = v.get("browser_check") if isinstance(v, dict) else None
+    if not isinstance(bc, dict):
+        return "none"
+    if int(bc.get("evidence_revision", -1)) != int(v.get("evidence_revision", 0) or 0):
+        return "stale"
+    if int(bc.get("errors", 1)) != 0:
+        return "errors"
+    return "ok"
 
 
 def mark_diff_reviewed(v: dict, *, root: str | None = None) -> None:
@@ -510,12 +558,18 @@ def gaps_from_state(v: dict) -> list[str]:
                 f"{_what}{_blind_note}但尚未运行测试。"
                 "请先调用 run_tests 验证改动不会引入回归（它会自动认 pytest / npm / Maven / Gradle / "
                 "go / cargo / dotnet；认不出的项目用 run_command 跑它自己的测试命令，结果同样算数）。"
+                + ("如果项目里没有测试，改的又只是浏览器脚本，run_tests 确认之后可以改用浏览器检查验证。"
+                   if browser_scripts_only(v) and not blind else "")
             )
         elif v["tests_passed"] is False:
             gaps.append("测试未通过（有失败用例），请先修复测试再声称任务完成。")
         elif v["tests_passed"] is not True:
-            reason = v.get("tests_reason") or "未取得明确结果"
-            gaps.append(f"测试尚未验证：{reason}。不能将结果未知视为通过。")
+            browser_gap = _browser_instead_of_tests(v, blind)
+            if browser_gap is None:
+                reason = v.get("tests_reason") or "未取得明确结果"
+                gaps.append(f"测试尚未验证：{reason}。不能将结果未知视为通过。")
+            elif browser_gap:
+                gaps.append(browser_gap)
 
     # 2. 静态检查未通过
     failed_checks = [
@@ -559,6 +613,30 @@ def gaps_from_state(v: dict) -> list[str]:
                         "在那之前这一项保持未验证。")
 
     return gaps
+
+
+def _browser_instead_of_tests(v, blind):
+    """项目没有测试时，浏览器检查能不能顶替测试结论。
+
+    返回 None = 不适用（照常要求测试）；"" = 浏览器检查已经证明了当前代码；
+    其它字符串 = 适用但还没做到，告诉模型差什么。
+
+    四个条件缺一不可：项目确实没有测试（不带筛选跑过、一个没收集到）；改的代码全是
+    浏览器直接跑的脚本；页面是在最后一次改动**之后**重新加载的；读的就是这次加载的
+    控制台、没有报错。另外不能有盲区——看不见的写入可能改了别的东西。
+    """
+    if blind or not v.get("tests_none_found") or not browser_scripts_only(v):
+        return None
+    state = browser_check_state(v)
+    if state == "ok":
+        return ""
+    how = ("用 browser_open 重新打开改过的页面（会拿到新代码），再用 browser_console "
+           "确认这次加载没有报错")
+    if state == "stale":
+        return f"项目没有测试用例；上次浏览器检查之后又改了文件，那次结论不算数。请{how}。"
+    if state == "errors":
+        return f"项目没有测试用例；最近一次浏览器检查里页面控制台还有报错。修好后请{how}。"
+    return f"项目没有测试用例。改的是浏览器里直接跑的脚本：请{how}——这可以作为验证。"
 
 
 def needs_verification(v: dict) -> bool:

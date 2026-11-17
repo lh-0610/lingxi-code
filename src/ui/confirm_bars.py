@@ -231,6 +231,9 @@ class ConfirmBarsMixin:
         self._command_confirm_destructive = False
         self._command_confirm_script_write = False
         self._command_confirm_remember_key = None
+        self._command_confirm_kind = None
+        self._command_confirm_browser_origin = ""
+        self._command_confirm_browser_action = ""
 
         # 装事件过滤器接 1 / 2 / 3 / Esc 键
         bar.installEventFilter(self)
@@ -516,6 +519,9 @@ class ConfirmBarsMixin:
             "destructive", self._is_destructive_command(command)))
         self._command_confirm_script_write = bool(holder.get("script_write"))
         self._command_confirm_remember_key = holder.get("remember_key")
+        self._command_confirm_kind = kind
+        self._command_confirm_browser_origin = holder.get("browser_origin", "")
+        self._command_confirm_browser_action = holder.get("browser_action", "")
 
         # MCP / Git 写 / 派子 Agent 的说明是 JSON 或成段文字，用 <pre> 纯文本渲染，不走 shell 高亮
         if kind != _pm.KIND_COMMAND:
@@ -556,6 +562,9 @@ class ConfirmBarsMixin:
         elif kind == _pm.KIND_SPAWN:
             self._cmd_confirm_title.setText("确认派出并行子 Agent")
             self._cmd_confirm_desc.setText("子 Agent 改文件、执行命令都不会再逐条问你，做完后改动会合并回项目。")
+        elif kind == _pm.KIND_BROWSER:
+            self._cmd_confirm_title.setText("确认浏览器操作")
+            self._cmd_confirm_desc.setText("灵犀想在浏览器里执行下面的操作，确认后执行。")
         else:
             self._cmd_confirm_title.setText("确认执行命令")
             self._cmd_confirm_desc.setText("灵犀想运行下面的命令，确认后执行。")
@@ -574,12 +583,26 @@ class ConfirmBarsMixin:
         else:
             self._cmd_confirm_badge.setText("需要确认")
             self._cmd_remember_btn.setVisible(True)
-            # base 命令放进「允许并记住」的 tooltip（如"信任所有 git 类命令"）
-            base = self._extract_base_command(command)
-            self._cmd_remember_btn.setToolTip(
-                f"信任所有 `{base}` 类命令，以后不再询问（设置 → 权限 可撤销）" if base
-                else "信任所有同类命令，以后不再询问（设置 → 权限 可撤销）"
-            )
+            if kind == _pm.KIND_BROWSER:
+                # browser 的"记住"是会话级来源信任：不落盘、会话结束即失效（§6.2）。
+                # 打开卡只免后续打开；操作卡才免点击/输入
+                origin = self._command_confirm_browser_origin
+                if self._command_confirm_browser_action == "open":
+                    tip = (f"信任来源 {origin}，本会话内打开不再询问"
+                           "（点击/输入仍会问；不落盘，会话结束即失效）" if origin
+                           else "信任此来源，本会话内打开不再询问（点击/输入仍会问）")
+                else:
+                    tip = (f"信任来源 {origin}，本会话内普通点击/输入不再询问"
+                           "（不落盘，会话结束即失效）" if origin
+                           else "信任此来源，本会话内不再询问（不落盘，会话结束即失效）")
+                self._cmd_remember_btn.setToolTip(tip)
+            else:
+                # base 命令放进「允许并记住」的 tooltip（如"信任所有 git 类命令"）
+                base = self._extract_base_command(command)
+                self._cmd_remember_btn.setToolTip(
+                    f"信任所有 `{base}` 类命令，以后不再询问（设置 → 权限 可撤销）" if base
+                    else "信任所有同类命令，以后不再询问（设置 → 权限 可撤销）"
+                )
 
         # 工作目录行
         try:
@@ -588,7 +611,8 @@ class ConfirmBarsMixin:
         except Exception:
             cwd = ""
         self._cmd_confirm_cwd.setText(f"工作目录  {cwd}" if cwd else "")
-        self._cmd_confirm_cwd.setVisible(bool(cwd))
+        # browser 卡片正文已带页面 URL，工作目录行无关，隐藏
+        self._cmd_confirm_cwd.setVisible(bool(cwd) and kind != _pm.KIND_BROWSER)
 
         self.command_confirm_bar.setVisible(True)
         # 清空反馈输入框
@@ -607,6 +631,7 @@ class ConfirmBarsMixin:
         if self._command_confirm_done_event is None:
             return  # 已被处理过 / 状态被清
 
+        from .. import permission_modes as _pm
         feedback = self.command_confirm_feedback.text().strip()
         origin = self._command_confirm_result_holder.get("_session")
 
@@ -617,20 +642,31 @@ class ConfirmBarsMixin:
 
         if (allow and remember and not self._command_confirm_destructive
                 and not self._command_confirm_script_write and origin is not None):
-            # 记什么由 confirm_command 定好（shell 命令记 base 命令，MCP 记工具名）；
-            # 没带这个键的旧调用退回从卡片文字取第一个词
-            base = getattr(self, "_command_confirm_remember_key", None)
-            if base is None:
-                base = self._extract_base_command(self.command_confirm_text.toPlainText())
-            if base:
-                origin.command_prefix_allowlist.add(base)
-                _remember_persistently(_rules.KIND_COMMAND, base, origin)
-                logger_log = getattr(self, "_logger", None)  # 不强依赖；只是 best-effort
-                if logger_log:
-                    try:
-                        logger_log.info(f"加入前缀白名单: {base}")
-                    except Exception:
-                        pass
+            if self._command_confirm_kind == _pm.KIND_BROWSER:
+                # browser 来源信任只进会话白名单，不落盘、不跨会话（§6.2）。
+                # 有后果动作 destructive=True，上面的守卫已挡住，这里不再判一次。
+                # 打开与操作分开授权：打开卡的记住只免后续打开
+                browser_origin = getattr(self, "_command_confirm_browser_origin", "")
+                if browser_origin:
+                    if getattr(self, "_command_confirm_browser_action", "") == "open":
+                        origin.browser_open_allowlist.add(browser_origin)
+                    else:
+                        origin.browser_origin_allowlist.add(browser_origin)
+            else:
+                # 记什么由 confirm_command 定好（shell 命令记 base 命令，MCP 记工具名）；
+                # 没带这个键的旧调用退回从卡片文字取第一个词
+                base = getattr(self, "_command_confirm_remember_key", None)
+                if base is None:
+                    base = self._extract_base_command(self.command_confirm_text.toPlainText())
+                if base:
+                    origin.command_prefix_allowlist.add(base)
+                    _remember_persistently(_rules.KIND_COMMAND, base, origin)
+                    logger_log = getattr(self, "_logger", None)  # 不强依赖；只是 best-effort
+                    if logger_log:
+                        try:
+                            logger_log.info(f"加入前缀白名单: {base}")
+                        except Exception:
+                            pass
 
         self._command_confirm_result_holder["allow"] = allow
         self._command_confirm_result_holder["feedback"] = feedback
@@ -642,6 +678,9 @@ class ConfirmBarsMixin:
         self._command_confirm_destructive = False
         self._command_confirm_script_write = False
         self._command_confirm_remember_key = None
+        self._command_confirm_kind = None
+        self._command_confirm_browser_origin = ""
+        self._command_confirm_browser_action = ""
 
     def _release_pending_confirm(self):
         """关窗 / 退出时唤醒任何挂在 confirm_command 上的 worker，避免无限挂起。
@@ -959,6 +998,9 @@ class ConfirmBarsMixin:
         self._command_confirm_destructive = False
         self._command_confirm_script_write = False
         self._command_confirm_remember_key = None
+        self._command_confirm_kind = None
+        self._command_confirm_browser_origin = ""
+        self._command_confirm_browser_action = ""
         if hasattr(self, "edit_confirm_bar"):
             self.edit_confirm_bar.setVisible(False)
             self.edit_confirm_diff.clear()
@@ -973,12 +1015,18 @@ class ConfirmBarsMixin:
     # ══════════════════════════════════════
 
     def confirm_command(self, command: str, kind: str = "command", tool: str = "",
-                        stdin: str = "") -> tuple[bool, str]:
+                        stdin: str = "", browser_origin: str = "",
+                        browser_consequential: bool = False,
+                        browser_action: str = "") -> tuple[bool, str]:
         """从 worker 线程同步等待用户在主线程的内联确认条上选择。
 
         kind 由调用方明说是什么操作（permission_modes.KIND_*）：shell 命令 / Git 写 / MCP 工具 /
-        派子 Agent。判定按类型来，不从文案开头去猜。tool 是 MCP 工具名（"记住"只记这一个工具）。
+        派子 Agent / 浏览器动作。判定按类型来，不从文案开头去猜。tool 是 MCP 工具名（"记住"只记这一个工具）。
         stdin 是要交给命令标准输入的内容（`python -` 加一段脚本）：卡片上原样列出，危险判定也看它。
+        browser_origin / browser_consequential 仅 KIND_BROWSER 用：来源串（scheme://host:port）供
+        "允许并记住"加会话来源白名单（不落盘）；有后果动作按危险处理——永远问、不给记住。
+        browser_action（open / interact）决定记住进哪个白名单：打开卡只免后续打开，
+        操作卡才免点击/输入（两者分开授权）。
 
         放行优先级：
           1. Git 写、派子 Agent、命令被"危险"判定、或脚本会写文件 → 永不绕过白名单，
@@ -1004,7 +1052,8 @@ class ConfirmBarsMixin:
         # 脚本里用 subprocess 调 rm -rf / git reset --hard，和直接写在命令行里一样危险
         is_destructive = kind in _pm.ALWAYS_ASK_KINDS or (
             kind == _pm.KIND_COMMAND
-            and self._is_destructive_command(command + ("\n" + stdin if stdin else "")))
+            and self._is_destructive_command(command + ("\n" + stdin if stdin else ""))) or (
+            kind == _pm.KIND_BROWSER and browser_consequential)
         # 跑"会写文件的脚本"和 edit_file 一样是改文件操作：每次必问、不给"记住"。
         # 不然模型写个脚本批量改文件，逐处确认就全绕过了（真实任务里实测出现过）
         script_write = False
@@ -1012,10 +1061,14 @@ class ConfirmBarsMixin:
             from ..tools_common import _shell_cwd
             script_write = _pm.script_writes_files(command, stdin, _shell_cwd())
         risky = is_destructive or script_write
-        # 权限模式（输入框底栏的"模式"菜单）：自动放行普通命令，跳过权限确认全部放行
-        if _pm.allows_command(_pm.current(_sess), risky=risky or kind == _pm.KIND_MCP):
+        # 权限模式（输入框底栏的"模式"菜单）：自动放行普通命令，跳过权限确认全部放行。
+        # browser 和 MCP 一样判到要问就必弹卡：问不问已由 tools_browser 按模式×动作×来源
+        # 先判过（security.decide_action），这里再按模式放行会把"localhost 首次点击要问"绕掉
+        if _pm.allows_command(_pm.current(_sess),
+                              risky=risky or kind in (_pm.KIND_MCP, _pm.KIND_BROWSER)):
             return True, ""
-        remember_key = "" if risky else self._remember_key(command, kind, tool)
+        # browser 的"允许并记住"是会话级来源白名单（第 5 步接），不走命令前缀那套、更不落盘
+        remember_key = "" if risky or kind == _pm.KIND_BROWSER else self._remember_key(command, kind, tool)
         if remember_key and remember_key in _sess.command_prefix_allowlist:
             return True, ""
         # 持久规则：重启 / 新会话后照样生效（设置 → 权限 可撤销）。risky 时 remember_key 为空，
@@ -1030,7 +1083,8 @@ class ConfirmBarsMixin:
         # 携带发起会话（主线程槽据此判断是否后台、把"记住"加对会话），以及卡片要的判定结果——
         # 卡片不再自己从文案里重新猜一遍"危险不危险"
         result = {"_session": _sess, "kind": kind, "destructive": is_destructive,
-                  "script_write": script_write, "remember_key": remember_key, "stdin": stdin}
+                  "script_write": script_write, "remember_key": remember_key, "stdin": stdin,
+                  "browser_origin": browser_origin, "browser_action": browser_action}
         done = threading.Event()
 
         # --- 手机 Telegram 遥控确认（与 PC 卡片竞争，先点先到） ---
@@ -1058,10 +1112,18 @@ class ConfirmBarsMixin:
         self.bridge.confirm_request.emit(command, result, done)
         done.wait()
 
-        # 手机端点了"记住同类"——补加白名单（PC 路径已在 _resolve_command_confirm 里加过）
-        if result.get("allow") and result.get("remember") and remember_key:
-            _sess.command_prefix_allowlist.add(remember_key)
-            _remember_persistently(_rules.KIND_COMMAND, remember_key, _sess)
+        # 手机端点了"记住同类"——补加白名单（PC 路径已在 _resolve_command_confirm 里加过）。
+        # browser 来源只加会话白名单、不落盘；有后果动作不接受记住（按钮虽藏，这里再挡一层）
+        if result.get("allow") and result.get("remember"):
+            if kind == _pm.KIND_BROWSER:
+                if browser_origin and not browser_consequential:
+                    if browser_action == "open":
+                        _sess.browser_open_allowlist.add(browser_origin)
+                    else:
+                        _sess.browser_origin_allowlist.add(browser_origin)
+            elif remember_key:
+                _sess.command_prefix_allowlist.add(remember_key)
+                _remember_persistently(_rules.KIND_COMMAND, remember_key, _sess)
 
         # 清理远程注册表（如果远程那边还没触发）
         if remote_cid:

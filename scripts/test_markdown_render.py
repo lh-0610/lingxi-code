@@ -21,6 +21,34 @@ def render(md):
     return MarkdownRenderMixin._md_to_html(_Host(), md)
 
 
+# ── 复审 12：行内代码 / 裸文本里的 localhost 地址要能点（浏览器面板打开）──
+
+def test_inline_code_localhost_linkified():
+    html = render("开 `http://localhost:5173/` 看看")
+    assert '<a href="http://localhost:5173/"' in html
+    assert "<code" in html, "链接文字仍保留行内代码样式"
+
+
+def test_bare_localhost_linkified():
+    html = render("dev server 在 http://localhost:5173/x 已起")
+    assert '<a href="http://localhost:5173/x"' in html
+
+
+def test_existing_localhost_md_link_not_doubled():
+    html = render("[dev](http://localhost:5173/)")
+    assert html.count('<a href="http://localhost:5173/"') == 1
+
+
+def test_code_block_localhost_not_linkified():
+    html = render("```\nhttp://localhost:5173/\n```")
+    assert '<a href="http://localhost:5173/' not in html
+
+
+def test_public_url_not_turned_into_browser_link():
+    html = render("见 http://example.com/ 文档")
+    assert 'href="http://example.com' not in html
+
+
 def test_fenced_code_keeps_asterisks():
     src = "看这段：\n```python\np, *rest = xs\nprint(*args, **kwargs)\n```\n"
     out = protect(src)

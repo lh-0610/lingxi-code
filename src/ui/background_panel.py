@@ -258,6 +258,15 @@ class BackgroundPanel(QDialog):
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop_selected)
         detail_top.addWidget(self.stop_btn)
+        self.open_browser_btn = QPushButton("在浏览器里打开")
+        self.open_browser_btn.setObjectName("backgroundOpenBrowser")
+        self.open_browser_btn.setEnabled(False)
+        self.open_browser_btn.setToolTip("未从任务输出识别到 localhost 地址")
+        self.open_browser_btn.clicked.connect(self._open_browser_selected)
+        detail_top.addWidget(self.open_browser_btn)
+        # ChatUI 设：(url, sess) → 开浏览器面板 + 加会话来源白名单（§7.3）
+        self.open_browser_fn = None
+        self._dev_url = ""
         detail_layout.addLayout(detail_top)
         self.command_view = QPlainTextEdit()
         self.command_view.setObjectName("backgroundCommand")
@@ -398,7 +407,7 @@ class BackgroundPanel(QDialog):
         self.stop_note.setStyleSheet(f"color: {c('text_dim')}; font-size: 12px;")
         self.refresh_btn.setIcon(self._icon("refresh_cw_lucide.svg", c("text_dim")))
         self.stop_btn.setIcon(self._icon("square-stop.svg", c("badge_warn_text")))
-        for button in (self.refresh_btn, self.info_btn, self.stop_btn):
+        for button in (self.refresh_btn, self.info_btn, self.stop_btn, self.open_browser_btn):
             button.setIconSize(QSize(14, 14))
             button.setCursor(Qt.PointingHandCursor)
         self.refresh()
@@ -523,6 +532,8 @@ class BackgroundPanel(QDialog):
             self._output_id = None
             self._set_output_note("记录可能已被清理或不属于当前筛选范围；不能据此判断进程是否退出。" if bg_id else "", warning=True)
             self.stop_btn.setEnabled(False)
+            self.open_browser_btn.setEnabled(False)
+            self._dev_url = ""
             return
         status, _ = process_status(snap, busy=bg_id in self._busy)
         self.detail_title.setText(status)
@@ -545,6 +556,11 @@ class BackgroundPanel(QDialog):
         retry = snap.get("stop_requested") and snap["running"] is not False
         self.stop_btn.setText("停止中…" if busy else ("重试停止" if retry else "停止此任务"))
         self.stop_btn.setEnabled(snap["running"] is not False and not busy and not self._refresh_error)
+        self._dev_url = background.dev_server_url(snap)
+        self.open_browser_btn.setEnabled(bool(self._dev_url) and self.open_browser_fn is not None)
+        self.open_browser_btn.setToolTip(
+            f"在侧栏浏览器打开 {self._dev_url}（并信任此来源）" if self._dev_url
+            else "未从任务输出识别到 localhost 地址")
         warning = any(snap.get(key) for key in
                       ("output_truncated", "read_error", "process_error", "stop_error", "tree_error"))
         self._set_output_note(output_notes(snap), warning=warning)
@@ -592,6 +608,16 @@ class BackgroundPanel(QDialog):
             self.output.verticalScrollBar().setValue(maximum)
 
     @Slot()
+    def _open_browser_selected(self):
+        """人主动点"在浏览器里打开"：导航放行、不需确认；来源加进任务所属会话的白名单（§7.3）。"""
+        snap = self._snapshots.get(self._selected_id)
+        if snap is None or not self._dev_url or self.open_browser_fn is None:
+            return
+        owner = snap.get("owner_id")
+        sess = next((s for s in session.live_sessions()
+                     if s.background_owner_id == owner), None) or session.get_active()
+        self.open_browser_fn(self._dev_url, sess)
+
     def _stop_selected(self):
         bg_id = self._selected_id
         if not bg_id or bg_id in self._busy or self._refresh_error:

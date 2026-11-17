@@ -31,6 +31,17 @@ def _offline_pricing(monkeypatch):
     monkeypatch.setattr(config, "MODEL_PRICING", {}, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _pinned_system_prompt(monkeypatch):
+    """system 钉成固定短串：本文件守的是回收/前缀机制，不是提示词内容。
+
+    _prepare_stream_history 每轮重渲染活的 SYSTEM_PROMPT，提示词一变每轮上下文估算就跟着变，
+    回收点会漂移（浏览器段 +796 字符曾把最后一次回收顶到会话最后一轮，夹具红）。钉住后
+    回收点稳定在 [26, 39, 52]（60 轮 / 4000 字符 / 水位 3 万），不再随提示词演化漂移。
+    """
+    monkeypatch.setattr(roles, "get_system_prompt", lambda *a, **k: "固定系统提示（回放测试钉住）")
+
+
 @pytest.fixture()
 def trim_line(monkeypatch):
     """回收线设到 3 万：60 轮里能触发几次，又不至于每轮都触发。"""
@@ -68,6 +79,7 @@ def test_prefix_recovers_from_the_round_after_each_trip(trim_line):
     """回收那一轮之后，折叠照原样保持：下一轮起前缀立刻恢复稳定，不再连着断。"""
     rows = replay_sessions.replay_session(_synthetic())["rounds"]
     trips = _trips({"rounds": rows})
+    assert len(trips) >= 2, f"回收太少（{trips}），下面的循环会空转，夹具失去守护意义"
     for trip in trips:
         following = [row for row in rows if trip < row["round"] <= trip + 3]
         assert following, f"第 {trip} 轮之后没有轮次了，构造的会话太短"

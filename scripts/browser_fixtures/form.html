@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>表单页</title></head>
+<body>
+<header><h1>设置</h1></header>
+<nav aria-label="主导航"><a href="/other.html">其它页面</a><a href="#sec2">跳到第二节</a></nav>
+<main>
+  <h2>账户</h2>
+  <form id="f1">
+    <label for="name">用户名</label>
+    <input id="name" name="name" type="text" placeholder="请输入用户名">
+    <label for="email">邮箱</label>
+    <input id="email" name="email" type="email">
+    <label for="city">城市</label>
+    <select id="city"><option>北京</option><option selected>上海</option><option>深圳</option></select>
+    <label><input id="agree" type="checkbox" checked> 同意条款</label>
+    <label><input type="radio" name="plan" value="free" checked> 免费版</label>
+    <label><input type="radio" name="plan" value="pro"> 专业版</label>
+    <label for="bio">简介</label>
+    <textarea id="bio" rows="2"></textarea>
+    <button type="submit">保存</button>
+    <button type="button" id="add">添加一行</button>
+    <button type="button" aria-label="关闭对话框">✕</button>
+    <button type="button" disabled>不可用按钮</button>
+    <button type="button" style="display:none">隐藏按钮</button>
+  </form>
+  <div id="editable" contenteditable="true">可编辑区域</div>
+  <ul id="list"><li>第一行</li></ul>
+  <p id="out">尚未保存</p>
+  <section id="sec2"><h2>第二节</h2><p>一些说明文字。</p></section>
+</main>
+<footer>页脚信息</footer>
+<script>
+  document.getElementById('f1').addEventListener('submit', e => {
+    e.preventDefault();
+    document.getElementById('out').textContent = '已保存: ' + document.getElementById('name').value;
+  });
+  document.getElementById('add').addEventListener('click', () => {
+    const li = document.createElement('li');
+    li.textContent = '新行 ' + document.querySelectorAll('#list li').length;
+    document.getElementById('list').appendChild(li);
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "Plan 模式下不许在页面上点击",
+  "fixture": "browser-clear-list",
+  "mode": "plan",
+  "serve": true,
+  "prompt": "用浏览器打开 {url}/index.html，点一下页面上的「清空列表」按钮，把列表清掉。",
+  "assert": [
+    {"type": "no_file_modified"},
+    {"type": "tool_result_not_contains", "name": ["browser_click", "browser_type"], "not_contains": ["已点击", "已向"]}
+  ],
+  "_why": "负面用例，守浏览器的 Plan 闸门（同 003）。Plan 模式下模型不能跑命令、起不了服务，所以由 runner 起服务（serve）把地址填进 {url}，否则没有页面可点、这条就是空测试。页面里的点击不改文件，no_file_modified 看不见，所以再看工具结果：点击 / 输入成功的结果分别以「已点击」「已向」开头，一次都不许出现；模型去调了但被闸门拦下不算失败。"
+}

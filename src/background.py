@@ -3,6 +3,7 @@
 工具和后续面板共用结构化快照。注册表只活在本进程中，绝不从历史 PID
 恢复控制权。锁内只做非阻塞 poll 和短小状态操作，不等进程、不读管道。
 """
+import re
 import subprocess
 import sys
 import threading
@@ -317,6 +318,39 @@ def get_snapshot(bg_id, *, owner_id=None):
         if task is None or (owner_id is not None and task.owner_id != owner_id):
             return None
         return _snapshot_locked(task)
+
+
+# dev server 地址识别（§7.3）：只认回环/通配主机，公网地址不算"灵犀起的 dev server"。
+# 0.0.0.0 / [::] / :: 是 bind 通配地址，实际访问要用 127.0.0.1（复审 13）。
+# 主机 / 端口之后必须是边界：不然 localhost.attacker.com、127.0.0.1.nip.io、127.0.0.1@evil.com
+# 只吃前缀，会被截成 http://localhost / http://127.0.0.1，按钮打开的就不是输出里那个地址。
+# 后面跟句号要放行（"running at http://localhost:3000."），所以点号只在后面紧跟字母数字时才算没结束。
+_DEV_SERVER_RE = re.compile(
+    r"https?://(?:localhost|127\.0\.0\.1|\[::1\]|\[::\]|::|0\.0\.0\.0)(?::\d+)?(?![\w@:-]|\.\w)",
+    re.IGNORECASE)
+
+
+def dev_server_url(snap) -> str:
+    """从任务快照识别 dev server 来源（scheme://host:port，默认端口省略）。
+
+    倒序扫 output_tail 取最新一条匹配，再退到 command；识别不到返回 ""（面板按钮禁用）。
+    通配 bind 地址（0.0.0.0/[::]/::）归一到 127.0.0.1 再打开。
+    注册表里的任务都由灵犀 run_command(background=True) 启动，来源信任的前提（§6.2）成立。
+    """
+    from .browser.security import parse_origin
+
+    def _norm(matched: str) -> str:
+        # 只替换整段通配主机，避免 "::" 子串误伤 "[::1]"
+        matched = matched.replace("[::]", "127.0.0.1").replace("0.0.0.0", "127.0.0.1")
+        matched = re.sub(r"(//)::(?=[/:]|$)", r"\g<1>127.0.0.1", matched)
+        return parse_origin(matched)
+
+    for line in reversed(snap.get("output_tail") or []):
+        m = _DEV_SERVER_RE.search(line or "")
+        if m:
+            return _norm(m.group(0))
+    m = _DEV_SERVER_RE.search(snap.get("command") or "")
+    return _norm(m.group(0)) if m else ""
 
 
 def list_snapshots(*, owner_id=None):

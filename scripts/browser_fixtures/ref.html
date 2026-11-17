@@ -1,0 +1,13 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>ref</title></head><body>
+<header><h1>顶部</h1><button onclick="hit('甲')">甲</button><button onclick="hit('乙')">乙</button><button onclick="hit('丙')">丙</button></header>
+<main><section aria-label="二区"><button onclick="hit('X')">X</button><button onclick="hit('Y')">Y</button></section>
+<p id="out">未点击</p></main>
+<footer>
+<a href="#" onclick="hit('链接01');return false">链接01</a><a href="#" onclick="hit('链接02');return false">链接02</a>
+<a href="#" onclick="hit('链接03');return false">链接03</a><a href="#" onclick="hit('链接04');return false">链接04</a>
+<a href="#" onclick="hit('链接05');return false">链接05</a><a href="#" onclick="hit('链接06');return false">链接06</a>
+<a href="#" onclick="hit('链接07');return false">链接07</a><a href="#" onclick="hit('链接08');return false">链接08</a>
+<a href="#" onclick="hit('链接09');return false">链接09</a><a href="#" onclick="hit('链接10');return false">链接10</a>
+<a href="#" onclick="hit('链接11');return false">链接11</a><a href="#" onclick="hit('链接12');return false">链接12</a>
+</footer>
+<script>function hit(n){document.getElementById('out').textContent='点了:'+n;}</script></body></html>

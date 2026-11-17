@@ -131,3 +131,20 @@ def test_tools_whose_args_are_all_optional_accept_empty_calls():
         assert not by_name[name].args_schema.model_json_schema().get("required"), name
     for name in ("read_file", "search_files", "edit_file", "web_search"):
         assert name not in NO_ARG_OK_TOOLS, name
+
+
+# ── 浏览器：单页有状态，一律串行（browser-design §5.3）──────────
+
+def test_no_browser_tool_is_parallel_safe():
+    from src.streaming import PARALLEL_SAFE_TOOLS
+    from src.tools import ALL_TOOLS
+    browser = [t.name for t in ALL_TOOLS if t.name.startswith("browser_")]
+    assert len(browser) == 8, "P1 是 8 个浏览器工具，注册漏了这里会先发现"
+    assert not any(n in PARALLEL_SAFE_TOOLS for n in browser), \
+        "连只读的 browser_snapshot 也不并行：快照会重置 ref，和动作互相踩"
+
+
+def test_browser_readonly_mixed_batch_falls_back_to_serial():
+    tcs = [{"name": "browser_snapshot", "args": {}},
+           {"name": "read_file", "args": {"path": "a.py"}}]
+    assert _can_parallel(tcs) is False

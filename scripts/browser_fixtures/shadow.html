@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Shadow DOM 页</title></head>
+<body>
+<h1>Shadow DOM 测试</h1>
+<button id="light">光 DOM 按钮</button>
+<div id="host-open"></div>
+<div id="host-closed" data-has-closed-shadow="1"></div>
+<script>
+  const openRoot = document.getElementById('host-open').attachShadow({mode: 'open'});
+  openRoot.innerHTML = '<section><h2>开放影子标题</h2><button id="shadow-btn">影子里的按钮</button>' +
+    '<label for="si">影子输入</label><input id="si" type="text"></section>';
+  openRoot.getElementById('shadow-btn').addEventListener('click', () => {
+    document.getElementById('light').textContent = '影子按钮被点了';
+  });
+  const closedRoot = document.getElementById('host-closed').attachShadow({mode: 'closed'});
+  closedRoot.innerHTML = '<button>封闭影子里的按钮</button>';
+</script>
+</body>
+</html>

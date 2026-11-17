@@ -124,6 +124,7 @@ class Session:
     __slots__ = tuple(_SESSION_FIELDS) + (
         "is_generating", "thread", "key", "needs_redraw", "project",
         "command_allowlist", "command_prefix_allowlist", "edit_path_allowlist",
+        "browser_origin_allowlist", "browser_open_allowlist",
         "pending_confirm", "render_log", "render_lock", "is_subagent",
         "role_snapshot", "session_kind", "rag_kb_dir",
         "snapshot_lock", "progress_revision", "progress_error",
@@ -159,6 +160,11 @@ class Session:
         self.command_allowlist = set()         # 精确命令字符串（旧版，向后兼容）
         self.command_prefix_allowlist = set()  # base 命令前缀（"信任所有 git"）
         self.edit_path_allowlist = set()       # edit_file 路径（"信任此文件所有修改"）
+        # 浏览器来源信任（scheme://host:port，§6.2）：只存内存、不落盘、不跨会话，
+        # 确认卡"允许并记住"只加这里，不调 _remember_persistently
+        self.browser_origin_allowlist = set()
+        # 打开授权与操作授权分开：打开卡上的"记住"只免后续打开，不免点击/输入
+        self.browser_open_allowlist = set()
         # 后台会话（非 active）发起的命令/编辑确认：暂存在这里，不打断前台；切到该会话时
         # 才弹卡。形如 ("command", command, result, done) 或 ("edit", path, diff, result, done)。
         self.pending_confirm = None

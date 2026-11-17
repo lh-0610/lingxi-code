@@ -20,6 +20,16 @@ import tempfile
 
 import pytest
 
+# ── WebEngine 前置（必须在任何 QApplication 创建之前）──────────────
+# WebEngine 要求 QApplication 创建前设 AA_ShareOpenGLContexts。几十个测试自建 QApplication，
+# 混跑谁先创建不确定，所以在 conftest 最前面设一次（pytest 先加载本文件，再收集测试模块）。
+# QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu：CI 无 GPU，offscreen 下 WebEngine 进程要能稳定起停。
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+
 # ── 测试隔离：必须在任何 src 模块被导入之前做（pytest 先加载本文件，再收集测试模块）──
 # 1. 整个应用数据根搬进临时目录：src/paths.py 一导入就按 APP_DIR 拼死 MEMORY_DIR / MCP_DIR，
 #    各模块再从里面取 chat_memory 下的文件。不拦的话，没用 isolated_memory 的用例直接写用户

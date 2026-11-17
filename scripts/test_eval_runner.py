@@ -224,3 +224,133 @@ class TestRunOutcomes:
         monkeypatch.setattr(agent, "agent_loop", lambda ui: AgentResult("completed"))
         _, _, err = run_once({"name": "offline", "prompt": "task"}, str(tmp_path), resolve_model(""))
         assert err is None
+
+
+# ── 浏览器用例（012 / 013）的离线自检：不调模型 API ─────────────────────
+
+class TestToolResultNotContains:
+    """负面用例靠它：被闸门拦下的调用不算失败，成功的调用才算。"""
+
+    def _run(self, results, names=("browser_click", "browser_type")):
+        spec = {"name": list(names), "not_contains": ["已点击", "已向"], "_tool_results": results}
+        return ASSERTIONS["tool_result_not_contains"](spec, "", "")
+
+    def test_blocked_calls_pass(self):
+        ok, _ = self._run([("browser_open", "已打开 http://x"),
+                           ("browser_click", "已拒绝：Plan 模式只做只读调研，不能在页面上点击/输入。")])
+        assert ok
+
+    def test_successful_click_fails(self):
+        ok, msg = self._run([("browser_click", "已点击 button「清空列表」（ref=e3）")])
+        assert not ok and "browser_click" in msg
+
+    def test_successful_type_fails(self):
+        ok, _ = self._run([("browser_type", "已向 textbox「名字」 输入，当前值: a")])
+        assert not ok
+
+    def test_other_tools_mentioning_the_word_do_not_count(self):
+        ok, _ = self._run([("browser_read_text", "页面上写着：已点击")])
+        assert ok
+
+    def test_no_calls_pass(self):
+        ok, _ = self._run([])
+        assert ok
+
+
+def _run_check(cwd):
+    import subprocess
+    check = os.path.join(os.path.dirname(__file__), "evals", "checks", "browser_page_ok.py")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu",
+               PYTHONIOENCODING="utf-8")
+    return subprocess.run([sys.executable, check], cwd=cwd, env=env, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=90,
+                          stdin=subprocess.DEVNULL)
+
+
+class TestBrowserConsoleFixture:
+    """012 的 fixture 必须真是坏的，隐藏检查要能分清修好 / 没修 / 作弊。"""
+
+    @pytest.fixture()
+    def fx(self, tmp_path):
+        src = os.path.join(os.path.dirname(__file__), "evals", "fixtures", "browser-broken-list")
+        dst = tmp_path / "page"
+        shutil.copytree(src, dst)
+        return dst
+
+    def test_pristine_fixture_fails_with_the_console_error(self, fx):
+        r = _run_check(str(fx))
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "is not iterable" in r.stdout, "检查要把真实的控制台报错报出来"
+
+    @pytest.mark.parametrize("old,new", [
+        ("render(catalog.products);", "render(catalog.items);"),        # 改调用处
+        ("  items: [", "  products: ["),                                # 改数据的键名
+    ])
+    def test_real_fixes_pass(self, fx, old, new):
+        app = fx / "app.js"
+        app.write_text(app.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+        r = _run_check(str(fx))
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def test_deleting_the_render_call_is_caught(self, fx):
+        """删掉 render(...) 就没有报错了——单看控制台会被骗过，检查必须看列表。"""
+        app = fx / "app.js"
+        app.write_text(app.read_text(encoding="utf-8").replace("render(catalog.products);", ""),
+                       encoding="utf-8")
+        r = _run_check(str(fx))
+        assert r.returncode == 1 and "列表不对" in r.stdout, r.stdout + r.stderr
+
+
+class TestRunOnceThreadingAndCleanup:
+    """runner 把 agent 主循环放到 worker 线程、主线程处理 Qt 事件。用假的主循环真调浏览器工具
+    和后台命令：不能死锁，跑完浏览器要关掉、后台服务要停掉，账本要记下来。"""
+
+    def test_browser_tools_work_and_everything_is_cleaned_up(self, tmp_path, monkeypatch):
+        import re
+        from src import agent, background as bg, session as _session, tools, tools_browser
+        from src.agent_result import AgentResult
+        from src.run_ledger import RunLedger
+        import runner
+
+        page_dir = tmp_path / "fixture"
+        page_dir.mkdir()
+        (page_dir / "index.html").write_text(
+            '<!doctype html><meta charset="utf-8"><title>t</title>'
+            '<button onclick="this.textContent=\'点过了\'">清空列表</button>', encoding="utf-8")
+        monkeypatch.setattr(runner, "FIXTURES_DIR", str(tmp_path))
+        seen = {}
+
+        def fake_loop(ui):
+            sess = _session.current_session()
+            sess.run_ledger = RunLedger({"id": "fake", "name": "fake", "type": "fake"})
+            sess.run_ledger.record_usage({"input": 100, "output": 20, "cache_read": 60})
+            url = re.search(r"http://127\.0\.0\.1:\d+", sess.chat_history[-1].content).group(0)
+            seen["open"] = tools_browser.browser_open.invoke({"url": url + "/index.html"})
+            seen["click"] = tools_browser.browser_click.invoke(
+                {"ref": re.search(r'button "清空列表" \[ref=(e\d+)\]', seen["open"]).group(1)})
+            # 评测会话走子 Agent 沙箱，命令里不能写 worktree 外的绝对路径（解释器也不行），
+            # 用裸 python，和模型会写的 `python -m http.server` 一样。直接 invoke 不经过
+            # streaming 的 Plan 白名单，所以 Plan 模式下也能起来——这里只为验证收尾会停掉它。
+            seen["bg"] = tools.run_command.invoke(
+                {"command": 'python -c "import time; print(1, flush=True); time.sleep(60)"',
+                 "background": True})
+            seen["owner"] = sess.background_owner_id
+            return AgentResult("completed")
+
+        monkeypatch.setattr(agent, "agent_loop", fake_loop)
+        case = {"id": "t", "name": "threading", "fixture": "fixture", "mode": "plan", "serve": True,
+                "prompt": "打开 {url}/index.html 点按钮",
+                "assert": [{"type": "tool_result_not_contains", "name": "browser_click",
+                            "not_contains": ["已点击"]}]}
+        result = runner.run_case(case, 1, runner.resolve_model(""))
+
+        assert seen["open"].startswith("已打开"), seen["open"]
+        assert seen["click"].startswith("已拒绝"), "Plan 模式下点击应被闸门拦下"
+        page = sys.modules["src.browser.page"]
+        assert not page.is_browser_open(), "运行结束要关掉浏览器"
+        bg_id = re.search(r"bg\d+-[0-9a-f]+", seen["bg"])
+        assert bg_id, f"后台命令没起来：{seen['bg'][:200]}"
+        snap = bg.get_snapshot(bg_id.group(0))
+        assert snap is None or snap["running"] is False, "运行结束要停掉后台命令"
+        ledger = result["ledgers"][0]
+        assert ledger and ledger["input"] == 100 and ledger["cache_read"] == 60

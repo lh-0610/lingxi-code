@@ -1,0 +1,7 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>submit</title></head><body>
+<!-- 不写 type 的 <button>：HTML 默认 submit；表单 method=post。
+     onsubmit 记录实际提交并 preventDefault，便于测试断言"页面实际效果"而不真导航 -->
+<form method="post" action="/save" onsubmit="event.preventDefault();document.getElementById('out').textContent='提交了'">
+<input name="a" placeholder="名字"><button>保存</button></form>
+<p id="out">未提交</p>
+</body></html>

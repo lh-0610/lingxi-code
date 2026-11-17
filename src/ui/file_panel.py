@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import shiboken6
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
@@ -51,6 +52,10 @@ _TINTED = {"add": "mv_ok", "del": "mv_bad", "hunk": "mv_indigo_soft"}
 def _norm(path: str) -> str:
     """同一个文件的两种写法（反斜杠 / 正斜杠）算同一个标签页。"""
     return (path or "").replace("\\", "/")
+
+
+# 浏览器标签的哨兵 tabData（不是文件路径）：paths() 只用来判面板空不空，无持久化顾虑
+BROWSER_KEY = "lingxi:browser"
 
 
 def _mix(color: str, base: str, ratio: float) -> QColor:
@@ -117,6 +122,9 @@ class FilePanel(QFrame):
         self._rows: dict[str, list] = {}        # 归一化路径 → 交进来的逐行差异（切主题要重画）
         self._hints: dict[str, str] = {}        # 归一化路径 → 内容说明（diff / 新文件 / 无差异）
         self._spans: dict[str, dict] = {}       # 归一化路径 → {行下标: 高亮范围}（切主题不用重解析）
+        self._browser_view = None               # 浏览器标签内容（第一次 open_browser 才创建，懒加载）
+        self._browser_tab_label = None          # 浏览器标签文字（LeftSide 按钮，见 open_browser）
+        self._browser_last_url = ""             # 手动入口复用的上次地址
         self._build_ui()
         self.apply_theme()
 
@@ -142,6 +150,9 @@ class FilePanel(QFrame):
             f"QPushButton#filePanelClose {{ border: none; border-radius: 6px; background: transparent;"
             f" color: {sec}; font-size: 14px; }}"
             f"QPushButton#filePanelClose:hover {{ background: {self._t('mv_indigo_soft')}; color: {text}; }}"
+            f"QPushButton#filePanelBrowser {{ border: 1px solid {chip}; border-radius: 6px;"
+            f" background: transparent; color: {sec}; font-size: 12px; padding: 2px 8px; }}"
+            f"QPushButton#filePanelBrowser:hover {{ background: {self._t('mv_indigo_soft')}; color: {text}; }}"
             # 标签：选中态用卡片底色 + 主文字色，和消息流里的卡片同一套观感
             "QTabBar { background: transparent; }"
             f"QTabBar::tab {{ background: transparent; color: {sec}; padding: 4px 8px;"
@@ -157,6 +168,8 @@ class FilePanel(QFrame):
         for view in self._panes.values():
             view.apply_theme(self._t("mv_view_bg"), self._t("mv_text"))
             self._fill(view, self._rows.get(self._path_of(view)) or [])
+        if self._browser_view is not None and shiboken6.isValid(self._browser_view):
+            self._browser_view.apply_theme()
         self._sync_header()
 
     # ── 搭建 ──
@@ -186,7 +199,16 @@ class FilePanel(QFrame):
         self.close_btn.setToolTip("关闭文件面板")
         self.close_btn.clicked.connect(self.close_all)
 
+        # 用户手动开浏览器入口（复审 14）：空白页或上次地址
+        self.open_browser_btn = QPushButton("浏览器", top)
+        self.open_browser_btn.setObjectName("filePanelBrowser")
+        self.open_browser_btn.setCursor(Qt.PointingHandCursor)
+        self.open_browser_btn.setToolTip("打开浏览器标签（空白页或上次的地址）")
+        self.open_browser_btn.clicked.connect(
+            lambda: self.open_browser(self._browser_last_url or ""))
+
         top_lay.addWidget(self.path_label, 1)
+        top_lay.addWidget(self.open_browser_btn, 0)
         top_lay.addWidget(self.close_btn, 0)
         lay.addWidget(top)
 
@@ -263,9 +285,66 @@ class FilePanel(QFrame):
         self._sync_header()
         self._show_self()
 
+    def open_browser(self, url: str = ""):
+        """开"浏览器"标签（已开就切过去）；url 非空则导航。第一次点开才创建 view（懒加载）。"""
+        if url:
+            self._browser_last_url = url
+        if self._browser_view is not None and shiboken6.isValid(self._browser_view):
+            index = self._tab_index(BROWSER_KEY)
+            if index >= 0:
+                self.tabs.setCurrentIndex(index)
+            if url:
+                self._browser_view.navigate(url)
+            self._sync_header()
+            self._show_self()
+            return
+        from .browser_panel import BrowserView   # 惰性 import：构造面板不碰 WebEngine
+        view = BrowserView(self.stack, theme_lookup=self.theme_lookup)
+        self._browser_view = view
+        self.stack.addWidget(view)
+        index = self.tabs.addTab("")
+        # 标签文字走 LeftSide 按钮而非 tabText：ElideMiddle 对 CJK 会误判余量把
+        # "浏览器"截成"..."（原生字体下实测），elide 只作用 tabText，按钮文字不受影响
+        label = QLabel("浏览器", self.tabs)
+        label.setStyleSheet("background: transparent; font-size: 12px;")
+        self.tabs.setTabButton(index, QTabBar.LeftSide, label)
+        self._browser_tab_label = label
+        self.tabs.setTabData(index, BROWSER_KEY)
+        self.tabs.setTabToolTip(index, "模型可操作的侧边栏浏览器（F12 开发者工具）")
+        btn = QPushButton("×", self.tabs)
+        btn.setObjectName("fileTabClose")
+        btn.setFixedSize(16, 16)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolTip("关闭浏览器标签")
+        btn.clicked.connect(lambda _checked=False: self.close_file(BROWSER_KEY))
+        self.tabs.setTabButton(index, QTabBar.RightSide, btn)
+        view.closed.connect(lambda: self.close_file(BROWSER_KEY))
+        self.tabs.setCurrentIndex(index)
+        if url:
+            view.navigate(url)
+        self._sync_header()
+        self._show_self()
+
     def close_file(self, rel_path: str):
         """关掉一个标签页；最后一个关掉时面板一起收起。"""
         key = _norm(rel_path)
+        if key == BROWSER_KEY:
+            index = self._tab_index(key)
+            if index < 0:
+                return
+            view = self._browser_view
+            self._browser_view = None
+            self._browser_tab_label = None
+            self.tabs.removeTab(index)
+            if view is not None:
+                self.stack.removeWidget(view)
+                view.release()          # 释放 view/page，profile 常驻（§11.6）
+                view.deleteLater()
+            if self.tabs.count() == 0:
+                self.close_all()
+            else:
+                self._on_tab_changed(self.tabs.currentIndex())
+            return
         index = self._tab_index(key)
         if index < 0:
             return
@@ -284,6 +363,13 @@ class FilePanel(QFrame):
 
     def close_all(self):
         """关掉所有标签页并收起面板（对话区恢复原来的宽度）。"""
+        if self._browser_view is not None:
+            view = self._browser_view
+            self._browser_view = None
+            self._browser_tab_label = None
+            self.stack.removeWidget(view)
+            view.release()
+            view.deleteLater()
         for key in list(self._panes):
             view = self._panes.pop(key)
             self._rows.pop(key, None)
@@ -319,6 +405,16 @@ class FilePanel(QFrame):
 
     def _sync_header(self):
         key = _norm(self.current_path())
+        if self._browser_tab_label is not None and shiboken6.isValid(self._browser_tab_label):
+            # QLabel 不继承 QTabBar::tab 的 color，选中/未选中自己刷
+            color = self._t("text") if key == BROWSER_KEY else self._t("mv_text_sec")
+            self._browser_tab_label.setStyleSheet(
+                f"background: transparent; font-size: 12px; color: {color};")
+        if key == BROWSER_KEY:
+            self.path_label.setText("浏览器")
+            self.path_label.setToolTip("模型可操作的侧边栏浏览器")
+            self.hint_label.setText("模型可操作的侧边栏浏览器 · F12 开发者工具")
+            return
         if not key:
             self.path_label.setText("")
             self.path_label.setToolTip("")

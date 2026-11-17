@@ -622,3 +622,122 @@ assert background.stop(sys.argv[1])['found'] is False
     result = subprocess.run([sys.executable, "-c", code, bg_id], capture_output=True,
                             text=True, encoding="utf-8", timeout=10, stdin=subprocess.DEVNULL)
     assert result.returncode == 0, result.stderr
+
+
+# ── dev server 识别 + "在浏览器里打开"按钮（第 6 步，§7.3）─────────
+
+class TestDevServerUrl:
+    def test_latest_output_line_wins(self):
+        snap = {"output_tail": ["listening http://localhost:3000\n",
+                                "ready at http://127.0.0.1:5173/\n"],
+                "command": "npm run dev"}
+        assert bg.dev_server_url(snap) == "http://127.0.0.1:5173"
+
+    def test_command_fallback(self):
+        snap = {"output_tail": ["building...\n"], "command": "serve --open http://127.0.0.1:8080"}
+        assert bg.dev_server_url(snap) == "http://127.0.0.1:8080"
+
+    def test_no_match_returns_empty(self):
+        assert bg.dev_server_url({"output_tail": ["done\n"], "command": "pytest -q"}) == ""
+        assert bg.dev_server_url({}) == ""
+
+    def test_public_url_not_trusted(self):
+        snap = {"output_tail": ["deployed https://example.com\n"], "command": "deploy"}
+        assert bg.dev_server_url(snap) == ""
+
+    def test_default_port_normalized_and_ipv6(self):
+        assert bg.dev_server_url({"output_tail": ["http://localhost:80/"]}) == "http://localhost"
+        assert bg.dev_server_url({"output_tail": ["http://[::1]:9000/"]}) == "http://[::1]:9000"
+
+
+def test_open_browser_button_disabled_without_url(panel, qapp):
+    bg_id, proc = spawn("import time; print('plain output', flush=True); time.sleep(30)",
+                        session.get_active())
+    try:
+        wait(qapp, lambda: "plain output" in "".join(bg.get_snapshot(bg_id)["output_tail"]))
+        select(panel, bg_id)
+        assert not panel.open_browser_btn.isEnabled()
+        assert "未从任务输出识别到" in panel.open_browser_btn.toolTip()
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_open_browser_button_passes_url_and_task_session(panel, qapp):
+    """真实任务输出里的 dev server 地址 → 按钮启用 → 点击把 (url, 任务所属会话) 交给宿主。"""
+    sess = session.get_active()
+    called = []
+    panel.open_browser_fn = lambda url, s: called.append((url, s))
+    bg_id, proc = spawn(
+        "import time; print('dev server at http://localhost:5173/', flush=True); time.sleep(30)",
+        sess)
+    try:
+        wait(qapp, lambda: "localhost:5173" in "".join(bg.get_snapshot(bg_id)["output_tail"]))
+        select(panel, bg_id)
+        assert panel.open_browser_btn.isEnabled()
+        assert panel._dev_url == "http://localhost:5173"
+        panel.open_browser_btn.click()
+        assert called == [("http://localhost:5173", sess)]
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_open_browser_button_disabled_without_host_callback(panel, qapp):
+    panel.open_browser_fn = None
+    bg_id, proc = spawn(
+        "import time; print('http://localhost:5173', flush=True); time.sleep(30)",
+        session.get_active())
+    try:
+        wait(qapp, lambda: "localhost:5173" in "".join(bg.get_snapshot(bg_id)["output_tail"]))
+        select(panel, bg_id)
+        assert not panel.open_browser_btn.isEnabled(), "没有宿主入口时不该给点"
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+# ── 复审 13：通配 bind 地址归一 + 子进程无缓冲 ──────────────────────────
+
+@pytest.mark.parametrize("line,expect", [
+    ("Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...", "http://127.0.0.1:8000"),
+    ("running at http://[::]:8080/", "http://127.0.0.1:8080"),
+    ("listen http://localhost:3000", "http://localhost:3000"),
+    ("public https://example.com/x", ""),
+])
+def test_dev_server_url_wildcard_normalized(line, expect):
+    assert bg.dev_server_url({"output_tail": [line], "command": ""}) == expect
+
+
+# 主机名 / 端口后面要有边界：只吃前缀会把 localhost.attacker.com 截成 http://localhost，
+# 按钮打开的就不是输出里写的那个地址。截出来的虽然总是本机来源（不涉及信任），但地址是错的。
+@pytest.mark.parametrize("line", [
+    "API ready at http://localhost.attacker.com:8080/",
+    "proxy -> http://127.0.0.1.nip.io:3000/",
+    "open http://127.0.0.1@evil.com/ to continue",
+    "open http://localhost:3000@evil.com/ to continue",
+    "see http://localhost-evil.com/",
+])
+def test_dev_server_url_requires_a_boundary_after_the_host(line):
+    assert bg.dev_server_url({"output_tail": [line], "command": ""}) == ""
+
+
+@pytest.mark.parametrize("line,expect", [
+    ("Server running at http://localhost:3000.", "http://localhost:3000"),      # 句末句号
+    ("url=http://127.0.0.1:8080, pid=12", "http://127.0.0.1:8080"),
+    ("(http://0.0.0.0:8000/)", "http://127.0.0.1:8000"),
+    ("http://[::1]:9000/", "http://[::1]:9000"),
+    ("open http://localhost then log in", "http://localhost"),
+    ('"url": "http://127.0.0.1:5173"', "http://127.0.0.1:5173"),
+])
+def test_dev_server_url_boundary_keeps_normal_endings(line, expect):
+    assert bg.dev_server_url({"output_tail": [line], "command": ""}) == expect
+
+
+def test_command_env_sets_pythonunbuffered(monkeypatch):
+    from src import tools
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    env = tools._command_env()
+    assert env.get("PYTHONUNBUFFERED") == "1"
+    monkeypatch.setenv("PYTHONUNBUFFERED", "0")
+    assert tools._command_env().get("PYTHONUNBUFFERED") == "0", "用户自己设过就不覆盖"

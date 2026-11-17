@@ -39,6 +39,44 @@ _DRIVE = re.compile(r"^[A-Za-z]:")
 _PATH_PART = re.compile(r"[\w.\-]+")
 _LINK_TAIL = re.compile(r"^(?P<path>.+?):(?P<line>\d+)$")
 
+# ── 正文里的 localhost 地址 → 可点链接（复审 12：行内代码 + 裸文本）──────
+# 点了由 ChatUI._on_file_link_clicked 在浏览器面板打开（§7.4）。路径字符限 ASCII，
+# 避免把紧跟的中文标点/文字吞进 URL。
+_LOCALHOST_URL = re.compile(
+    r"https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:/[A-Za-z0-9_./\-?=&%#]*)?",
+    re.IGNORECASE)
+_MD_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
+
+
+def _linkify_localhost(md_text: str) -> str:
+    """把行内代码里整段的 localhost URL、以及裸文本里的 localhost URL 换成 markdown 链接。
+
+    代码块不动；已是 markdown 链接/autolink 的不重复包。链接文字保留原样（行内代码仍带反引号）。
+    """
+    if not md_text:
+        return md_text
+    parts = _CODE_SPAN.split(md_text)
+    for i in range(len(parts)):
+        seg = parts[i]
+        if i % 2 == 1:
+            if seg.startswith(("```", "~~~")):
+                continue
+            m = _LOCALHOST_URL.fullmatch(seg[1:-1].strip())
+            if m:
+                parts[i] = f"[{seg}]({m.group(0)})"
+        else:
+            stash = []
+
+            def _st(m):
+                stash.append(m.group(0))
+                return f"\x01L{len(stash) - 1}\x02"
+
+            seg = _MD_LINK.sub(_st, seg)
+            seg = _LOCALHOST_URL.sub(lambda m: f"[{m.group(0)}]({m.group(0)})", seg)
+            seg = re.sub(r"\x01L(\d+)\x02", lambda m: stash[int(m.group(1))], seg)
+            parts[i] = seg
+    return "".join(parts)
+
 
 def file_link_href(rel_path: str, line: int = 0) -> str:
     """正文里的文件链接 href：`lingxi-file:src/ui/task_panel.py:835`。"""
@@ -232,6 +270,8 @@ class MarkdownRenderMixin:
         md_text = _protect_literal_asterisks(md_text)
         # 行内代码里的项目文件路径 → 可点链接（代码块里的不处理，只认真实存在的文件）
         md_text = _linkify_file_paths(md_text, _link_root())
+        # 行内代码/裸文本里的 localhost 地址 → 可点链接（点了在浏览器面板打开）
+        md_text = _linkify_localhost(md_text)
 
         html = markdown.markdown(md_text, extensions=['tables', 'fenced_code', 'nl2br'])
 

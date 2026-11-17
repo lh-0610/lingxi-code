@@ -902,6 +902,9 @@ def _command_env():
     env = _scrubbed_env()
     env = dict(os.environ) if env is None else env
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # 子进程 stdout 是管道时 Python 默认块缓冲，dev server 的 "Serving HTTP" 行迟迟不出现，
+    # 后台面板识别不到地址（复审 13）。强制行缓冲/无缓冲；用户自己设过就不覆盖。
+    env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
 
@@ -2526,12 +2529,17 @@ def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
         summary = f"{_reason}（退出码 4）。\n\n" + summary
     else:
         _status, _reason = "failed", ""
+    # 不带筛选跑、一个用例都没收集到 = 项目里没有测试。前端脚本的改动这时可以改用
+    # 浏览器检查验证（verification._browser_instead_of_tests）；带了 path / k 的不算，
+    # 那只说明筛选条件没选中东西。
+    _no_tests = result.returncode == 5 and not paths and not k
     _record_run_evidence(kind="tests", checker="pytest", argv=cmd, cwd=run_cwd,
                          started_at=started, t0=t0, exit_code=result.returncode,
-                         status=_status, summary=_first_lines(summary), reason=_reason)
+                         status=_status, summary=_first_lines(summary), reason=_reason,
+                         no_tests=_no_tests)
     with contextlib.suppress(Exception):
         if _status == "not_run":
-            _v_mark_tests(_session.get_verification(), None, _reason)
+            _v_mark_tests(_session.get_verification(), None, _reason, no_tests=_no_tests)
         else:
             # root：这次测试**实际**在哪个目录跑（run_cwd 跟随 cd）。按目录记着的义务
             # 只能被覆盖到那个目录的测试了结——别处的一次绿灯不能替它背书。
@@ -3311,6 +3319,10 @@ from .tools_explore import explore  # noqa: E402
 from .tools_code import run_code  # noqa: E402
 from .tools_fs import delete_path, move_path, copy_path, make_directory  # noqa: E402
 from .tools_image import read_image, _IMAGE_EXTS  # noqa: E402  _IMAGE_EXTS 供 read_file 指向 read_image
+from .tools_browser import (  # noqa: E402
+    browser_open, browser_snapshot, browser_find, browser_read_text,
+    browser_click, browser_type, browser_console, browser_close,
+)
 
 # 导出
 ALL_TOOLS = [
@@ -3336,6 +3348,8 @@ ALL_TOOLS = [
     apply_patch,
     fetch_url, web_search,
     search_knowledge,
+    browser_open, browser_snapshot, browser_find, browser_read_text,
+    browser_click, browser_type, browser_console, browser_close,
 ]
 
 
@@ -3418,6 +3432,14 @@ TOOL_DISPLAY_NAMES = {
     "web_search": "🔍 网络搜索",
     "search_knowledge": "📚 知识库检索",
     "get_project_instructions": "📜 项目规则",
+    "browser_open": "🌐 浏览器打开",
+    "browser_snapshot": "🌐 浏览器快照",
+    "browser_find": "🌐 浏览器找元素",
+    "browser_read_text": "🌐 浏览器读正文",
+    "browser_click": "🌐 浏览器点击",
+    "browser_type": "🌐 浏览器输入",
+    "browser_console": "🌐 浏览器控制台",
+    "browser_close": "🌐 关闭浏览器",
 }
 
 

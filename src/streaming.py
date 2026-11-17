@@ -133,6 +133,9 @@ PLAN_MODE_READONLY_TOOLS = {
     "find_definition", "find_references",  # jedi 代码导航，只读分析
     "find_tests", "related_files",  # 测试发现 / 关联文件，只读分析
     "get_project_instructions",  # 读取项目规则文件，只读
+    # 浏览器只读五件套：开页/快照/找元素/读正文/读控制台都不改页面状态。
+    # browser_click / browser_type 是动作，**不在**这里（Plan 拦下）；browser_close 改状态也不在
+    "browser_open", "browser_snapshot", "browser_find", "browser_read_text", "browser_console",
 }
 
 
@@ -147,6 +150,15 @@ _PLAN_REJECT_NOTES = {
         "属于执行命令、不保证只读。）"
         "不要自行改模式，也不要改用别的工具跑等价的检查命令——"
         "把需要做哪些检查写进方案里，由用户切到 Act 后再执行。"
+    ),
+    "browser_click": (
+        "Plan 模式只调研：浏览器点击会改页面状态（可能提交表单/触发写操作）。"
+        "可以用 browser_open / browser_snapshot / browser_find / browser_read_text 看页面，"
+        "把要点什么、预期什么结果写进方案，由用户切到 Act 后再操作。"
+    ),
+    "browser_type": (
+        "Plan 模式只调研：浏览器输入会改页面状态（回车还可能提交表单）。"
+        "可以用只读的浏览器工具看页面，把要填什么写进方案，由用户切到 Act 后再操作。"
     ),
 }
 
@@ -1430,6 +1442,7 @@ PARALLEL_SAFE_TOOLS = {
     "list_background_commands", "fetch_url", "web_search",
     "read_image",  # 读图：只读文件 + 视觉识别，无磁盘副作用
     "get_project_instructions",  # 读取项目规则文件，只读
+    # browser_* 一律不并行（连只读的也不）：单页有状态，快照会重置 ref、动作互相踩（§5.3）
 }
 
 

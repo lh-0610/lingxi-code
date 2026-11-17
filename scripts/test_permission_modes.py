@@ -493,3 +493,60 @@ def test_read_only_script_still_flows_in_auto(sess, script_dir):
     (script_dir / "read.py").write_text(
         "print(open('x.txt', encoding='utf-8').read())", encoding="utf-8")
     assert _decide(sess, "auto", command="python read.py") == "放行"
+
+
+# ── KIND_BROWSER：问不问由工具先判，判到要问就必弹卡 ─────────────
+
+_BROWSER = "将在浏览器点击 button「保存」（ref=e19）\n页面: http://localhost:5173/"
+
+
+@pytest.mark.parametrize("mode, expected", [
+    ("manual", "询问"), ("accept_edits", "询问"), ("auto", "询问"), ("bypass", "放行"),
+])
+def test_browser_confirmation_shows_card_in_every_mode_but_bypass(sess, mode, expected):
+    """tools_browser 已按模式×动作×来源判过（security.decide_action）；走到 confirm_command
+    就是"该问"，auto 模式不能再静默放行——否则"localhost 首次点击要问"被绕掉。"""
+    assert _decide(sess, mode, command=_BROWSER, kind=pm.KIND_BROWSER) == expected
+
+
+def test_browser_confirmation_gets_no_command_remember_key(sess):
+    """浏览器来源信任是会话级白名单（第 5 步接线），不走命令前缀"记住"、更不落盘。"""
+    pm.apply(sess, "manual")
+    host = _Host()
+    host.confirm_command(_BROWSER, kind=pm.KIND_BROWSER)
+    assert host.holders[0]["remember_key"] == ""
+    assert host.holders[0]["destructive"] is False
+
+
+def test_browser_consequential_card_is_destructive(sess):
+    """有后果动作按危险处理：卡片藏"允许并记住"、手机端同样藏（is_destructive=risky）。"""
+    pm.apply(sess, "manual")
+    host = _Host()
+    host.confirm_command(_BROWSER, kind=pm.KIND_BROWSER,
+                         browser_origin="http://localhost:5173", browser_consequential=True)
+    holder = host.holders[0]
+    assert holder["destructive"] is True
+    assert holder["remember_key"] == ""
+    assert holder["browser_origin"] == "http://localhost:5173"
+
+
+def test_browser_plain_card_carries_origin_not_destructive(sess):
+    pm.apply(sess, "manual")
+    host = _Host()
+    host.confirm_command(_BROWSER, kind=pm.KIND_BROWSER,
+                         browser_origin="http://localhost:5173")
+    holder = host.holders[0]
+    assert holder["destructive"] is False
+    assert holder["browser_origin"] == "http://localhost:5173"
+
+
+def test_browser_card_carries_action_for_remember_target(sess):
+    """打开/操作分开授权：卡片 holder 带 browser_action，决定记住进哪个白名单。"""
+    pm.apply(sess, "manual")
+    host = _Host()
+    host.confirm_command(_BROWSER, kind=pm.KIND_BROWSER,
+                         browser_origin="http://localhost:5173", browser_action="open")
+    assert host.holders[0]["browser_action"] == "open"
+    host.confirm_command(_BROWSER, kind=pm.KIND_BROWSER,
+                         browser_origin="http://localhost:5173", browser_action="interact")
+    assert host.holders[1]["browser_action"] == "interact"

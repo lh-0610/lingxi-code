@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>报错页</title></head>
+<body>
+<h1>控制台报错测试</h1>
+<script>
+  console.warn("一条警告: 配置缺失");
+  console.error("TypeError: cannot read property 'x' of undefined");
+  setTimeout(() => { throw new Error("异步未捕获异常 boom"); }, 100);
+  Promise.reject(new Error("未处理的 Promise 拒绝"));
+</script>
+</body>
+</html>

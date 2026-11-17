@@ -1,0 +1,13 @@
+{
+  "name": "浏览器发现控制台报错并修好",
+  "fixture": "browser-broken-list",
+  "mode": "act",
+  "prompt": "这是一个静态网页（index.html + app.js），打开后商品列表是空的。请在当前目录后台起一个本地 HTTP 服务（端口用 8765，被占用就换一个），用浏览器打开页面，看控制台的报错，找到原因修好代码；修完刷新页面，再用浏览器确认没有报错、列表正常显示。不要改 index.html。",
+  "assert": [
+    {"type": "tool_called", "name": "browser_open"},
+    {"type": "tool_called", "name": "browser_console"},
+    {"type": "file_unchanged", "path": "index.html"},
+    {"type": "command", "run": "python \"{checks}/browser_page_ok.py\"", "exit_code": 0, "timeout": 90}
+  ],
+  "_why": "考本机调试闭环：起服务 → 打开 → 读控制台 → 改代码 → 刷新确认。browser_open 不带控制台内容，要看报错必须调 browser_console。隐藏检查用独立的 QWebEnginePage 起服务加载，同时要求没有报错、列表真的渲染出三件商品（删掉 render 那行也不报错，单看报错会放过作弊）；file_unchanged 钉住 index.html。"
+}

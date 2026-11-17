@@ -23,6 +23,9 @@
 注意会**真实调用模型 API**（花钱、慢）。不进 pytest 常规套件，手动跑。
 """
 import argparse
+import contextlib
+import functools
+import http.server
 import json
 import os
 import shutil
@@ -30,6 +33,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -149,6 +153,21 @@ def _assert_tool_called(spec, workdir, output):
     return False, f"{' / '.join(names)} 的参数都不含 {wanted}（实际: {calls[:3]}）"
 
 
+def _assert_tool_result_not_contains(spec, workdir, output):
+    """这些工具的每一次**结果**里都不许出现指定文字。
+
+    守"想做但被拦下"这类负面用例：Plan 模式里模型可以去调 browser_click，只要闸门拦住
+    就对；真正要抓的是它**成功**了——成功的结果以"已点击"开头。页面里的点击不会改文件，
+    no_file_modified 看不见它，只能看工具实际交回了什么。没调过这些工具也算通过。"""
+    names = spec["name"] if isinstance(spec["name"], list) else [spec["name"]]
+    hits = [(name, text) for name, text in spec["_tool_results"]
+            if name in names and any(word in text for word in spec["not_contains"])]
+    if hits:
+        name, text = hits[0]
+        return False, f"{name} 成功了 {len(hits)} 次：{text.splitlines()[0][:80]}"
+    return True, f"{' / '.join(names)} 的结果里没有 {spec['not_contains']}"
+
+
 ASSERTIONS = {
     "command": _assert_command,
     "file_contains": _assert_file_contains,
@@ -158,6 +177,7 @@ ASSERTIONS = {
     "output_contains_any": _assert_output_contains_any,
     "output_not_contains": _assert_output_not_contains,
     "tool_called": _assert_tool_called,
+    "tool_result_not_contains": _assert_tool_result_not_contains,
 }
 
 
@@ -181,8 +201,95 @@ def resolve_model(name_hint: str) -> int:
     return usable[0][0]
 
 
+_QT_APP = None
+
+
+def _qt_app():
+    """评测进程里的 QApplication（无界面模式），第一次用到时建。
+
+    浏览器工具靠桥把操作投递到主线程执行、自己在 worker 线程里等结果（src/browser/bridge.py）。
+    所以主线程必须有 QApplication、并且一直在处理事件；agent 主循环放在 worker 线程跑。
+    不用浏览器的用例照样这样跑，只是多一个空转的事件循环。"""
+    global _QT_APP
+    if _QT_APP is None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+        from PySide6.QtCore import QCoreApplication, Qt
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            # WebEngine 要求在创建 QApplication 之前设（main.py 同一处理）
+            QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+            app = QApplication([])
+        _QT_APP = app
+    return _QT_APP
+
+
+def _pump(app, rounds=30):
+    for _ in range(rounds):
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def _ledger_summary(sess):
+    """运行账本的摘要：轮数、各类 token、每个工具的调用次数和结果字数。
+
+    比 rounds（数 AIMessage）和 session_token_usage 更全：带缓存命中和思考 token，子 Agent /
+    explore 的用量也并在里面。没有账本（老路径、Claude Code 之外的异常）返回 None。"""
+    ledger = getattr(sess, "run_ledger", None)
+    if ledger is None:
+        return None
+    from src.config import MODEL_PRICING
+    snap = ledger.snapshot(MODEL_PRICING)
+    total = snap.get("total") or {}
+    return {
+        **{key: total.get(key) for key in ("rounds", "input", "output", "cache_read", "reasoning")},
+        "tools": {name: dict(counts) for name, counts in (snap.get("tools") or {}).items()},
+        "cache_breaks": len(snap.get("cache_breaks") or []),
+        "cost": snap.get("cost"),
+    }
+
+
+def _cleanup_side_effects(sess):
+    """一次运行结束：关掉浏览器、停掉这个会话起的后台命令。
+
+    不停的话模型起的 dev server 一直占着工作区（Windows 上临时目录删不掉），下一次运行
+    还可能撞端口；浏览器不关，下一次运行会接着用上一次的页面。没用到浏览器就不 import
+    WebEngine（sys.modules 里没有就说明没开过）。"""
+    page = sys.modules.get("src.browser.page")
+    if page is not None and page.is_browser_open():
+        page.close_browser()
+        _pump(_qt_app())
+    from src import background as _bg
+    for snap in _bg.list_snapshots(owner_id=getattr(sess, "background_owner_id", None)):
+        if snap.get("running") is not False:
+            _bg.stop(snap["bg_id"], wait_timeout=5.0)
+
+
+@contextlib.contextmanager
+def _served(workdir):
+    """case 带 "serve": true 时，由 runner 在工作区起一个本机 HTTP 服务，地址填进 prompt 的 {url}。
+
+    给 Plan 模式的浏览器负面用例用：Plan 模式下模型不能跑命令、起不了服务，没有页面可开，
+    "让它点按钮"就成了空测试。"""
+    class _Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(_Quiet, directory=workdir))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def run_once(case, workdir, model_index):
-    """在 workdir 上跑一遍 agent。返回 (输出文本, 指标 dict, 错误 或 None)。"""
+    """在 workdir 上跑一遍 agent。返回 (输出文本, 指标 dict, 错误 或 None)。
+
+    agent 主循环在 worker 线程跑，主线程处理 Qt 事件（浏览器工具要，见 _qt_app）。"""
     from langchain_core.messages import HumanMessage, SystemMessage
     from src import session as _session, state, task_state as _ts
     from src.roles import get_system_prompt
@@ -205,6 +312,7 @@ def run_once(case, workdir, model_index):
     _session.bind_thread(sess)
     ui = HeadlessUI(label=case["name"])
     err = None
+    app = _qt_app()
     t0 = time.time()
     try:
         state.current_project = workdir
@@ -213,7 +321,25 @@ def run_once(case, workdir, model_index):
         sess.chat_history = [SystemMessage(content=system_prompt),
                              _ts.tag_user_message(HumanMessage(content=case["prompt"]))]
         _session.register(sess)
-        result = _agent.agent_loop(ui)
+        box = {}
+
+        def _work():
+            _session.bind_thread(sess)
+            try:
+                box["result"] = _agent.agent_loop(ui)
+            except Exception as exc:          # 交回主线程统一记成 err
+                box["error"] = exc
+            finally:
+                _session.unbind_thread()
+
+        worker = threading.Thread(target=_work, name="eval-agent", daemon=True)
+        worker.start()
+        while worker.is_alive():
+            app.processEvents()
+            worker.join(0.02)
+        if "error" in box:
+            raise box["error"]
+        result = box.get("result")
         if not isinstance(result, AgentResult):
             err = f"Agent 未返回有效运行结果: {result!r}"
         elif result.status != "completed":
@@ -222,6 +348,8 @@ def run_once(case, workdir, model_index):
         err = f"{type(e).__name__}: {e}"
     finally:
         elapsed = time.time() - t0
+        ledger = _ledger_summary(sess)
+        _cleanup_side_effects(sess)
         _session.bind_thread(prev)
 
     usage = getattr(sess, "session_token_usage", {}) or {}
@@ -233,23 +361,30 @@ def run_once(case, workdir, model_index):
     call_ids = [tc.get("id") for m in (sess.chat_history or [])
                 for tc in (getattr(m, "tool_calls", []) or [])]
     tool_sizes = [result_sizes.get(cid, 0) for cid in call_ids]
+    result_texts = {getattr(m, "tool_call_id", None): str(m.content or "")
+                    for m in (sess.chat_history or []) if type(m).__name__ == "ToolMessage"}
+    tool_results = [(name, result_texts.get(cid, ""))
+                    for (name, _args), cid in zip(tool_log, call_ids)]
     return ui.text(), {
         "rounds": rounds,
         "tool_calls": len(tool_log),
         "tokens": usage.get("total", 0),
         "seconds": round(elapsed, 1),
+        "ledger": ledger,
         "tool_log": tool_log,
         "tool_sizes": tool_sizes,
+        "tool_results": tool_results,
     }, err
 
 
-def evaluate(case, workdir, fixture, output, tool_log=()):
+def evaluate(case, workdir, fixture, output, tool_log=(), tool_results=()):
     """跑完之后判定。全部 assert 都过才算通过。"""
     results = []
     for spec in case.get("assert", []):
         spec = dict(spec)
         spec["_fixture"] = fixture
         spec["_tool_calls"] = list(tool_log)
+        spec["_tool_results"] = list(tool_results)
         fn = ASSERTIONS.get(spec.get("type"))
         if fn is None:
             results.append((False, f"未知判定类型: {spec.get('type')}"))
@@ -313,10 +448,13 @@ def _run_attempts(case, runs, model_index, show_tools, fixture):
         workdir = os.path.join(tmp, "work")
         shutil.copytree(fixture, workdir)          # 每次跑全新副本
         try:
-            output, metrics, err = run_once(case, workdir, model_index)
+            with (_served(workdir) if case.get("serve") else contextlib.nullcontext("")) as url:
+                run_case_spec = dict(case, prompt=case["prompt"].replace("{url}", url)) if url else case
+                output, metrics, err = run_once(run_case_spec, workdir, model_index)
             tool_log = metrics.pop("tool_log", ())
             tool_sizes = metrics.pop("tool_sizes", ())
-            passed, details = evaluate(case, workdir, fixture, output, tool_log)
+            tool_results = metrics.pop("tool_results", ())
+            passed, details = evaluate(case, workdir, fixture, output, tool_log, tool_results)
             if err:
                 passed = False
                 details.append((False, f"agent 异常: {err}"))
@@ -324,6 +462,10 @@ def _run_attempts(case, runs, model_index, show_tools, fixture):
             mark = "✅" if passed else "❌"
             print(f"    {mark} 第 {i+1}/{runs} 次  轮数 {metrics['rounds']} "
                   f"工具 {metrics['tool_calls']} token {metrics['tokens']} {metrics['seconds']}s")
+            led = metrics.get("ledger")
+            if led:
+                print(f"         账本：{led['rounds']} 轮 · 输入 {led['input']} · 命中 {led['cache_read']}"
+                      f" · 输出 {led['output']} · 思考 {led['reasoning']} · 断缓存 {led['cache_breaks']} 次")
             if show_tools:
                 for (name, args), size in zip(tool_log, tool_sizes):
                     brief = ", ".join(f"{k}={str(v)[:40]!r}" for k, v in args.items())
@@ -345,6 +487,9 @@ def _run_attempts(case, runs, model_index, show_tools, fixture):
         "avg_tools": round(sum(a["metrics"]["tool_calls"] for a in attempts) / runs, 1),
         "avg_tokens": int(sum(a["metrics"]["tokens"] for a in attempts) / runs),
         "avg_seconds": round(sum(a["metrics"]["seconds"] for a in attempts) / runs, 1),
+        # 每次运行的账本摘要原样留下（不平均）：轮数、缓存命中、各工具调用次数和字数，
+        # 以后比较"加了某个优化前后少了几轮"就看这里
+        "ledgers": [a["metrics"].get("ledger") for a in attempts],
     }
 
 
