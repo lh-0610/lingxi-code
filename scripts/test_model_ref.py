@@ -144,14 +144,14 @@ def qapp():
 def _open_settings(qapp, tmp_path, monkeypatch, cfg, entries):
     """建一个 SettingsDialog（config 指到临时文件、模型列表换成 entries）。"""
     import json
-    from PySide6.QtWidgets import QMessageBox
+    from src.ui import dialogs
     from src.ui import settings_dialog as sd
 
     monkeypatch.setattr(models, "MODEL_LIST", entries)
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     monkeypatch.setattr(sd, "CONFIG_PATH", str(cfg_path))
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)     # 不弹"已保存"
+    monkeypatch.setattr(dialogs.ThemedDialog, "exec", lambda self: 0)     # 不弹"已保存"
     return sd.SettingsDialog(), cfg_path
 
 

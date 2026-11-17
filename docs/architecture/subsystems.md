@@ -50,7 +50,7 @@
 - 都改/复制历史，先过 `_worker_alive(sess) or resume_pending` 闸（与 retry 同源：worker 还活着就拒绝，不排队）；回退另弹确认框说明"不撤销文件"。下标失效（消息已不在）→ 提示 + 重绘自愈。
 
 ## 会话重命名与跨会话搜索（src/memory.py + src/ui/sidebar.py）
-- **重命名 `rename_session(session_id, title)`**：与 `move_sessions_to_no_project` 同样的"三处一起改"，同一 `_LOCK` 临界区内改 ① 内存里已打开会话的 `current_session_title`（经 `live_sessions()` 取一致快照；只改磁盘的话下次 `save_session` 会用旧内存标题覆盖回去——正常流程必现）② index.json 的 title ③ `<id>.json` 正文 title。**不刷新 `updated`**：改名是元数据编辑、不是新活动，不该把会话顶到分组最前打乱历史顺序。用户标题只折叠空白 + 截断 100 字符（`_sanitize_user_title`，不像自动标题那样剥标点/书名号）；空标题抛 `ValueError`。UI 走会话行右键菜单「重命名」→ `QInputDialog`（生成中也可改名，标题不动历史/运行态）。
+- **重命名 `rename_session(session_id, title)`**：与 `move_sessions_to_no_project` 同样的"三处一起改"，同一 `_LOCK` 临界区内改 ① 内存里已打开会话的 `current_session_title`（经 `live_sessions()` 取一致快照；只改磁盘的话下次 `save_session` 会用旧内存标题覆盖回去——正常流程必现）② index.json 的 title ③ `<id>.json` 正文 title。**不刷新 `updated`**：改名是元数据编辑、不是新活动，不该把会话顶到分组最前打乱历史顺序。用户标题只折叠空白 + 截断 100 字符（`_sanitize_user_title`，不像自动标题那样剥标点/书名号）；空标题抛 `ValueError`。UI 走会话行右键菜单「重命名」→ `dialogs.get_text` 主题输入框（生成中也可改名，标题不动历史/运行态）。
 - **跨会话搜索 `search_sessions(query, *, kind=None, project="__all__")`**：先 `list_sessions` 拿索引（只在读 index 时持 `_LOCK`，读完即释放），再**锁外**逐个读正文（`_atomic_write_json` 保证读到完整旧/新文件）。只搜真实用户输入 + 助手可见正文（`content_text` 跳过思考块），跳过 SystemMessage / 内部消息（`lingxi_internal`）/ 工具结果；大小写不敏感。结果按索引顺序（更新时间倒序），每项含 `snippet`（首个命中处上下文预览）/ `match_in_title` / `match_count`。单个正文读不出（损坏/版本过新）只跳过其正文、保留标题命中，不中断整次搜索。
 - **搜索 UI 不卡主线程**：侧栏「历史记录」下的搜索框防抖 250ms（回车立即搜），扫描放 daemon worker，结果经 `SignalBridge.session_search_done(str, object)` 回主线程渲染。**worker 必须继承启动时刻的数据根**（`paths.get_data_dir()` → 线程内 `set_data_dir`，与 send worker 同套路）：`set_data_dir` 是线程本地的，不继承则 Web 多用户模式读到默认根（别人的数据）、测试读不到隔离目录。搜索态下 `_refresh_session_list` 改渲染扁平结果行（标题 + 项目名 + 命中预览，点击 `_load_session` 跳转）；过期结果（查询词已变）丢弃；切工作区（`switch_workspace`）清空搜索（kind 变了旧结果失效）。
 
@@ -93,6 +93,25 @@
 - **数据安全**：`_save` 用临时文件 + `os.replace` **原子写**（崩溃不留半截）；`_load` 区分"真损坏"（JSON/编码错 → 重置空可重建）和"瞬时错误"（IO/占用 → 抛 `_MemoryLoadError`，**写操作遇到必中止、绝不 _save 写空丢数据**）
 - v1 不用 embedding（单人助手记忆少，按预算全量注入又快又准）；注入段会被 Anthropic/MiMo 缓存覆盖，每轮重读保持最新。当前截断策略是"按时间取最近"，不是按重要性——条数多了会丢老记忆，这是已知取舍
 - `remember`/`forget` 是本地安全操作，**不弹确认**、Plan 模式放行（在 `PLAN_MODE_READONLY_TOOLS` 里）
+
+## 主题弹窗（src/ui/dialogs.py）
+- **`src/ui/` 里不用原生 QMessageBox / QInputDialog**，一律走 `dialogs`（守它的是 `scripts/test_themed_dialogs.py::test_no_native_message_or_input_boxes_in_ui`，按 tokenize 只看代码里的名字）。QFileDialog 文件选择框和托盘气泡保留原生。设计稿是画布「灵犀弹窗设计」：无边框、背后一层变暗的遮罩、中间一张宽 440 圆角 14 的卡片；颜色全取 `theme` 的 `dlg_*` token（打开那一刻按当前主题取），明暗两套 key 必须一一对应
+- **实现**：`ThemedDialog` 是 `Qt.Dialog | FramelessWindowHint` + 透明背景的 QDialog，几何盖住父窗口的客户区，`paintEvent` 只画遮罩，卡片在中间偏上（上下留白 4:6）；父窗口不可见（最小化 / 进托盘）或没有父窗口时只开卡片大小、屏幕居中、不画遮罩。仍是模态 `exec()`，调用处保持同步写法，只能在主线程调
+- **API 对齐 QMessageBox**：`question / information / warning / critical / success` 返回 `StandardButton`（数值与 QMessageBox 一致），`labels={dialogs.Yes: "删除"}` 改按钮字；`choose` 多出口返回动作 key（Esc / 关闭返回 None）；`get_text` 同 `QInputDialog.getText` 返回 `(文本, 是否确定)`；`confirm_danger` 返回 bool。图标底色表示类型：info 靛蓝 / success 绿 / warning 琥珀 / error 红，`glyph` 另选图形（rewind / trash / folder …）。路径和报错放 `detail`（灰色等宽框，带「复制」，长路径无空格也能折行：用 QTextEdit 不用 QLabel）
+- **键盘**：Esc = 取消（关闭按钮、Alt+F4 同）；Enter = 默认按钮——普通对话框默认主按钮，调用方给了 `default` 按它（回退对话、移除项目沿用原来的默认「取消」），焦点在别的按钮上时按那个；**危险对话框（`danger=True`）默认聚焦取消，Enter 永远等于取消**，危险按钮只能点或 Tab 过去按空格（原来「跳过权限确认」的 QMessageBox 按 Enter 就直接切了）。按钮自绘（`DialogButton`）：主窗口的全局 QSS 会继承下来，焦点环又要画在按钮外面，QSS 盒模型做不到；autoDefault 关掉，Enter 统一由对话框处理
+- **危险样式的调用点**：跳过权限确认（琥珀图标 + 红按钮「仍要切换」）、删除自定义模型。危险按钮实心 #c43d27（深色主题 #f09a8d 配深色字），对比度都过 4.5:1（测试里算）
+- **测试写法**：exec 是阻塞的，先挂带 receiver 的零秒定时器，等 `dialogs.active_dialog()` 出现再按键 / 点按钮（`test_themed_dialogs.drive`），另挂 5 秒安全阀防卡死；只想跳过弹窗的用例 patch `dialogs.ThemedDialog.exec` 或 `dialogs.get_text`。offscreen 下 `QTest.keyClicks` 打中文字符会卡住，输入框用 `setText`
+
+## 侧栏浏览器（src/browser/ + tools_browser.py + ui/browser_panel.py）
+- **模型和人共用一个页面**：浏览器在文件面板里开一个「浏览器」标签（`BrowserView`），嵌的就是 `page.get_browser().view`，模型的导航 / 点击在面板里实时可见。**懒加载是硬约束**：`browser/`、`tools_browser.py`、`browser_panel.py` 顶层都不 import QtWebEngine*，profile / page / view 等到第一次 `browser_open` 或手动点开标签才在主线程构造，不用浏览器就不存在
+- **profile 常驻、off-the-record、NoCache**：`page._get_profile()` 不传 storageName（只在内存、不落盘）、不设 parent（模块持有；offscreen 下进程退出前销毁用过的 profile 会触发上游 Qt 段错误），关浏览器只销毁 view/page。关闭时清 cookie、HTTP 缓存、visited links；localStorage 没有清除 API，留到进程退出。安全默认值：下载、新窗口、alert/confirm/prompt、摄像头/麦克风/定位/通知一律拒，`acceptNavigationRequest` 只放 http(s) 和 about:blank
+- **每次导航前清渲染进程的内存缓存**：NoCache 管不到 Blink 的内存缓存，它按 Last-Modified 认为旧脚本"还新鲜"——改完 app.js 重开同一地址、加 `?v=2`、Reload 都还跑旧代码（评测 012）。`bridge._clear_cache_then_load` 先 `clearHttpCache()`，等 `clearHttpCacheCompleted` 再 `page.load`（2 秒兜底）。**导航在途时不清**（`_page_loading`）：这时发同步 IPC 会堵死导航；新页面 / about:blank 也直接 load。关浏览器后的清缓存同理，轮询到桥空闲再清
+- **tree.js 注入隔离世界**：`QWebEngineScript` 在 DocumentCreation、ApplicationWorld、含子 frame 注入，页面脚本看不到也改不了 `window.__lx`，闸门用的 info/state 才可信；`runJavaScript` 必须用同一个 worldId。隔离世界拦不到页面的 `console.*`，页面控制台走 `ConsolePage.javaScriptConsoleMessage` 这条 Python 通道
+- **worker ↔ 主线程的桥**（`bridge.py`）：工具跑在 worker 线程，`call()` 经 Signal 投到主线程（`BrowserBridge` 建好后 `moveToThread(app.thread())`），自己在 `threading.Event` 上每 0.3s 分片等待、看 `stop_flag`，点停止立刻发 cancel 返回。**不能在主线程调 `call()`**：请求排在主线程事件队列里，主线程却在 `ev.wait` 上等它，死锁。`open` 也不嵌套 QEventLoop——嵌套期间主线程会处理关窗等事件，窗口关掉后访问已删除控件会崩；改成 loadFinished 回调写结果 + 带 receiver 的 QTimer 管超时
+- **ref 跨文档单调递增、执行时核对 docId**：tree.js 每个文档生成一个 `docId`，ref（`e12`）在同一文档里稳定复用；桥用 `_ref_seed` 记已发过的最大编号、下一个文档接着往上数，换页后旧编号不会撞上新元素。`tools_browser._issued` 登记每个 ref 签发时的 docId，`click/type` 执行前先比对当前 docId，换了文档或配错 frame 一律报"ref 已失效"
+- **有后果的操作走权限闸门**：`security.decide_action` 按权限模式 × 动作分级 × 来源（本机 / 已授权来源 / 其它）给出 allow / ask / ask_always / block，要问就调 `ui.confirm_command(kind=KIND_BROWSER)`，没界面 fail-closed。`click/type` 先取元素 info，`is_consequential` 判定提交按钮 / POST 表单 / 回车提交，有后果每次都问、不给记住。浏览器**不套 fetch_url 的内网拦截**（localhost 正是主用途），内网风险靠只读导航 + 动作确认控
+- **页面内容放在 untrusted 围栏里**：`tree.fence` 把页面文字包进 `<browser-content url="…" untrusted>`，正文里伪造的 `</browser-content>` 会被转义，不能把后续文字送出围栏。动作默认附 all 模式前后的"变化行 diff"（`tree.compute_delta`），空 diff 等异步渲染再补一次，view 隐藏时 settle 更久（定时器被节流）
+- **控制台按加载序号 nav 分段**：`ConsolePage` 每次 loadStarted 把 `nav_seq` 加一，控制台条目都带 `nav`；`browser_console` 默认只给最近一次加载的，改好代码重开后不会再看到上一次的旧报错。浏览器检查能顶替测试结论的条件见 [undo-and-verification.md](undo-and-verification.md)
 
 ## 持久化文件
 | 文件 | 内容 |

@@ -19,7 +19,7 @@ Agent 工具调用 · 写盘确认闸门 · 改完自检的验证闭环 · RAG �
 | [background.md](docs/architecture/background.md) | 后台进程管理（B10a）、后台任务面板（B10b） | `background.py` `ui/background_panel.py` |
 | [undo-and-verification.md](docs/architecture/undo-and-verification.md) | 文件改动的安全撤销（B11a）、验证闭环与自动修复 | `file_history.py` `file_transaction.py` `verification.py`，以及写盘工具 |
 | [tools.md](docs/architecture/tools.md) | 工具列表、计划稳定性、改后自我校验 | `tools*.py`：新增或修改工具 |
-| [subsystems.md](docs/architecture/subsystems.md) | 子 Agent 与 worktree、代码导航、持久化、会话历史、角色卡、托盘、MCP、RAG、长期记忆、持久化文件清单 | `subagent.py` `worktree.py` `lsp_client.py` `codeintel.py` `memory*.py` `mcp_client.py` `rag/` `floating.py` |
+| [subsystems.md](docs/architecture/subsystems.md) | 子 Agent 与 worktree、代码导航、持久化、会话历史、角色卡、托盘、MCP、RAG、长期记忆、侧栏浏览器、主题弹窗、持久化文件清单 | `subagent.py` `worktree.py` `lsp_client.py` `codeintel.py` `memory*.py` `mcp_client.py` `rag/` `floating.py` `browser/` `tools_browser.py` `ui/browser_panel.py` `ui/dialogs.py` |
 
 `docs/architecture/` 跟代码一起改、一起提交；`docs/` 下其余资料（规格、方案、评审记录）只在本地，不进仓库。
 
@@ -70,6 +70,7 @@ python scripts/replay_sessions.py
 - **新增 UI 子模块**：`src/ui/` 下放，注意从 `..` 引父包（`from .. import agent`），从 `.` 引同级（`from .theme import ...`）；`__init__.py` 只对外暴露 `ChatUI` / `SettingsDialog`
 
 ### Qt 相关
+- **弹窗一律用 `src/ui/dialogs.py`**（主题卡片 + 遮罩，API 对齐 QMessageBox / QInputDialog），`src/ui/` 里不许再出现 QMessageBox / QInputDialog（有测试守着）；删除、跳过权限确认这类危险操作用 `confirm_danger`（默认聚焦取消、Enter 等于取消）。QFileDialog 保留原生
 - 高 DPI：`QT_ENABLE_HIGHDPI_SCALING=1` + `setHighDpiScaleFactorRoundingPolicy(PassThrough)`
 - 任务栏图标：`SetCurrentProcessExplicitAppUserModelID("lingxi.ai.desktop")`
 - QTextBrowser **不支持 `<style>`**，Markdown HTML 必须 inline 样式

@@ -46,7 +46,8 @@ def test_search_settings_save_and_apply_without_restart(tmp_path, monkeypatch):
     """设置 → 高级 → 网络搜索：保存写进 config.json，并立即反映到运行中的程序（web_search 每次
     调用才读这几个值），不用重启。"""
     import json
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
+    from src.ui import dialogs
     from src import config
     from src.ui import settings_dialog as sd
 
@@ -54,7 +55,7 @@ def test_search_settings_save_and_apply_without_restart(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps({"web_search_api_key": "tvly-old"}), encoding="utf-8")
     monkeypatch.setattr(sd, "CONFIG_PATH", str(cfg_path))
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)       # 不弹"已保存"
+    monkeypatch.setattr(dialogs.ThemedDialog, "exec", lambda self: 0)       # 不弹"已保存"
     for name in ("WEB_SEARCH_API_KEY", "BOCHA_API_KEY", "WEB_SEARCH_PROVIDER", "WEB_SEARCH_DEEP"):
         monkeypatch.setattr(config, name, getattr(config, name))   # 测完还原
 
@@ -79,7 +80,8 @@ def test_search_settings_save_and_apply_without_restart(tmp_path, monkeypatch):
 def test_context_trim_line_is_a_setting(tmp_path, monkeypatch):
     """设置 → 高级 → 上下文长度：回收线能填、存成数字；没填过显示默认值，乱填回落默认。"""
     import json
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
+    from src.ui import dialogs
     from src.limits import CONTEXT_TRIM_TOKENS_DEFAULT
     from src.ui import settings_dialog as sd
 
@@ -87,7 +89,7 @@ def test_context_trim_line_is_a_setting(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(sd, "CONFIG_PATH", str(cfg_path))
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(dialogs.ThemedDialog, "exec", lambda self: 0)
 
     dlg = sd.SettingsDialog()
     assert dlg.fields["context_trim_tokens"].text() == str(CONTEXT_TRIM_TOKENS_DEFAULT)

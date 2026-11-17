@@ -17,10 +17,11 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .. import agent
+from . import dialogs
 
 
 class RagSidebarMixin:
@@ -317,18 +318,18 @@ class RagSidebarMixin:
             self._refresh_kb_status()   # 切换目录后立即刷新（通常显示「需要重建」）
             self._show_toast("已设知识库目录，点「重建索引」开始建库")
         else:
-            QMessageBox.warning(self, "知识库", "写入 config.json 失败，请检查文件权限。")
+            dialogs.critical(self, "知识库目录没保存", "写入 config.json 失败，请检查文件权限。")
 
     def _kb_reindex(self):
         from .. import config
         if getattr(self, "_kb_reindexing", False):
             return   # 防重复任务（按钮已禁用，双保险）
         if not config.RAG_KB_DIR:
-            QMessageBox.information(self, "知识库", "请先选择知识库目录（选择目录）。")
+            dialogs.information(self, "知识库", "请先选择知识库目录（选择目录）。")
             return
         if not config.RAG_EMBED_API_KEY:
-            QMessageBox.warning(self, "知识库",
-                                "缺 embedding key（默认复用 qwen_api_key），请在 config.json 配置。")
+            dialogs.warning(self, "知识库",
+                            "缺 embedding key（默认复用 qwen_api_key），请在 config.json 配置。")
             return
         # 开始前快照全部配置：worker 全程用快照（不读活配置），完成时校验快照是否仍与
         # 当前配置一致——期间配置被改（手工编辑 config 等）则结果标过期，不冒充成功。

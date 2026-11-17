@@ -19,8 +19,8 @@ import os
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
-    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 from langchain_core.messages import SystemMessage
 
@@ -28,6 +28,7 @@ from .. import agent
 from .. import state
 from ..limits import SIDEBAR_GROUP_VISIBLE_INITIAL, SIDEBAR_GROUP_VISIBLE_STEP
 from ._base import BASE_DIR
+from . import dialogs
 from .widgets import HistoryRow
 
 
@@ -488,26 +489,21 @@ class SidebarMixin:
         a_remove.setIcon(self._svg_icon("trash_lucide.svg", self._t("menu_text")))
 
         def _do_remove():
-            reply = QMessageBox.question(
-                self, "移除项目",
-                f"从列表移除「{_projects.get_current_name() if _projects.get_current() == project_path else os.path.basename(project_path)}」？\n\n"
-                "（不会删除磁盘上的项目文件；该项目下的历史会话会一并归到「无项目（全局）」。）",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
+            name = (_projects.get_current_name() if _projects.get_current() == project_path
+                    else os.path.basename(project_path))
+            if not self._confirm_remove_project(name, project_path):
                 return
             # 先从注册表移除项目；【成功后】再把它名下会话归到"无项目"。顺序反过来能避免
             # 移除存盘失败时出现"会话已归无项目、项目却还在列表"的不一致。
             if not _projects.remove_project(project_path):
-                QMessageBox.warning(
+                dialogs.warning(
                     self, "移除项目",
                     "移除未能保存（磁盘 / 权限问题），项目保持不变，请稍后重试。")
                 return
             try:
                 agent.move_sessions_to_no_project(project_path)
             except Exception:
-                QMessageBox.warning(
+                dialogs.warning(
                     self, "移除项目",
                     "项目已移除；个别会话的归类文件未能即时写入，已在内存中修正，下次保存会自动写正。")
             # 如果删除的是当前激活项目，切到无项目
@@ -533,8 +529,7 @@ class SidebarMixin:
 
     def _rename_session_dialog(self, session_id, old_title):
         """弹输入框改名：非空校验 → agent.rename_session（三处一起改）→ 刷新侧栏。"""
-        text, ok = QInputDialog.getText(
-            self, "重命名会话", "会话标题：", QLineEdit.Normal, old_title or "")
+        text, ok = dialogs.get_text(self, "重命名会话", "会话标题", old_title or "")
         if not ok:
             return
         text = (text or "").strip()
@@ -903,8 +898,7 @@ class SidebarMixin:
         # 2. 切换项目（全局当前项目 + tools 项目根）。持久化失败时提醒用户：内存里仍切
         #    过去（不打断操作），但重启可能回到旧项目，让用户知情而非静默不一致。
         if not _projects.set_current(path):
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "项目切换",
                 "项目切换未能保存（磁盘 / 权限问题）。本次仍会切换，但重启后可能恢复为原项目。")
         state.current_project = path
@@ -951,32 +945,36 @@ class SidebarMixin:
             normalized = os.path.normpath(path).replace("\\", "/")
             self._switch_project(normalized)
         else:
-            QMessageBox.warning(self, "添加失败", "该项目已存在或路径无效。")
+            dialogs.warning(self, "添加失败", "该项目已存在或路径无效。", detail=path,
+                            detail_label="选择的目录")
+
+    def _confirm_remove_project(self, name, path):
+        """移除项目前确认：默认「取消」（Enter 等于取消），和原来原生确认框的默认「否」一致。"""
+        return dialogs.question(
+            self, "移除项目？", f"从列表移除项目「{name}」？",
+            dialogs.Yes | dialogs.No, dialogs.No,
+            labels={dialogs.Yes: "移除", dialogs.No: "取消"}, tone="warning", glyph="folder",
+            detail=path, detail_label="项目目录",
+            footnote="不会删除磁盘上的项目文件；该项目下的历史会话会一并归到「无项目（全局）」。",
+        ) == dialogs.Yes
 
     def _remove_current_project(self):
         from .. import projects as _projects
         current = _projects.get_current()
         if not current:
             return
-        reply = QMessageBox.question(
-            self, "移除项目",
-            f"从列表移除项目「{_projects.get_current_name()}」？\n\n"
-            "（不会删除磁盘上的项目文件；该项目下的历史会话会一并归到「无项目（全局）」。）",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
+        if not self._confirm_remove_project(_projects.get_current_name(), current):
             return
         # 先移除项目；成功后再迁移会话——避免移除存盘失败时"会话已归无项目、项目仍在"的不一致。
         if not _projects.remove_project(current):
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "移除项目",
                 "移除未能保存（磁盘 / 权限问题），项目保持不变，请稍后重试。")
             return
         try:
             agent.move_sessions_to_no_project(current)
         except Exception:
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "移除项目",
                 "项目已移除；个别会话的归类文件未能即时写入，已在内存中修正，下次保存会自动写正。")
         self._switch_project(None)

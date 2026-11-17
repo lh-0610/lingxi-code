@@ -4,7 +4,7 @@
 """
 import os
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 
 from .. import state
 
@@ -315,32 +315,28 @@ class RunResultMixin:
 
     def _show_resume_blocked(self, sess, view, card, pre):
         """预检没过：说清原因，给出能走的下一步（改用当前模型 / 重新选择项目目录）。"""
-        from PySide6.QtWidgets import QApplication, QMessageBox
-        box = QMessageBox(self)
-        box.setWindowTitle("暂时无法继续任务")
-        box.setIcon(QMessageBox.Warning)
-        box.setText("继续之前需要先处理：\n\n" + "\n".join(f"• {b}" for b in pre.blocking))
-        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        use_current = relocate = copy_path = None
+        from PySide6.QtWidgets import QApplication
+        from . import dialogs
+        actions = []
         if pre.model_missing and not pre.project_missing:
             from ..models import MODEL_LIST
             idx = int(getattr(sess, "current_model_index", 0) or 0)
             name = MODEL_LIST[idx][0] if 0 <= idx < len(MODEL_LIST) else "当前模型"
-            use_current = box.addButton(f"改用当前模型「{name}」继续", QMessageBox.AcceptRole)
+            actions.append(("use_current", f"改用当前模型「{name}」继续", dialogs.PRIMARY))
         if pre.project_missing:
-            relocate = box.addButton("重新选择项目目录…", QMessageBox.ActionRole)
-            copy_path = box.addButton("复制原路径", QMessageBox.ActionRole)
-        box.addButton("关闭", QMessageBox.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
+            actions.append(("relocate", "重新选择项目目录…", dialogs.SECONDARY))
+            actions.append(("copy_path", "复制原路径", dialogs.SECONDARY))
+        actions.append(("close", "关闭", dialogs.TEXT))
+        clicked = dialogs.choose(self, "暂时无法继续任务", "继续之前需要先处理：", actions,
+                                 bullets=list(pre.blocking))
         if clicked is None:
             return
-        if clicked is use_current:
+        if clicked == "use_current":
             self._on_result_continue(view, card=card, accept_current_model=True)
-        elif clicked is copy_path:
+        elif clicked == "copy_path":
             QApplication.clipboard().setText(pre.project_missing)
             self._show_toast("已复制原项目路径")
-        elif clicked is relocate:
+        elif clicked == "relocate":
             self._resume_relocate_project(sess, view, card, pre.project_missing)
 
     def _resume_relocate_project(self, sess, view, card, old_path):
@@ -349,8 +345,9 @@ class RunResultMixin:
         不核对就改挂，等于允许把一个会话的未验证改动、恢复说明套到另一个项目上——
         方案要求"实际指向另一个项目时阻止直接继续"，这里就是那道闸。
         """
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from PySide6.QtWidgets import QFileDialog
         from .. import session as _session
+        from . import dialogs
         picked = QFileDialog.getExistingDirectory(self, "选择项目现在的位置", "")
         if not picked:
             return
@@ -359,17 +356,18 @@ class RunResultMixin:
             return
 
         def _confirm(why, path):
-            reply = QMessageBox.question(
-                self, "无法确认是同一个项目",
-                f"{why}。\n\n仍要把这个会话改到下面的目录吗？\n{path}\n\n"
-                "（继续后会重新核对现场，并要求补跑测试、查看改动。）",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            return reply == QMessageBox.Yes
+            return dialogs.question(
+                self, "无法确认是同一个项目", f"{why}。仍要把这个会话改到下面的目录吗？",
+                dialogs.Yes | dialogs.No, dialogs.No,
+                labels={dialogs.Yes: "仍要改到这里", dialogs.No: "取消"},
+                tone="warning", glyph="warning", detail=path, detail_label="新位置",
+                footnote="继续后会重新核对现场，并要求补跑测试、查看改动。",
+            ) == dialogs.Yes
 
         ok, message = self._relocate_session_project(sess, picked, confirm=_confirm)
         if not ok:
             if message:
-                QMessageBox.warning(self, "没有修改项目位置", message)
+                dialogs.warning(self, "没有修改项目位置", message)
             return
         if message:
             self._show_toast(message, 3000)

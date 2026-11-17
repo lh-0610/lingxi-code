@@ -90,15 +90,12 @@ class TimelineMixin:
         return edit.toPlainText().strip()
 
     def _confirm_rewind(self):
-        from PySide6.QtWidgets import QMessageBox
-        box = QMessageBox(self)
-        box.setWindowTitle("回退对话")
-        box.setIcon(QMessageBox.Question)
-        box.setText("回退将丢弃这一轮及之后的所有对话。")
-        box.setInformativeText("磁盘上的文件改动不会被撤销（要撤销文件请用顶栏的「撤销」）。继续？")
-        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        box.setDefaultButton(QMessageBox.Cancel)
-        return box.exec() == QMessageBox.Ok
+        from . import dialogs
+        return dialogs.question(
+            self, "回退对话？", "回退将丢弃这一轮及之后的所有对话。",
+            dialogs.Ok | dialogs.Cancel, dialogs.Cancel, labels={dialogs.Ok: "回退"},
+            informative="磁盘上的文件改动不会被撤销，要撤销文件请用顶栏的「撤销」。",
+            glyph="rewind") == dialogs.Ok
 
     def _on_user_edit(self, index):
         sess = _session.get_active()

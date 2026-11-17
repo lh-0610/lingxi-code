@@ -105,12 +105,12 @@ class TestRenameUI:
         assert all(b.contextMenuPolicy() == Qt.CustomContextMenu for b in btns)
 
     def test_rename_dialog_updates_disk_and_sidebar(self, chat_ui, qt_app, project_dir, monkeypatch):
-        from PySide6.QtWidgets import QInputDialog, QPushButton
+        from PySide6.QtWidgets import QPushButton
+        from src.ui import dialogs
         import json
         from src.paths import memory_dir
         s = _save("旧标题", [HumanMessage(content="hi"), AIMessage(content="yo")])
-        monkeypatch.setattr(QInputDialog, "getText",
-                            staticmethod(lambda *a, **k: ("新名字", True)))
+        monkeypatch.setattr(dialogs, "get_text", lambda *a, **k: ("新名字", True))
         chat_ui._rename_session_dialog(s.current_session_id, "旧标题")
         qt_app.processEvents()
         data = json.loads(open(os.path.join(memory_dir(), f"{s.current_session_id}.json"),
@@ -124,10 +124,9 @@ class TestRenameUI:
         assert "新名字" in tips
 
     def test_rename_empty_shows_toast(self, chat_ui, project_dir, monkeypatch):
-        from PySide6.QtWidgets import QInputDialog
+        from src.ui import dialogs
         s = _save("旧", [HumanMessage(content="hi"), AIMessage(content="yo")])
-        monkeypatch.setattr(QInputDialog, "getText",
-                            staticmethod(lambda *a, **k: ("   ", True)))
+        monkeypatch.setattr(dialogs, "get_text", lambda *a, **k: ("   ", True))
         toasts = []
         monkeypatch.setattr(chat_ui, "_show_toast", lambda t, d=1500: toasts.append(t))
         chat_ui._rename_session_dialog(s.current_session_id, "旧")
@@ -135,23 +134,21 @@ class TestRenameUI:
         assert s.current_session_title == "旧"     # 未改
 
     def test_rename_cancel_noop(self, chat_ui, project_dir, monkeypatch):
-        from PySide6.QtWidgets import QInputDialog
+        from src.ui import dialogs
         s = _save("旧", [HumanMessage(content="hi"), AIMessage(content="yo")])
-        monkeypatch.setattr(QInputDialog, "getText",
-                            staticmethod(lambda *a, **k: ("随便", False)))
+        monkeypatch.setattr(dialogs, "get_text", lambda *a, **k: ("随便", False))
         chat_ui._rename_session_dialog(s.current_session_id, "旧")
         assert s.current_session_title == "旧"
 
     def test_rename_current_session_syncs_state(self, chat_ui, project_dir, monkeypatch):
-        from PySide6.QtWidgets import QInputDialog
+        from src.ui import dialogs
         from src import state, session as sm
         s = sm.get_active()
         s.chat_history = [SystemMessage(content="sys"), HumanMessage(content="hi"),
                           AIMessage(content="yo")]
         from src import memory
         memory.save_session(session=s)
-        monkeypatch.setattr(QInputDialog, "getText",
-                            staticmethod(lambda *a, **k: ("当前会话新名", True)))
+        monkeypatch.setattr(dialogs, "get_text", lambda *a, **k: ("当前会话新名", True))
         chat_ui._rename_session_dialog(s.current_session_id, "新对话")
         assert state.current_session_title == "当前会话新名"
 

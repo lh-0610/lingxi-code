@@ -17,13 +17,14 @@ import os
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QMenu, QMessageBox,
+    QFileDialog, QHBoxLayout, QLabel, QMenu,
     QPushButton, QWidget,
 )
 
 from .. import agent
 from ..paths import logger
 from ._base import BASE_DIR
+from . import dialogs
 from .helpers import _make_upload_icon
 
 
@@ -418,7 +419,7 @@ class HeaderMixin:
                 self._refresh_header_compactness()
                 self._append_html(f"已加载角色卡: {display_name}\n\n", "tool_result")
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"读取角色卡失败: {e}")
+                dialogs.critical(self, "读取角色卡失败", "这个角色卡文件读不出来。", detail=str(e))
 
         # 弹出菜单：roles/ 快捷切换 / 导入 / 清除
         menu = QMenu(self)

@@ -10,12 +10,13 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTabWidget, QTextEdit,
+    QLineEdit, QPushButton, QScrollArea, QTabWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
 from ._base import BASE_DIR, CONFIG_PATH
 from ..paths import APP_DIR as _APP_DIR
+from . import dialogs
 from .fonts import MONO_CSS
 from .theme import color as theme_color
 from ..limits import AGENT_MAX_ROUNDS_DEFAULT as _AGENT_MAX_ROUNDS_DEFAULT
@@ -714,13 +715,12 @@ class SettingsDialog(QDialog):
         if not (0 <= index < len(self._custom_models)):
             return
         cm = self._custom_models[index]
-        reply = QMessageBox.question(
-            self, "删除自定义模型",
-            f"确认删除「{cm.get('name', cm.get('model_id', '?'))}」？\n"
-            "这一项会从设置移除，重启后顶栏下拉里也消失。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes:
+        if dialogs.confirm_danger(
+            self, "删除自定义模型？",
+            f"确认删除「{cm.get('name', cm.get('model_id', '?'))}」？",
+            "删除", glyph="trash",
+            informative="这一项会从设置移除，重启后顶栏下拉里也消失。",
+        ):
             del self._custom_models[index]
             self._refresh_custom_models_ui()
 
@@ -1096,7 +1096,8 @@ class SettingsDialog(QDialog):
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            QMessageBox.warning(self, "保存失败", str(e))
+            dialogs.critical(self, "保存失败", "配置没能写入 config.json，请检查文件权限。",
+                             detail=str(e))
             return
 
         # 让"命令确认推手机"开关即时生效（confirm_bars 运行时读 config 模块属性）——
@@ -1122,14 +1123,12 @@ class SettingsDialog(QDialog):
 
         # 密钥 / Base URL 是启动时加载的模块常量，改完要重启才生效。给个一键重启，
         # 省掉小白"怎么重启"的困惑;重启失败则退回手动(不会把用户卡死)。
-        box = QMessageBox(self)
-        box.setWindowTitle("已保存")
-        box.setText("配置已写入 config.json。\n密钥 / Base URL 改动需要重启应用才能生效。")
-        restart_btn = box.addButton("立即重启", QMessageBox.AcceptRole)
-        box.addButton("稍后", QMessageBox.RejectRole)
-        box.exec()
+        reply = dialogs.success(
+            self, "已保存", "配置已写入 config.json。密钥和 Base URL 的改动要重启应用才生效。",
+            dialogs.Yes | dialogs.No, dialogs.Yes,
+            labels={dialogs.Yes: "立即重启", dialogs.No: "稍后"})
         self.accept()
-        if box.clickedButton() is restart_btn:
+        if reply == dialogs.Yes:
             import sys
             from PySide6.QtCore import QProcess
             from PySide6.QtWidgets import QApplication
@@ -1148,7 +1147,7 @@ class SettingsDialog(QDialog):
     def _open_path(self, path):
         import subprocess
         if not os.path.exists(path):
-            QMessageBox.warning(self, "找不到", f"路径不存在：\n{path}")
+            dialogs.warning(self, "找不到", "路径不存在。", detail=path, detail_label="路径")
             return
         try:
             if sys.platform == "win32":
@@ -1159,21 +1158,19 @@ class SettingsDialog(QDialog):
                 subprocess.run(["xdg-open", path], check=False,
                                stdin=subprocess.DEVNULL)
         except Exception as e:
-            QMessageBox.warning(self, "打开失败", str(e))
+            dialogs.critical(self, "打开失败", "没能打开这个路径。", detail=str(e))
 
     def _about(self):
         from .. import __version__ as _ver
-        QMessageBox.about(
-            self, "关于灵犀",
-            "<div style='min-width:280px'>"
-            "<h2 style='margin:0'>灵犀 AI 助手</h2>"
-            "<p style='color:#888;margin:4px 0 14px 0'>多模型 AI 桌面客户端</p>"
+        dialogs.information(
+            self, "灵犀 AI 助手",
+            "<p style='margin:0 0 10px 0'>多模型 AI 桌面客户端</p>"
             f"<p><b>版本</b>：{_ver}</p>"
             "<p><b>技术栈</b>：LangChain + PySide6</p>"
             "<p><b>支持上游</b>：MiMo · Qwen · Claude · DeepSeek · Responses(DeepSeek V4) · Ollama · Claude Code</p>"
             "<p><b>本地能力</b>：多角色卡 · 持久化记忆 · MCP 工具</p>"
-            "<p style='margin-top:16px'><a href='https://github.com/'>GitHub 源码</a></p>"
-            "</div>"
+            "<p style='margin-top:12px'><a href='https://github.com/'>GitHub 源码</a></p>",
+            rich_text=True, single_ok_label="知道了",
         )
 
     # ── 样式 ──
@@ -1375,10 +1372,10 @@ class _CustomModelEditor(QDialog):
         name = self.f_name.text().strip()
         model_id = self.f_model_id.text().strip()
         if not name:
-            QMessageBox.warning(self, "缺字段", "请填「显示名」。")
+            dialogs.warning(self, "缺字段", "请填「显示名」。")
             return
         if not model_id:
-            QMessageBox.warning(self, "缺字段", "请填「Model ID」。")
+            dialogs.warning(self, "缺字段", "请填「Model ID」。")
             return
         self.result_data = {
             "name": name,

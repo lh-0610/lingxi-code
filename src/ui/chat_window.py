@@ -2103,17 +2103,19 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._show_toast(f"已切到「{_pm.name(mode)}」：{_pm.describe(mode)}", 3000)
 
     def _confirm_bypass_mode(self) -> bool:
-        from PySide6.QtWidgets import QMessageBox
-        box = QMessageBox(self)
-        box.setWindowTitle("跳过权限确认")
-        box.setIcon(QMessageBox.Warning)
-        box.setText("切换后，这个会话里 AI 改文件、执行任何命令都不再问你，包括删除文件、"
-                    "Git 提交和推送、调用 MCP 工具。\n\n只建议在你信得过、能随时撤回的项目里用。"
-                    "这个模式不会被记住：重开程序或新建会话会回到原来的模式。")
-        ok = box.addButton("仍要切换", QMessageBox.AcceptRole)
-        box.addButton("取消", QMessageBox.RejectRole)
-        box.exec()
-        return box.clickedButton() is ok
+        # 危险样式：默认聚焦「取消」、Enter 等于取消，只有点「仍要切换」才切
+        from .. import session as _session
+        from . import dialogs
+        project = _session.current_project()
+        return dialogs.confirm_danger(
+            self, "跳过权限确认？",
+            "切换后，这个会话里 AI 改文件、执行任何命令都不再问你，包括删除文件、"
+            "Git 提交和推送、调用 MCP 工具。",
+            "仍要切换", tone="warning", glyph="warning",
+            detail=f"当前会话 · {project}" if project else "当前会话 · 无项目（全局）",
+            detail_label="作用范围", copyable=False,
+            footnote="只建议在你信得过、能随时撤回的项目里用。这个模式不会被记住："
+                     "重开程序或新建会话会回到原来的模式。")
 
     def _add_pending_image(self, path):
         try:

@@ -31,6 +31,13 @@ src/                     # 主代码
   background.py          # 后台命令唯一注册表（B10a）：冻结归属 / 结构化快照 / 有界停止 / 有界输出；工具与后续面板共用
   tools_git.py           # git 工具：git_diff/log/status/stage/unstage/commit（写操作弹确认、无 push）
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
+  tools_browser.py       # 侧栏浏览器的 8 个工具（open/snapshot/find/read_text/click/type/console/close）：确认闸门在工具内部 + ref 签发登记（核对 docId）+ 页面文字围 untrusted + 动作前后变化行 diff + 浏览器检查证据
+  browser/               # 侧栏浏览器（模型和人共用一个页面；懒加载，顶层不 import WebEngine；详见 subsystems.md「侧栏浏览器」节）
+    page.py              # 常驻 off-the-record profile（NoCache）+ 注入 tree.js + ConsolePage（控制台按加载序号 nav 记、弹框/新窗口/下载/非 http(s) 一律拦）+ get_browser/close_browser
+    bridge.py            # worker ↔ 主线程的非阻塞桥（Signal 投递 + Event 分片等待、响应停止）；open 前清渲染进程内存缓存；ref 编号种子跨文档单调递增
+    security.py          # 纯逻辑：网址规则（只许 http/https）、来源授权与动作分级、有后果动作判定（提交/POST/回车）
+    tree.py              # 纯逻辑：变化行 diff、untrusted 围栏（转义伪造的结束标签）、字符上限
+    tree.js              # 注入到隔离世界的可访问性文字树：snapshot/find/click/type/readText/console/state/info，每文档一个 docId
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
   llm_errors.py          # 模型请求错误分类（限流/上下文溢出/鉴权/瞬时）+ Retry-After 解析 + 重试策略
   run_records.py         # 运行身份（run_id/来源/终态）+ 统一 begin/finalize + inflight sidecar + 完成回执 + 待验证义务归一化 + 结果快照
@@ -81,6 +88,7 @@ src/                     # 主代码
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
     queue_panel.py       # 输入队列面板（B09b）：排队 N 条 / 暂停横幅 / 编号列表 / 已发送折叠，只画不判
     task_panel.py        # 停靠在窗口右侧的任务面板与限制编辑对话框（B05）：要求/计划/执行状态/验证证据，可撤销横幅，硬预算校验
+    browser_panel.py     # 文件面板里的「浏览器」标签：地址栏 + 模型正在操作的徽标 + 嵌入 page.get_browser().view（和模型操作同一个页面）+ F12 开发者工具
     file_panel.py        # 停靠在对话区右侧的文件面板：点改动的文件 / 点正文里的文件路径开标签页（同一个文件不重复开），顶部路径、正文带行号、新增绿/删除红，带行号打开时滚到那一行，只画不判（差异由 ChatUI 用 tools_git.file_diff_lines 取好交进来）
     syntax_highlight.py  # 文件面板的语法高亮：tree-sitter 划出每行的「哪一段是哪一类」，只回字符范围不碰 Qt / 主题；Python / JS / TS / TSX 用单语言包的 highlights.scm，其余语言按节点类型名分类，认不出语言 / 没语法库 / 太大就返回空（照原样显示）
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
@@ -89,7 +97,8 @@ src/                     # 主代码
     sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组）+ 项目添加/切换/移除 + 会话行右键重命名 + 跨会话搜索框（标题/正文，worker 扫描经 bridge.session_search_done 回主线程渲染结果，点击跳转）
     header.py            # HeaderMixin：顶栏（撤销/隔离/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描。模型与思考强度已挪到输入框底栏的模型按钮（model_btn / _show_model_menu）。计划|执行同样在底栏的模式按钮
     debug_inspector.py   # F12 调试弹窗（请求/响应/usage 可视化）
-    theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
+    dialogs.py           # 主题弹窗（取代原生 QMessageBox / QInputDialog）：遮罩 + 宽 440 圆角 14 的卡片，question / confirm_danger / success / critical / information / warning / choose（多出口）/ get_text（输入），返回值对齐 QMessageBox；详见 subsystems.md「主题弹窗」节
+    theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色，dlg_* 是主题弹窗的）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
     widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / CloseConfirmDialog / FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）
     settings_dialog.py   # 设置弹窗（provider 卡片式 API key + 自定义模型增删改）
     helpers.py           # _make_button_icon / _build_image_content_block / _escape
