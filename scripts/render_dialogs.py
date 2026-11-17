@@ -116,6 +116,7 @@ def main(out_dir):
             open_it()
     saved += _render_dock(app, ui, out_dir)
     saved += _render_browser(app, ui, out_dir)
+    saved += _render_menus(app, ui, out_dir)
     ui.close()
     app.processEvents()
     ui.deleteLater()
@@ -230,6 +231,78 @@ def _render_browser(app, ui, out_dir):
         srv.shutdown()
         with bg._LOCK:
             bg._tasks.pop(bg_id, None)
+    return shots
+
+
+def _render_menus(app, ui, out_dir):
+    """第 5 批：右键菜单（输入框 / 聊天记录 / 网页），菜单截图叠在主窗口截图上。"""
+    from PySide6.QtCore import QPoint as _P
+    from PySide6.QtGui import QTextCursor
+
+    from src.ui import context_menus as cm
+    from src.ui.message_view import BodyText
+
+    class _Req:
+        def __init__(self, link="", sel=""):
+            self._l, self._s = link, sel
+
+        def linkUrl(self):
+            from PySide6.QtCore import QUrl
+            return QUrl(self._l)
+
+        def selectedText(self):
+            return self._s
+
+        def isContentEditable(self):
+            return False
+
+        def editFlags(self):
+            return 0
+
+    shots = []
+    ui.resize(1180, 760)
+    for theme_name in ("light", "dark"):
+        if ui.theme != theme_name:
+            ui.theme = theme_name
+            ui._apply_theme()
+            ui._redraw_chat()
+        ui.entry.setPlainText("把登录超时的重试补上，连续失败三次后提示用户检查网络。")
+        cur = ui.entry.textCursor()
+        cur.setPosition(11)
+        cur.setPosition(21, QTextCursor.MoveMode.KeepAnchor)
+        ui.entry.setTextCursor(cur)
+        ui._render_markdown("已在后台启动 `npm run dev`，地址是 http://localhost:5173/ ，右侧「后台」里能看到输出。")
+        app.processEvents()
+        body = ui.chat_area.findChildren(BodyText)[-1]
+        body.setProperty("lx_hover_link", "http://localhost:5173/")
+        body.setSelection(10, 20)
+        menus = [
+            ("18_menu_input", cm.build_text_menu(ui.entry, _P(10, 10)), ui.entry),
+            ("19_menu_chat", cm.build_text_menu(body, _P(10, 10)), body),
+        ]
+        ui.file_panel.open_browser("")
+        _wait(app, lambda: ui.file_panel._browser_view is not None, 5)
+        view = ui.file_panel._browser_view
+        menus.append(("20_menu_page", view.build_page_menu(_Req()), view))
+        menus.append(("21_menu_link", view.build_page_menu(_Req("http://localhost:5173/docs",
+                                                                 "token 和过期时间")), view))
+        for name, menu, anchor in menus:
+            menu.popup(anchor.mapToGlobal(_P(30, 20)))
+            _wait(app, lambda: False, 0.2)
+            base = ui.grab()
+            top = menu.grab()
+            p = QPainter(base)
+            at = anchor.mapTo(ui, _P(30, 20))
+            p.drawPixmap(at, top)
+            p.end()
+            path = os.path.join(out_dir, f"{name}_{theme_name}.png")
+            base.save(path)
+            shots.append(path)
+            menu.close()
+            menu.deleteLater()
+        ui.file_panel.close_all()
+        ui.entry.clear()
+        _wait(app, lambda: False, 0.3)
     return shots
 
 

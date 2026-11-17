@@ -380,7 +380,7 @@ class MarkdownRenderMixin:
         from PySide6.QtWidgets import QApplication
         styled_html = self._md_to_html(md_text)
         self._msg_buffers[str(len(self._msg_buffers))] = md_text
-        self.chat_area.finalize_markdown(styled_html)
+        self.chat_area.finalize_markdown(styled_html, md_text)
         self.chat_area.add_message_actions(
             on_copy=lambda t=md_text: (QApplication.clipboard().setText(t), self._show_toast("已复制")),
             on_regen=self._on_retry,

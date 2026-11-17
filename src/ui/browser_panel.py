@@ -527,6 +527,9 @@ class BrowserView(QWidget):
     # ── 嵌入 / 释放 ──────────────────────────────────────────────
     def _embed(self, view):
         self._embedded = view
+        # 网页右键菜单换成中文、跟随主题的（设计稿「右键菜单 · 浏览器网页」），不用 Chromium 的英文菜单
+        view.setContextMenuPolicy(Qt.CustomContextMenu)
+        view.customContextMenuRequested.connect(self._on_page_menu)
         self.page_split.insertWidget(0, view)
         self.page_split.setStretchFactor(0, 3)
         self.page_split.addWidget(self.devtools_panel)
@@ -882,6 +885,86 @@ class BrowserView(QWidget):
             if not focus and not self._user_typing:
                 self._set_address(self.page_url())
         return super().eventFilter(obj, event)
+
+    # ── 网页右键菜单 ────────────────────────────────────────────
+    def build_page_menu(self, req):
+        """按右键落点拼菜单：可编辑区域给编辑项，链接给链接项，选中文字给复制 / 发到输入框，
+        空白处给后退 / 前进 / 重新加载 / 复制地址 / 系统浏览器；最后都有「检查元素」。"""
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWebEngineCore import QWebEngineContextMenuRequest
+        from . import context_menus as cm
+        p = self._wired_page
+        if p is None or not shiboken6.isValid(p):
+            return None
+        wa = p.WebAction
+        menu = cm.make_menu(self)
+        link = req.linkUrl().toString() if req is not None and req.linkUrl().isValid() else ""
+        sel = (req.selectedText() if req is not None else "") or ""
+        host = cm._host()
+
+        def act(a):
+            return lambda: p.triggerAction(a)
+
+        if req is not None and req.isContentEditable():
+            flags = req.editFlags()
+            ef = QWebEngineContextMenuRequest.EditFlag
+            cm.add_item(menu, "撤销", act(wa.Undo), shortcut="Ctrl+Z", enabled=bool(flags & ef.CanUndo))
+            cm.add_item(menu, "重做", act(wa.Redo), shortcut="Ctrl+Y", enabled=bool(flags & ef.CanRedo))
+            menu.addSeparator()
+            cm.add_item(menu, "剪切", act(wa.Cut), shortcut="Ctrl+X", enabled=bool(flags & ef.CanCut))
+            cm.add_item(menu, "复制", act(wa.Copy), shortcut="Ctrl+C", enabled=bool(flags & ef.CanCopy))
+            cm.add_item(menu, "粘贴", act(wa.Paste), shortcut="Ctrl+V", enabled=bool(flags & ef.CanPaste))
+            menu.addSeparator()
+            cm.add_item(menu, "全选", act(wa.SelectAll), shortcut="Ctrl+A",
+                        enabled=bool(flags & ef.CanSelectAll))
+        elif link:
+            web = not security.validate_url(link)
+            cm.add_item(menu, "打开链接", lambda: self.navigate(link), enabled=web)
+            cm.add_item(menu, "复制链接地址", lambda: QApplication.clipboard().setText(link))
+            cm.add_item(menu, "在系统浏览器中打开链接", lambda: QDesktopServices.openUrl(QUrl(link)),
+                        enabled=web)
+            if sel:
+                menu.addSeparator()
+                cm.add_item(menu, "复制", act(wa.Copy), shortcut="Ctrl+C")
+                cm.add_item(menu, "把选中文字发到输入框",
+                            lambda: host.context_menu_quote(sel), enabled=host is not None)
+        elif sel:
+            cm.add_item(menu, "复制", act(wa.Copy), shortcut="Ctrl+C")
+            cm.add_item(menu, "把选中文字发到输入框",
+                        lambda: host.context_menu_quote(sel), enabled=host is not None)
+        else:
+            hist = p.history()
+            url = self.page_url()
+            has_page = bool(url) and not security.validate_url(url)
+            cm.add_item(menu, "后退", act(wa.Back), shortcut="Alt+←", enabled=hist.canGoBack())
+            cm.add_item(menu, "前进", act(wa.Forward), shortcut="Alt+→", enabled=hist.canGoForward())
+            cm.add_item(menu, "重新加载", lambda: self._page_action("reload"), shortcut="F5",
+                        enabled=has_page)
+            menu.addSeparator()
+            cm.add_item(menu, "复制页面地址", lambda: QApplication.clipboard().setText(url),
+                        enabled=has_page)
+            cm.add_item(menu, "在系统浏览器中打开", lambda: QDesktopServices.openUrl(QUrl(url)),
+                        enabled=has_page)
+        menu.addSeparator()
+        cm.add_item(menu, "检查元素", self._inspect_element, shortcut="F12")
+        return menu
+
+    def _on_page_menu(self, pos):
+        view = self._embedded
+        if view is None or not shiboken6.isValid(view):
+            return
+        menu = self.build_page_menu(view.lastContextMenuRequest())
+        if menu is None:
+            return
+        menu.exec(view.mapToGlobal(pos))
+        menu.deleteLater()
+
+    def _inspect_element(self):
+        """「检查元素」：开停靠的开发者工具并定位到右键点的那个元素。"""
+        self._open_devtools()
+        p = self._wired_page
+        if p is not None and shiboken6.isValid(p):
+            p.triggerAction(p.WebAction.InspectElement)
 
     # ── 开发者工具（停靠在页面下方）──────────────────────────────
     def _toggle_devtools(self):

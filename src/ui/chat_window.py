@@ -61,6 +61,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         set_active_theme(self.theme)   # 消息流按需取色，构造控件之前就要知道当前主题
         self.setStyleSheet(build_stylesheet(self.theme))
         self._apply_tooltip_style()  # QToolTip 要设到 app 级才生效
+        # 输入框 / 聊天记录 / 只读文本的右键菜单换成中文、跟随主题的（全局过滤器，装一次）
+        from PySide6.QtWidgets import QApplication as _QApp
+        from . import context_menus
+        context_menus.install(_QApp.instance(), host=self)
 
         # 设置图标
         icon_path = os.path.join(BASE_DIR, "icon.ico")
@@ -812,6 +816,27 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """
         self._open_file_in_panel(rel_path)
         self._settle_file_panel()
+
+    # ── 右键菜单（ui/context_menus）要的两个入口 ──
+    def context_menu_quote(self, text):
+        """「引用到输入框」：选中的文字按 Markdown 引用（每行前加 > ）追加到输入框末尾。"""
+        lines = [ln.rstrip() for ln in (text or "").strip().splitlines()]
+        if not lines:
+            return
+        quoted = "\n".join(("> " + ln) if ln else ">" for ln in lines) + "\n\n"
+        from PySide6.QtGui import QTextCursor
+        cur = self.entry.textCursor()
+        cur.movePosition(QTextCursor.End)
+        existing = self.entry.toPlainText()
+        if existing and not existing.endswith("\n"):
+            quoted = "\n" + quoted
+        cur.insertText(quoted)
+        self.entry.setTextCursor(cur)
+        self.entry.setFocus()
+
+    def context_menu_open_link(self, href):
+        """右键「在浏览器面板打开 / 打开」：和点链接走同一条路（本机地址进侧栏浏览器，文件进文件面板）。"""
+        self._on_file_link_clicked(href)
 
     def _on_file_link_clicked(self, href):
         """点回复正文里的文件链接（`lingxi-file:src/ui/task_panel.py:835`）。

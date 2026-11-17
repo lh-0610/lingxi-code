@@ -375,6 +375,8 @@ class BodyText(QLabel):
             f"color:{_P['text2']}; font-family:{_SANS}; font-size:14px; background:transparent;"
         )
         self.linkActivated.connect(self.link_clicked)
+        # 右键菜单要知道点在哪个链接上：QLabel 不给按位置查链接，跟着悬停记下来
+        self.linkHovered.connect(lambda href: self.setProperty("lx_hover_link", href or ""))
         self.setText(text)
 
 
@@ -1068,12 +1070,14 @@ class AssistantTurn(QWidget):
         self._cur_body_text += text
         self._cur_body.setText(_esc(self._cur_body_text).replace("\n", "<br>"))
 
-    def finalize_markdown(self, html):
-        """流式结束:把当前正文替换成渲染好的 markdown 富文本。"""
+    def finalize_markdown(self, html, md=None):
+        """流式结束:把当前正文替换成渲染好的 markdown 富文本（md 是源文，右键「复制为 Markdown」用）。"""
         self._close_think()
         if self._cur_body is None:
             self._cur_body = self._new_body()
         self._cur_body.setText(html)
+        if md:
+            self._cur_body.setProperty("lx_markdown", md)
         self.end_body()
 
     def think_start(self):
@@ -1558,8 +1562,8 @@ class MessageView(QScrollArea):
                 r.current_step = key
                 self._assistant().step(cur, key[1], "in_progress")
 
-    def finalize_markdown(self, html):
-        self._assistant().finalize_markdown(html)
+    def finalize_markdown(self, html, md=None):
+        self._assistant().finalize_markdown(html, md)
 
     def add_message_actions(self, on_copy=None, on_regen=None):
         """回复末尾的操作按钮:复制 / 重新生成(幽灵图标按钮)。"""
