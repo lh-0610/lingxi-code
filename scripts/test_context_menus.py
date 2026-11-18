@@ -329,3 +329,33 @@ def test_file_dialogs_and_other_windows_unaffected(qapp, host):
     """菜单父对象是被右键的控件，不另开窗口；过滤器只认文本类控件。"""
     w = QWidget()
     assert cm._text_target(w) is None
+
+
+def _filter_sees(qapp, monkeypatch):
+    """给一个普通 QWidget 发右键事件，返回全局过滤器有没有看到它（_text_target 被调到）。"""
+    seen = []
+    monkeypatch.setattr(cm, "_text_target", lambda obj: seen.append(obj) or None)
+    w = QWidget()
+    QApplication.sendEvent(w, QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(1, 1)))
+    w.deleteLater()
+    return bool(seen)
+
+
+def test_suspended_takes_the_global_filter_off_and_puts_it_back(qapp, monkeypatch):
+    """批量建控件（重画长会话）时摘掉全局过滤器：每个事件都进一趟 Python，重画 371 条消息
+    约 9 万个事件，把切回编码从 0.8s 拖到 1.6s（逐个提交二分实测）。可嵌套，最外层结束才装回。"""
+    cm.install(qapp)
+    assert _filter_sees(qapp, monkeypatch)
+    with cm.suspended():
+        with cm.suspended():
+            assert not _filter_sees(qapp, monkeypatch)
+        assert not _filter_sees(qapp, monkeypatch), "内层结束不能提前装回"
+    assert _filter_sees(qapp, monkeypatch), "结束后右键菜单照常"
+
+
+def test_suspended_puts_the_filter_back_even_if_rendering_fails(qapp, monkeypatch):
+    cm.install(qapp)
+    with pytest.raises(RuntimeError):
+        with cm.suspended():
+            raise RuntimeError("画到一半出错")
+    assert _filter_sees(qapp, monkeypatch)

@@ -31,13 +31,13 @@ src/                     # 主代码
   background.py          # 后台命令唯一注册表（B10a）：冻结归属 / 结构化快照 / 有界停止 / 有界输出；工具与后续面板共用
   tools_git.py           # git 工具：git_diff/log/status/stage/unstage/commit（写操作弹确认、无 push）
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
-  tools_browser.py       # 侧栏浏览器的 8 个工具（open/snapshot/find/read_text/click/type/console/close）：确认闸门在工具内部 + ref 签发登记（核对 docId）+ 页面文字围 untrusted + 动作前后变化行 diff + 浏览器检查证据
+  tools_browser.py       # 侧栏浏览器的 9 个工具（open/snapshot/find/read_text/click/type/console/close/screenshot）：确认闸门在工具内部 + ref 签发登记（核对 docId）+ 页面文字围 untrusted + 动作前后变化行 diff（文字树没变时报操作处附近的计算样式差异）+ 截图交识别模型 + 浏览器检查证据
   browser/               # 侧栏浏览器（模型和人共用一个页面；懒加载，顶层不 import WebEngine；详见 subsystems.md「侧栏浏览器」节）
-    page.py              # 常驻 off-the-record profile（NoCache）+ 注入 tree.js + ConsolePage（控制台按加载序号 nav 记、弹框/新窗口/下载/非 http(s) 一律拦）+ get_browser/close_browser
+    page.py              # 常驻 off-the-record profile（NoCache）+ 注入 tree.js + ConsolePage（控制台按加载序号 nav 记、弹框/新窗口/下载/非 http(s) 一律拦）+ get_browser/close_browser + HTTP 缓存闸门（load_url：清缓存和导航绝不重叠）
     bridge.py            # worker ↔ 主线程的非阻塞桥（Signal 投递 + Event 分片等待、响应停止）；open 前清渲染进程内存缓存；ref 编号种子跨文档单调递增
     security.py          # 纯逻辑：网址规则（只许 http/https）、来源授权与动作分级、有后果动作判定（提交/POST/回车）
     tree.py              # 纯逻辑：变化行 diff、untrusted 围栏（转义伪造的结束标签）、字符上限
-    tree.js              # 注入到隔离世界的可访问性文字树：snapshot/find/click/type/readText/console/state/info，每文档一个 docId
+    tree.js              # 注入到隔离世界的可访问性文字树：snapshot/find/click/type/readText/console/state/info + 动作前后的样式核对 watchPrepare/watchBaseline/watchReport，每文档一个 docId
   tools_codemap.py       # code_map（符号地图）/ find_tests / related_files
   llm_errors.py          # 模型请求错误分类（限流/上下文溢出/鉴权/瞬时）+ Retry-After 解析 + 重试策略
   run_records.py         # 运行身份（run_id/来源/终态）+ 统一 begin/finalize + inflight sidecar + 完成回执 + 待验证义务归一化 + 结果快照
@@ -83,7 +83,7 @@ src/                     # 主代码
     queue_dispatch.py    # QueueDispatchMixin：运行中输入队列的入队、派发与收尾（B09b）
     run_results.py       # RunResultMixin：运行结果卡（B06）与「继续任务」（B04）的 UI 侧
     timeline.py          # TimelineMixin：用户气泡的编辑/回退/分叉（后端在 memory.truncate_history/rewind_session/fork_session；只动对话与运行态，不撤销磁盘改动）
-    message_view.py      # 消息流时间线：每轮一条线串起用户消息、思考、工具卡、计划步骤分段和结果卡；新一轮开始时上一轮的过程收成一行
+    message_view.py      # 消息流时间线：每轮一条线串起用户消息、思考、工具调用（一行一条，连续的收成可折叠的组）、计划步骤分段和结果卡；新一轮开始时上一轮的过程收成一行；样式一张表 mv_qss
     fonts.py             # 字体族与字号（界面 / 等宽），全界面唯一来源
     result_card.py       # 运行结果卡控件（只画 result_view 算好的结论；判断在那边、画在这边）
     queue_panel.py       # 输入队列面板（B09b）：排队 N 条 / 暂停横幅 / 编号列表 / 已发送折叠，只画不判
@@ -94,14 +94,14 @@ src/                     # 主代码
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理；行内代码里的项目文件路径在这里变成 lingxi-file: 链接（只认真实存在的文件，代码块不处理）
     search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开）
-    sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组）+ 项目添加/切换/移除 + 会话行右键重命名 + 跨会话搜索框（标题/正文，worker 扫描经 bridge.session_search_done 回主线程渲染结果，点击跳转）
+    sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组，行右侧一个状态 / 时间，悬停「⋯」菜单重命名 / 删除）+ 项目添加/切换/移除 + 底栏后台任务数量 + 跨会话搜索框（标题/正文，worker 扫描经 bridge.session_search_done 回主线程渲染结果，点击跳转）
     header.py            # HeaderMixin：顶栏（撤销/隔离/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描。模型与思考强度已挪到输入框底栏的模型按钮（model_btn / _show_model_menu）。计划|执行同样在底栏的模式按钮
     debug_inspector.py   # 调试面板（请求/响应/usage 可视化）：右侧停靠栏的「调试」标签，F12 打开 / 收起（原来是独立置顶窗口）
     dialogs.py           # 主题弹窗（取代原生 QMessageBox / QInputDialog）：遮罩 + 宽 440 圆角 14 的卡片，question / confirm_danger / success / critical / information / warning / choose（多出口）/ get_text（输入），返回值对齐 QMessageBox；CardDialog = 表单对话框的窗内卡片外框（标题栏 + body + 底部操作栏），TextViewerDialog = 只读长文本；详见 subsystems.md「主题弹窗」节
     titlebar.py          # 自绘标题栏（Windows）：FramelessWindowHint + 把原生窗框样式加回来，nativeEvent 处理 NCCALCSIZE / NCHITTEST / 最大化键；三个窗口按钮是顶栏最后一项（顶栏横跨对话区和右侧面板）；config native_title_bar 退回系统标题栏（也不再设 QT_WIDGETS_RHI）
     context_menus.py     # 中文、跟随主题的右键菜单：QApplication 级过滤器把文本类控件（输入框 / 只读文本 / 聊天记录的 QLabel）的默认英文菜单换掉；make_menu / add_item 给网页菜单等复用
     theme.py             # THEMES dict（mv_* 是新界面用的 token，mv_gate_* 是"需要你处理"的琥珀色，dlg_* 是主题弹窗的）+ build_stylesheet + color()/set_active_theme + load/save_theme_choice
-    widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow / QuitConfirmDialog（危险样式主题弹窗）/ FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）
+    widgets.py           # SignalBridge / DragDrop（粘贴强制纯文本）/ HistoryRow（悬停显隐）/ GroupHeader / ElidedButton（按宽度省略）/ QuitConfirmDialog（危险样式主题弹窗）/ FileCompleter（@ 补全）/ DescribedMenuItem（带说明的菜单项）
     settings_dialog.py   # 设置弹窗（CardDialog 800×620：左侧分类导航 + 可滚动表单 + 底部取消 / 保存；provider 卡片式 API key + 自定义模型增删改）
     helpers.py           # _make_button_icon / _build_image_content_block / _escape
     prefs.py             # UI 偏好持久化（关闭按钮选择等）

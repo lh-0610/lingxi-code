@@ -130,6 +130,45 @@ def _snapshot_text(r, cap):
     return body + "\n" + note + "）"
 
 
+def _before_action(ref, frame):
+    """动作前：先做完滚动 / 聚焦（这些副作用不能算进动作的效果），再取文字树快照、
+    记操作处附近的计算样式基线。样式基线取不到不影响动作本身。"""
+    _lx("watchPrepare", {"ref": ref}, frame)
+    before = _lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
+    _lx("watchBaseline", {"ref": ref}, frame)
+    return before
+
+
+def _style_text(frame):
+    """文字树 diff 为空时，报动作前后操作处附近**实际计算样式**的变化。
+
+    只报样式真变了的元素（class 换了但样式没变不报）；动作前就在自己变的元素、
+    离得远没核对的属性变化只给计数，不说成"变了"。取不到基线返回 None，调用方退回原话。"""
+    w = _lx("watchReport", {}, frame)
+    if not w.get("ok"):
+        return None
+    changed = w.get("changed") or []
+    if changed:
+        lines = ["文字树没有变化，但操作处附近的实际样式变了（动作前后逐项比对计算样式）："]
+        for c in changed:
+            props = "；".join(f"{p['prop']} {p['from']} → {p['to']}" for p in c.get("props") or [])
+            mark = "（就是操作的元素）" if c.get("self") else ""
+            lines.append(f"- {c.get('desc')}{mark}：{props}")
+        if w.get("more"):
+            lines.append(f"- …另有 {w['more']} 个元素")
+    else:
+        lines = ["文字树和操作处附近的样式都没有变化（动作前后逐项比对过计算样式）。"]
+    notes = []
+    if w.get("busy"):
+        notes.append(f"{w['busy']} 个元素动作前就在自己变（动画 / 定时刷新），没算进去")
+    if w.get("elsewhere"):
+        notes.append(f"页面其他位置有 {w['elsewhere']} 个元素属性变了，是否可见没核对")
+    if notes:
+        lines.append("（" + "；".join(notes) + "）")
+    lines.append("要确认看起来对不对用 browser_screenshot；canvas / 图表这类文字和样式都看不到。")
+    return "\n".join(lines)
+
+
 def _delta_text(before, frame, url):
     """动作后的变化行 diff（§3.2）。before 是动作前的 all 快照（None=不算 diff）。
 
@@ -171,6 +210,10 @@ def _delta_text(before, frame, url):
         if truncated:
             return (f"\n页面变化: {tree.DELTA_EMPTY}（快照被截断，变化可能在截断区，"
                     f"diff 不全；用 root_ref/browser_find 核对）{nav}")
+        if not nav:
+            styled = _style_text(frame)
+            if styled:
+                return "\n页面变化: " + styled
         return f"\n页面变化: {tree.DELTA_EMPTY}{nav}"
     return "\n页面变化:\n" + tree.fence(delta, after.get("qtUrl") or after.get("url") or url) + nav
 
@@ -373,9 +416,61 @@ def browser_read_text(max_chars: int = 8000, frame: str | None = None) -> str:
 
 
 @tool
+def browser_screenshot(question: str, ref: str | None = None) -> str:
+    """截浏览器当前可见区域，交给图片识别模型，按 question 回答它在图上看到的。
+
+    核对"看起来对不对"用它：颜色 / 高亮 / 图标 / 图表 / canvas / 布局——文字树和
+    动作后的样式核对都说不清的东西。question 要具体，只问图上看得出来的事，例如
+    「"买牛奶"那一行有没有删除线」「日历里 11 月 3 日是什么底色」；别问"页面对不对"。
+    ref：先把这个元素滚到可见区域再截。
+    返回的是识别模型的文字回答，不是原图；它也可能看错，关键结论能用文字树 / 正文核对的就再核对。
+    需要先在「设置 → 图片识别模型」配好能看图的模型。"""
+    question = (question or "").strip()
+    if not question:
+        return "截图失败: 要给 question（想从图上确认什么），不然识别模型不知道该看哪里"
+    from .browser import page as _page
+    if _page._browser is None:          # 不让截图悄悄拉起一个空浏览器（同 _lx）
+        return _NO_PAGE
+    from .models import describe_images_with_vision, get_vision_model_index
+    if get_vision_model_index() < 0:
+        return ("截图失败: 没有可用的图片识别模型。请在「设置 → 图片识别模型」里选一个"
+                "能看图的模型（如 GPT-4o / Claude / Gemini / Qwen-VL）。")
+    if ref:
+        url, err = _page_url()
+        if err:
+            return err
+        st = _lx("state")
+        if not st.get("ok"):
+            return _err(st, "读取页面状态")
+        if ("", ref) not in _issued or _issued[("", ref)] != (st.get("docId") or ""):
+            return _STALE_REF
+        r = _bridge_call("js", code=(
+            "(() => { const el = document.querySelector('[data-lxref=\"' + "
+            + json.dumps(ref) + " + '\"]'); if (!el) return false;"
+            " el.scrollIntoView({block: 'center', inline: 'center'}); return true; })()"))
+        if not r.get("ok") or not r.get("value"):
+            return _STALE_REF
+        _bridge_call("settle", ms=150)
+    shot = _bridge_call("grab")
+    if not shot.get("ok"):
+        return _err(shot, "截图")
+    prompt = (f"这是浏览器页面的截图（{shot.get('url', '')}）。请回答：{question}\n"
+              "只说图上能看到的；看不清、图上没有的就直说看不清 / 没有，不要猜。")
+    try:
+        vision_name, desc = describe_images_with_vision(prompt, [("browser.png", shot["png"])])
+    except Exception as e:
+        return f"截图失败: 图片识别模型出错（{e}）"
+    if not desc:
+        return f"截图完成，但识别模型（{vision_name}）没返回内容"
+    return (f"[浏览器截图 · {shot.get('width')}×{shot.get('height')} · 识别模型 {vision_name}]\n"
+            f"{desc}\n（这是识别模型看图的回答，不是原图；它也可能看错）")
+
+
+@tool
 def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str:
-    """点击快照/find 给出的 ref 元素。默认附动作前后的"变化行 diff"：
-    看到"页面无可见变化"就是没有可见变化，别反复点；要看全貌再 browser_snapshot。
+    """点击快照/find 给出的 ref 元素。默认附动作前后的"变化行 diff"；文字树没变时改报
+    操作处附近**实际计算样式**的变化（动作前后逐项比对，不按 class 名猜）。
+    "样式都没有变化"就是确实没反应，别反复点；颜色含义 / 图表要核对用 browser_screenshot。
     可能先问用户；提交/删除/支付这类有后果的动作每次都问。"""
     url, err = _page_url()
     if err:
@@ -407,8 +502,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
                     extra_url=frame_url if frame else None, origin=origin)
     if refusal:
         return refusal
-    before = (_lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
-              if delta else None)
+    before = _before_action(ref, frame) if delta else None
     r = _lx("click", {"ref": ref,
                       "expect": {"doc": cur_doc, "fp": info.get("fp")}}, frame)
     if not r.get("ok"):
@@ -461,8 +555,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
                     extra_url=frame_url if frame else None, origin=origin)
     if refusal:
         return refusal
-    before = (_lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
-              if delta else None)
+    before = _before_action(ref, frame) if delta else None
     r = _lx("type", {"ref": ref, "text": text, "clear": clear, "submit": submit,
                      "expect": {"doc": cur_doc, "fp": info.get("fp")}}, frame)
     if not r.get("ok"):

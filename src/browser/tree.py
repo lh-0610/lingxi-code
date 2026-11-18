@@ -15,7 +15,9 @@ DELTA_DEFAULT_CHARS = 2000
 CONSOLE_DEFAULT_CHARS = 4000
 VALUE_DEFAULT_CHARS = 100
 
-DELTA_EMPTY = "页面无可见变化"
+# 只能说"文字树没变"，不能说"页面没变"：纯样式变化（颜色、隐藏的 class 切换）文字树看不见。
+# 早先写"页面无可见变化"，模型点掉一条待办（只加删除线）后信以为真，绕去加诊断代码（实测）
+DELTA_EMPTY = "文字树没有变化（纯样式变化看不到；要核对就 browser_screenshot 或 browser_read_text）"
 _TRUNCATE_MARKER = "…[已截断]"
 _FENCE_TAG_RE = re.compile(r"</?browser-content", re.IGNORECASE)
 
@@ -45,8 +47,9 @@ def compute_delta(before: str, after: str, cap: int = DELTA_DEFAULT_CHARS) -> st
     """all 模式快照前后的"变化行 diff"（§3.2）。
 
     只回增删行（+ 新增 / - 删除），带原缩进，不重发全树。实测点一次"添加一行"：
-    diff 22 字 vs 全量 926 字（42×）。无变化时明确写"页面无可见变化"，防模型以为
-    没生效反复点。交互树看不见纯内容变化（§3.6），所以 diff 必须用 all 模式算。
+    diff 22 字 vs 全量 926 字（42×）。无变化时明确写 DELTA_EMPTY（文字树没变，不等于页面没变），
+    防模型以为没生效反复点。交互树看不见纯内容变化（§3.6），所以 diff 必须用 all 模式算；
+    删除线 / aria 状态 tree.js 会标成 [strikethrough] / [checked] / [pressed] / [selected]。
     """
     before_lines = (before or "").splitlines()
     after_lines = (after or "").splitlines()

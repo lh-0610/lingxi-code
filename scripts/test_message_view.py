@@ -55,7 +55,7 @@ class TestToolCards:
 
         card = mv.findChildren(ToolCallCard)[0]
         assert "def login():" in card.output_text()
-        assert card._tail.full() == "def login():", "一次给完的结果，收起时露第一行"
+        assert not card._tail.isVisibleTo(card), "跑完了不再露输出行（一行一条），要看全文就展开"
         assert "超出上下文窗口" not in card.output_text(), "工具结束后的程序提示不能算进工具输出"
         notices = [n.text() for n in mv.findChildren(Notice)]
         assert any(t.startswith("超出上下文窗口") for t in notices), "提示单独成条，去掉 emoji"
@@ -73,12 +73,12 @@ class TestToolCards:
         card = mv.findChildren(ToolCallCard)[0]
         assert card.output_text().splitlines() == [
             "collected 3 items", "...", "3 passed in 0.12s", "✓ 退出码 0"]
-        assert card._count.text() == "输出 4 行"
-        assert card._tail.isVisibleTo(card) and card._tail.full() == "✓ 退出码 0"
-        assert not card._out.isVisibleTo(card), "默认收起，完整输出要点开才看"
+        assert card._out is None, "输出只存成文字，点开才建输出框"
+        assert card.tone == "" and not card._status.isVisibleTo(card), "退出码 0：做完了不加标记"
         card.toggle()
         _pump(qt_app)
         assert card._out.isVisibleTo(card) and not card._tail.isVisibleTo(card)
+        assert card._out.toPlainText().splitlines()[-1] == "✓ 退出码 0", "点开后看到全部输出"
         mv.close()
 
     def _expanded_card(self, qt_app, width, *outputs):
@@ -156,7 +156,7 @@ class TestRounds:
         assert summary.findChildren(type(body).__mro__[1])[0].text() == "调用了 1 次工具，思考 1 次"
         summary.btn.click()
         _pump(qt_app)
-        assert card.isVisibleTo(mv) and summary.btn.text() == "收起过程"
+        assert card.isVisibleTo(mv) and summary.is_open() and summary.toolTip() == "收起过程"
         mv.close()
 
     def test_result_card_inside_a_round_keeps_its_buttons(self, qt_app, isolated_memory):
@@ -587,7 +587,8 @@ class TestToolCardClock:
         assert card._spinner is not None
         mv.handle("", "reset_ai_reply")             # 工具返回
         assert not card.is_running() and card._spinner is None
-        assert card.clock_text().startswith("用时 2 分")
+        assert card.clock_text() == "", "跑完了行上不留用时（一组的总用时在组头）"
+        assert card.duration >= 125
         mv.close()
 
     def test_quick_tool_shows_no_clock(self, qt_app):
@@ -613,7 +614,7 @@ class TestToolCardClock:
         card = self._running_card(mv)
         self._age(card, 30)
         mv.stop_tool_clock()
-        assert not card.is_running() and card.clock_text().startswith("用时 30 秒")
+        assert not card.is_running() and card.clock_text() == "" and card.duration >= 30
         mv.close()
 
     def test_next_tool_ends_the_previous_clock(self, qt_app):

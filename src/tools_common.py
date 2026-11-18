@@ -24,13 +24,52 @@ _SEARCH_IGNORE_DIRS = {
 _SEARCH_MAX_FILE_SIZE = 1 * 1024 * 1024  # 单文件 > 1MB 跳过（大概率是二进制 / 数据文件）
 
 
+def _documents_dir() -> str:
+    """Windows 的「文档」文件夹（可能被 OneDrive 重定向，按系统登记的位置取）；取不到退回 ~/Documents。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        # CSIDL_PERSONAL = 5（「文档」），SHGFP_TYPE_CURRENT = 0
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value:
+            return buf.value
+    except Exception:
+        pass
+    return os.path.join(os.path.expanduser("~"), "Documents")
+
+
+def no_project_dir() -> str:
+    """「无项目 · 全局工作区」时工具的工作目录：一个专门的空文件夹，不是程序自己的目录。
+
+    早先回退到进程 cwd——源码运行时就是灵犀仓库根目录：模型在无项目对话里写的 index.html /
+    app.js 落进了仓库，跑 pytest 还会收集到灵犀自己的测试（仓库根的 pytest.ini 指定了
+    testpaths = scripts，所以工作区也不能放在仓库里面）。打包版从快捷方式启动时 cwd 是安装目录，更糟。
+    顺序：config.json 的 default_workspace → 测试隔离的数据根下的 workspace（LINGXI_DATA_DIR）
+    → 「文档\灵犀工作区」。不存在就建。
+    """
+    from . import config as _config
+    from .paths import get_data_dir
+    path = (getattr(_config, "DEFAULT_WORKSPACE", "") or "").strip()
+    if not path:
+        if os.environ.get("LINGXI_DATA_DIR"):
+            path = os.path.join(get_data_dir(), "workspace")
+        else:
+            path = os.path.join(_documents_dir(), "灵犀工作区")
+    path = os.path.abspath(os.path.expanduser(path))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        logger.warning(f"无项目工作区建不出来（{path}）：{e}")
+    return path
+
+
 def _project_cwd() -> str:
     """所有命令 / 文件工具的有效工作目录。
 
     优先用【当前会话】锚定的 project：多会话下 worker 跑工具时用它自己会话的项目根，
     不会因为用户在前台切了项目就把 A 会话的 read_file/run_command 落到 B。会话还没锚定
     （_UNSET，如刚新建没存盘）→ 回退全局 state.current_project；都没有 / 路径不存在 →
-    进程 cwd。None 是合法的"无项目（全局）"。
+    无项目工作区（no_project_dir，不是进程 cwd）。None 是合法的"无项目（全局）"。
 
     隔离模式：当前会话有 worktree 路径时，优先返回 worktree 目录。
     """
@@ -47,7 +86,7 @@ def _project_cwd() -> str:
     proj = _session.current_project()   # 会话级：_UNSET 回退全局，统一来源
     if proj and os.path.isdir(proj):
         return proj
-    return os.getcwd()
+    return no_project_dir()
 
 
 def _resolve_path(path: str) -> str:

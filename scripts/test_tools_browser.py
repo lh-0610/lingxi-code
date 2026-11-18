@@ -460,7 +460,8 @@ def test_all_eight_tools_registered_with_display_names():
     from src.tools import ALL_TOOLS, TOOL_DISPLAY_NAMES
     names = {t.name for t in ALL_TOOLS}
     expected = {"browser_open", "browser_snapshot", "browser_find", "browser_read_text",
-                "browser_click", "browser_type", "browser_console", "browser_close"}
+                "browser_click", "browser_type", "browser_console", "browser_close",
+                "browser_screenshot"}
     assert expected <= names
     assert all(n in TOOL_DISPLAY_NAMES for n in expected)
 
@@ -468,5 +469,5 @@ def test_all_eight_tools_registered_with_display_names():
 def test_plan_whitelist_covers_readonly_only():
     from src.streaming import PLAN_MODE_READONLY_TOOLS
     assert {"browser_open", "browser_snapshot", "browser_find",
-            "browser_read_text", "browser_console"} <= PLAN_MODE_READONLY_TOOLS
+            "browser_read_text", "browser_console", "browser_screenshot"} <= PLAN_MODE_READONLY_TOOLS
     assert not {"browser_click", "browser_type", "browser_close"} & PLAN_MODE_READONLY_TOOLS

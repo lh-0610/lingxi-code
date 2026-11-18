@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>状态页</title>
+<style>
+  li.done { text-decoration: line-through; color: #999; }
+  li { cursor: pointer; }
+</style></head>
+<body>
+<h1>待办</h1>
+<ul id="list">
+  <li id="milk">买牛奶</li>
+  <li id="report">写周报</li>
+</ul>
+<div id="ariaBox" role="checkbox" aria-checked="false" tabindex="0">自定义复选框</div>
+<button id="bold" aria-pressed="false">加粗</button>
+<div role="tablist">
+  <div role="tab" aria-selected="true" tabindex="0">第一页</div>
+  <div role="tab" aria-selected="false" tabindex="-1">第二页</div>
+</div>
+<script>
+  document.getElementById("milk").addEventListener("click", e => e.currentTarget.classList.toggle("done"));
+  const box = document.getElementById("ariaBox");
+  box.addEventListener("click", () =>
+    box.setAttribute("aria-checked", box.getAttribute("aria-checked") === "true" ? "false" : "true"));
+  const bold = document.getElementById("bold");
+  bold.addEventListener("click", () =>
+    bold.setAttribute("aria-pressed", bold.getAttribute("aria-pressed") === "true" ? "false" : "true"));
+</script>
+</body>
+</html>

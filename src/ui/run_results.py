@@ -56,11 +56,17 @@ class RunResultMixin:
         view = result_view.describe(snapshot, live_run_id=live)
         if not view:
             return
+        if view.get("quiet"):
+            # 纯问答 / 调研：没改文件、没跑检查、不用继续——不出卡（判断在 result_view）
+            self._rendered_result_run_id = view.get("run_id") or ""
+            return
         card = ResultCard(view)
         card.view_diff_requested.connect(self._on_result_view_diff)
         card.view_output_requested.connect(self._on_result_view_output)
         card.continue_requested.connect(
             lambda v, c=card: self._on_result_continue(v, card=c))
+        card.open_file_requested.connect(
+            lambda v, path: self._open_file_in_panel(path, work_dir=v.get("work_dir")))
         self.chat_area.add_result_card(card)
         self._rendered_result_run_id = view.get("run_id") or ""
 
@@ -281,7 +287,7 @@ class RunResultMixin:
             self._sync_header_from_session()
         from .. import permission_modes as _pm
         mode = _pm.label(_pm.current(sess), long=True)
-        self._append_html(f"\n继续任务 · 使用模型「{pre.model_label}」· {mode}\n", "tool_result")
+        self._append_html(f"\n继续任务 · 使用模型「{pre.model_label}」· {mode}\n", "recovery_note")
         resume = {"expected_run_id": view.get("run_id") or "", "notes": list(pre.notes)}
         _session.register(sess)
         sess.is_generating = True

@@ -104,16 +104,18 @@ def test_list_right_under_a_line_of_text_is_a_list():
     out = render("改了两处：\n- 第一处\n- 第二处\n\n验证：\n1. 跑测试\n2. 看差异")
     text = re.sub(r"<[^>]+>", "", out)
     assert "- 第一处" not in text
-    # 摊平成段落但留下项目符号和序号
-    for item in ("• 第一处", "• 第二处", "1. 跑测试", "2. 看差异"):
+    # 两列表格：符号 / 序号一列，内容一列（悬挂缩进）
+    for item in ("•第一处", "•第二处", "1.跑测试", "2.看差异"):
         assert item in text
 
 
 def test_nested_and_loose_lists_keep_markers_inline():
     out = render("步骤：\n\n1. 改代码\n\n2. 跑测试\n    - 只跑相关的\n")
     text = re.sub(r"<[^>]+>", "", out)
-    assert "1. 改代码" in text and "2. 跑测试" in text and "• 只跑相关的" in text
-    assert "margin:2px 0 2px 18px" in out, "嵌套的一层往里缩"
+    assert "1.改代码" in text and "2.跑测试" in text and "•只跑相关的" in text
+    # 嵌套的那层落在外层「跑测试」那项的内容列里（再往里缩一层）
+    inner = out.index("只跑相关的")
+    assert out.rfind("<table", 0, inner) > out.index("跑测试"), "嵌套列表是外层那项里的一张表"
 
 
 def test_list_fix_leaves_code_blocks_and_single_stars_alone():

@@ -4,20 +4,26 @@
 展开管理卡片（状态行 + 选择目录 / 重建索引）。业务槽函数从 header.py 整体迁入
 （顶栏不再有任何知识库控件）。
 
-状态行五态（kbState 属性驱动 QSS 颜色，见 theme.py #kbCardStatus）：
-  none=未配置 / indexing=索引中 / ok=可用·N块 / stale=需要重建 / error=重建失败
+卡片六态（kbState 属性驱动卡片底色 / 边框 / 文字颜色，见 theme.py 的 #kbCard 段；
+设计稿「左侧栏：编码与知识库两个工作区」）：
+  none=还没选目录（只给「选择目录」主按钮）/ reading=读取中 / ok=就绪·N 块 /
+  stale=需要重建（「重建索引」变主按钮）/ indexing=索引中（忙碌条，按钮禁用）/
+  error=读取或重建失败（「重建索引」改叫「重试」）
 
 线程规则：重建在后台线程跑，完成经 bridge.kb_status(state, text, done) 信号回到
-主线程更新控件（worker 绝不直接碰 Qt 控件）。
+主线程更新控件（worker 绝不直接碰 Qt 控件）。读状态（index_status）同样在后台线程：
+第一次要加载向量库、打开索引，约 1.8s，放在主线程上第一次切到知识库会卡住整个界面
+（实测）。结果经 bridge.kb_status_read 回来，带请求序号——只认最新一次，旧结果
+（期间换了目录 / 开始重建）直接丢弃。启动后空闲时预热一次（_prewarm_kb_status）。
 
 依赖宿主：self.bridge / self._show_toast / self.new_chat_btn（sidebar 建）
 """
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .. import agent
@@ -34,9 +40,10 @@ class RagSidebarMixin:
         # 分别记住最近一次活动的 code / rag 会话 key，切回该工作区时优先恢复它
         self._last_ws_key = {"code": None, "rag": None}
 
-        # 编码 | 知识库 段控：撑满侧栏可用宽度，与"+ 新对话"同边距
+        # 编码 | 知识库 工作区切换：撑满侧栏可用宽度，带图标
         self.uimode_seg = QWidget()
         self.uimode_seg.setObjectName("ragModeSeg")
+        self.uimode_seg.setAttribute(Qt.WA_StyledBackground, True)
         seg_lay = QHBoxLayout(self.uimode_seg)
         seg_lay.setContentsMargins(3, 3, 3, 3)
         seg_lay.setSpacing(3)
@@ -46,6 +53,8 @@ class RagSidebarMixin:
             _b.setCheckable(True)
             _b.setCursor(Qt.PointingHandCursor)
             _b.setProperty("class", "segBtn")
+            _b.setFixedHeight(30)
+            _b.setIconSize(QSize(15, 15))
             seg_lay.addWidget(_b, 1)          # 平分宽度
         self.code_mode_btn.setChecked(True)
         self.code_mode_btn.setToolTip("编码模式：正常的 AI 编码助手")
@@ -54,16 +63,41 @@ class RagSidebarMixin:
         self.kb_mode_btn.clicked.connect(lambda: self._set_ui_mode("kb"))
         parent_layout.addWidget(self.uimode_seg)
 
-        # 知识库管理卡片（仅知识库模式可见）
+        # 知识库卡片（仅知识库模式可见）：标题行（图标 + 库名 + 状态词）/ 说明 / 忙碌条 / 按钮
         self.kb_card = QWidget()
         self.kb_card.setObjectName("kbCard")
+        self.kb_card.setAttribute(Qt.WA_StyledBackground, True)
         card_lay = QVBoxLayout(self.kb_card)
-        card_lay.setContentsMargins(10, 8, 10, 9)
-        card_lay.setSpacing(6)
+        card_lay.setContentsMargins(12, 11, 12, 12)
+        card_lay.setSpacing(8)
 
-        self.kb_status_label = QLabel()
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+        self.kb_card_icon = QLabel()
+        self.kb_card_icon.setFixedSize(16, 16)
+        self.kb_card_name = QLabel()
+        self.kb_card_name.setObjectName("kbCardName")
+        self.kb_card_name.setMinimumWidth(0)
+        self.kb_card_state = QLabel()
+        self.kb_card_state.setObjectName("kbCardState")
+        head.addWidget(self.kb_card_icon)
+        head.addWidget(self.kb_card_name, 1)
+        head.addWidget(self.kb_card_state)
+        card_lay.addLayout(head)
+
+        self.kb_status_label = QLabel()          # 说明行（N 块 / 原因 / 引导），测试按它判状态
         self.kb_status_label.setObjectName("kbCardStatus")
+        self.kb_status_label.setWordWrap(True)
         card_lay.addWidget(self.kb_status_label)
+
+        self.kb_busy_bar = QProgressBar()
+        self.kb_busy_bar.setObjectName("kbCardBusy")
+        self.kb_busy_bar.setRange(0, 0)          # 不确定进度：重建只在完成时回报，不画假百分比
+        self.kb_busy_bar.setTextVisible(False)
+        self.kb_busy_bar.setFixedHeight(4)
+        self.kb_busy_bar.setVisible(False)
+        card_lay.addWidget(self.kb_busy_bar)
 
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
@@ -79,11 +113,29 @@ class RagSidebarMixin:
         for _b in (self.kb_dir_btn, self.kb_reindex_btn):
             _b.setCursor(Qt.PointingHandCursor)
             _b.setProperty("class", "kbCardBtn")
+            _b.setFixedHeight(30)
             btn_row.addWidget(_b, 1)
         card_lay.addLayout(btn_row)
 
         self.kb_card.setVisible(False)        # 默认编码模式
         parent_layout.addWidget(self.kb_card)
+
+    def _style_mode_seg_icons(self):
+        """段控图标随选中态和主题换色（QSS 管不到图标颜色）。"""
+        for btn, icon in ((self.code_mode_btn, "code_lucide.svg"),
+                          (self.kb_mode_btn, "book-open.svg")):
+            color = self._t("sb_seg_active_text" if btn.isChecked() else "sb_seg_idle_text")
+            btn.setIcon(self._svg_icon(icon, color))
+        if hasattr(self, "kb_card_icon") and self.kb_card.property("kbState"):
+            self._paint_kb_icon(self.kb_card.property("kbState"))
+
+    def _paint_kb_icon(self, state_key):
+        if not hasattr(self, "_svg_icon"):
+            return                      # 轻量宿主（测试）没有主题图标
+        color ={"stale": "kb_stale_text", "error": "kb_error_text"}.get(state_key, "sb_accent")
+        icon = "triangle-alert.svg" if state_key == "error" else "book.svg"
+        pm = self._svg_icon(icon, self._t(color)).pixmap(QSize(16, 16))
+        self.kb_card_icon.setPixmap(pm)
 
     def _check_rag_session_anchor(self, sess):
         """加载 rag 历史会话时校验它的知识库锚点：与当前配置目录不同时明确提示，
@@ -97,45 +149,124 @@ class RagSidebarMixin:
 
     # ── 状态行渲染 ──
 
-    def _set_kb_status(self, state_key: str, text: str, tooltip: str = ""):
-        """更新状态行：● + 文本（过长省略，不撑宽侧栏），kbState 属性驱动 QSS 颜色。"""
-        lbl = self.kb_status_label
-        lbl.setProperty("kbState", state_key)
-        lbl.style().unpolish(lbl)
-        lbl.style().polish(lbl)
-        full = f"● {text}"
-        fm = QFontMetrics(lbl.font())
-        avail = max(120, self.kb_card.width() - 24) if self.kb_card.width() > 40 else 190
-        lbl.setText(fm.elidedText(full, Qt.ElideRight, avail))
-        lbl.setToolTip(tooltip or text)
+    _KB_STATE_WORDS = {"ok": "就绪", "reading": "读取中…", "indexing": "索引中…",
+                       "stale": "需要重建", "error": "出错了", "none": ""}
+
+    def _set_kb_status(self, state_key: str, text: str, tooltip: str = "", *, word: str = ""):
+        """更新知识库卡片：kbState 属性驱动配色（卡片和说明行都挂），说明行放 text。
+        none 态没有库名：标题改成引导语、只留「选择目录」主按钮。"""
+        from .. import config
+        card = self.kb_card
+        for w in (card, self.kb_status_label):
+            w.setProperty("kbState", state_key)
+        kb = config.RAG_KB_DIR or ""
+        if state_key == "none":
+            self.kb_card_name.setText("还没选知识库目录")
+            self.kb_card_name.setToolTip("")
+            self.kb_card_icon.setVisible(False)
+        else:
+            name = os.path.basename(kb.rstrip("/\\")) or kb
+            fm = QFontMetrics(self.kb_card_name.font())
+            avail = max(80, card.width() - 130) if card.width() > 40 else 120
+            self.kb_card_name.setText(fm.elidedText(name, Qt.ElideRight, avail))
+            self.kb_card_name.setToolTip(kb)
+            self.kb_card_icon.setVisible(True)
+            self._paint_kb_icon(state_key)
+        self.kb_card_state.setText(word or self._KB_STATE_WORDS.get(state_key, ""))
+        self.kb_status_label.setText(text)
+        self.kb_status_label.setToolTip(tooltip or text)
+        self.kb_busy_bar.setVisible(state_key == "indexing")
+        self.kb_reindex_btn.setVisible(state_key != "none")
+        self.kb_reindex_btn.setText("重试" if state_key == "error" else "重建索引")
+        self.kb_reindex_btn.setProperty("primary", "true" if state_key == "stale" else "false")
+        self.kb_dir_btn.setProperty("primary", "true" if state_key == "none" else "false")
+        for w in [card] + card.findChildren(QWidget):
+            w.style().unpolish(w)
+            w.style().polish(w)
 
     def _refresh_kb_status(self):
         """按 index_status（与检索同一套锚校验）刷新状态行——索引若是旧目录/旧模型建的，
-        显示「需要重建」而不是把当前目录名和旧索引块数拼在一起误导用户。"""
+        显示「需要重建」而不是把当前目录名和旧索引块数拼在一起误导用户。
+
+        读取在后台线程（见模块说明）：先显示「读取中…」，结果回来再更新。"""
         if not hasattr(self, "kb_status_label"):
             return
         from .. import config
         kb = config.RAG_KB_DIR
+        self._kb_status_seq = getattr(self, "_kb_status_seq", 0) + 1
         if not kb:
-            self._set_kb_status("none", "未配置知识库", "点「选择目录」指向存放 .md / .pdf 的文件夹")
+            self._set_kb_status("none", "指向一个放 .md / .pdf 的文件夹，灵犀会建索引，"
+                                        "回答时引用里面的资料。",
+                                "点「选择目录」指向存放 .md / .pdf 的文件夹")
             return
-        name = os.path.basename(kb.rstrip("/\\")) or kb
-        try:
-            from ..rag.retriever import index_status
-            st = index_status(kb_dir=kb, embed_model=config.RAG_EMBED_MODEL,
-                              embed_base_url=config.RAG_EMBED_BASE_URL,
-                              chunk_size=config.RAG_CHUNK_SIZE,
-                              chunk_overlap=config.RAG_CHUNK_OVERLAP)
-        except Exception:
-            self._set_kb_status("error", f"{name} · 状态读取失败", kb)
+        if getattr(self, "_kb_reindexing", False):
+            return                      # 重建中：状态行归重建进度管，完成后会再刷新
+        snap = self._kb_status_key()
+        cached = getattr(self, "_kb_status_cache", None)
+        if cached and cached[0] == snap:
+            # 同一目录、同一套配置读过：先直接显示上次的结果（不闪「读取中」），后台再静默核对
+            self._apply_kb_status(kb, cached[1])
+        else:
+            self._set_kb_status("reading", "正在读取索引…", kb)
+        self._read_kb_status_async(self._kb_status_seq, kb, snap)
+
+    def _kb_status_key(self):
+        from .. import config
+        return (config.RAG_KB_DIR, config.RAG_EMBED_MODEL, config.RAG_EMBED_BASE_URL,
+                config.RAG_CHUNK_SIZE, config.RAG_CHUNK_OVERLAP)
+
+    def _read_kb_status_async(self, seq, kb, key):
+        snap = dict(zip(("kb_dir", "embed_model", "embed_base_url", "chunk_size", "chunk_overlap"),
+                        key))
+        bridge = self.bridge
+        import threading
+
+        def _work():
+            try:
+                from ..rag.retriever import index_status
+                st = index_status(**snap)
+            except Exception as e:
+                st = f"{type(e).__name__}: {e}"
+            bridge.kb_status_read.emit(seq, kb, st)
+
+        threading.Thread(target=_work, daemon=True, name="kb-status").start()
+
+    def _prewarm_kb_status(self):
+        """启动后空闲时读一次（加载向量库），第一次切到知识库就不用等。界面不在知识库也照样
+        读——结果只是落到隐藏的状态行上。"""
+        from .. import config
+        if config.RAG_KB_DIR and hasattr(self, "kb_status_label") \
+                and not getattr(self, "_kb_status_seq", 0):
+            self._refresh_kb_status()
+
+    def _on_kb_status_read(self, seq, kb, st):
+        """bridge.kb_status_read 槽（主线程）：只认最新一次请求的结果。"""
+        if not hasattr(self, "kb_status_label") or seq != getattr(self, "_kb_status_seq", 0):
+            return
+        if getattr(self, "_kb_reindexing", False):
+            return
+        from .. import config
+        if kb != config.RAG_KB_DIR:
+            return
+        if isinstance(st, dict):
+            self._kb_status_cache = (self._kb_status_key(), st)
+        self._apply_kb_status(kb, st)
+
+    def _apply_kb_status(self, kb, st):
+        if not isinstance(st, dict):
+            self._set_kb_status("error", f"状态读取失败：{st}", f"{st}\n{kb}", word="读取失败")
             return
         if st["ok"]:
             # 分域信息进 tooltip：多域库检索时按域配额取，用户该能一眼看到库里分了哪几域
             cats = st.get("categories") or []
             tip = kb if len(cats) <= 1 else f"{kb}\n分域：{'、'.join(cats)}"
-            self._set_kb_status("ok", f"{name} · {st['chunks']} 块", tip)
+            detail = f"{st['chunks']} 块"
+            if len(cats) > 1:
+                detail += f" · {len(cats)} 个分域：{'、'.join(cats)}"
+            self._set_kb_status("ok", detail, tip)
         else:
-            self._set_kb_status("stale", f"{name} · {st['reason']}", f"{st['reason']}\n{kb}")
+            self._set_kb_status("stale", f"{st['reason']}。",
+                                f"{st['reason']}\n{kb}")
 
     # ── 工作区切换（编码 / 知识库）──
     # 左侧段控是【工作区切换器】：切到"另一个会话"，不是改当前会话的 session_kind。
@@ -285,7 +416,9 @@ class RagSidebarMixin:
         self.kb_mode_btn.setChecked(is_kb)
         self.kb_card.setVisible(is_kb)
         if hasattr(self, "new_chat_btn"):
-            self.new_chat_btn.setText("+ 新知识库对话" if is_kb else "+ 新对话")
+            self.new_chat_btn.setText("新知识库对话" if is_kb else "新对话")
+        if hasattr(self, "_t"):
+            self._style_mode_seg_icons()
         # 附件入口：知识库模式暂不支持附件（未做摄取），禁用并提示，绝不静默忽略
         if hasattr(self, "img_btn"):
             self.img_btn.setEnabled(not is_kb)
@@ -340,9 +473,10 @@ class RagSidebarMixin:
                     chunk_size=config.RAG_CHUNK_SIZE,
                     chunk_overlap=config.RAG_CHUNK_OVERLAP)
         self._kb_reindexing = True
+        self._kb_status_seq = getattr(self, "_kb_status_seq", 0) + 1   # 作废在途的状态读取
         self.kb_reindex_btn.setEnabled(False)
         self.kb_dir_btn.setEnabled(False)   # 重建期间禁止切换目录
-        self._set_kb_status("indexing", "索引中…", snap["kb_dir"])
+        self._set_kb_status("indexing", "切走也不会中断，完成后会提示。", snap["kb_dir"])
         import threading
 
         def _work():
@@ -380,6 +514,7 @@ class RagSidebarMixin:
             return
         if done:
             self._kb_reindexing = False
+            self._kb_status_cache = None     # 索引变了：缓存的块数作废
             self.kb_reindex_btn.setEnabled(True)
             self.kb_dir_btn.setEnabled(True)
         if done and state_key == "ok":
@@ -387,4 +522,6 @@ class RagSidebarMixin:
             self._show_toast(text)
             self._refresh_kb_status()
         else:
-            self._set_kb_status(state_key, text)
+            word = "重建失败" if state_key == "error" else ""
+            detail = text[len("重建失败: "):] if text.startswith("重建失败: ") else text
+            self._set_kb_status(state_key, detail, text, word=word)

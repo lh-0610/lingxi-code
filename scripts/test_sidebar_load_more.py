@@ -140,7 +140,9 @@ def _groups(ui):
     current = None
     for w in _layout_widgets(ui):
         if isinstance(w, QPushButton) and w.objectName().startswith("projectHeader"):
-            current = {"title": w.text(), "rows": [], "more": []}
+            # 标题按宽度省略：按完整名字匹配
+            title = w.full_text() if hasattr(w, "full_text") else w.text()
+            current = {"title": title, "rows": [], "more": []}
             groups.append(current)
         elif isinstance(w, HistoryRow):
             if current is not None:
@@ -165,11 +167,12 @@ def _row_title_button(row):
     return None
 
 
-def _row_delete_button(row):
-    for btn in row.findChildren(QPushButton):
-        if btn.objectName() == "historyDeleteBtn":
-            return btn
-    return None
+def _row_delete_action(ui, row):
+    """行上不再挂删除按钮：删除在「⋯」菜单里（悬停才出现的 sbMoreBtn，右键同一个菜单）。"""
+    assert any(b.objectName() == "sbMoreBtn" for b in row.findChildren(QPushButton)),         "每行都有「⋯」"
+    menu = ui._session_row_menu(row.property("session_id"), row.property("session_title"),
+                                row.property("rowstate") == "generating")
+    return next(a for a in menu.actions() if a.text() == "删除会话")
 
 
 def test_running_row_shows_a_spinner_not_a_text_pill(ui, isolated_memory, tmp_path):
@@ -191,7 +194,7 @@ def test_running_row_shows_a_spinner_not_a_text_pill(ui, isolated_memory, tmp_pa
     badge = badges[0]
     assert row.isVisible() and badge._label.isHidden(), "不再显示文字药丸"
     assert badge.toolTip().startswith("生成中")
-    assert _row_delete_button(row) is None, "正在跑的会话不给删除"
+    assert not _row_delete_action(ui, row).isEnabled(), "正在跑的会话菜单里删除置灰"
     title = _row_title_button(row)
     assert title.geometry().right() < badge.geometry().left()
     assert badge.geometry().right() <= row.width(), "转圈不被截掉"
@@ -247,19 +250,19 @@ def test_groups_expand_independently(ui, isolated_memory, tmp_path):
     _make_sessions(32, project=None, tag="np")
     ui._refresh_session_list()
 
-    gx, gy, gn = _group(ui, "proj-x"), _group(ui, "proj-y"), _group(ui, "历史会话")
+    gx, gy, gn = _group(ui, "proj-x"), _group(ui, "proj-y"), _group(ui, "无项目")
     assert (len(gx["rows"]), len(gy["rows"]), len(gn["rows"])) == (30, 30, 30)
     assert all(len(g["more"]) == 1 for g in (gx, gy, gn))
 
     gx["more"][0].click()
-    gx, gy, gn = _group(ui, "proj-x"), _group(ui, "proj-y"), _group(ui, "历史会话")
+    gx, gy, gn = _group(ui, "proj-x"), _group(ui, "proj-y"), _group(ui, "无项目")
     assert len(gx["rows"]) == 40 and gx["more"] == []
     assert (len(gy["rows"]), len(gn["rows"])) == (30, 30)
     assert len(gy["more"]) == 1 and len(gn["more"]) == 1
 
 
 def test_rag_group_load_more_separate_from_no_project(ui, isolated_memory, tmp_path):
-    """知识库分组与编码「历史会话」都以 project=None 渲染，展示数量必须各自独立。"""
+    """知识库分组与编码「无项目」都以 project=None 渲染，展示数量必须各自独立。"""
     _make_sessions(33, project=None, kind="code", tag="np")
     _make_sessions(36, project=None, kind="rag", tag="rg")
 
@@ -277,7 +280,7 @@ def test_rag_group_load_more_separate_from_no_project(ui, isolated_memory, tmp_p
     # 编码无项目会话 33 条，只提示余下的 3 条（知识库的 36 条不算进来）
     rag_sess.session_kind = "code"
     ui._refresh_session_list()
-    gn = _group(ui, "历史会话")
+    gn = _group(ui, "无项目")
     assert len(gn["rows"]) == 30 and len(gn["more"]) == 1
     assert "3" in gn["more"][0].text()
 
@@ -308,7 +311,7 @@ def test_click_row_31_loads_that_session(ui, isolated_memory, tmp_path):
 
 
 def test_delete_row_31_really_deletes(ui, isolated_memory, tmp_path):
-    """真实点击第 31 条的删除按钮：索引条目与正文一并删除，后续保存不复活。"""
+    """第 31 条从「⋯」菜单删除：索引条目与正文一并删除，后续保存不复活。"""
     from src import agent
     registered = _register_project(tmp_path, "proj-d")
     ids = _make_sessions(40, project=registered, tag="pd")
@@ -320,9 +323,9 @@ def test_delete_row_31_really_deletes(ui, isolated_memory, tmp_path):
     victim = ids[-1 - 30]                      # 界面第 31 行（展示为新→旧）
     body = os.path.join(paths.memory_dir(), f"{victim}.json")
     assert os.path.exists(body)
-    del_btn = _row_delete_button(rows[30])
-    assert del_btn is not None
-    del_btn.click()                            # 真实点击 → _delete_session
+    del_act = _row_delete_action(ui, rows[30])
+    assert del_act.isEnabled()
+    del_act.trigger()                          # 「⋯」菜单 → 删除会话 → _delete_session
 
     assert not os.path.exists(body)
     assert victim not in {e["id"] for e in memory.list_sessions("__all__")}

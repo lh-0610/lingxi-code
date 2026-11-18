@@ -11,12 +11,27 @@
 - **思考过程**：解析 `<think>...</think>` / `reasoning_content` / Anthropic `thinking` content block，统一显示成可折叠的紫色块
 - **Markdown 渲染**：流式过程显示纯文本，完成后用 `markdown` 库一次性转 HTML 替换（QTextBrowser 不支持 `<style>` 标签，所有样式必须 inline）。复制/重新生成按钮用 `<table cellpadding=0 height=18>` spacer 撑开（QTextBrowser 对 `<div margin>` 支持差）
 
+## 消息流（src/ui/message_view.py）
+- **工具调用一行一条，连续的收成一组**（设计稿「消息区：工具调用改成一行一条」）：`ToolCallCard`（类名沿用，对外接口不变）现在是一行——图标 · 动作（「运行」「读取」「编辑」，`_tool_verb` 按显示名）· 对象 · 右边的状态。连续的调用进 `_ToolGroup`：一两条直接平铺，第三条起出组头（「列了 1 个目录，读取了 3 个文件 · 1 条失败 · 41 秒」，读多个文件按文件数算），点组头折叠；实时运行时组展开，这一组结束（来了正文 / 思考 / 改文件……任何别的块，见 `AssistantTurn._add` → `_close_group`）就收起，**有失败的组不自动收**；重画历史时组直接收着。改文件的工具（`_EDIT_TOOLS`）单独一行、不进组，右边是增删行数（`streaming.describe_edit_stats` 按参数算，经 `tool_stat` 消息送来：`edit_file` 新旧两段做真实的行级差异；`replace_all` 不报；`write_file` 只说「N 行」，不知道原文件多少行就不说成 +N），点文件名在文件面板看差异。线上一组一个节点，有失败的组节点变红（`node_tone`）
+- **失败判断宁可不标也不错标**（`_tool_outcome`）：只认非零退出码（「退出码: N」/「✓ 退出码 N」）、❌ / ⛔ 开头、「失败：」「读取失败:」这类开头、用户中断（橙色「已停止」）。输出里出现 error / FAILED / 失败字样不算——测试名、文件内容里常有，误标成失败会让人以为出了问题。做完了的行不加标记
+- **输出只存成文字，点开那一行才建输出框**：`ToolCallCard._lines`（最多 4000 行），展开时 `_build_body` 才建参数标签和 QPlainTextEdit。早先每张卡都预建一个藏着的输出框，重画长会话时这一项占卡片耗时的三分之一。Ctrl+F 要搜到工具参数：`find_text` 先给参数里有关键词、还没建的行补建（`ensure_body`）。运行中的行图标换转圈、右边走秒（超过 2 秒才出，快的不闪），下面露最新一行输出；跑完行上不留用时（总用时在组头）
+- **样式一张表**（`mv_qss()`，挂在 MessageView 上，`apply_theme` 时按当前主题生成）：控件只打 objectName 或 `mv` 属性，不各自 setStyleSheet——每次都要解析 CSS、重算这一枝，一张卡十几次。范围用 `QScrollArea[mvRoot="true"]` 限定，**不用 `#messageView`**：ChatUI 把它的 objectName 改成了 chatArea，按 objectName 写的规则一条都不生效（实测：气泡没底色、按钮成了默认样式）。内容区原来挂着一条不带选择器的 `background`，会级联到每个子控件，于是每个子控件又写 `background:transparent` 盖回去——一并去掉。改前改后逐像素比对过（浅色 / 深色、收起 / 展开 / 底部），完全一致
+- **一轮里各块的分寸**（设计稿「消息区：消息流整理」）：
+  - 用户消息的编辑 / 回退 / 分叉放在气泡右边同一行（`UserTurn.set_actions`），鼠标移到这条消息上才出现；回答下面的复制 / 重新生成**只有最新一条常显**（`MessageView._latest_actions`），更早的移到那段回复上才出现。显隐都走 `_HoverButtons`：按钮藏起来也占着位置（`setRetainSizeWhenHidden`）——不然长消息折行时按钮一出现气泡就被挤窄重排，回答下面那排一出现后面的内容就往下跳
+  - 继续任务 / 中断恢复的说明走 `recovery_note` 消息（`run_results` 的「继续任务 · 使用模型…」、`recovery.prepare_and_apply` 的说明、重画时 `_recovery_note_text`），画成 `RecoveryNote`：线上一个小圆点 + 一行灰字，现场变化这些细节收进「详情」。实时继续时这两段紧挨着到，并成一条（标题相同的那句不重复）。以前是通栏灰底的程序提示，比用户自己的消息还显眼。其它程序提示（重试、拒绝调用）仍是 `Notice`
+  - 收起的过程是一行（`_ProcessSummary`，整行是按钮），行尾箭头朝右 = 收着
+  - 线上的节点：用户消息空心圆、**最终回答实心圆**（`_Round.answer_body`，绘制时现找：最后一段回复的最后一个正文块，跳过那排按钮；这一轮不是以回答收尾——停在工具上、后面还有提示——就不画，过渡回复不能标成回答）。竖线从第一个节点画到这一轮内容的底（`_content_bottom`，不算藏着也占位的按钮排），离最后一个节点够远（≥24）时底端收一个小空心圆
+  - 轮与轮之间一条很淡的分隔线（`#roundSep`，从线槽右边起；只加在两个 `_Round` 之间）。线上方少空 10：上一段回答末尾那排按钮藏着也占位
+  - 回答正文（`markdown_render._md_to_html`）：段落只留下边距 8；标题换成带字号的段落（Qt 给 `<hN>` 套自己的字号级别，style 里的 font-size 盖不过，h1 是 xx-large），上 18 下 6，回答以标题开头时上边距归零；列表是两列无框表格（符号一列、内容一列），折行和文字对齐，嵌套列表落在外层那项的内容列里；行内代码用正文色 + 很浅的底（`md_code_*`），文件链接和 localhost 链接用强调色、无下划线（Qt 默认的纯蓝下划线在深色底上几乎看不清）
+- **重画长会话的耗时账**（371 条消息、92 次工具调用，真实数据副本实测「知识库切回编码」）：界面改版前 0.8s → 右键菜单全局过滤器引入后 1.6s（修：重画时摘掉，见 subsystems.md 右键菜单）→ 0.82s → 样式一张表 0.45s → 一行一条 + 输出不预建 0.33–0.39s
+
 ## 项目（工作区）
 - **状态**：`state.current_project` 持当前项目根路径，None = 无项目；`chat_memory/projects.json` 持久化项目列表 + current
 - **启动恢复**：`src/agent.py` 启动时 `state.current_project = _projects.get_current()` 自动恢复
 - **新对话沿用项目**：`reset_history()` 不动 `current_project`，所以 `save_session` 仍用当前项目打 tag
 - **删项目时批量改归属**：`memory.move_sessions_to_no_project(old_path)` 把所有 `project == old_path` 的会话改成 None，三处一起改：**① 内存里已打开的 `Session.project`**（关键——只改磁盘的话，移除当前项目后 `_switch_project` 的 `save_session` 会按旧内存锚点把会话写回已删项目，后台会话下次 save 也复发）+ ② index.json + ③ 各 session 文件。个别会话文件写失败 → 抛 `SessionMigrationError`（内存锚点已置 None、下次 save 自愈，caller 据此提示用户）
 - **工具按项目根解析路径**：`src/tools.py:_project_cwd()` / `_resolve_path()` 让 `read_file('foo.txt')` 解析到 `state.current_project/foo.txt`；`run_command` 的 cwd 也是项目根
+- **无项目时落在专门的空工作区**（`tools_common.no_project_dir()`）：顺序是 config.json 的 `default_workspace` → 测试隔离数据根下的 `workspace`（设了 `LINGXI_DATA_DIR` 时）→「文档\灵犀工作区」，不存在就建。早先回退到进程 cwd——源码运行时就是灵犀仓库根：无项目对话里写的 index.html / app.js 落进了仓库，验证时跑 pytest 收集到的是灵犀自己的测试（仓库根 pytest.ini 指定了 testpaths，所以工作区也不能放在仓库里面）。system prompt 在无项目的编码会话里加一段「# 工作目录」写明这个路径（路径稳定，不破坏前缀缓存）；`@` 文件提及和补全也用 `_project_cwd()`，与工具同源。测试里要让无项目工具落在某个目录，用 `monkeypatch.setattr(config, "DEFAULT_WORKSPACE", ...)`，chdir 不再管用
 - **`.lingxirules` 项目级指令**：项目根放该文件后，`roles.get_system_prompt()` 会把它内容追加到 system prompt 末尾，优先于 SYSTEM_PROMPT 和角色卡的通用指令；每次新对话 / 切项目 / 删当前会话时都重新读，让 AI 立刻"懂这个项目的约定"
 - **规则加载分两层**（`roles.py`）：`read_rule_sources()` 只读**原文**、不截断；`render_rule_sources(budget)` 负责在预算内挑内容。装得下给全文（输出与重构前逐字一致）；装不下给「来源清单 + 目录 + 原文节选 + 省略范围 + 补读示例」，开头标注"尚未完整读取"。节选取头也取尾——**重要性不能靠位置判断**，约定和已知取舍这类最该遵守的条目常写在文末。预算：system prompt 合并 `_COMBINED_RULES_MAX=40000`，单来源 `_SINGLE_RULE_MAX=40000`，`get_project_instructions` 概览 `_TOOL_OVERVIEW_MAX=20000`（必须明显低于 `TOOL_RESULT_HARD_CAP_CHARS=24000`，否则概览会被发送层二次截断，连"少了什么"的说明本身都被切掉）
 - **早先"读的时候就截断"丢过真东西**：本仓库 CLAUDE.md 超过当时 20000 的上限，末尾 5 节（含「已知限制与有意取舍」）从未进入 system prompt——既不在输出里也不在任何清单里，模型不会去补读自己不知道存在的内容。这类故障不报错，只会表现为"它怎么老提已经决定过的事"
@@ -70,6 +85,6 @@
 - **溢出恢复**：provider 报超窗 → `_stream_chunks_with_retry` 抛 `ContextOverflowError` → 主循环把会话的 `overflow_squeeze` +1（`_current_history_budget` 按 1/2^n 收紧、8k 地板）→ 压缩后重发，封顶 `_MAX_OVERFLOW_RETRIES=3`。**不在成功后清零**：溢出说明对该模型窗口的估算偏乐观，这个教训该在本会话内保持，否则每轮都要重新撞一次墙
 - **停止不等网络**：`_stoppable_stream` 在旁路线程里拉流，worker 每 0.2s 看一次停止标志。原来 worker 直接迭代 `llm.stream()`，模型迟迟不回 chunk 时卡在网络读上（请求超时 30 分钟），停止后转圈一直走秒、旧 worker 不退，下一条消息排队 15 秒就放弃。旁路线程和 worker 绑同一会话与数据根，停止后它等到下一个 chunk 或请求结束自己关连接退出；重试退避也按停止标志提前结束。界面侧 `_force_stop_generation` 当场清掉「等待响应」指示器
 - **排队提示**：DeepSeek 高峰期会让请求排队最多 10 分钟，期间只发 SSE 注释 `: keep-alive`（实测 `/responses` 和 `/chat/completions` 都是每 12 秒一次，SDK 不产出 chunk）。`WaitingIndicator` 按心跳报的阶段区分「等待响应」（一个 chunk 都没有）/「模型思考中」/「正在生成工具调用 X」，只有前者满 30 秒才在下面加一行「服务商可能在排队」。原来三种阶段界面上都显示「等待响应」，长的 write_file 参数生成会被误认成卡住
-- **跑测试能停、工具卡走秒**：`run_tests` 原来用 `subprocess.run` 一直阻塞到进程退出，全量测试一跑 9 分钟，期间点停止没有反应、卡片上也一动不动。现在走 `_run_test_process`：`communicate` 每 0.2s 超时一次看停止标志（重试不丢输出），停止就杀进程树，结果如实记成「用户停止了测试，没有跑完」（证据 `cancelled`，不算通过也不算失败）。界面侧 `ToolCallCard` 实时运行时走秒，超过 2 秒头部出转圈和「运行中 N 秒」，结束后留「用时 N 秒」；重绘历史不走秒，点停止当场定格。跑着的测试同时登记进「后台任务」面板（见 background.md），能看实时输出、单独停
+- **跑测试能停、工具卡走秒**：`run_tests` 原来用 `subprocess.run` 一直阻塞到进程退出，全量测试一跑 9 分钟，期间点停止没有反应、卡片上也一动不动。现在走 `_run_test_process`：`communicate` 每 0.2s 超时一次看停止标志（重试不丢输出），停止就杀进程树，结果如实记成「用户停止了测试，没有跑完」（证据 `cancelled`，不算通过也不算失败）。界面侧 `ToolCallCard`（一行一条）实时运行时走秒，超过 2 秒图标换转圈、右边「运行中 N 秒」，结束后行上不留用时、算进组头的总用时；重绘历史不走秒，点停止当场定格。跑着的测试同时登记进「后台任务」面板（见 background.md），能看实时输出、单独停
 - **只记进度的一轮补一句提醒**：`agent._run_tool_calls` 执行完一轮，若整轮只调了 `set_step_status` / `update_plan`，在最后那条工具结果后面补一句"之后把进度更新和这一步的第一个动作放在同一轮发"。密钥打码那次 68 轮里有 7 轮是这样；系统提示词早就要求同一轮多发调用，DeepSeek 照样单发，对刚收到的工具结果更上心。提醒只进历史末尾（不碰缓存前缀），界面上的结果不变
 - 子 Agent 递归深度天然封顶：`spawn_agents` 里 `is_subagent` 的会话不许再派生

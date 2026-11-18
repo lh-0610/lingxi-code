@@ -22,7 +22,7 @@ import sys
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-from src import memory, recovery, run_records, session, verification
+from src import config, memory, recovery, run_records, session, verification
 from src.agent_result import AgentResult
 
 # 复用 B04 用例的造数函数（夹具在下面就地定义：从别的测试模块导入夹具会被当成重定义）。
@@ -87,7 +87,7 @@ class TestNoProjectSession:
                                                           monkeypatch):
         """工具**执行的当下**，sidecar 里就要有它实际的工作目录。"""
         from src import streaming
-        monkeypatch.chdir(repo)
+        monkeypatch.setattr(config, "DEFAULT_WORKSPACE", str(repo))   # 无项目工作区就是 repo
         sess = _no_project_session()
         _bind(sess)
         run_records.begin_run(sess)
@@ -128,7 +128,7 @@ class TestNoProjectSession:
             self, isolated_memory, repo, monkeypatch):
         """复核原场景：无项目、命令改了文件、没有回执 → 重开后只说"继续"，不能按 completed 收尾。"""
         from src import agent as _agent
-        monkeypatch.chdir(repo)
+        monkeypatch.setattr(config, "DEFAULT_WORKSPACE", str(repo))   # 无项目工作区就是 repo
         sess = _no_project_session()
         _bind(sess)
         run_records.begin_run(sess)
@@ -185,7 +185,7 @@ class TestNoProjectSession:
         from src.tools import run_tests
         from src.tools_git import git_diff
         _write_passing_test(repo)
-        monkeypatch.chdir(repo)
+        monkeypatch.setattr(config, "DEFAULT_WORKSPACE", str(repo))   # 无项目工作区就是 repo
         sess = _no_project_session()
         sess.pending_verification = {"files": [], "code_files": [], "reason": "", "run_id": "",
                                      "tracking_incomplete": {recovery.UNKNOWN_ROOT: "未知写入"}}
@@ -224,6 +224,8 @@ assert memory.load_session(sid, session=sess) is True
 assert sess.project is None, "这条用例测的就是无项目会话"
 sess.current_model_index = next(i for i, m in enumerate(MODEL_LIST)
                                 if m[1] not in ("claude-code", "ollama"))
+from src import config
+config.DEFAULT_WORKSPACE = os.getcwd()     # 无项目工作区 = 子进程的 cwd（repo）
 session.register(sess)
 session.bind_thread(sess)
 session.set_active(sess)
@@ -333,6 +335,7 @@ class TestNoProjectRealProcess:
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)             # 本进程在另一个目录
+        monkeypatch.setattr(config, "DEFAULT_WORKSPACE", str(elsewhere))   # 无项目工作区也换了地方
         spy = _Spy()
         from src import streaming
         monkeypatch.setattr(streaming, "get_tool_map", lambda: {"run_command": spy})

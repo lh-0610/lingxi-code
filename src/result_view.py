@@ -27,6 +27,8 @@ _TITLE_COMPLETED_UNRESOLVED = "本轮执行结束，检查未全部通过"
 # 项目里没有测试，结论来自浏览器：照实说证据是什么，不写"测试通过"。
 _TITLE_COMPLETED_BROWSER = "本轮执行结束，浏览器检查通过（项目没有测试）"
 _TITLE_INTERRUPTED = "上次运行被中断"
+# 收成一行时用的短标题（设计稿「消息区：结果卡精简成一行」）。只是去掉「本轮执行结束，」这类
+# 前缀，限定语不能丢：「已执行检查通过」仍然只说已执行的检查，不说需求做对了。
 _TITLE_RUNNING = "本轮仍在运行"
 _TITLE_UNKNOWN = "本轮结果未知"
 
@@ -262,6 +264,54 @@ def usage_lines(snapshot):
     return lines
 
 
+def _short_title(title):
+    short = {
+        _TITLE_COMPLETED_CHECKED: "已执行检查通过",
+        _TITLE_COMPLETED_UNRESOLVED: "检查未全部通过",
+        _TITLE_COMPLETED_BROWSER: "浏览器检查通过",
+        _TITLES["unverified"]: "仍有未验证事项",
+    }
+    return short.get(title, title)
+
+
+def split_rows(rows):
+    """检查记录分两组：卡片上直接列的「最新结论」，和收起来的「更早的记录」。
+
+    最新结论 = 既没过期、也没被复查取代的；一条都没有时（只剩过期记录），退回没被取代的
+    那些（照样标「已过期」）——不能因为过期就让卡片上一条检查都不剩，看着像没跑过。"""
+    current = [r for r in rows if not r.get("stale") and not r.get("superseded")]
+    primary = current or [r for r in rows if not r.get("superseded")]
+    folded = [r for r in rows if r not in primary]
+    return primary, folded
+
+
+def _meta(title, rows, files, pending, stop):
+    """一行里标题后面那串：涉及几个文件 · 检查名（全过）或几项没过 / 已过期。"""
+    parts = []
+    if title == _TITLE_COMPLETED_BROWSER:
+        parts.append("项目没有测试")
+    if stop and title != stop:
+        parts.append(stop)
+    if files:
+        parts.append(f"涉及 {len(files)} 个文件")
+    primary, _folded = split_rows(rows)
+    bad = [r for r in primary if r["status"] != "passed" and not r.get("stale")]
+    stale = [r for r in primary if r.get("stale")]
+    if bad:
+        parts.append(f"{len(bad)} 项未通过")
+    if stale:
+        parts.append(f"{len(stale)} 项已过期")
+    if primary and not bad and not stale:
+        names = []
+        for r in primary:
+            if r["checker"] not in names:
+                names.append(r["checker"])
+        parts.append("、".join(names[:3]) + ("等" if len(names) > 3 else ""))
+    if not rows and (pending.get("files") or pending.get("reason")) and files:
+        parts.append("没有跑检查")
+    return parts
+
+
 def describe(snapshot, *, live_run_id=None):
     """把快照翻译成结果卡的全部内容。返回纯数据 dict，便于逐条断言。"""
     if not isinstance(snapshot, dict):
@@ -325,8 +375,24 @@ def describe(snapshot, *, live_run_id=None):
     plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
     model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
 
+    primary, folded = split_rows(rows)
+    has_pending = bool(pending_files or pending_reason or pending.get("tracking_incomplete"))
+    # 纯问答 / 调研：没改文件、没跑检查、不用继续、没出问题——不出这张卡（只剩一行用量，
+    # 每轮都挂一张没内容的卡只是噪音）。判断照旧在这里，绘制方据此跳过。
+    quiet = (phase != "running" and outcome == "completed" and not rows and not files
+             and not has_pending and not save_note and not resumable)
+    # 只有"通过"默认收成一行；没过、中断、未验证、保存出错这些时候正需要看清楚，展开着
+    default_open = (tone != "ok") or resumable or has_pending or bool(save_note)
+
     return {
         "title": title,
+        "short_title": _short_title(title),
+        "meta": _meta(title, rows, files, pending, stop),
+        "primary_rows": primary,
+        "folded_rows": folded,
+        "folded_note": _folded_note(folded),
+        "quiet": quiet,
+        "default_open": default_open,
         "tone": tone,
         "reason": snapshot.get("reason") or "",
         "run_id": snapshot.get("run_id") or "",
@@ -366,6 +432,16 @@ def describe(snapshot, *, live_run_id=None):
         "agent_mode": snapshot.get("agent_mode") or "act",
         "permission_mode": snapshot.get("permission_mode") or "",
     }
+
+
+def _folded_note(folded):
+    if not folded:
+        return ""
+    stale = sum(1 for r in folded if r.get("stale"))
+    sup = sum(1 for r in folded if r.get("superseded") and not r.get("stale"))
+    why = "、".join(x for x in (f"{stale} 条之后又改过文件" if stale else "",
+                                 f"{sup} 条被复查取代" if sup else "") if x)
+    return f"还有 {len(folded)} 条更早的检查记录" + (f"（{why}）" if why else "")
 
 
 def plain_text(view) -> str:

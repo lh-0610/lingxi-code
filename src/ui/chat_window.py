@@ -105,6 +105,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.bridge.show_plan.connect(self._on_plan_update)
         self.bridge.run_result.connect(self._on_run_result)
         self.bridge.kb_status.connect(self._on_kb_status)
+        self.bridge.kb_status_read.connect(self._on_kb_status_read)
 
         # 让 tools.py 在 worker 线程里能找到主窗口（弹确认框用）
         state.ui_ref = self
@@ -136,6 +137,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._restore_role_card_ui()
         self._show_empty_state()
         QTimer.singleShot(300, self, self._show_current_model_config_warning)
+        # 启动后空闲时预热知识库（加载向量库 + 读一次状态，首次约 1.8s）：第一次切到知识库就不卡
+        QTimer.singleShot(2500, self, self._prewarm_kb_status)
 
     # ── 主题工具 ──
     def _t(self, key):
@@ -415,7 +418,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 重绘的是历史：回复上方不起秒表、不标当前模式
         self.chat_area.replaying = True
         try:
-            rendered_any = self._replay_history(list(agent.chat_history))
+            # 一口气建几百个控件：全局右键过滤器先摘掉（每个事件都进一趟 Python，见 suspended）
+            from . import context_menus
+            with context_menus.suspended():
+                rendered_any = self._replay_history(list(agent.chat_history))
         finally:
             self.chat_area.replaying = False
         if not rendered_any:
@@ -434,7 +440,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         ToolMessage），被接受的计划变化推演成步骤分段。返回是否画出了任何内容。"""
         from langchain_core.messages import ToolMessage
         from ..limits import TOOL_RESULT_PREVIEW_CHARS
-        from ..streaming import describe_tool_call
+        from ..streaming import describe_edit_stats, describe_tool_call
         from .message_view import replay_plan_change
         results = {m.tool_call_id: str(m.content or "") for m in history_snapshot
                    if isinstance(m, ToolMessage)}
@@ -450,7 +456,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 # 恢复说明是程序写的，画成程序说明，不画成"你"的气泡
                 rendered_any = True
                 labeled = False
-                self._append_html(note + "\n\n", "tool_result")
+                self._append_html(note + "\n\n", "recovery_note")
                 continue
             if isinstance(msg, HumanMessage):
                 rendered_any = True
@@ -515,6 +521,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                     display_name, detail = describe_tool_call(name, args)
                     self._append_html(f"\n{display_name}", "tool_tag")
                     self._append_html(f"  {detail}\n", "tool_detail")
+                    stats = describe_edit_stats(name, args)
+                    if stats:
+                        self._append_html(stats, "tool_stat")
                     result = results.get(tc.get("id"))
                     if result:
                         if len(result) > TOOL_RESULT_PREVIEW_CHARS:
@@ -1664,8 +1673,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
     def _list_project_dir(self, rel_dir):
         """列出 项目根/rel_dir 的直接子项 [(name, is_dir)]，跳噪声目录，文件夹优先。
         逐层浏览：@ 浮窗每次只列一层，选文件夹进入下一层。"""
-        from .. import session as _session
-        project_root = _session.current_project() or os.getcwd()  # 会话级，与工具 cwd 同源
+        from ..tools_common import _project_cwd
+        project_root = _project_cwd()          # 与工具 cwd 同源（无项目时是无项目工作区）
         target = os.path.join(project_root, rel_dir) if rel_dir else project_root
         ignore = {
             ".git", ".hg", ".svn", "node_modules", "bower_components",
@@ -1762,8 +1771,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """扫描 @相对路径，【不注入文件内容】，而是末尾追加强提示，让 AI 自己用
         read_file / list_directory 工具读取（历史干净 + 与工具体系一致）。"""
         import re as _re
-        from .. import session as _session
-        project_root = _session.current_project() or os.getcwd()  # 会话级，与工具 cwd 同源
+        from ..tools_common import _project_cwd
+        project_root = _project_cwd()          # 与工具 cwd 同源（无项目时是无项目工作区）
         pattern = _re.compile(r'(?<!\S)@([^\s@]+)')
         refs = []
         for m in pattern.finditer(text):

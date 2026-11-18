@@ -45,6 +45,21 @@ def test_unchanged_save_keeps_updated(isolated_memory):
     assert _body_updated(s.current_session_id) == before_body
 
 
+def test_regenerated_system_prompt_is_not_new_activity(isolated_memory):
+    """切到会话时系统提示词按当前代码重新生成：跨天（「今天是 X 月 X 日」变了）或提示词改过
+    之后，它和存盘时不一样。这不是对话内容，不能刷新 updated（用户实测：隔天点开会话又被顶到
+    最前、显示「刚刚」）。"""
+    s = _save("A", "hi", "20261117_000000_000003")
+    before_index, before_body = _index_updated()[s.current_session_id], _body_updated(s.current_session_id)
+    time.sleep(0.01)
+    s.chat_history[0] = SystemMessage(content="sys\n\n# 当前日期\n今天是 2026年11月18日。")
+    memory.save_session(session=s)
+    assert _index_updated()[s.current_session_id] == before_index
+    assert _body_updated(s.current_session_id) == before_body
+    with open(os.path.join(memory_dir(), f"{s.current_session_id}.json"), encoding="utf-8") as f:
+        assert "11月18日" in json.load(f)["messages"][0]["content"], "新提示词照样存下来"
+
+
 def test_new_message_refreshes_updated(isolated_memory):
     s = _save("A", "hi", "20261117_000000_000002")
     before = _index_updated()[s.current_session_id]

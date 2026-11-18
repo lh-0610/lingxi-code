@@ -188,6 +188,34 @@ def test_delta_after_click(browser, servers):
     assert len(delta) < len(after)              # diff 远小于全量
 
 
+def test_states_seen_by_the_text_tree(browser, servers):
+    """待办点掉只加了删除线、div 做的复选框 / 切换按钮 / 标签页：状态都要在文字树里，
+    点完的 diff 也要看得出来（实测：只加删除线时报"没有变化"，自定义复选框永远 unchecked）。"""
+    base_a, _ = servers
+    _call(browser, "open", url=base_a + "/states.html", timeout=20)
+    before = _call(browser, "lx", method="snapshot", args={"mode": "all"})["tree"]
+    assert 'checkbox "自定义复选框"' in before and "[unchecked]" in before
+    assert 'tab "第一页"' in before and "[selected]" in before
+    assert "[strikethrough]" not in before and "[pressed]" not in before
+    _call(browser, "js", code="document.getElementById('milk').click();"
+                              "document.getElementById('ariaBox').click();"
+                              "document.getElementById('bold').click(); true")
+    after = _call(browser, "lx", method="snapshot", args={"mode": "all"})["tree"]
+    milk = next(ln for ln in after.splitlines() if "买牛奶" in ln)
+    assert "[strikethrough]" in milk
+    assert next(ln for ln in after.splitlines() if "自定义复选框" in ln).endswith("[checked]") \
+        or "[checked]" in next(ln for ln in after.splitlines() if "自定义复选框" in ln)
+    assert "[pressed]" in next(ln for ln in after.splitlines() if "加粗" in ln)
+    delta = tree.compute_delta(before, after)
+    assert delta != tree.DELTA_EMPTY and "[strikethrough]" in delta
+
+
+def test_empty_delta_does_not_claim_the_page_is_unchanged():
+    """没变化时只说文字树没变：纯样式变化文字树看不见，不能说成"页面无可见变化"。"""
+    assert tree.compute_delta("- a", "- a") == tree.DELTA_EMPTY
+    assert "文字树" in tree.DELTA_EMPTY and "页面无可见变化" not in tree.DELTA_EMPTY
+
+
 def test_collapsed_select(browser, servers):
     base_a, _ = servers
     r = _call(browser, "open", url=base_a + "/form.html", timeout=20)
@@ -358,6 +386,85 @@ def test_close_while_open_pending_returns_closed_and_recovers(browser, servers):
     assert r2["ok"] is True, r2
 
 
+def _wait_cache_idle(app, limit=6.0):
+    deadline = time.time() + limit
+    while page_mod.cache_clearing() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    assert not page_mod.cache_clearing(), "清缓存一直没完成"
+
+
+def test_navigation_waits_for_an_in_flight_cache_clear(browser, servers):
+    """clearHttpCache 和导航重叠 → 那次导航永远等不到 loadFinished，卡满超时（实测 8/8）。
+    闸门让导航排在清理后面。这里清理和导航在同一轮事件里紧挨着发——经 worker 线程转一手
+    就有几毫秒间隔，未必撞得上，测不出闸门有没有起作用。"""
+    from PySide6.QtCore import QUrl
+    base_a, _ = servers
+    assert _call(browser, "open", url=base_a + "/form.html", timeout=20)["ok"]
+    _wait_cache_idle(browser)
+    for i in range(3):
+        pg = page_mod.get_browser().page
+        done = {}
+        conn = pg.loadFinished.connect(lambda ok: done.setdefault("ok", ok))
+        try:
+            page_mod.clear_cache_then(lambda: None)        # 别处刚发起的清理
+            page_mod.load_url(pg, QUrl(base_a + ("/states.html" if i % 2 else "/form.html")))
+            deadline = time.time() + 8
+            while "ok" not in done and time.time() < deadline:
+                browser.processEvents()
+                time.sleep(0.002)
+        finally:
+            pg.loadFinished.disconnect(conn)
+        assert done.get("ok") is True, f"第 {i} 次导航卡住了：{done}"
+
+
+def test_model_open_during_a_cache_clear(browser, servers):
+    """模型的 open 赶上清理在途：照样很快成功。"""
+    base_a, _ = servers
+    assert _call(browser, "open", url=base_a + "/form.html", timeout=20)["ok"]
+    _wait_cache_idle(browser)
+    page_mod.clear_cache_then(lambda: None)
+    t0 = time.perf_counter()
+    r = _call(browser, "open", url=base_a + "/states.html", timeout=10)
+    assert r["ok"] is True, r
+    assert (time.perf_counter() - t0) < 5, "不该卡到超时"
+
+
+def test_clears_never_overlap(browser, servers):
+    """清理在途时再要清：排在同一次后面，不叠第二次（叠起来时前一次的完成信号会提前放行导航）。"""
+    _call(browser, "open", url=servers[0] + "/form.html", timeout=20)
+    _wait_cache_idle(browser)
+    calls = []
+    profile = page_mod._get_profile()
+    real = profile.clearHttpCache
+    order = []
+    try:
+        profile.clearHttpCache = lambda: (calls.append(1), real())[1]
+        page_mod.clear_cache_then(lambda: order.append("a"))
+        page_mod.clear_cache_then(lambda: order.append("b"))
+        assert len(calls) == 1
+        assert order == [], "清完之前谁都不放行"
+        _wait_cache_idle(browser)
+        assert order == ["a", "b"]
+    finally:
+        del profile.clearHttpCache
+
+
+def test_close_defers_the_cache_clear_to_the_next_navigation(browser, servers):
+    """关浏览器不再延时清缓存（会撞上紧跟着的重开），只标脏；下一次导航先清完再走。"""
+    base_a, _ = servers
+    assert _call(browser, "open", url=base_a + "/form.html", timeout=20)["ok"]
+    _call(browser, "close", timeout=10)
+    assert page_mod.cache_dirty() and not page_mod.cache_clearing(), "关闭时不发清理"
+    for _ in range(20):                                # 以前的轮询清理会在这段时间里发出去
+        browser.processEvents()
+        time.sleep(0.01)
+    assert not page_mod.cache_clearing()
+    r = _call(browser, "open", url=base_a + "/states.html", timeout=10)
+    assert r["ok"] is True, r
+    assert not page_mod.cache_dirty(), "重开的第一次导航已经清过"
+
+
 def test_close_while_settle_pending_returns_closed(browser, servers):
     """等回调的请求（settle）同样立刻回"浏览器已关闭"。"""
     b = bridge_mod.get_bridge()
@@ -480,6 +587,193 @@ def test_detached_element_ref_pruned(browser, servers):
     assert r["ok"] is False, r
     assert "脱离" in r.get("error", "") or "不存在" in r.get("error", ""), r
     assert _out(browser) == "未点击", "失效 ref 不该点中别的元素"
+
+
+# ── 纯样式变化：文字树看不见时按动作前后的实际计算样式报，且不报假变化 ──────────────
+
+@pytest.fixture()
+def trusted_tools(browser, servers, monkeypatch):
+    """本机来源加白名单、确认一律放行：只测动作结果的文字，不测闸门。"""
+    from src import permission_modes as pm
+    from src import session as _session
+    from src import state as _state
+    from src import tools_browser as tb
+    sess = _session.current_session()
+    old_mode = pm.current(sess)
+    old_allow = set(sess.browser_origin_allowlist)
+    pm.apply(sess, "manual")
+    sess.browser_origin_allowlist.add(sec.parse_origin(servers[0]))
+
+    class _UI:
+        def confirm_command(self, text, **kw):
+            return True, ""
+
+    monkeypatch.setattr(_state, "ui_ref", _UI())
+    try:
+        yield tb
+    finally:
+        pm.apply(sess, old_mode)
+        sess.browser_origin_allowlist.clear()
+        sess.browser_origin_allowlist.update(old_allow)
+
+
+def _open_visual(browser, servers, tb):
+    r = _tool(browser, tb.browser_open.func, servers[0] + "/visual.html")
+    assert "已打开" in r, r
+    # 页面得是可见、有焦点的：offscreen 里不显示的话 visibilityState=hidden，焦点事件不触发、
+    # CSS 动画不走、定时器被节流——这几个误判陷阱全都不会发作，测了等于没测（变异实测）
+    view = page_mod.get_browser().view
+    view.resize(800, 600)
+    view.show()
+    view.activateWindow()
+    view.setFocus()
+    deadline = time.time() + 3
+    while True:                              # 焦点是异步到的
+        state_js = _call(browser, "js", code="document.visibilityState + '/' + document.hasFocus()")
+        if state_js.get("value") == "visible/true" or time.time() > deadline:
+            break
+        view.activateWindow()
+        view.setFocus()
+        browser.processEvents()
+        time.sleep(0.05)
+    assert state_js.get("value") == "visible/true", state_js
+    snap = _tool(browser, tb.browser_snapshot.func, mode="all")
+    deadline = time.time() + 0.3            # 让时钟在动作前的空闲期里跳几下
+    while time.time() < deadline:
+        browser.processEvents()
+        time.sleep(0.01)
+    return snap
+
+
+def _click(browser, tb, snap, name):
+    ref = _ref_of(snap, name)
+    assert ref, f"快照里找不到 {name}: {snap[:500]}"
+    return _tool(browser, tb.browser_click.func, ref)
+
+
+def test_color_only_change_is_reported(browser, servers, trusted_tools):
+    """只改颜色（文字树看不见）：要报出来，而且报在真正变色的那段文字上。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb)
+    out = _click(browser, tb, snap, "完成")
+    assert "实际样式变了" in out, out
+    assert "写周报" in out and "rgb(153, 153, 153)" in out, out
+    assert "border" not in out, f"边框色跟着 currentColor 变，是同一件事，不重复报\n{out}"
+
+
+def test_class_only_selection_is_reported_on_the_option(browser, servers, trusted_tools):
+    """类似 antd 下拉：选中只靠 class 上的背景色。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb)
+    out = _click(browser, tb, snap, "上海")
+    assert "实际样式变了" in out, out
+    line = next(ln for ln in out.splitlines() if "上海" in ln and "background-color" in ln)
+    assert "rgb(230, 244, 255)" in line and "就是操作的元素" in line, out
+
+
+@pytest.mark.parametrize("name, why", [
+    ("埋点按钮", "class 变了但没有任何样式"),
+    ("焦点按钮", "页面自己的焦点样式：聚焦在基线之前做完"),
+    ("空按钮", "旁边的时钟在自己跳、加载图标一直在转"),
+    ("闪一下", "点击反馈闪一下又恢复"),
+])
+def test_no_false_change(browser, servers, trusted_tools, name, why):
+    """没有真变化时绝不说变了（误判比漏报更糟：模型会以为点成功了）。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb)
+    out = _click(browser, tb, snap, name)
+    assert "实际样式变了" not in out, f"{why}：不该报变化\n{out}"
+    assert "样式都没有变化" in out, out
+
+
+@pytest.fixture()
+def fake_vision(monkeypatch):
+    """识别模型换成记录器：看它收到的是不是一张真截图、问题有没有带过去。"""
+    from src import models
+    seen = []
+
+    def describe(prompt, images):
+        seen.append((prompt, images))
+        return "假识别模型", "看到了：上海那一行是浅蓝底色"
+
+    monkeypatch.setattr(models, "get_vision_model_index", lambda: 0)
+    monkeypatch.setattr(models, "describe_images_with_vision", describe)
+    return seen
+
+
+def test_screenshot_sends_a_real_picture_with_the_question(browser, servers, trusted_tools,
+                                                           fake_vision):
+    import base64
+
+    from PySide6.QtGui import QImage
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb)
+    ref = _ref_of(snap, "上海")
+    out = _tool(browser, tb.browser_screenshot.func, "上海那一行是什么底色？", ref=ref)
+    assert "浅蓝底色" in out and "不是原图" in out, out
+    prompt, images = fake_vision[0]
+    assert "上海那一行是什么底色" in prompt and "不要猜" in prompt
+    img = QImage.fromData(base64.b64decode(images[0][1]), "PNG")
+    assert not img.isNull() and img.width() >= 50 and img.height() >= 50
+    # 不是一张纯白图：页面上有文字和色块
+    colors = {img.pixel(x, y) for x in range(0, img.width(), 7) for y in range(0, img.height(), 7)}
+    assert len(colors) > 3, "截到的是空白图"
+
+
+def test_screenshot_refuses_when_the_panel_is_hidden(browser, servers, trusted_tools, fake_vision):
+    """面板收起时截出来是空白：直说，不拿白图去问识别模型（它会照着白图编答案）。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb)
+    page_mod.get_browser().view.hide()
+    browser.processEvents()
+    out = _tool(browser, tb.browser_screenshot.func, "页面上有什么？")
+    assert "面板没显示" in out, out
+    assert not fake_vision, "不该把空白图交给识别模型"
+
+
+def test_screenshot_does_not_start_a_browser(browser, trusted_tools, fake_vision):
+    tb = trusted_tools
+    _call(browser, "close", timeout=10)
+    out = _tool(browser, tb.browser_screenshot.func, "页面上有什么？")
+    assert not page_mod.is_browser_open(), "没开页面时截图不该拉起浏览器"
+    assert not fake_vision and "browser_open" in out, out
+
+
+def test_screenshot_needs_a_question_and_a_vision_model(browser, servers, trusted_tools,
+                                                        monkeypatch):
+    from src import models
+    tb = trusted_tools
+    _open_visual(browser, servers, tb)
+    assert "要给 question" in _tool(browser, tb.browser_screenshot.func, "  ")
+    monkeypatch.setattr(models, "get_vision_model_index", lambda: -1)
+    assert "图片识别模型" in _tool(browser, tb.browser_screenshot.func, "看看")
+
+
+def test_standard_states_in_the_tree(browser, servers):
+    """规范里定死的状态一次读齐：aria-current / sort / invalid / required / readonly / busy /
+    data-state / details 展开。"""
+    base_a, _ = servers
+    _call(browser, "open", url=base_a + "/states.html", timeout=20)
+    _call(browser, "js", code=(
+        "document.body.insertAdjacentHTML('beforeend', `"
+        "<nav><a href='#a' aria-current='page'>首页</a></nav>"
+        "<table><tr><th aria-sort='ascending'>日期</th></tr></table>"
+        "<input aria-label='邮箱' aria-invalid='true' required>"
+        "<input aria-label='工号' readonly value='42'>"
+        "<div role='region' aria-label='列表区' aria-busy='true'><button>刷新</button></div>"
+        "<button data-state='open'>菜单</button>"
+        "<details><summary>更多</summary><p>内容</p></details>`); true"))
+    t = _call(browser, "lx", method="snapshot", args={"mode": "all"})["tree"]
+
+    def line(name):
+        return next(ln for ln in t.splitlines() if f'"{name}"' in ln)
+    assert "[current=page]" in line("首页")
+    assert "[sort=ascending]" in line("日期")
+    assert "[invalid]" in line("邮箱") and "[required]" in line("邮箱")
+    assert "[readonly]" in line("工号")
+    assert "[busy]" in line("列表区")
+    assert "[state=open]" in line("菜单")
+    assert "[expanded=false]" in line("更多")
 
 
 def test_click_in_cross_origin_iframe_asks_even_when_top_trusted(browser, servers, monkeypatch):

@@ -54,7 +54,7 @@
   - 区域 3：执行与验证状态（待验证文件列表与义务提示）；
   - 区域 4：验证证据（每项检查最后一次的结论，与结果卡共用 `result_view.effective_rows`；加本会话仍在跑的后台命令），面板显示时每 2 秒刷新；
   - 普通问答无任务无计划时显示空状态说明（会出现什么、可以先加固定限制），不再整栏消失。
-- **消息流里的计划步骤分段（`ui/message_view.py`）**：计划的当前步骤换了（`show_plan` → `_on_plan_update` → `MessageView.on_plan`），就在这一轮里插一个带编号的步骤节点，之后的工具卡排在它下面；步骤来自程序记下的计划状态，不从回复文字里猜。重绘历史时按被工具接受了的 `update_plan` / `set_step_status` 推演（`replay_plan_change`），只用于画分段，面板仍以会话保存的计划为准。
+- **消息流里的计划步骤分段（`ui/message_view.py`）**：计划的当前步骤换了（`show_plan` → `_on_plan_update` → `MessageView.on_plan`），就在这一轮里插一个带编号的步骤节点，之后的工具调用排在它下面；步骤来自程序记下的计划状态，不从回复文字里猜。重绘历史时按被工具接受了的 `update_plan` / `set_step_status` 推演（`replay_plan_change`），只用于画分段，面板仍以会话保存的计划为准。
 
 ## 统一退出屏障：停止后启动下一轮（src/ui/run_admission.py，B09a）
 - **忙碌判据只有一条**：`_worker_alive(sess)` = `is_generating` 或 `last_worker.is_alive()`。强制停止会立刻把 `is_generating` 置 False 而旧线程还在收尾写会话；`finished` 信号也可能先于线程退出到达——两者都不能作为"可以开新一轮"的依据。各入口的忙碌判断统一走这个谓词（`_resume_wait` / `_wait_worker_and_undo_switch` 亦然），不各养一套。

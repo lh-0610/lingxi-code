@@ -736,9 +736,12 @@ class BrowserView(QWidget):
         self._user_typing = False
         self._set_address(url)
         self.failed = False
+        was_loading = self._loading
         self._loading = True
         self._update_mode()
-        self._embedded.load(QUrl(url))
+        # 走缓存闸门：清缓存在途时排队等清完（和清理重叠的导航会卡死）；关过浏览器先清一次
+        from ..browser import page as page_mod
+        page_mod.load_url(self._embedded.page(), QUrl(url), page_loading=was_loading)
 
     def _navigate(self):
         self._user_typing = False
@@ -768,7 +771,9 @@ class BrowserView(QWidget):
             p.triggerAction(p.WebAction.Forward)
         elif which == "reload":
             self.failed = False
-            p.triggerAction(p.WebAction.Reload)
+            from ..browser import page as page_mod      # 清缓存在途时等清完再刷新（同 navigate）
+            page_mod.when_cache_idle(
+                lambda: shiboken6.isValid(p) and p.triggerAction(p.WebAction.Reload))
 
     def _reload_or_stop(self):
         p = self._wired_page

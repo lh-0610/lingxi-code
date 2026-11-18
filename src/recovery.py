@@ -806,14 +806,15 @@ def prepare_and_apply(sess, *, ui=None, mode="continue", expected_run_id="", not
         logger.warning(f"恢复说明未能落盘，保留 inflight 记录: {outcome.error}")
         if not outcome.skipped:
             _say(ui, "\n⚠️ 恢复说明未能保存；执行前记录已保留，下次打开仍会提示。\n")
-    _say(ui, "\n" + note + "\n")
+    # 恢复说明在消息流里画成一行小字、细节收进「详情」（MessageView.recovery_note）
+    _say(ui, "\n" + note + "\n", tag="recovery_note")
     return True
 
 
-def _say(ui, text):
+def _say(ui, text, tag="tool_result"):
     if ui is None:
         return
     try:
-        ui.show_message(text, "tool_result")
+        ui.show_message(text, tag)
     except Exception:
         pass

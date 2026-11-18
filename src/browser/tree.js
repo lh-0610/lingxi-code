@@ -14,6 +14,8 @@
     "CAPTION", "DD", "DT", "H1", "H2", "H3", "H4", "H5", "H6"]);
   const SKIP_TAG = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META",
     "LINK", "TITLE", "BASE", "SVG", "PATH"]);
+  const DATA_STATES = new Set(["open", "closed", "checked", "unchecked", "indeterminate", "active",
+    "inactive", "on", "off", "selected", "unselected", "expanded", "collapsed", "disabled"]);
   const NAME_MAX = 120;
   const WALK_NODE_CAP = 30000;
   const FOLD_LINK_LIMIT = 8;        // §3.5：contentinfo/banner 里同级链接超过这个数就折叠
@@ -140,16 +142,52 @@
     if (name) line += " " + JSON.stringify(name);
     if (/^H[1-6]$/.test(el.tagName)) line += " [level=" + el.tagName[1] + "]";
     if (withRef) line += " [ref=" + assignRef(el) + "]";
-    if (el.disabled) line += " [disabled]";
-    if (role === "checkbox" || role === "radio" || role === "switch" || role === "menuitemcheckbox")
-      line += " [" + (el.checked ? "checked" : "unchecked") + "]";
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") line += " [disabled]";
+    if (role === "checkbox" || role === "radio" || role === "switch" || role === "menuitemcheckbox"
+        || role === "menuitemradio") {
+      // 原生 <input> 看 checked / indeterminate；div[role=checkbox] 这类自定义控件没有 checked
+      // 属性，要看 aria-checked——早先只读 el.checked，自定义复选框永远显示 unchecked（实测）
+      let st;
+      if (el.tagName === "INPUT") st = el.indeterminate ? "mixed" : (el.checked ? "checked" : "unchecked");
+      else {
+        const a = (el.getAttribute("aria-checked") || "").toLowerCase();
+        st = a === "true" ? "checked" : a === "mixed" ? "mixed" : "unchecked";
+      }
+      line += " [" + st + "]";
+    }
+    const pressed = el.getAttribute("aria-pressed");
+    if (pressed === "true") line += " [pressed]";
+    else if (pressed === "mixed") line += " [pressed=mixed]";
     const exp = el.getAttribute("aria-expanded");
     if (exp !== null) line += " [expanded=" + exp + "]";
     if (role === "textbox" || role === "searchbox" || role === "combobox") {
       const v = el.value || "";
       if (v) line += " [value=" + JSON.stringify(clean(v, 50)) + "]";
     }
-    if (role === "option" && el.selected) line += " [selected]";
+    if ((role === "option" && el.selected) || el.getAttribute("aria-selected") === "true")
+      line += " [selected]";
+    // 其余标准状态：规范里定死的有限几种，读一次就够，不随项目适配
+    if (role === "button" && el.tagName === "SUMMARY" && exp === null && el.parentElement
+        && el.parentElement.tagName === "DETAILS")
+      line += " [expanded=" + (el.parentElement.open ? "true" : "false") + "]";
+    const cur = el.getAttribute("aria-current");
+    if (cur && cur !== "false") line += cur === "true" ? " [current]" : " [current=" + cur + "]";
+    const sort = el.getAttribute("aria-sort");
+    if (sort && sort !== "none") line += " [sort=" + sort + "]";
+    if (el.getAttribute("aria-invalid") === "true") line += " [invalid]";
+    if (el.required || el.getAttribute("aria-required") === "true") line += " [required]";
+    if ((role === "textbox" || role === "searchbox" || role === "spinbutton")
+        && (el.readOnly || el.getAttribute("aria-readonly") === "true")) line += " [readonly]";
+    if (el.getAttribute("aria-busy") === "true") line += " [busy]";
+    // Radix / shadcn 这类组件库的 data-state；上面的 aria 状态已经说了就不重复
+    const ds = (el.getAttribute("data-state") || "").toLowerCase();
+    if (ds && DATA_STATES.has(ds) && !/\[(checked|unchecked|mixed|pressed|selected|expanded=)/.test(line))
+      line += " [state=" + ds + "]";
+    // 删除线是「已完成」最常见的画法（待办清单）：纯样式、文字树本来看不见，点完会被当成没变化
+    try {
+      const deco = getComputedStyle(el).textDecorationLine || "";
+      if (deco.indexOf("line-through") >= 0) line += " [strikethrough]";
+    } catch (e) { /* 拿不到样式就不标 */ }
     return line;
   }
 
@@ -524,8 +562,189 @@
   window.addEventListener("unhandledrejection", e =>
     push("error", "unhandledrejection: " + (e.reason && (e.reason.stack || e.reason.message) || e.reason)));
 
+  // ── 动作前后的样式核对（文字树看不见的纯样式变化，tools_browser._delta_text 只在文字树
+  // diff 为空时取）──────────────────────────────────────────────────────────────
+  //
+  // 关键是**不报假变化**：不看 class 名猜含义，而是动作前记下点击处附近元素的实际计算样式，
+  // 动作后再取一次逐项比——class 变了但样式没变（埋点 class、焦点 class 没写样式）不会报。
+  // 我们自己的副作用（滚动到可见、聚焦）在记基线之前做完，不会混进来。
+  // 动作前空闲期就在自己变的元素（时钟、轮播、加载动画）单独标出，不当成动作的效果。
+  const VISUAL_PROPS = ["display", "visibility", "opacity", "color", "backgroundColor",
+    "backgroundImage", "textDecorationLine", "fontWeight", "fontStyle", "borderTopColor",
+    "borderRightColor", "borderBottomColor", "borderLeftColor", "outlineStyle", "outlineColor",
+    "boxShadow", "transform", "filter"];
+  const PSEUDO_PROPS = ["content", "color", "backgroundColor", "display"];
+  const CSS_NAME = p => p.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
+  const SCOPE_CAP = 120;
+  const MUT_CAP = 4000;
+  let mutObs = null;
+  let mutated = new Set();      // 上次 takeRecords 以来属性变过的元素
+  let busy = new WeakSet();     // 动作前空闲期就在自己变的元素
+  let baseline = null;          // {target, items: [{el, st, pseudo}]}
+
+  function noteRecords(records) {
+    for (const m of records) {
+      if (m.type !== "attributes" || m.attributeName === "data-lxref") continue;
+      if (mutated.size < MUT_CAP) mutated.add(m.target);
+    }
+  }
+
+  function ensureObserver() {
+    if (mutObs || !document.documentElement) return;
+    mutObs = new MutationObserver(noteRecords);
+    mutObs.observe(document.documentElement, { subtree: true, attributes: true });
+  }
+  if (document.readyState === "loading")
+    document.addEventListener("DOMContentLoaded", ensureObserver, { once: true });
+  else ensureObserver();
+
+  function drainMutations() {
+    if (mutObs) noteRecords(mutObs.takeRecords());
+    const out = mutated;
+    mutated = new Set();
+    return out;
+  }
+
+  function rendered(el) {
+    return el.isConnected && el.getClientRects().length > 0;
+  }
+
+  // 一直在跑的 CSS 动画（加载转圈等）：它动的属性随时在变，比较时跳过
+  function loopingProps(el) {
+    const skip = new Set();
+    try {
+      for (const a of el.getAnimations()) {
+        const timing = a.effect && a.effect.getComputedTiming ? a.effect.getComputedTiming() : null;
+        if (!timing || timing.iterations !== Infinity) continue;
+        const kf = a.effect.getKeyframes ? a.effect.getKeyframes() : [];
+        for (const f of kf) for (const k of Object.keys(f)) skip.add(k);
+      }
+    } catch (e) { /* 拿不到就不跳过 */ }
+    return skip;
+  }
+
+  function styleOf(el) {
+    const cs = getComputedStyle(el);
+    const st = {};
+    for (const p of VISUAL_PROPS) st[p] = cs[p];
+    const pseudo = {};
+    for (const which of ["::before", "::after"]) {
+      const ps = getComputedStyle(el, which);
+      if (ps.content && ps.content !== "none" && ps.content !== "normal")
+        for (const p of PSEUDO_PROPS) pseudo[which + " " + p] = ps[p];
+    }
+    return { st, pseudo };
+  }
+
+  // 点击处附近：目标往上两层的整棵子树（同一行 / 同一项里的兄弟元素，删除线常画在旁边的
+  // 文字上）+ 祖先链 + aria-controls / label 指向的元素
+  function scopeOf(target) {
+    const set = new Set();
+    let root = target;
+    for (let i = 0; i < 2 && root.parentElement && root.parentElement !== document.body; i++)
+      root = root.parentElement;
+    // 祖先在前（自上而下）、子树按层序在后：报告时父元素先比，继承下来的同样变化才能去重
+    const chain = [];
+    for (let a = root.parentElement; a && a !== document.documentElement; a = a.parentElement)
+      chain.unshift(a);
+    for (const a of chain) set.add(a);
+    const queue = [root];
+    while (queue.length && set.size < SCOPE_CAP) {
+      const el = queue.shift();
+      if (SKIP_TAG.has(el.tagName)) continue;
+      set.add(el);
+      for (const c of el.children) queue.push(c);
+    }
+    const ids = (target.getAttribute("aria-controls") || "").split(/\s+/).filter(Boolean);
+    if (target.control) set.add(target.control);
+    for (const id of ids) { const t = document.getElementById(id); if (t) set.add(t); }
+    if (!set.has(target)) set.add(target);
+    return Array.from(set);
+  }
+
+  function watchPrepare(opts) {
+    // 空闲期（上一个动作之后到现在）变过的元素：它们会自己变，不是这次动作的效果
+    ensureObserver();
+    busy = new WeakSet();
+    for (const el of drainMutations()) busy.add(el);
+    baseline = null;
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    // 先把我们自己的副作用做完（click/type 里还会再做一遍，届时已是空操作）
+    r.el.scrollIntoView({ block: "center", inline: "center" });
+    if (r.el.focus) r.el.focus();
+    return { ok: true };
+  }
+
+  function watchBaseline(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    drainMutations();                       // 聚焦、滚动、快照打的 data-lxref：丢掉
+    const items = scopeOf(r.el).map(el => ({ el, ...styleOf(el) }));
+    baseline = { target: r.el, items, docId };
+    return { ok: true, scope: items.length };
+  }
+
+  function describe(el) {
+    const role = roleOf(el);
+    let name = nameOf(el, role);
+    if (!name) name = clean(el.textContent, 40);
+    let d = role === "generic" ? el.tagName.toLowerCase() : role;
+    if (name) d += " " + JSON.stringify(name);
+    const ref = elRefs.get(el);
+    if (ref && refs.get(ref) === el) d += " [ref=" + ref + "]";
+    return d;
+  }
+
+  function watchReport() {
+    if (!baseline || baseline.docId !== docId)
+      return { ok: false, error: "没有动作前的样式基线" };
+    const after = drainMutations();
+    const changed = [];
+    let busyCount = 0;
+    const seen = new Map();                 // el -> 变化签名，用来去掉继承下来的重复
+    for (const it of baseline.items) {
+      const el = it.el;
+      if (!el.isConnected) continue;
+      const now = styleOf(el);
+      const loop = loopingProps(el);
+      const diffs = [];
+      for (const p of VISUAL_PROPS) {
+        if (loop.has(p)) continue;
+        if (it.st[p] === now.st[p]) continue;
+        // 边框 / 轮廓色默认跟着 currentColor：文字变色时它们一起变，是同一件事，不重复报
+        if (/^(border|outline).*Color$/.test(p) && it.st[p] === it.st.color && now.st[p] === now.st.color)
+          continue;
+        diffs.push([CSS_NAME(p), it.st[p], now.st[p]]);
+      }
+      const keys = new Set([...Object.keys(it.pseudo), ...Object.keys(now.pseudo)]);
+      for (const k of keys) {
+        if ((it.pseudo[k] || "") !== (now.pseudo[k] || ""))
+          diffs.push([k.replace(/ ([a-zA-Z]+)$/, (m, p) => " " + CSS_NAME(p)), it.pseudo[k] || "(无)", now.pseudo[k] || "(无)"]);
+      }
+      if (!diffs.length) continue;
+      // 现在看不见的元素：只有"被隐藏"本身算变化
+      if (!rendered(el) && !diffs.some(d => d[0] === "display" || d[0] === "visibility")) continue;
+      const sig = JSON.stringify(diffs);
+      seen.set(el, sig);
+      if (el.parentElement && seen.get(el.parentElement) === sig) continue;  // 继承自父元素
+      if (busy.has(el)) { busyCount++; continue; }
+      changed.push({
+        desc: describe(el),
+        self: el === baseline.target,
+        props: diffs.slice(0, 4).map(d => ({ prop: d[0], from: String(d[1]).slice(0, 60), to: String(d[2]).slice(0, 60) })),
+      });
+    }
+    const scoped = new Set(baseline.items.map(i => i.el));
+    let elsewhere = 0;
+    for (const el of after) if (!scoped.has(el) && !busy.has(el) && rendered(el)) elsewhere++;
+    baseline = null;
+    return { ok: true, changed: changed.slice(0, 6), more: Math.max(0, changed.length - 6),
+             busy: busyCount, elsewhere };
+  }
+
   window.__lx = {
-    snapshot, find, click, type, act, readText, info,
+    snapshot, find, click, type, act, readText, info, watchPrepare, watchBaseline, watchReport,
     console: (opts) => { const out = consoleBuf.slice(); if (opts && opts.clear) consoleBuf.length = 0; return { ok: true, entries: out, url: location.href, docId }; },
     state: () => ({ ok: true, url: location.href, title: document.title, readyState: document.readyState, generation, docId }),
   };

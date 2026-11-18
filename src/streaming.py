@@ -77,9 +77,63 @@ def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
             detail += f"，筛选 {str(args['k']).strip()}"
     elif name == "search_in_file":
         detail = f"{args.get('path', '')} → '{args.get('keyword', '')}'"
+    elif name == "apply_patch":
+        # 一行摘要是补丁涉及的文件（原来是参数 JSON 的第一行「*** Begin Patch」，看不出改了啥）；
+        # 补丁全文放在后面几行，展开看
+        patch = str(args.get("patch") or "")
+        files = []
+        for ln in patch.splitlines():
+            for mark in ("*** Update File:", "*** Add File:", "*** Delete File:"):
+                if ln.strip().startswith(mark):
+                    f = ln.strip()[len(mark):].strip()
+                    if f and f not in files:
+                        files.append(f)
+        detail = "、".join(files) or "补丁"
+        if patch.strip():
+            detail += "\n" + patch.strip()
     else:
         detail = _pretty_args(args)
     return display_name, detail
+
+
+def describe_edit_stats(name: str, args: dict) -> str:
+    """改文件类工具在界面上那一行右边的增删行数（「编辑 app.js +12 −3」）。
+
+    工具本身不返回这个，按参数算：edit_file 比对新旧两段（真实的行级差异，不是两段各多少行）；
+    apply_patch 数补丁里的 +/- 行；append_file 追加了多少行。replace_all 的编辑不知道替换了几处、
+    write_file 不知道原文件多少行——这两种不报「+N」，免得把整文件覆盖说成新增（write_file 只报
+    写了多少行）。算不出来返回空串。"""
+    import difflib
+    try:
+        if name == "edit_file":
+            if args.get("replace_all"):
+                return ""
+            old = str(args.get("old_string") or "").splitlines()
+            new = str(args.get("new_string") or "").splitlines()
+            added = removed = 0
+            for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+                if tag in ("replace", "delete"):
+                    removed += i2 - i1
+                if tag in ("replace", "insert"):
+                    added += j2 - j1
+        elif name == "append_file":
+            added, removed = len(str(args.get("content") or "").splitlines()), 0
+        elif name == "apply_patch":
+            added = removed = 0
+            for line in str(args.get("patch") or "").splitlines():
+                if line.startswith("+") and not line.startswith("+++"):
+                    added += 1
+                elif line.startswith("-") and not line.startswith("---"):
+                    removed += 1
+        elif name == "write_file":
+            n = len(str(args.get("content") or "").splitlines())
+            return f"{n} 行" if n else ""
+        else:
+            return ""
+    except Exception:
+        return ""
+    parts = ([f"+{added}"] if added else []) + ([f"−{removed}"] if removed else [])
+    return " ".join(parts)
 
 
 def _pretty_args(args) -> str:
@@ -136,6 +190,7 @@ PLAN_MODE_READONLY_TOOLS = {
     # 浏览器只读五件套：开页/快照/找元素/读正文/读控制台都不改页面状态。
     # browser_click / browser_type 是动作，**不在**这里（Plan 拦下）；browser_close 改状态也不在
     "browser_open", "browser_snapshot", "browser_find", "browser_read_text", "browser_console",
+    "browser_screenshot",  # 截图交识别模型：只读页面（滚动到 ref 不改页面数据），网络外发同 read_image
 }
 
 
@@ -1654,6 +1709,9 @@ def _execute_tool(tc, ui, _preinvoked=None):
 
     ui.show_message(f"\n{display_name}", "tool_tag")
     ui.show_message(f"  {detail}\n", "tool_detail")
+    _stats = describe_edit_stats(name, args)
+    if _stats:
+        ui.show_message(_stats, "tool_stat")          # 改文件那一行右边的 +N −M
     logger.info(f"执行工具: {name}({detail})")
 
     # ── MCP / Git 写操作执行前确认 ──

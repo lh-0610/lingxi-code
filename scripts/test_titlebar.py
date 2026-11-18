@@ -134,3 +134,22 @@ def test_settings_offers_native_title_bar_fallback(qapp, tmp_path, monkeypatch):
     dlg._save()
     assert json.loads(cfg.read_text(encoding="utf-8"))["native_title_bar"] is True
     dlg.deleteLater()
+
+
+def test_hover_block_is_centered_but_the_button_stays_full_height(qapp):
+    """悬停底色是居中的圆角块，不铺满 56px 高的整列（用户反馈关闭键太高）；按钮本身仍是整列，
+    最大化时鼠标甩到屏幕右上角照样点得中关闭。"""
+    from PySide6.QtGui import QColor
+    from src.ui.titlebar import BUTTON_H, HOVER_H, WindowButtons, _CaptionButton
+    from PySide6.QtWidgets import QWidget
+    host = QWidget()
+    wb = WindowButtons(host)
+    close = next(b for b in wb.findChildren(_CaptionButton) if b.kind == "close")
+    assert close.height() == BUTTON_H
+    close.nc_hover = True
+    img = close.grab().toImage()
+    red = QColor("#c42b1c")
+    mid = img.pixelColor(img.width() // 2 - 12, img.height() // 2)
+    top = img.pixelColor(img.width() // 2, 2)
+    assert mid == red, "中间是关闭键的红色悬停块"
+    assert top != red and (BUTTON_H - HOVER_H) >= 12, "上沿留白，不是整列都红"

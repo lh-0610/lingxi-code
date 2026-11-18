@@ -14,6 +14,14 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
+@pytest.fixture(autouse=True)
+def _workspace_is_this_repo(monkeypatch):
+    # 用例拿灵犀仓库自己当样本（相对路径 src/tools.py）。无项目时工具落在无项目工作区、
+    # 不再是进程 cwd，所以把工作区显式指到仓库根
+    from src import config
+    monkeypatch.setattr(config, "DEFAULT_WORKSPACE", ROOT)
+
+
 # ── 辅助 ────────────────────────────────────────────────────────────
 
 def _norm(p: str) -> str:

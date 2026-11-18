@@ -584,6 +584,12 @@ def _ensure_memory_dir():
             _atomic_write_json(memory_index(), [], ensure_ascii=True, indent=None)
 
 
+def _conversation_only(messages):
+    """存盘消息里去掉系统提示词（每次切会话都会按当前代码重新生成，不是对话内容）。"""
+    return [m for m in (messages or [])
+            if not (isinstance(m, dict) and m.get("type") == "SystemMessage")]
+
+
 def _msg_to_dict(msg):
     if msg is None:
         return {"type": "Unknown", "content": ""}
@@ -931,7 +937,11 @@ def _save_session_locked(*, session=None, started=None):
 
     # 只有对话真的变了才算"新活动"、刷新 updated（侧栏按它排序）。切会话时会先把当前会话
     # 存一遍——内容没变也照样刷新的话，看过一眼就跳到分组最前（用户实测：点谁谁跑到第一个）。
-    touched = not existing or existing.get("messages") != data["messages"]
+    # 系统提示词不算对话：切到会话时它按当前代码重新生成（里面有「今天是 X 月 X 日」、工作目录
+    # 等），跨天或改过提示词后它和存盘时不一样——算进去的话，隔天点开任何会话都会被顶到最前、
+    # 显示「刚刚」（用户实测复发）。只比用户 / 模型 / 工具这些真正的对话消息。
+    touched = not existing or (_conversation_only(existing.get("messages"))
+                               != _conversation_only(data["messages"]))
     if not touched and existing.get("updated"):
         data["updated"] = existing["updated"]
 

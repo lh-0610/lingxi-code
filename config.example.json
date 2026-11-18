@@ -41,6 +41,8 @@
   "web_search_provider": "auto",
   "web_search_deep": false,
   "fetch_url_allow_proxy": false,
+  "default_workspace": "",
+  "_default_workspace_说明": "没打开项目（无项目 · 全局工作区）时，AI 读写文件、运行命令所在的文件夹。留空 = 「文档」下的「灵犀工作区」，不存在会自动建。设置 → 高级 → 无项目工作区 里改，重启生效。",
   "_fetch_url_allow_proxy_说明": "fetch_url 是否走系统代理。默认 false（直连，SSRF 防线完整、能校验目标真实 IP）。必须靠代理才能访问外网时设 true，但此时跳过防 DNS 重绑定的 peer 校验。",
   "_web_search_说明": "web_search 用 DeepSeek 自家的搜索接口（直接用 deepseek_api_key，中文最好，约 5 元/千次）、Tavily（tavily.com，有免费额度）或博查（open.bochaai.com，只用它的普通 Web Search）。web_search_provider：auto = 中文问题先 DeepSeek 再博查再 Tavily，其余先 Tavily 再 DeepSeek 再博查，出错就换下一个（没配 key 的跳过）；deepseek / tavily / bocha = 只用它。fetch_url 被网站拒绝（403 等）时，有 DeepSeek key 就改用它的抓取接口再读一次。web_search_deep：深度搜索，自动读前几个结果的原文、按问题挑出最相关的段落，更准但每次多等几秒。这几项在设置 → 高级 → 网络搜索 里改，保存后立即生效。",
 

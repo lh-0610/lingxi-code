@@ -10,7 +10,7 @@ import os
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize, QRectF
 from PySide6.QtGui import QPainter, QFont, QFontMetrics, QColor, QPalette
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMenu, QTextBrowser,
+    QHBoxLayout, QLabel, QMenu, QPushButton, QTextBrowser,
     QTextEdit, QVBoxLayout, QWidget, QStyle, QStyledItemDelegate,
 )
 
@@ -42,6 +42,8 @@ class SignalBridge(QObject):
     dismiss_confirm = Signal()
     show_plan = Signal(object, object)  # (来源 Session, list[{text,status}])
     kb_status = Signal(str, str, bool)  # 知识库重建进度：(状态键 ok/stale/error, 文本, 是否已结束)
+    # 知识库状态读取结果（后台线程读 index_status → 主线程）：(请求序号, kb 目录, 结果 dict 或异常文本)
+    kb_status_read = Signal(int, str, object)
 
 
 class DragDropTextBrowser(QTextBrowser):
@@ -539,22 +541,155 @@ class FileCompleter(QWidget):
         return (score, positions) if qi == len(q) else (-1, [])
 
 
-class HistoryRow(QWidget):
-    """Sidebar history row（删除按钮通过布局排在标题右侧，永远可见）。"""
+class ElidedButton(QPushButton):
+    """按实际宽度在末尾省略的按钮（侧栏会话标题 / 分组名）。
+
+    早先按字数截成 12 字 + "..."：宽侧栏浪费、窄侧栏照样被挤，中英文混排时长短也不一。
+    full_text() 是完整文字，text() 是当前显示的（可能带 …）。"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full = text or ""
+        self.setText(self._full)
+
+    def full_text(self) -> str:
+        return self._full
+
+    def set_full_text(self, text):
+        self._full = text or ""
+        self._elide()
+
+    def _elide(self):
+        avail = self.contentsRect().width()
+        try:
+            # 样式表里的左右内边距不在 contentsRect 里，按样式算出的内容区为准
+            from PySide6.QtWidgets import QStyleOptionButton
+            opt = QStyleOptionButton()
+            self.initStyleOption(opt)
+            r = self.style().subElementRect(QStyle.SE_PushButtonContents, opt, self)
+            if r.width() > 0:
+                avail = r.width()
+            if not self.icon().isNull():
+                avail -= self.iconSize().width() + 6
+        except Exception:
+            pass
+        if avail <= 8:
+            super().setText(self._full)
+            return
+        super().setText(self.fontMetrics().elidedText(self._full, Qt.ElideRight, avail))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+
+class _HoverRevealMixin:
+    """悬停时把一组控件换成另一组：平时显示 rest（时间 / 数量），悬停显示 hover（「⋯」）。
+    弹出菜单期间鼠标离开行不算离开——菜单关掉后再按鼠标实际位置收起。"""
+
+    def _init_hover_reveal(self):
+        self._hover_show = []
+        self._hover_hide = []
+        self._menu_open = False
+        self.setAttribute(Qt.WA_Hover, True)
+
+    def set_hover_widgets(self, show_on_hover=(), hide_on_hover=()):
+        self._hover_show = [w for w in show_on_hover if w is not None]
+        self._hover_hide = [w for w in hide_on_hover if w is not None]
+        self._apply_hover(False)
+
+    def _apply_hover(self, hovered):
+        for w in self._hover_show:
+            w.setVisible(hovered)
+        for w in self._hover_hide:
+            w.setVisible(not hovered)
+
+    def set_menu_open(self, open_):
+        """菜单弹出期间菜单抢着鼠标：点别处关掉菜单时，这一行和「⋯」都收不到 Leave，
+        Qt 还当鼠标在上面（WA_UnderMouse 不清）——QSS 的 :hover 底色卡住、「⋯」的悬停底框
+        留在原地（实测：点「⋯」再点对话区，行左边一块灰、时间外面一个框）。关菜单时按
+        鼠标实际位置把悬停状态纠正过来，重新套样式并重画。"""
+        self._menu_open = open_
+        if open_:
+            return
+        from PySide6.QtGui import QCursor
+        inside = self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+        self._apply_hover(inside)
+        for w in [self] + self.findChildren(QWidget):
+            if not inside or not w.rect().contains(w.mapFromGlobal(QCursor.pos())):
+                w.setAttribute(Qt.WA_UnderMouse, False)
+            w.style().unpolish(w)
+            w.style().polish(w)
+            w.update()
+
+    def enterEvent(self, event):
+        self._apply_hover(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._menu_open:
+            self._apply_hover(False)
+        super().leaveEvent(event)
+
+
+class HistoryRow(_HoverRevealMixin, QWidget):
+    """侧栏会话行：标题（按宽度省略）+ 右侧一个状态（转圈 / 待确认 / 绿点 / 时间）。
+    悬停时出现「⋯」（重命名 / 删除），平时不挂删除按钮。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         # 纯 QWidget 默认不画样式表背景；要让 #historyRow[rowstate]/[current] 的整行底色
         # 真正绘制出来，必须开 WA_StyledBackground（否则属性选择器只生效在能自绘背景的控件上）。
         self.setAttribute(Qt.WA_StyledBackground, True)
-        # WA_Hover：让 #historyRow:hover 整行底色在鼠标移入(含移到内部标题按钮/× 上)时也生效。
-        # 只靠子按钮 :hover 的话高亮只覆盖标题按钮那一截、左边被 marker 推开、右边到不了 ×，
-        # 看着是个左缩右缺的半截色块，很难看；整行 hover 才和选中态(整行底色)一致。
-        self.setAttribute(Qt.WA_Hover, True)
+        # WA_Hover：让 #historyRow:hover 整行底色在鼠标移入(含移到内部标题按钮/⋯ 上)时也生效。
+        self._init_hover_reveal()
 
     def watch_hover(self, widget):
         # 兼容旧调用，无操作
         pass
+
+
+class GroupHeader(_HoverRevealMixin, ElidedButton):
+    """侧栏分组标题：折叠箭头 + 名字（省略）+ 右侧「当前」/ 数量；注册项目悬停出「⋯」。
+    右侧小件用布局挂在按钮里，标题省略时给它们让出宽度。"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._init_hover_reveal()
+        self._right = QHBoxLayout(self)
+        self._right.setContentsMargins(0, 0, 4, 0)
+        self._right.setSpacing(4)
+        self._right.addStretch(1)
+        self._right_width = 0
+
+    def add_right(self, widget):
+        self._right.addWidget(widget, 0, Qt.AlignVCenter)
+        widget.setAttribute(Qt.WA_TransparentForMouseEvents,
+                            not isinstance(widget, QPushButton))
+        self._elide()
+
+    def _elide(self):
+        reserve = 0
+        for i in range(self._right.count() if hasattr(self, "_right") else 0):
+            w = self._right.itemAt(i).widget()
+            if w is not None and not w.isHidden():
+                reserve += w.sizeHint().width() + 4
+        if not reserve:
+            super()._elide()
+            return
+        full = self.full_text()
+        avail = self.width() - reserve - 34          # 左侧箭头 + 内边距
+        if avail <= 8:
+            QPushButton.setText(self, full)
+            return
+        QPushButton.setText(self, self.fontMetrics().elidedText(full, Qt.ElideRight, avail))
+
+    def _apply_hover(self, hovered):
+        super()._apply_hover(hovered)
+        self._elide()
 
 
 class LoadingSpinner(QWidget):

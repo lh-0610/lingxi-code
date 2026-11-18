@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>纯样式变化</title>
+<style>
+  .done .label { color: rgb(153, 153, 153); }
+  .is-focused { outline: 2px solid rgb(0, 0, 255); }
+  .tick { background-color: rgb(255, 255, 0); }
+  .opt.selected { background-color: rgb(230, 244, 255); }
+  .flash { box-shadow: 0 0 0 4px rgb(255, 0, 0); }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .spinner { display: inline-block; width: 10px; height: 10px; animation: spin 0.5s linear infinite; }
+</style>
+</head>
+<body>
+<!-- 真变化：只改颜色（文字树看不见），应当报出来 -->
+<ul>
+  <li id="todo"><button id="done">完成</button> <span class="label">写周报</span></li>
+</ul>
+
+<!-- 假变化陷阱：class 变了但没有任何样式 -->
+<div><button id="track" onclick="this.classList.toggle('tracked-click')">埋点按钮</button></div>
+
+<!-- 假变化陷阱：聚焦时页面自己加的焦点样式，我们的聚焦在基线之前做完 -->
+<div><button id="focusy">焦点按钮</button></div>
+
+<!-- 假变化陷阱：旁边有个自己在跳的时钟、一直转的加载图标，按钮本身什么都不做 -->
+<div id="row"><button id="noop">空按钮</button> <span id="clock">12:00</span> <span class="spinner"></span></div>
+
+<!-- 假变化陷阱：点击时闪一下又恢复（波纹 / 点击反馈），结束后什么都没变 -->
+<div><button id="flashy">闪一下</button></div>
+
+<!-- 真变化：类似 antd 下拉选项，选中只靠 class 上的背景色 -->
+<div class="list">
+  <div class="opt" role="option" id="optA">北京</div>
+  <div class="opt" role="option" id="optB">上海</div>
+</div>
+
+<script>
+  document.getElementById("done").addEventListener("click", () =>
+    document.getElementById("todo").classList.toggle("done"));
+  const f = document.getElementById("focusy");
+  f.addEventListener("focus", () => f.classList.add("is-focused"));
+  f.addEventListener("blur", () => f.classList.remove("is-focused"));
+  // 时钟每跳一下颜色都不同（只在两个值之间切换的话，动作结束时有一半概率恰好回到原色，
+  // "自己在变的元素"这个陷阱就时有时无）
+  let tick = 0;
+  setInterval(() => {
+    tick = (tick + 1) % 200;
+    document.getElementById("clock").style.backgroundColor = "rgb(" + (50 + tick) + ", 0, 0)";
+  }, 60);
+  document.getElementById("flashy").addEventListener("click", e => {
+    e.target.classList.add("flash");
+    setTimeout(() => e.target.classList.remove("flash"), 80);
+  });
+  for (const o of document.querySelectorAll(".opt"))
+    o.addEventListener("click", () => {
+      for (const x of document.querySelectorAll(".opt")) x.classList.remove("selected");
+      o.classList.add("selected");
+    });
+</script>
+</body>
+</html>

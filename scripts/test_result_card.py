@@ -731,7 +731,9 @@ class TestQtRendering:
         qt_app.processEvents()
 
         text = _card_text(card)
-        assert "本轮结束，仍有未验证事项" in text
+        assert "仍有未验证事项" in text, "收成一行用短标题"
+        assert card.title_label.toolTip() == "本轮结束，仍有未验证事项", "完整标题在悬停提示里"
+        assert card.is_open(), "未验证的卡默认展开：这时正需要看清楚"
         assert "src/a.py" in text
         assert "pytest" in text and "失败" in text
         assert "退出码 1" in text
@@ -845,7 +847,7 @@ class TestQtRendering:
         card = ResultCard(_describe(_finish(sess, "limit_reached")))
 
         def _position(match):
-            col = card.layout()
+            col = card.body.layout()             # 详情都在展开区里（那一行之下）
             for i in range(col.count()):
                 item = col.itemAt(i)
                 widgets = [item.widget()] if item.widget() else [
@@ -1081,3 +1083,157 @@ class TestAgentLoopDelivery:
         # 只多了模型那条真实回复，没有为了显示卡片而伪造的 AIMessage
         assert len(sess.chat_history) == before + 1
         assert sess.chat_history[-1].content == "好了"
+
+
+# ══════════════════════════════════════════════════════════════
+# 精简成一行（设计稿「消息区：结果卡精简成一行」）
+# ══════════════════════════════════════════════════════════════
+
+def _evidence(sess, checker="pytest", status="passed", code=0, **kw):
+    verification.record_evidence(sess.verification, kind="tests", checker=checker, status=status,
+                                 exit_code=code, argv=["python", "-m", checker], **kw)
+
+
+class TestCompactView:
+    def test_short_title_keeps_its_qualifier(self, isolated_memory):
+        sess = _new_session()
+        _saved(sess)
+        run_records.begin_run(sess)
+        _evidence(sess)
+        view = _describe(_finish(sess, "completed"))
+        assert view["title"] == "本轮执行结束，已执行检查通过"
+        assert view["short_title"] == "已执行检查通过", "只去前缀，「已执行」这个限定不能丢"
+
+    def test_meta_names_checks_when_clear_and_counts_failures_otherwise(self, isolated_memory):
+        sess = _new_session()
+        _saved(sess)
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "a.py")
+        _evidence(sess)
+        clear = _describe(_finish(sess, "completed"))
+        assert clear["meta"] == ["涉及 1 个文件", "pytest"]
+
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "a.py")
+        _evidence(sess, status="failed", code=1)
+        _evidence(sess, checker="ruff")
+        bad = _describe(_finish(sess, "completed"))
+        assert "1 项未通过" in bad["meta"] and "pytest" not in bad["meta"]
+
+    def test_old_records_fold_and_the_latest_stay(self, isolated_memory):
+        """截图里 9 条检查只有 2 条代表当前结论：过期 / 被取代的收进「更早的记录」。"""
+        sess = _new_session()
+        _saved(sess)
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "a.py")
+        _evidence(sess, checker="pytest")
+        verification.mark_dirty(sess.verification, "a.py")     # 之后又改了：上面那条过期
+        _evidence(sess, checker="ruff")
+        view = _describe(_finish(sess, "completed"))
+        assert [r["checker"] for r in view["primary_rows"]] == ["ruff"]
+        assert [r["checker"] for r in view["folded_rows"]] == ["pytest"]
+        assert view["folded_note"] == "还有 1 条更早的检查记录（1 条之后又改过文件）"
+
+    def test_when_only_stale_records_remain_they_stay_visible(self, isolated_memory):
+        """全都过期了也不能让卡片上一条检查都不剩——那看着像从没跑过。"""
+        from src.result_view import split_rows
+        rows = [{"checker": "pytest", "status": "passed", "stale": True, "superseded": False}]
+        primary, folded = split_rows(rows)
+        assert primary == rows and folded == []
+
+    def test_only_a_clean_pass_starts_folded(self, isolated_memory):
+        sess = _new_session()
+        _saved(sess)
+        run_records.begin_run(sess)
+        _evidence(sess)
+        snap = _finish(sess, "completed")
+        snap["pending_verification"] = {}            # 干净的通过：没有待验证事项
+        view = _describe(snap)
+        assert view["tone"] == "ok" and not view["has_pending"] and not view["resumable"]
+        assert view["default_open"] is False, "干净的通过：收成一行"
+        snap["pending_verification"] = {"files": ["a.py"], "reason": "改了还没测"}
+        assert _describe(snap)["default_open"] is True, "有待验证事项：展开"
+        run_records.begin_run(sess)
+        _evidence(sess, status="failed", code=1)
+        assert _describe(_finish(sess, "completed"))["default_open"], "没全过：展开"
+        run_records.begin_run(sess)
+        assert _describe(_finish(sess, "limit_reached"))["default_open"], "能继续：展开"
+
+    def test_plain_question_is_quiet(self, isolated_memory):
+        sess = _new_session()
+        _saved(sess)
+        run_records.begin_run(sess)
+        assert _describe(_finish(sess, "completed"))["quiet"] is True
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "a.py")
+        assert _describe(_finish(sess, "completed"))["quiet"] is False, "改了文件就出卡"
+
+    def test_quiet_run_renders_no_card(self, qt_app, isolated_memory):
+        from src.ui.message_view import MessageView
+        from src.ui.result_card import ResultCard
+        from src.ui.run_results import RunResultMixin
+
+        class Host(RunResultMixin):
+            def __init__(self):
+                self.chat_area = MessageView()
+                self._rendered_result_run_id = ""
+
+            def _on_result_view_diff(self, v):
+                pass
+
+            _on_result_view_output = _on_result_continue = _on_result_view_diff
+
+            def _open_file_in_panel(self, *a, **k):
+                pass
+
+        sess = _new_session()
+        _saved(sess)
+        session.set_active(sess)
+        run_records.begin_run(sess)
+        host = Host()
+        host._render_result_card(_finish(sess, "completed"))
+        assert host.chat_area.findChildren(ResultCard) == [], "纯问答不出卡"
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "a.py")
+        host._render_result_card(_finish(sess, "completed"))
+        assert len(host.chat_area.findChildren(ResultCard)) == 1
+        host.chat_area.close()
+
+    def test_card_folds_old_records_and_opens_files(self, qt_app, isolated_memory):
+        from PySide6.QtWidgets import QLabel, QPushButton
+        from src.ui.result_card import ResultCard
+        sess = _new_session(project="D:/proj")
+        _saved(sess)
+        run_records.begin_run(sess)
+        verification.mark_dirty(sess.verification, "src/app.js")
+        _evidence(sess, checker="pytest")
+        verification.mark_dirty(sess.verification, "src/app.js")
+        _evidence(sess, checker="ruff")
+        view = dict(_describe(_finish(sess, "completed")), default_open=False)
+        card = ResultCard(view)
+        card.resize(640, 400)
+        card.show()
+        qt_app.processEvents()
+        assert not card.is_open(), "干净的通过收成一行"
+        card.toggle()
+        assert card.is_open()
+        fold = next(b for b in card.findChildren(QPushButton) if "更早的检查记录" in b.text())
+        hidden = [w for w in card.findChildren(QLabel) if w.text() == "pytest"]
+        assert hidden and not hidden[0].isVisibleTo(card), "过期的旧记录先收着"
+        fold.click()
+        assert hidden[0].isVisibleTo(card)
+        opened = []
+        card.open_file_requested.connect(lambda v, p: opened.append(p))
+        link = next(w for w in card.findChildren(QLabel) if 'href="0"' in w.text())
+        link.linkActivated.emit("0")
+        assert opened == ["src/app.js"]
+        card.close()
+
+    def test_soft_wrap_does_not_split_words(self):
+        from src.ui.result_card import _soft_wrap
+        text = "代码文件被修改（app.js）但尚未运行测试。请先调用 run_tests 验证改动不会引入回归，本轮已有文件修改但尚未调用 git_diff 查看最终改动。"
+        lines = _soft_wrap(text).splitlines()
+        assert all(len(ln) <= 42 for ln in lines)
+        joined = "".join(lines)
+        assert "run_tests" in joined and "git_diff" in joined, "英文词不能被切开"
+        assert max(len(ln) for ln in _soft_wrap("Z" * 300).splitlines()) <= 42, "超长单词照样硬切"

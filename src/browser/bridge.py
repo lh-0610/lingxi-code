@@ -98,9 +98,10 @@ class BrowserBridge(QObject):
 
     _ACTIVITY_LABELS = {"open": "打开页面", "js": "执行脚本", "frames": "列框架",
                         "settle": "等待页面", "close": "关闭浏览器",
-                        "qturl": "读地址", "console": "读控制台"}
+                        "qturl": "读地址", "console": "读控制台", "grab": "截图"}
     _LX_LABELS = {"snapshot": "快照", "find": "查找", "click": "点击", "type": "输入",
-                  "readText": "读正文", "console": "控制台", "info": "查元素", "state": "读状态"}
+                  "readText": "读正文", "console": "控制台", "info": "查元素", "state": "读状态",
+                  "watchPrepare": "准备操作", "watchBaseline": "记样式", "watchReport": "核对样式"}
 
     def _activity_label(self, req):
         op = req["op"]
@@ -151,6 +152,8 @@ class BrowserBridge(QObject):
                 self._qturl(req, args.get("frame"))
             elif op == "console":
                 self._console(req, args)
+            elif op == "grab":
+                self._grab(req, args)
             elif op == "settle":
                 QTimer.singleShot(args.get("ms", 800), self, lambda: self._reply(req, {"ok": True}))
             else:
@@ -206,6 +209,7 @@ class BrowserBridge(QObject):
                           error=None if ok else "loadFinished(false)")
 
     def _open(self, req, args):
+        from src.browser import page as page_mod
         page = self._browser.page
         self._abort_open("被新的导航取代")
         self._wire_page(page)
@@ -232,36 +236,15 @@ class BrowserBridge(QObject):
         timer.timeout.connect(on_timeout)
         timer.start(int(timeout * 1000))
         self._open_timer = timer
-        url = QUrl(args["url"])
-        if self._page_loading or page.url().isEmpty() or page.url().toString() == "about:blank":
-            page.load(url)          # 新页面渲染进程里没有旧脚本；在途导航时清缓存会堵死导航
-        else:
-            self._clear_cache_then_load(req, page, url)
-
-    def _clear_cache_then_load(self, req, page, url):
-        """先清缓存再导航。profile 已是 NoCache，但渲染进程里的 Blink 内存缓存仍会按
-        Last-Modified 推断"还新鲜"复用旧脚本——改完 app.js 重开同一地址、加 ?v=2、Reload
-        都还跑旧代码（评测 012），只有 clearHttpCache（会一并清渲染进程内存缓存）管用。
-        它是异步的：等 clearHttpCacheCompleted 再 load，2 秒兜底。"""
-        profile = self._browser.profile
-        fired = {"done": False, "conn": None}
-
-        def go():
-            if fired["done"]:
-                return
-            fired["done"] = True
-            try:
-                profile.clearHttpCacheCompleted.disconnect(fired["conn"])
-            except (RuntimeError, TypeError):
-                pass
-            if req.get("cancelled") or req.get("replied") or self._open_req is not req:
-                return
-            if shiboken6.isValid(page):
-                page.load(url)
-
-        fired["conn"] = profile.clearHttpCacheCompleted.connect(go)
-        QTimer.singleShot(2000, self, go)
-        profile.clearHttpCache()
+        # 先清缓存再导航：profile 已是 NoCache，但渲染进程里的 Blink 内存缓存仍会按
+        # Last-Modified 推断"还新鲜"复用旧脚本——改完 app.js 重开同一地址、加 ?v=2、Reload
+        # 都还跑旧代码（评测 012），只有 clearHttpCache（会一并清渲染进程内存缓存）管用。
+        # 空白新页面里没有旧脚本，不用清（关过浏览器则由闸门的"标脏"兜住）；在途导航时不清。
+        blank = page.url().isEmpty() or page.url().toString() == "about:blank"
+        page_mod.load_url(page, QUrl(args["url"]),
+                          clear_first=not blank, page_loading=self._page_loading,
+                          still_wanted=lambda: not (req.get("cancelled") or req.get("replied")
+                                                    or self._open_req is not req))
 
     def _finish_open(self, req, *, ok, loaded, error):
         page = self._browser.page if self._browser is not None else None
@@ -364,6 +347,34 @@ class BrowserBridge(QObject):
 
         walk(self._browser.page.mainFrame(), "f")
         self._reply(req, {"ok": True, "frames": info})
+
+    def _grab(self, req, args):
+        """截页面当前可见区域（view.grab），PNG base64。宽度超过 max_width 等比缩小。
+        view 不显示（面板收起 / 尺寸为零）时截出来是空白，直接说清楚，不交一张白图去识别。"""
+        import base64
+
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+        view = self._browser.view
+        if view is None or not shiboken6.isValid(view) or not view.isVisible() \
+                or view.width() < 50 or view.height() < 50:
+            self._reply(req, {"ok": False, "error": "浏览器面板没显示，截不到页面（打开右侧的浏览器面板再截）"})
+            return
+        pix = view.grab()
+        if pix.isNull():
+            self._reply(req, {"ok": False, "error": "截图失败（拿到空图）"})
+            return
+        max_w = int(args.get("max_width") or 1280)
+        img = pix.toImage()
+        if img.width() > max_w:
+            img = img.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
+        data = QByteArray()
+        buf = QBuffer(data)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG")
+        buf.close()
+        self._reply(req, {"ok": True, "png": base64.b64encode(bytes(data)).decode("ascii"),
+                          "width": img.width(), "height": img.height(),
+                          "url": self._browser.page.url().toString()})
 
     def _qturl(self, req, frame):
         """页面/frame 的真实 URL（Qt 侧）。闸门与围栏不信页面自报的 URL。"""

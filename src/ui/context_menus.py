@@ -19,6 +19,7 @@ QWebEngineContextMenuRequest 另做，菜单外观共用 ``make_menu``。
 from __future__ import annotations
 
 import weakref
+from contextlib import contextmanager
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QAction, QTextDocument
@@ -45,6 +46,33 @@ def install(app: QApplication, host=None):
     if _filter is None:
         _filter = _ContextMenuFilter(app)
         app.installEventFilter(_filter)
+
+
+_suspend_depth = 0
+
+
+@contextmanager
+def suspended():
+    """批量建控件期间临时摘掉全局过滤器，结束装回去（可嵌套）。
+
+    应用级过滤器是 Python 写的：界面上**每个事件**都要从 C++ 进一趟 Python。人手操作时
+    事件很稀，感觉不到；重画长会话（371 条消息、92 张工具卡）一口气产生约 9 万个事件，
+    这一层把「知识库切回编码」从 0.8s 拖到 1.6s（逐个提交二分实测，第 5 批引入）。
+    重画期间主线程忙着，不可能弹右键菜单；期间的右键事件排在队列里，装回去之后才分发。"""
+    global _suspend_depth
+    app = QApplication.instance()
+    if _filter is None or app is None:
+        yield
+        return
+    if _suspend_depth == 0:
+        app.removeEventFilter(_filter)
+    _suspend_depth += 1
+    try:
+        yield
+    finally:
+        _suspend_depth -= 1
+        if _suspend_depth == 0:
+            app.installEventFilter(_filter)
 
 
 def make_menu(parent: QWidget | None = None) -> QMenu:

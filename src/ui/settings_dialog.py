@@ -309,6 +309,11 @@ class SettingsDialog(dialogs.CardDialog):
         search_hint.setWordWrap(True)
         a.addWidget(search_hint)
 
+        self._add_section(a, "无项目工作区")
+        self._add_path_picker(a, "default_workspace",
+                              "没打开项目时，AI 读写文件、运行命令都在这个文件夹（重启生效）",
+                              placeholder="留空 = 「文档」下的「灵犀工作区」")
+
         self._add_section(a, "窗口")
         self._add_bool(a, "native_title_bar",
                        "使用系统标题栏（自绘标题栏在你的电脑上显示不对时打开；重启生效）")

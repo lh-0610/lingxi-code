@@ -18,7 +18,7 @@ import sys
 import pytest
 from langchain_core.messages import HumanMessage
 
-from src import memory, recovery, run_records, session, state, verification
+from src import config, memory, recovery, run_records, session, state, verification
 
 from test_b04_recovery import _UI, _bind, _code_session, _make_repo, _reopen, _sidecar
 from test_b04_review_fixes import _no_project_session, _write_passing_test
@@ -67,10 +67,16 @@ class _ChecksThenDone:
         return "完成了。", [], {"input": 1, "output": 1, "total": 2}, None
 
 
+def _work_in(monkeypatch, path):
+    """无项目会话的工具落在无项目工作区（不是进程 cwd）：两个一起指过去。"""
+    monkeypatch.chdir(path)
+    monkeypatch.setattr(config, "DEFAULT_WORKSPACE", str(path))
+
+
 class TestChecksMustCoverTheObligation:
     def _interrupted_in(self, a_dir, monkeypatch):
         """无项目会话在 a_dir 里跑命令、改了文件后中断（sidecar 里没有回执）。"""
-        monkeypatch.chdir(a_dir)
+        _work_in(monkeypatch, a_dir)
         sess = _no_project_session()
         _bind(sess)
         run_records.begin_run(sess)
@@ -88,7 +94,7 @@ class TestChecksMustCoverTheObligation:
         _write_passing_test(repo)
         _write_passing_test(other)
         sid = self._interrupted_in(repo, monkeypatch)
-        monkeypatch.chdir(repo if same_dir else other)
+        _work_in(monkeypatch, repo if same_dir else other)
         again = _reopen(sid)
         _bind(again)
         again.chat_history.append(HumanMessage(content="继续"))
@@ -113,7 +119,7 @@ class TestChecksMustCoverTheObligation:
         _write_passing_test(repo)
         _write_passing_test(other)
         sid = self._interrupted_in(repo, monkeypatch)
-        monkeypatch.chdir(other)
+        _work_in(monkeypatch, other)
         monkeypatch.setattr(state, "ui_ref", None)
         again = _reopen(sid)
         _bind(again)
@@ -121,7 +127,7 @@ class TestChecksMustCoverTheObligation:
             recovery.prepare_and_apply(again, mode="message", ui=_UI())
             run_records.begin_run(again)
             run_tests.func(path="test_sample.py")          # 在 B 跑
-            git_diff.func()                                # 无项目会话：git_diff 在进程目录 B 执行
+            git_diff.func()                                # 无项目会话：git_diff 在无项目工作区 B 执行
             gaps = "\n".join(verification.get_verification_gaps(again.verification))
             assert "测试是在" in gaps and "没有覆盖" in gaps
             run_command.func(command=f"cd {repo}")

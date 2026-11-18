@@ -42,8 +42,10 @@
 
 ## 运行结果卡（src/result_view.py + ui/result_card.py，B06）
 - **用量行**（`result_view.usage_lines`）：轮数 · 输入 · 输出 · 思考（有上报才列）· 命中率，有单价时追加金额、没单价但有折算比时追加"未命中等价 token"，两者都没有就只列 token。子 Agent 有用量时另起一行"其中子 Agent：…"，免得总数看不出是谁花的。命中率拿不到就写"命中率未知"，**不写 0%**。金额取账本快照里收尾时算好的数，不在这里按当前配置重算。缓存断裂事件**不上卡片**（只进日志和账本，见 core.md）
+- **长相：一行 + 点开看详情**（设计稿「消息区：结果卡精简成一行」）：那一行是状态圆标 · 短标题（`short_title`，只去「本轮执行结束，」这类前缀，「已执行」这种限定语不能丢；完整标题在悬停提示里）· 摘要（`meta`：涉及几个文件 · 全过时列检查名、没过时说「N 项未通过 / 已过期」）·「查看改动」· 展开箭头。**只有干净的通过默认收着**（`default_open`）：没过、中断、到上限、有待验证事项、保存出错时默认展开——这些时候正需要看清楚。详情里每项检查**只列最新结论**（`split_rows`：没过期也没被取代的；一条都不剩时退回没被取代的，照样标已过期，不能让卡上一条检查都没有），过期 / 被复查取代的收成一行「还有 N 条更早的检查记录（a 条之后又改过文件、b 条被复查取代）」，点了才列。改动的文件逐个可点，在右侧文件面板看那个文件的差异（`open_file_requested`）。用户截图里一张卡列了 9 条检查，代表当前结论的只有 2 条
+- **纯问答不出卡**（`quiet`：完成、没改文件、没跑检查、不用继续、没出问题）：早先每轮都挂一张只有一行用量的「本轮回复结束」，只是噪音。判断在 `result_view`，`run_results._render_result_card` 据此跳过
 - **判断与绘制分开**：`result_view.describe(snapshot, live_run_id=...)` 算出标题/检查行/过期/待验证/保存提示，返回纯数据；`ui/result_card.py` 只负责画。卡片上"能不能说检查通过了"是要被逐条测试钉死的判断，混进布局代码就只能靠截图验
-- **卡片上每一句都要有程序证据**。模型正文说"已完成"不改变结论；没跑过检查就不写"测试通过"，纯问答连检查面板都不画（空面板会让人以为哪里出错）；`unverified` **不翻译成**"代码写完了只是没测"——它并不证明实现完整
+- **卡片上每一句都要有程序证据**。模型正文说"已完成"不改变结论；没跑过检查就不写"测试通过"，纯问答连卡都不出（见上）；`unverified` **不翻译成**"代码写完了只是没测"——它并不证明实现完整
 - **结构化证据在实际执行位置采集**（`verification.record_evidence` → `verification["evidence"]`，随 `last_run.evidence.validation_runs` 落盘）：`argv` / `command` / `cwd` / `started_at` / `duration_ms` / `exit_code` / `status`。`run_tests`、手动 `check_code`、编辑后的自动检查共用这一套
 - **状态枚举分得细是有原因的**：`passed / failed / not_run / timeout / cancelled / error / unknown`。"没装 pytest"和"测试跑完挂了"在卡片上是完全不同的两件事，合成一个布尔就说不出来。**拿不到退出码就是 `None`，绝不填 0**；pytest 退出码 5（一个用例都没收集到）算 `not_run`，不算通过
 - **"筛完没剩下诊断"不等于"检查跑成功了"**：mypy 退出码 ≥2 是致命错误（语法错/用法错），它根本没完成分析 → 记 `error` 并保留摘要。退出码 0/1 且高信号筛选无命中才算 `passed`（那是有意的筛选，退出码照实记，用户能自己看出差别）
@@ -58,7 +60,7 @@
 - 按钮带着**卡片自己的** `view`（含 session/work_dir/run_id）走，不读当前前台会话——用户完全可能在点之前切走了。"查看改动"看的是**当前状态**，不冒充那一轮保存过的历史 diff
 - **"查看改动"走右侧停靠的文件面板**（和任务面板「改动的文件」同一套，不开模态窗口、不把整个工作区混成一大段纯文本）：`view["files"]` 里每个文件各开一个标签页，去重后最多 `_RESULT_DIFF_TAB_LIMIT`（8）个，超出部分只用提示条报"还有 N 个没打开"；`files` 为空提示"这一轮没有记录到改动的文件"，不去 diff 整个工作区。开标签页复用 `ChatUI._open_file_in_panel(rel_path, work_dir=...)`——`work_dir` 参数就是给这里用的：任务面板那条路不传，仍按当前会话的工作区
 - **"查看改动"用 `work_dir` 不用 `project`**：worktree 里跑的那轮改动在隔离区，拿项目根去 diff 只会回一句"工作区干净"。`work_dir` **持久化在 `last_run` 上**（`begin_run` 初始化、工具边界与收尾各刷一次）——只靠"重建时按当前会话现算"是不行的，重开后 `Session.worktree` 早没了，算出来永远是主仓库。记下来只为历史查看，**不会**被恢复成当前执行用的 `Session.worktree`
-- **记录的目录不存在时禁止回退**：`_project_cwd()` 在路径不存在时会回退到**进程 cwd**，于是 `git_diff` 悄悄查了灵犀自己的目录、回一句"工作区干净"，而弹窗标题还写着那个不存在的路径。`_on_result_view_diff` 先 `os.path.isdir` 校验，失效就明说不可用
+- **记录的目录不存在时禁止回退**：`_project_cwd()` 在路径不存在时会回退（当时回退到**进程 cwd**，现在是无项目工作区），于是 `git_diff` 悄悄查了灵犀自己的目录、回一句"工作区干净"，而弹窗标题还写着那个不存在的路径。`_on_result_view_diff` 先 `os.path.isdir` 校验，失效就明说不可用
 - **临时借用线程绑定必须用 `session.get_bound()` / `restore_bound()`**，不能用 `current_session()` 存旧值：未绑定的主线程拿到的是 active，"还原"反而把主线程**永久绑死**在它身上，之后 `get_active()` 与 `current_session()` 指向不同会话，所有经代理的保存都写错人
 - **一条通过不代表整轮通过**：标题判据是 `summarize_checks`——**每项检查的最新有效结论**都 passed 才叫 `clear`，任何失败/未执行/超时/未知都让它变 `unresolved`（标题改成"检查未全部通过"）。用 `any(passed)` 的话，"静态检查过了、pytest 挂了"会被写成"已执行检查通过"。只剩过期记录也算 `unresolved`——它顶替不了一次有效通过
 - **同一项检查重试通过，旧失败要让位**（`effective_rows` / `check_identity`）：身份用**采集时算的指纹** `verification.identity_fingerprint`（检查器 + 目录 + 目标 + **完整未截断**的 argv/命令的 sha256），同指纹后来的取代先前的，旧记录保留展示并标 `superseded`。不这么做的话，文件没改所以旧失败**不会过期**，`all()` 一直把它算进去，卡片停在"检查未全部通过"，而完成闸门早就认了 `tests_passed=True`——两边对同一件事给出相反结论。identity 必须带目录和参数：对两个文件跑 ruff、在主仓库和隔离区各跑一次 pytest，都是两项检查，不该互相顶替
@@ -74,7 +76,7 @@
   ① 结果卡「继续任务」（mode=continue）；② 上一轮被中断 / 留下结果未知的操作后，用户**没点继续、直接发了新消息**（mode=message）。处置把现场变化和结果未知的操作写进 `pending_verification`，由 begin_run 在 `reset_verification` **之后**填回——排在 begin_run 后面就被本轮重置清掉了
 - **第②条入口不能省**：中断前那次写操作从没进入 dirty 文件，新一轮的工作区基线又建立在它之后，完成闸门会拿"没有已知改动"推出"工作区没变"，一次没验证过的写入按 completed 收尾（方案 §5.5 明令禁止的推断）。这条路径**不阻断**用户的新请求、不做现场比对，只补占位、并入义务、告诉模型哪些结果未知。判定 `needs_adoption`：磁盘 `phase=running` 且不是本进程正在跑的那一轮，或 sidecar 里有没回执的记录；正常结束的会话只多一次 `os.path.exists`
 - **结果未知的写操作一律进盲区**（`tracking_incomplete` → `unknown_changes`），不只是把记录里的路径标脏：`run_command` 这类操作可能写了记录之外的路径。出口仍是显式 `run_tests` + `git_diff`。`_NON_FS_TOOLS`（remember/forget/notify_user/update_plan/set_step_status）结果未知时不碰项目文件，不进盲区
-- **盲区挂在工具当时实际的工作目录上**：执行前记录写下 `work_root`（`run_records._operation_root(sess)`：按**传进来的会话**借用绑定调 `_project_cwd()`，与工具解析路径同一套规则，不按当前线程碰巧绑着谁算）。无项目会话的工具落在进程工作目录——早先恢复只认"会话的项目根"，无项目时根为空，就把结果未知的写入整个丢掉、sidecar 照样摘掉，没跑任何检查也按 completed 收尾（首轮复核实测）。旧记录没有 `work_root` 就退回会话目录；**实在确定不了**挂在 `recovery.UNKNOWN_ROOT` 占位键上——目录不知道不等于没有改动。消息模式下恢复核对自己出错（`_hold_obligation`）同样留一段盲区，不拿"没核对成"推出"没有改动"
+- **盲区挂在工具当时实际的工作目录上**：执行前记录写下 `work_root`（`run_records._operation_root(sess)`：按**传进来的会话**借用绑定调 `_project_cwd()`，与工具解析路径同一套规则，不按当前线程碰巧绑着谁算）。无项目会话的工具落在无项目工作区（`no_project_dir()`，早先是进程工作目录）——早先恢复只认"会话的项目根"，无项目时根为空，就把结果未知的写入整个丢掉、sidecar 照样摘掉，没跑任何检查也按 completed 收尾（首轮复核实测）。旧记录没有 `work_root` 就退回会话目录；**实在确定不了**挂在 `recovery.UNKNOWN_ROOT` 占位键上——目录不知道不等于没有改动。消息模式下恢复核对自己出错（`_hold_obligation`）同样留一段盲区，不拿"没核对成"推出"没有改动"
 - **不存在的目录不种基线**（`verification.restore_obligations`）：给已不存在的目录（项目搬走、被删）或占位键种空基线，每次复查都会枚举失败、重新记一段盲区，把刚补做的测试和 diff 结论又作废——按提示补查也收不了尾。盲区照样保留，出口仍是显式 run_tests + git_diff，只是不再追着不存在的目录反复失败
 - **sidecar 里解析不了的条目不丢**（`_read_inflight_raw` 放进 `malformed`，改写时原样带回，`classify_inflight` 报 `unreadable`）：早先静默过滤——唯一那条记录坏了就等于"没有未决操作"，下一次改写还会把它彻底抹掉。恢复按"读不懂"处理（开盲区、有副作用的悬空调用按可能已执行说明），交接后才摘除，否则每一轮都会为它重开一次盲区
 - **展示可以截断，留底必须完整**（`run_records.archive_malformed`）：摘除前把这些条目的**完整原文**写进 `chat_memory/<id>.inflight.unreadable-<内容哈希>.json`，恢复说明里只放摘要（`unreadable_count` + 最多 20 条 300 字预览）和对这个文件的引用（`unreadable_archive`）；只有留底成功、恢复说明落盘之后才摘，且只摘写进留底的那几条（`drop_malformed(..., archived)`）。早先只存截断预览就删全部原文——21 条损坏记录只剩 20 条截断预览，末尾内容和第 21 条永久丢失（第二轮复核实测）。文件名取内容哈希，同一批交接两次不会越攒越多；`delete_session` 经 `discard_inflight` 一并删除
@@ -93,5 +95,5 @@
 - **锚点逐字段严格校验**（`workspace_anchor.normalize`，永不抛异常）：坏了整张降级成带原因的 `{"invalid": ...}`，比对时报"现场记录已损坏、无法核对"（有待核对的东西时并入盲区），**不挑着留好字段**——比如坏的是 `errors`，"只记录了前 200 个文件"这类说明就悄悄没了，结论反而更乐观。早先 `errors` 被改成数字时 `load_session` 直接抛 TypeError、整段聊天打不开；保存路径也对旧文件做同一次归一化，于是之后每次保存都失败。`memory._normalize_progress` 现在也是永不抛异常的外壳：漏网的意外异常一律按"进度读不懂"处理（保存路径据此隔离留底，加载路径只作废进度、照常恢复聊天）
 - **来源**：继续的那一轮 `source.kind="continue"`，文本仍是最后一条真实用户消息（任务是它提的）；中断后直接发消息的那一轮仍是 `user_message`
 - **不恢复**旧确认许可、后台进程控制权、隔离区使用权——它们本来就不持久化；隔离区里跑的那一轮继续时回到主项目并明确说"旧隔离区不会被自动合并"
-- **重绘**：内部 HumanMessage（`lingxi_internal`）一律不画成"你"的气泡。早先只认视觉桥接的文字前缀，自动修复 / 完成闸门的内部提示在重开会话后会被画成用户说的话；恢复说明画成程序说明，优先用当时实时显示的那段（`lingxi_recovery.note`）
+- **重绘**：内部 HumanMessage（`lingxi_internal`）一律不画成"你"的气泡。早先只认视觉桥接的文字前缀，自动修复 / 完成闸门的内部提示在重开会话后会被画成用户说的话；恢复说明画成一行小字（`recovery_note` → `RecoveryNote`，见 core.md 消息流），优先用当时实时显示的那段（`lingxi_recovery.note`）
 - **测试里必须阻断真实模型与 CLI**：新建的 Session 默认模型下标可能落在 Claude Code 上（backlog 里的默认模型 fallback 问题），漏设一次模型就会真起一个 `claude` 进程——写 B04 的真进程用例时实测踩到过一次。`test_b04_recovery.py` 用 autouse 夹具把 `_create_llm` / `_claude_code_loop` 换成直接报错，子进程脚本里同样显式阻断

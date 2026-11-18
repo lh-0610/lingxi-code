@@ -5,7 +5,7 @@
 - 左侧侧栏构造（品牌头、"+ 新对话"、按项目分组的历史会话列表、底部齿轮按钮）
 - 项目管理（添加 / 移除 / 切换 / 当前会话归属判定）
 
-会话列表按项目分组渲染：注册项目 → 游离项目 → "历史会话"（无项目）。
+会话列表按项目分组渲染：注册项目 → 游离项目 → "无项目"。
 切项目时同步 state.current_project + system prompt（让角色卡 / .lingxirules
 跟着重新加载）。
 
@@ -29,7 +29,31 @@ from .. import state
 from ..limits import SIDEBAR_GROUP_VISIBLE_INITIAL, SIDEBAR_GROUP_VISIBLE_STEP
 from ._base import BASE_DIR
 from . import dialogs
-from .widgets import HistoryRow
+from .widgets import ElidedButton, GroupHeader, HistoryRow
+
+
+def _relative_time(iso: str, now=None) -> str:
+    """会话行右侧的时间：刚刚 / N 分钟前 / 今天 HH:MM / 昨天 / M/D / YYYY/M/D。"""
+    from datetime import datetime, timedelta
+    try:
+        t = datetime.fromisoformat((iso or "").strip())
+    except ValueError:
+        return ""
+    now = now or datetime.now()
+    if t.tzinfo is not None and now.tzinfo is None:
+        t = t.astimezone().replace(tzinfo=None)
+    secs = (now - t).total_seconds()
+    if secs < 60:
+        return "刚刚"
+    if secs < 3600 and t.date() == now.date():
+        return f"{int(secs // 60)} 分钟前"
+    if t.date() == now.date():
+        return t.strftime("%H:%M")
+    if t.date() == (now - timedelta(days=1)).date():
+        return "昨天"
+    if t.year == now.year:
+        return f"{t.month}/{t.day}"
+    return f"{t.year}/{t.month}/{t.day}"
 
 
 class SidebarMixin:
@@ -42,60 +66,52 @@ class SidebarMixin:
     # ── 构造 ──
 
     def _build_sidebar(self):
+        """左侧栏（设计稿「左侧栏：编码与知识库两个工作区」）：品牌 → 编码/知识库切换（+ 知识库
+        卡片）→ 新对话 → 搜索 → 会话列表 → 底栏（设置 / 后台任务带运行中数量）。"""
         self.sidebar = QWidget()
         self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(248)
+        self.sidebar.setFixedWidth(260)
 
         layout = QVBoxLayout(self.sidebar)
-        layout.setContentsMargins(12, 12, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 14, 12, 0)
+        layout.setSpacing(10)
 
         brand = QWidget()
         brand.setObjectName("sidebarBrand")
         brand_layout = QHBoxLayout(brand)
-        brand_layout.setContentsMargins(6, 0, 6, 4)
+        brand_layout.setContentsMargins(4, 0, 4, 2)
         brand_layout.setSpacing(10)
 
         # 品牌图标：用项目原 app 图标 icon.ico（保留原 logo,不用渐变 tile）
         icon_label = QLabel()
-        icon_label.setFixedSize(36, 36)
+        icon_label.setFixedSize(32, 32)
         icon_path = os.path.join(BASE_DIR, "icon.ico")
         if os.path.exists(icon_path):
             # 从 .ico 取大尺寸源位图(通常 256×256)再按物理像素缩放,避免拿到比例不对的小图
             dpr = self.devicePixelRatioF() if hasattr(self, "devicePixelRatioF") else 1.0
-            phys = int(round(36 * dpr))
+            phys = int(round(32 * dpr))
             src = QIcon(icon_path).pixmap(QSize(256, 256))
             pix = src.scaled(phys, phys, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             pix.setDevicePixelRatio(dpr)
             icon_label.setPixmap(pix)
             icon_label.setAlignment(Qt.AlignCenter)
-        brand_text = QWidget()
-        brand_text_layout = QVBoxLayout(brand_text)
-        brand_text_layout.setContentsMargins(0, 0, 0, 0)
-        brand_text_layout.setSpacing(0)
         brand_title = QLabel("灵犀")
         brand_title.setObjectName("sidebarBrandTitle")
-        brand_sub = QLabel("local & cloud")
-        brand_sub.setObjectName("sidebarBrandSub")
-        brand_text_layout.addWidget(brand_title)
-        brand_text_layout.addWidget(brand_sub)
         brand_layout.addWidget(icon_label)
-        brand_layout.addWidget(brand_text, 1)
+        brand_layout.addWidget(brand_title, 1)
         layout.addWidget(brand)
 
-        # 编码/知识库 模式入口 + 知识库管理卡片（RagSidebarMixin，Logo 下方、新对话上方）
+        # 编码/知识库 工作区切换 + 知识库卡片（RagSidebarMixin，品牌下方、新对话上方）
         self._build_rag_sidebar(layout)
 
-        new_btn = QPushButton("+ 新对话")
+        new_btn = QPushButton("新对话")
         new_btn.setObjectName("newChatBtn")
+        new_btn.setFixedHeight(36)
+        new_btn.setIconSize(QSize(16, 16))
         new_btn.setCursor(Qt.PointingHandCursor)
         new_btn.clicked.connect(self._new_chat)
         layout.addWidget(new_btn)
-        self.new_chat_btn = new_btn   # 知识库模式下文案切换为「+ 新知识库对话」
-
-        label = QLabel("历史记录")
-        label.setObjectName("historyLabel")
-        layout.addWidget(label)
+        self.new_chat_btn = new_btn   # 知识库模式下文案切换为「新知识库对话」
 
         # 跨会话搜索框：输入关键词（标题/正文）→ 后台线程扫描 → 结果替换下方列表。
         # 清空即恢复按项目分组的正常列表。防抖 250ms，回车立即搜。
@@ -104,9 +120,11 @@ class SidebarMixin:
         self._sidebar_search_pending = False
         search_input = QLineEdit()
         search_input.setObjectName("sidebarSearch")
+        search_input.setFixedHeight(34)
         search_input.setPlaceholderText("搜索会话（标题 / 内容）")
         search_input.setAccessibleName("搜索会话")
         search_input.setClearButtonEnabled(True)
+        self._sidebar_search_icon = search_input.addAction(QIcon(), QLineEdit.LeadingPosition)
         self._sidebar_search_input = search_input
         self._sidebar_search_timer = QTimer(self)
         self._sidebar_search_timer.setSingleShot(True)
@@ -128,51 +146,86 @@ class SidebarMixin:
         self.history_widget = QWidget()
         self.history_widget.setObjectName("historyWidget")
         self.history_layout = QVBoxLayout(self.history_widget)
-        # 右边留 8px：让会话行内容（× / 状态徽章）和滚动条之间有间距，不贴一起
-        self.history_layout.setContentsMargins(0, 6, 8, 0)
-        self.history_layout.setSpacing(3)
+        # 右边留 4px：会话行右侧的「⋯」/ 状态和滚动条之间有间距，不贴一起
+        self.history_layout.setContentsMargins(0, 2, 4, 0)
+        self.history_layout.setSpacing(2)
         self.history_layout.addStretch()
 
         scroll.setWidget(self.history_widget)
         layout.addWidget(scroll, 1)
 
-        # 底部工具栏：齿轮按钮放左下角，右侧预留用户 / 角色区
+        # 底栏：设置 + 后台任务（带运行中数量），顶部一条分隔线
         footer = QWidget()
         footer.setObjectName("sidebarFooter")
+        footer.setAttribute(Qt.WA_StyledBackground, True)
         footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(6, 4, 6, 4)
+        footer_layout.setContentsMargins(0, 10, 0, 10)
         footer_layout.setSpacing(8)
 
         self.settings_btn = QPushButton()
         self.settings_btn.setObjectName("sidebarSettingsBtn")
-        self.settings_btn.setFixedSize(34, 34)
+        self.settings_btn.setFixedSize(36, 36)
         self.settings_btn.setCursor(Qt.PointingHandCursor)
         self.settings_btn.setToolTip("设置")
+        self.settings_btn.setAccessibleName("设置")
         self.settings_btn.clicked.connect(self._open_settings_menu)
         self._style_settings_btn()
         self.settings_btn.installEventFilter(self)
         footer_layout.addWidget(self.settings_btn)
         self.background_btn = QPushButton("后台任务")
+        self.background_btn.setObjectName("sidebarBgBtn")
+        self.background_btn.setFixedHeight(36)
+        self.background_btn.setIconSize(QSize(15, 15))
         self.background_btn.setCursor(Qt.PointingHandCursor)
         self.background_btn.setToolTip("查看本次启动的后台命令、输出和停止结果")
         self.background_btn.clicked.connect(self._open_background_panel)
-        footer_layout.addWidget(self.background_btn)
-        footer_layout.addStretch()
-
+        bg_lay = QHBoxLayout(self.background_btn)
+        bg_lay.setContentsMargins(0, 0, 10, 0)
+        bg_lay.addStretch(1)
+        self._bg_badge = QLabel("")
+        self._bg_badge.setObjectName("sbBadge")
+        self._bg_badge.setFixedHeight(18)
+        self._bg_badge.setAlignment(Qt.AlignCenter)
+        self._bg_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._bg_badge.setVisible(False)
+        bg_lay.addWidget(self._bg_badge, 0, Qt.AlignVCenter)
+        footer_layout.addWidget(self.background_btn, 1)
         layout.addWidget(footer)
+
+        # 后台任务运行中数量：读后台注册表（加锁拷快照，很便宜），变了才改徽章
+        self._bg_badge_timer = QTimer(self)
+        self._bg_badge_timer.setInterval(2000)
+        self._bg_badge_timer.timeout.connect(self._refresh_bg_badge)
+        self._bg_badge_timer.start()
         self._style_sidebar_scroll()
+        self._refresh_bg_badge()
+
+    def _refresh_bg_badge(self):
+        if not hasattr(self, "_bg_badge"):
+            return
+        try:
+            from .. import background as _bg
+            running = sum(1 for s in _bg.list_snapshots() if s.get("running") is True)
+        except Exception:
+            running = 0
+        text = str(running) if running else ""
+        if self._bg_badge.text() != text:
+            self._bg_badge.setText(text)
+            self._bg_badge.setVisible(bool(running))
+            self.background_btn.setToolTip(
+                (f"{running} 个后台命令运行中 · " if running else "")
+                + "查看本次启动的后台命令、输出和停止结果")
 
     def _style_sidebar_scroll(self):
+        """主题相关的图标 / 局部样式（换主题时重调）。主体样式在 theme.py 的侧栏段。"""
         if hasattr(self, "background_btn"):
-            self.background_btn.setIcon(self._svg_icon("clipboard-list.svg", self._t("history_item")))
-            self.background_btn.setIconSize(QSize(15, 15))
-            self.background_btn.setFixedHeight(34)
-            self.background_btn.setStyleSheet(
-                f"QPushButton {{ background: transparent; color: {self._t('history_item')}; "
-                f"border: 1px solid {self._t('sidebar_border')}; border-radius: 7px; padding: 6px 11px; font-size: 12px; }}"
-                f"QPushButton:hover {{ background: {self._t('history_hover_bg')}; "
-                f"color: {self._t('history_hover_text')}; }}"
-            )
+            self.background_btn.setIcon(self._svg_icon("terminal.svg", self._t("sb_meta")))
+        if hasattr(self, "new_chat_btn"):
+            self.new_chat_btn.setIcon(self._svg_icon("square-pen.svg", self._t("sb_accent")))
+        if hasattr(self, "_sidebar_search_icon"):
+            self._sidebar_search_icon.setIcon(self._svg_icon("search.svg", self._t("sb_placeholder")))
+        if hasattr(self, "code_mode_btn"):
+            self._style_mode_seg_icons()
         self.history_scroll.setStyleSheet(
             f"QScrollArea {{ background: {self._t('sidebar_bg')}; border: none; }}"
             f"QScrollBar:vertical {{ width: 5px; background: transparent; }}"
@@ -181,16 +234,9 @@ class SidebarMixin:
             f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
         )
         # 必须用 ID 选择器限定:裸 `background:` 声明会级联到所有子控件(HistoryRow),
-        # 把 #historyRow[current/rowstate] 的整行底色盖掉(Qt 样式表经典坑)。
+        # 把 #historyRow[current] 的整行底色盖掉(Qt 样式表经典坑)。
         self.history_widget.setStyleSheet(
             f"#historyWidget {{ background: {self._t('sidebar_bg')}; }}")
-        if hasattr(self, "_sidebar_search_input"):
-            self._sidebar_search_input.setStyleSheet(
-                f"QLineEdit#sidebarSearch {{ background: {self._t('sidebar_bg')};"
-                f" color: {self._t('history_item')}; border: 1px solid {self._t('sidebar_border')};"
-                f" border-radius: 7px; padding: 5px 8px; font-size: 12px; }}"
-                f"QLineEdit#sidebarSearch:focus {{ border-color: {self._t('new_chat_hover_text')}; }}"
-            )
 
     # ── 会话列表 ──
 
@@ -228,7 +274,7 @@ class SidebarMixin:
             rag_sessions = agent.list_sessions("__all__", kind="rag")
             rag_sessions.sort(key=_recency, reverse=True)
             self._render_project_group(None, "知识库对话", rag_sessions, is_active=True,
-                                        collapse_key=self._RAG_FOLD_KEY)
+                                        collapse_key=self._RAG_FOLD_KEY, section=True)
             self.history_widget.setStyleSheet(self.history_widget.styleSheet())
             return
 
@@ -265,179 +311,218 @@ class SidebarMixin:
                                         is_active=(active_project == path))
         # 无项目放最下面
         no_proj = grouped.get(None, [])
-        self._render_project_group(None, "历史会话", no_proj,
+        self._render_project_group(None, "无项目", no_proj,
                                     is_active=(active_project is None))
 
         # 刷新样式
         self.history_widget.setStyleSheet(self.history_widget.styleSheet())
 
     def _render_project_group(self, project_path, project_name, sessions, is_active,
-                              collapse_key=None):
-        """渲染一个项目分组：标题 + 该项目下的会话列表。
+                              collapse_key=None, section=False):
+        """渲染一个分组：标题 + 该分组下的会话行。
 
         collapse_key：折叠状态用的键，默认用 project_path。RAG「知识库对话」与编码
-        「历史会话」都以 project_path=None 渲染，折叠状态却必须各自独立——RAG 传入
+        「无项目」都以 project_path=None 渲染，折叠状态却必须各自独立——RAG 传入
         独立的 collapse_key，避免折叠其一连带折叠另一个。
 
+        section=True（知识库对话）：不折叠的小标题，没有箭头。
+
         展示数量同样按 collapse_key 独立维护（内存级）：初始只显示前
-        SIDEBAR_GROUP_VISIBLE_INITIAL 条，组尾「加载更多」按步长追加，刷新不重置；
+        SIDEBAR_GROUP_VISIBLE_INITIAL 条，组尾「显示更早的 N 条」按步长追加，刷新不重置；
         编码项目、无项目、知识库各自计数，互不串用。
         """
-        # 折叠状态(按 key,内存级,默认展开)。收起时标题带个数量,提示藏了几条会话。
         if not hasattr(self, "_collapsed_projects"):
             self._collapsed_projects = set()
         fold_key = project_path if collapse_key is None else collapse_key
-        collapsed = fold_key in self._collapsed_projects
+        collapsed = (not section) and fold_key in self._collapsed_projects
 
-        title_text = project_name + (f" ({len(sessions)})" if collapsed and sessions else "")
-        title_btn = QPushButton(title_text)
+        title_btn = GroupHeader(project_name)
         title_btn.setObjectName("projectHeaderActive" if is_active else "projectHeader")
-        # 图标:展开=打开的文件夹,收起=合上的文件夹;无项目用圆点
-        if project_path:
-            icon_file = "folder_lucide.svg" if collapsed else "folder-opened.svg"
+        title_btn.setFixedHeight(30)
+        title_btn.setCursor(Qt.ArrowCursor if section else Qt.PointingHandCursor)
+        title_btn.setToolTip(project_path or ("知识库对话" if section else "无项目（全局工作区）"))
+        title_btn.setAccessibleName(project_name)
+        if section:
+            title_btn.setProperty("kind", "section")
         else:
-            icon_file = "circle_lucide.svg"
-        icon_color = self._t("new_chat_hover_text") if is_active else self._t("history_label")
-        title_btn.setIcon(self._svg_icon(icon_file, icon_color))
-        title_btn.setIconSize(QSize(15, 15))
-        title_btn.setCursor(Qt.PointingHandCursor)
-        title_btn.setToolTip(project_path or "无项目（全局）")
+            title_btn.setIcon(self._svg_icon(
+                "chevron-right-sm.svg" if collapsed else "chevron-down-sm.svg", self._t("sb_meta")))
+            title_btn.setIconSize(QSize(12, 12))
+            title_btn.setProperty("aria_expanded", not collapsed)
+            # 点击标题 = 折叠/展开（不切换项目；切项目用顶栏的项目按钮）
+            title_btn.clicked.connect(lambda checked=False, k=fold_key: self._toggle_project_fold(k))
+            if is_active and project_path:
+                chip = QLabel("当前")
+                chip.setObjectName("sbChip")
+                chip.setToolTip("当前项目")
+                title_btn.add_right(chip)
+            if collapsed and sessions:
+                count = QLabel(str(len(sessions)))
+                count.setObjectName("sbCount")
+                count.setToolTip(f"{len(sessions)} 个会话")
+                title_btn.add_right(count)
 
-        # 点击项目名 = 折叠/展开它的会话(不再切换项目;切项目用顶栏的项目按钮)
-        title_btn.clicked.connect(lambda checked=False, k=fold_key: self._toggle_project_fold(k))
-
-        if project_path:
-            # 项目标题右键菜单（移除项目）
+        from .. import projects as _projects
+        if project_path and project_path in [p["path"] for p in _projects.list_projects()]:
+            # 注册项目：悬停出「⋯」（移除项目），右键同一个菜单
+            more = self._make_more_btn("项目操作")
+            more.clicked.connect(lambda checked=False, b=title_btn, p=project_path:
+                                 self._show_project_header_menu(b, p))
+            title_btn.add_right(more)
+            title_btn.set_hover_widgets(show_on_hover=[more])
             title_btn.setContextMenuPolicy(Qt.CustomContextMenu)
-            def _on_right(pos, p=project_path):
-                self._show_project_header_menu(title_btn, p)
-            title_btn.customContextMenuRequested.connect(_on_right)
+            title_btn.customContextMenuRequested.connect(
+                lambda pos, b=title_btn, p=project_path: self._show_project_header_menu(b, p))
 
         self.history_layout.insertWidget(self.history_layout.count() - 1, title_btn)
 
-        # 收起 → 不渲染该项目的会话行
         if collapsed:
             return
 
-        # 展开但没有会话 → "暂无对话"占位
         if not sessions:
-            empty = QLabel("暂无对话")
-            empty.setObjectName("historyEmptyHint")
-            self.history_layout.insertWidget(self.history_layout.count() - 1, empty)
+            if section:
+                self._insert_kb_empty_card()
+            else:
+                empty = QLabel("暂无对话")
+                empty.setObjectName("historyEmptyHint")
+                self.history_layout.insertWidget(self.history_layout.count() - 1, empty)
             return
 
-        # 展示数量（按组独立、内存级，刷新不重置）：超出部分靠「加载更多」追加
         if not hasattr(self, "_group_visible_counts"):
             self._group_visible_counts = {}
         visible = self._group_visible_counts.get(fold_key, SIDEBAR_GROUP_VISIBLE_INITIAL)
         shown = sessions[:visible]
 
-        # 会话列表
         import time as _time
         from .. import session as _session
         if not hasattr(self, "_gen_started"):
-            self._gen_started = {}        # sid → 生成开始 monotonic 时间戳（侧栏秒表用）
-        _seen_gen = set()                 # 本轮仍在生成的 sid，循环后据此清理 _gen_started
+            self._gen_started = {}        # sid → 生成开始 monotonic 时间戳（转圈的悬停提示里显示用时）
+        _seen_gen = set()
+        indent = 10 if section else 26     # 分组下的会话往里缩一截，和箭头后的名字对齐
         for s in shown:
             sid = s["id"]
             title = s["title"]
             is_current = (sid == agent.current_session_id)
-            # 运行态徽章：生成中（转圈 + 秒表）/ 待确认（后台积压确认）/ 已完成（后台跑完未查看）。
+            # 右侧只放一个状态：生成中（转圈）/ 待确认（徽章）/ 后台跑完未看（绿点）/ 时间
             _so = _session.get(sid)
             is_pending = bool(_so and getattr(_so, "pending_confirm", None))
             is_gen = bool(_so and _so.is_generating)
             is_done_unseen = bool(_so and not is_gen and getattr(_so, "needs_redraw", False))
 
             row = HistoryRow()
-            # 不用 row.setStyleSheet:直接父控件带样式表会让子按钮 tooltip 退回系统深底。
-            # 透明背景 + 运行态行底色都走主题表 historyRow(objectName + rowstate 属性),
-            # 保证会话标题 tooltip 吃主题色。
             row.setObjectName("historyRow")
+            row.setFixedHeight(32)
             row.setProperty("rowstate",
                             "generating" if is_gen else
                             "pending" if is_pending else
                             "done" if is_done_unseen else "")
-            row.setProperty("current", "true" if is_current else "false")  # 选中会话整行底色
+            row.setProperty("current", "true" if is_current else "false")
+            row.setProperty("session_id", sid)
+            row.setProperty("session_title", title)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(8, 0, 2, 0)   # 左缩进让会话视觉上"嵌"在项目下
-            row_layout.setSpacing(4)
-            # 不再放左侧状态标记：待确认/已完成 已由右侧徽章表达,留个空标记只会白白
-            # 占掉一截左边距(用户反馈"左侧空太多")。
+            row_layout.setContentsMargins(indent, 0, 4, 0)
+            row_layout.setSpacing(6)
 
-            display_title = title if len(title) <= 12 else title[:12] + "..."
-            btn = QPushButton(display_title)
-            _cls = "historyItemActive" if is_current else "historyItem"
-            btn.setProperty("class", _cls)
+            btn = ElidedButton(title)
+            btn.setProperty("class", "historyItemActive" if is_current else "historyItem")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setToolTip(title)
+            btn.setFixedHeight(32)
             # 注意：不要在这里 setStyleSheet。给 btn 设自己的 stylesheet 会切断
             # app 级 QToolTip 规则继承，tooltip 会变成系统默认黑底。
-            # text-align / padding 已经写在 theme.py 的 historyItem 类选择器里。
             btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             btn.setMinimumWidth(0)
             btn.clicked.connect(lambda checked=False, s=sid: self._load_session(s))
-            # 右键菜单：重命名（生成中也可改名——标题是元数据，不动历史/运行态）
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
             btn.customContextMenuRequested.connect(
-                lambda pos, b=btn, s=sid, t=title: self._show_session_row_menu(b, s, t))
+                lambda pos, r=row, s=sid, t=title, g=is_gen: self._show_session_row_menu(r, s, t, g))
+            row_layout.addWidget(btn, 1)
 
+            rest = None
             if is_gen:
-                # 生成中：标题（靛蓝加粗）占满剩余宽度 → 右边一个转圈，占删除按钮的位置
-                # （不给删除，避免误删正在跑的会话）。用时放进转圈的悬停提示：原来的
-                # 「生成中 MM:SS」药丸在窄侧栏里会把标题挤掉、自己也被截断。
-                btn.setProperty("class", "historyItemActive")  # 后台跑的会话标题也上靛蓝加粗
-                row_layout.addWidget(btn, 1)
                 _seen_gen.add(sid)
                 start_ts = self._gen_started.get(sid)
                 if start_ts is None:
                     start_ts = _time.monotonic()
                     self._gen_started[sid] = start_ts
                 from .widgets import GeneratingBadge
-                badge = GeneratingBadge(start_ts, spin_color=self._t("badge_run_text"), compact=True)
+                badge = GeneratingBadge(start_ts, spin_color=self._t("sb_accent"), compact=True)
                 badge.setObjectName("historyRunSpinner")
                 row_layout.addWidget(badge, 0, Qt.AlignVCenter)
+            elif is_pending:
+                row_layout.addWidget(self._make_state_badge("待确认", "warn"), 0, Qt.AlignVCenter)
+            elif is_done_unseen:
+                dot = QLabel()
+                dot.setObjectName("sbDoneDot")
+                dot.setFixedSize(7, 7)
+                dot.setToolTip("后台已跑完，切过去查看")
+                dot.setAccessibleName("后台已完成")
+                row_layout.addWidget(dot, 0, Qt.AlignVCenter)
+                row_layout.addSpacing(2)
             else:
-                row_layout.addWidget(btn, 1)
-                if is_pending:
-                    row_layout.addWidget(self._make_state_badge("待确认", "warn"), 0, Qt.AlignVCenter)
-                elif is_done_unseen:
-                    row_layout.addWidget(self._make_state_badge("已完成", "done"), 0, Qt.AlignVCenter)
-                del_btn = QPushButton("×")
-                del_btn.setObjectName("historyDeleteBtn")
-                del_btn.setFixedSize(22, 22)
-                del_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-                del_btn.setCursor(Qt.PointingHandCursor)
-                del_btn.setStyleSheet(
-                    f"QPushButton#historyDeleteBtn {{ background: transparent; border: none; "
-                    f"color: {self._t('del_btn')}; font-size: 16px; font-weight: 600; "
-                    f"border-radius: 12px; padding: 0; }}"
-                    f"QPushButton#historyDeleteBtn:hover {{ color: {self._t('del_btn_hover')}; "
-                    f"background: {self._t('del_btn_hover_bg')}; }}"
-                )
-                del_btn.clicked.connect(lambda checked=False, s=sid: self._delete_session(s))
-                row_layout.addWidget(del_btn, 0, Qt.AlignVCenter)
+                rest = QLabel(_relative_time(s.get("updated", "")))
+                rest.setObjectName("sbTime")
+                rest.setToolTip((s.get("updated") or "").replace("T", " ")[:16])
+                row_layout.addWidget(rest, 0, Qt.AlignVCenter)
+                row_layout.addSpacing(2)
+
+            more = self._make_more_btn("更多操作")
+            more.clicked.connect(lambda checked=False, r=row, s=sid, t=title, g=is_gen:
+                                 self._show_session_row_menu(r, s, t, g))
+            row_layout.addWidget(more, 0, Qt.AlignVCenter)
+            row.set_hover_widgets(show_on_hover=[more], hide_on_hover=[rest])
             self.history_layout.insertWidget(self.history_layout.count() - 1, row)
 
         # 清掉已不再生成的会话的秒表起点（下次再生成重新计时）
         self._gen_started = {k: v for k, v in self._gen_started.items() if k in _seen_gen}
 
-        # 还有没显示的会话 → 组尾「加载更多」（按步长追加本组可见数，只影响展示）
         hidden = len(sessions) - len(shown)
         if hidden > 0:
-            more_btn = QPushButton(f"加载更多（还有 {hidden} 条）")
+            more_btn = QPushButton(f"显示更早的 {hidden} 条")
             more_btn.setObjectName("loadMoreBtn")
+            more_btn.setFixedHeight(28)
             more_btn.setCursor(Qt.PointingHandCursor)
             more_btn.setToolTip("显示更早的会话（不会影响历史保留）")
-            more_btn.setStyleSheet(
-                f"QPushButton#loadMoreBtn {{ background: transparent;"
-                f" border: 1px dashed {self._t('sidebar_border')}; border-radius: 6px;"
-                f" padding: 4px 6px; margin: 2px 8px 0 8px;"
-                f" color: {self._t('history_label')}; font-size: 12px; }}"
-                f"QPushButton#loadMoreBtn:hover {{ color: {self._t('new_chat_hover_text')};"
-                f" border-color: {self._t('new_chat_hover_text')}; }}"
-            )
             more_btn.clicked.connect(lambda checked=False, k=fold_key: self._load_more_group(k))
             self.history_layout.insertWidget(self.history_layout.count() - 1, more_btn)
+
+    def _make_more_btn(self, name):
+        """会话行 / 项目标题右侧的「⋯」：平时藏着，悬停才出现（HistoryRow / GroupHeader 管）。"""
+        more = QPushButton()
+        more.setObjectName("sbMoreBtn")
+        more.setFixedSize(26, 26)
+        more.setIcon(self._svg_icon("ellipsis.svg", self._t("sb_meta")))
+        more.setIconSize(QSize(14, 14))
+        more.setCursor(Qt.PointingHandCursor)
+        more.setToolTip(name)
+        more.setAccessibleName(name)
+        more.setVisible(False)
+        return more
+
+    def _insert_kb_empty_card(self):
+        """知识库还没有对话：一句说明，告诉用户新建后会从哪个库检索。"""
+        from .. import config as _config
+        kb = getattr(_config, "RAG_KB_DIR", "") or ""
+        name = os.path.basename(kb.rstrip("/\\")) if kb else ""
+        card = QWidget()
+        card.setObjectName("kbEmptyCard")
+        card.setAttribute(Qt.WA_StyledBackground, True)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(4)
+        t = QLabel("还没有知识库对话")
+        t.setObjectName("kbEmptyTitle")
+        d = QLabel(f"新建一个，回答会从 {name} 里检索资料，并标出出处。" if name
+                   else "先在上面选好知识库目录，再新建对话。")
+        d.setObjectName("kbEmptyText")
+        d.setWordWrap(True)
+        lay.addWidget(t)
+        lay.addWidget(d)
+        wrap = QWidget()
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(6, 4, 2, 0)
+        wl.addWidget(card)
+        self.history_layout.insertWidget(self.history_layout.count() - 1, wrap)
 
     def _load_more_group(self, fold_key):
         """展开某分组接下来的 SIDEBAR_GROUP_VISIBLE_STEP 条。
@@ -463,20 +548,18 @@ class SidebarMixin:
         self._refresh_session_list()
 
     def _make_state_badge(self, text, kind):
-        """侧栏会话行右侧的运行态徽章：warn=待确认（琥珀）/ done=已完成（绿）。"""
-        from PySide6.QtWidgets import QLabel
+        """侧栏会话行右侧的运行态徽章：warn=待确认（琥珀）。"""
         bg = self._t(f"badge_{kind}_bg")
         fg = self._t(f"badge_{kind}_text")
         bd = self._t(f"badge_{kind}_border")
         lbl = QLabel(text)
         lbl.setStyleSheet(
             f"QLabel {{ background:{bg}; color:{fg}; border:1px solid {bd}; "
-            f"border-radius:9px; padding:1px 8px; font-size:12px; }}"
+            f"border-radius:9px; padding:0 7px; font-size:11px; }}"
         )
+        lbl.setFixedHeight(20)
         if kind == "warn":
             lbl.setToolTip("有待确认的命令/编辑，切到该会话处理")
-        elif kind == "done":
-            lbl.setToolTip("后台已跑完，切过去查看")
         return lbl
 
     def _show_project_header_menu(self, anchor_widget, project_path):
@@ -484,9 +567,10 @@ class SidebarMixin:
         from .. import projects as _projects
         if project_path not in [p["path"] for p in _projects.list_projects()]:
             return
-        menu = QMenu(self)
+        from .context_menus import make_menu
+        menu = make_menu(self)
         a_remove = QAction("从列表移除此项目", menu)
-        a_remove.setIcon(self._svg_icon("trash_lucide.svg", self._t("menu_text")))
+        a_remove.setIcon(self._svg_icon("trash_lucide.svg", self._t("sb_danger")))
 
         def _do_remove():
             name = (_projects.get_current_name() if _projects.get_current() == project_path
@@ -513,19 +597,46 @@ class SidebarMixin:
                 self._refresh_session_list()
         a_remove.triggered.connect(_do_remove)
         menu.addAction(a_remove)
-        menu.exec(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
+        self._exec_sidebar_menu(menu, anchor_widget)
 
     # ── 会话重命名 ──
 
-    def _show_session_row_menu(self, anchor_widget, session_id, title):
-        """会话行右键菜单：重命名。"""
-        menu = QMenu(self)
-        a_rename = QAction("重命名", menu)
-        a_rename.setIcon(self._svg_icon("file-pen.svg", self._t("menu_text")))
-        a_rename.triggered.connect(
-            lambda _=False, s=session_id, t=title: self._rename_session_dialog(s, t))
-        menu.addAction(a_rename)
-        menu.exec(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
+    def _session_row_menu(self, session_id, title, generating=False):
+        """会话「⋯」和右键共用的菜单：重命名 / 删除会话。生成中的会话删除置灰——
+        要删先停（和早先「生成中不给 ×」同一条规则）。单独成函数，测试能直接拿到菜单项。"""
+        from .context_menus import add_item, make_menu
+        menu = make_menu(self)
+        a_rename = add_item(menu, "重命名",
+                            lambda s=session_id, t=title: self._rename_session_dialog(s, t))
+        a_rename.setIcon(self._svg_icon("square-pen.svg", self._t("menu_text")))
+        menu.addSeparator()
+        a_del = add_item(menu, "删除会话", lambda s=session_id: self._delete_session(s),
+                         enabled=not generating)
+        a_del.setIcon(self._svg_icon("trash_lucide.svg", self._t("sb_danger")))
+        if generating:
+            a_del.setToolTip("正在生成，先停止再删")
+            menu.setToolTipsVisible(True)
+        return menu
+
+    def _show_session_row_menu(self, anchor_widget, session_id, title, generating=False):
+        self._exec_sidebar_menu(self._session_row_menu(session_id, title, generating),
+                                anchor_widget)
+
+    def _exec_sidebar_menu(self, menu, anchor_widget):
+        """菜单贴着行的右下角弹出；弹出期间行保持悬停态（「⋯」不消失）。"""
+        row = anchor_widget
+        while row is not None and not hasattr(row, "set_menu_open"):
+            row = row.parentWidget()
+        if row is not None:
+            row.set_menu_open(True)
+        try:
+            pos = anchor_widget.mapToGlobal(anchor_widget.rect().bottomRight())
+            pos.setX(pos.x() - menu.sizeHint().width())
+            menu.exec(pos)
+        finally:
+            import shiboken6
+            if row is not None and shiboken6.isValid(row):
+                row.set_menu_open(False)
 
     def _rename_session_dialog(self, session_id, old_title):
         """弹输入框改名：非空校验 → agent.rename_session（三处一起改）→ 刷新侧栏。"""

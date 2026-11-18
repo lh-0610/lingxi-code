@@ -7,8 +7,8 @@ QtWebEngine*；profile / page / view 都在首次 get_browser() 时才构造。b
 **profile 常驻**（§11.6，2026-11-16 拍板）：profile 由本模块持有、不设 parent，关闭浏览器
 只销毁 view/page。offscreen 下"用过 view 后在进程退出前销毁 profile"会触发上游 Qt 退出段错误
 （纯 PySide6 最小复现见 §11.6），真实应用 windows 平台不受影响，但测试/CI 跑 offscreen。
-关闭时清 cookie / HTTP 缓存 / visited links；**localStorage 没有清除 API，会留到进程退出**
-（off-the-record 只在内存，不落盘）。
+关闭时清 cookie / visited links，HTTP 缓存标脏、下一次导航前清（见「HTTP 缓存闸门」）；
+**localStorage 没有清除 API，会留到进程退出**（off-the-record 只在内存，不落盘）。
 
 安全默认值（§6.4）：下载拒、新窗口拒、alert/confirm/prompt dismiss、摄像头/麦克风/定位/通知
 一律 deny。profile 不传 storageName → 不落盘（off-the-record），cookie 不持久化、缓存只在内存。
@@ -134,6 +134,7 @@ def _get_profile():
         script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)
         script.setRunsOnSubFrames(True)
         profile.scripts().insert(script)
+        profile.clearHttpCacheCompleted.connect(_cache_cleared)
         _profile = profile
     return _profile
 
@@ -216,8 +217,8 @@ def is_browser_open() -> bool:
 
 def close_browser():
     """关闭并释放 view/page（主线程），profile 常驻复用。下次 get_browser() 重新构造页面。
-    关闭时清 cookie / HTTP 缓存 / visited links；localStorage 无清除 API，留到进程退出
-    （off-the-record 只在内存、不落盘，§11.6）。"""
+    关闭时清 cookie / visited links，HTTP 缓存标脏留给下一次导航先清（和导航重叠会卡死它）；
+    localStorage 无清除 API，留到进程退出（off-the-record 只在内存、不落盘，§11.6）。"""
     global _browser
     with _lock:
         if _browser is not None:
@@ -233,41 +234,110 @@ def close_browser():
                 app.sendPostedEvents(None, QEvent.DeferredDelete)
         if _profile is not None:
             _profile.cookieStore().deleteAllCookies()   # 异步，安全；调用方需泵事件等它完成
-            # clearHttpCache/clearAllVisitedLinks 会向渲染进程发同步 IPC：冷启动旧 page 还在
-            # 析构/新导航在途时发它会堵死导航（首载途中关闭→下次 open 卡满超时，复审 8 根因）。
-            # 轮询等桥空闲（无在途导航/请求）再清，避免固定延迟仍落在竞态窗口里。
-            _schedule_cache_clear()
+            _profile.clearAllVisitedLinks()             # 实测不碍导航，直接清
+            # HTTP 缓存不在这里清，只记一笔、由下一次导航先清再走（见 load_url）。早先在这里
+            # 延后清（轮询等桥空闲），但面板自己的导航、以及"刚判定空闲、模型的 open 紧跟着到"
+            # 都会撞上——clearHttpCache 和导航重叠，那次导航就再也等不到 loadFinished
+            mark_cache_dirty()
         from src.browser import bridge
         bridge.notify_closed()   # 在途请求立刻回"浏览器已关闭"，不等超时
 
 
-_cache_clear_timer = None
+# ── HTTP 缓存闸门 ──────────────────────────────────────────────────
+#
+# clearHttpCache 和导航**不能重叠**：清的过程中（发出前后都算）开始的导航，loadStarted 之后
+# 再也等不到 loadFinished，卡满加载超时（实测：load 前后紧挨着清，8/8 卡死；clearAllVisitedLinks
+# 不受影响）。所以所有导航都走 load_url：有清理在途就排队等清完，清理一次只跑一个。
+# 曾经的三个口子：关闭后延时清撞上紧接着的重开；两次清叠在一起，前一次的"清完了"信号把后一次
+# 等着的导航提前放行；2 秒兜底到点就 load、清理其实还没完。
+
+_CACHE_CLEAR_FALLBACK_MS = 5000
+_cache_state = {"clearing": False, "dirty": False, "waiters": [], "timer": None}
 
 
-def _schedule_cache_clear():
-    global _cache_clear_timer
-    if _profile is None or _cache_clear_timer is not None:
+def mark_cache_dirty():
+    """下一次导航前要先清 HTTP 缓存（关浏览器后：新页面可能复用旧渲染进程的内存缓存）。"""
+    _cache_state["dirty"] = True
+
+
+def cache_dirty() -> bool:
+    return _cache_state["dirty"]
+
+
+def cache_clearing() -> bool:
+    return _cache_state["clearing"]
+
+
+def _cache_cleared():
+    st = _cache_state
+    if not st["clearing"]:
         return
-    timer = QTimer(_profile)
-    timer.setInterval(100)
-
-    def tick():
-        global _cache_clear_timer
-        from src.browser import bridge
-        b = bridge._bridge
-        if b is not None and (b._open_req is not None or b._pending):
-            return                      # 有在途导航/请求：等它结束再清
+    st["clearing"] = False
+    timer, st["timer"] = st["timer"], None
+    if timer is not None:
         timer.stop()
         timer.deleteLater()
-        _cache_clear_timer = None
-        _clear_cache_and_visited()
+    waiters, st["waiters"] = st["waiters"], []
+    for fn in waiters:
+        try:
+            fn()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("清缓存后的导航回调出错")
 
-    timer.timeout.connect(tick)
-    _cache_clear_timer = timer
-    timer.start()
+
+def _cache_clear_timed_out():
+    import logging
+    logging.getLogger(__name__).warning(
+        "clearHttpCache %d ms 没回完成信号，按已完成继续导航", _CACHE_CLEAR_FALLBACK_MS)
+    _cache_cleared()
 
 
-def _clear_cache_and_visited():
-    if _profile is not None:
-        _profile.clearHttpCache()
-        _profile.clearAllVisitedLinks()
+def clear_cache_then(callback):
+    """清 HTTP 缓存，清完（clearHttpCacheCompleted）再调 callback。主线程。
+    已经有一次在清就排在它后面，不再叠一次（叠起来时前一次的完成信号会提前放行）。"""
+    st = _cache_state
+    st["waiters"].append(callback)
+    if st["clearing"]:
+        return
+    profile = _get_profile()
+    st["clearing"] = True
+    st["dirty"] = False
+    timer = QTimer(profile)                  # receiver 上下文：落在主线程
+    timer.setSingleShot(True)
+    timer.timeout.connect(_cache_clear_timed_out)
+    timer.start(_CACHE_CLEAR_FALLBACK_MS)
+    st["timer"] = timer
+    profile.clearHttpCache()
+
+
+def when_cache_idle(callback):
+    """没有清理在途就立刻调 callback，否则等清完。"""
+    if _cache_state["clearing"]:
+        _cache_state["waiters"].append(callback)
+    else:
+        callback()
+
+
+def load_url(page, url, *, clear_first=False, page_loading=False, still_wanted=None):
+    """所有导航的唯一入口（模型的 open 和面板的地址栏都走这里）。
+
+    clear_first：先清 HTTP 缓存再导航（模型重开改过的页面要跑新代码，评测 012）。
+    缓存被标脏（关过浏览器）时也先清。page_loading（页面正在加载）时不清、脏标记留着——
+    在途导航会被清理卡死，新导航直接接替它。still_wanted：排队期间请求可能被取代 / 取消，
+    回调前再问一次。
+    """
+    from PySide6.QtCore import QUrl
+    qurl = url if isinstance(url, QUrl) else QUrl(url)
+
+    def go():
+        if still_wanted is not None and not still_wanted():
+            return
+        if shiboken6.isValid(page):
+            page.load(qurl)
+
+    if ((clear_first or _cache_state["dirty"]) and not page_loading
+            and not _cache_state["clearing"]):
+        clear_cache_then(go)
+    else:
+        when_cache_idle(go)

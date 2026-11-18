@@ -187,14 +187,17 @@ def _protect_literal_asterisks(md_text):
 _LIST_TAG = re.compile(r"<(/?)(ul|ol|li)\b[^>]*>")
 
 
-def _flatten_lists(html):
-    """把 <ul>/<ol>/<li> 摊平成段落，每项前面写上 "• " 或 "1. "，嵌套的往里缩一点。
+def _flatten_lists(html, marker_color=""):
+    """把 <ul>/<ol>/<li> 换成两列无框表格：左列是 "•" 或 "1."，右列是内容（悬挂缩进）。
 
-    以前直接把列表标签删掉，项目符号和序号也一起没了，"第 1 步、第 2 步"只剩几行字。
+    QLabel 自带的列表缩进不好看；以前摊平成「• 文字」的段落，一项折行后第二行顶到符号
+    底下，和文字对不齐（设计稿「消息流整理」④）。表格的右列整列缩进，折行自然对齐。
+    嵌套列表落在外层那项的右列里，再往里缩一层。更早时直接删标签，符号和序号都没了。
     """
     # 松散列表（项之间有空行）的 <li> 里还会套一层 <p>：拆掉，不然符号单独占一行
     html = re.sub(r"<li>\s*<p>", "<li>", html)
     html = re.sub(r"</p>\s*</li>", "</li>", html)
+    color = f"color:{marker_color};" if marker_color else ""
     out, pos, stack = [], 0, []      # stack 里每层是 [列表类型, 已有几项]
     for m in _LIST_TAG.finditer(html):
         out.append(html[pos:m.start()])
@@ -204,17 +207,21 @@ def _flatten_lists(html):
             if closing:
                 if stack:
                     stack.pop()
+                out.append("</table>")
             else:
+                # 外层列表上方留 6：Qt 里列表前那段的下边距和它的上边距取大的那个，不相加
+                gap = "2px 0 0 0" if stack else "6px 0 8px 0"
+                out.append(f'<table cellspacing="0" cellpadding="0" style="margin:{gap};">')
                 stack.append([tag, 0])
         elif closing:
-            out.append("</p>")
+            out.append("</td></tr>")
         else:
             kind, n = stack[-1] if stack else ("ul", 0)
             if stack:
                 stack[-1][1] += 1
-            marker = f"{n + 1}. " if kind == "ol" else "• "
-            indent = 18 * max(0, len(stack) - 1)
-            out.append(f'<p style="margin:2px 0 2px {indent}px;">{marker}')
+            marker, width = (f"{n + 1}.", 22) if kind == "ol" else ("•", 16)
+            out.append(f'<tr><td width="{width}" valign="top" style="{color}padding:0 0 3px 0;">'
+                       f'{marker}</td><td valign="top" style="padding:0 0 3px 0;">')
     out.append(html[pos:])
     return "".join(out)
 
@@ -276,20 +283,22 @@ class MarkdownRenderMixin:
         html = markdown.markdown(md_text, extensions=['tables', 'fenced_code', 'nl2br'])
 
         # 列表摊平成段落（QLabel 自带的列表缩进不好看），但要留下项目符号 / 序号
-        html = _flatten_lists(html)
+        html = _flatten_lists(html, self._t("mv_muted"))
         # 去掉 <em>/<i> 斜体标签，避免动作描述*...* 与正常对话字体不一样
         html = _re.sub(r'</?em[^>]*>', '', html)
         html = _re.sub(r'</?i[^>]*>', '', html)
-        html = html.replace('<p>', '<p style="margin:6px 0;">')
+        # 段落只留下边距：上下各 6 时，段落、标题、列表挨在一起的空隙忽大忽小
+        html = html.replace('<p>', '<p style="margin:0 0 8px 0;">')
         # 代码块：markdown 输出的是 <pre><code class="language-python">，带 class 的标签下面按 '<code>'
         # 精确替换匹配不到，Qt 就给它用默认的 Courier New（又细又宽，括号前后像多了空格）。
         # 先把块里的 code 换成只带字体的样式；剩下不带属性的 <code> 才是行内代码。
         html = _re.sub(r'<pre><code[^>]*>',
                        f'<pre><code style="font-family:{MONO_CSS};font-size:13px;">', html)
+        # 行内代码：正文色 + 很浅的底（路径、编号多的回答不再像一排按钮）
         html = html.replace(
             '<code>',
             f'<code style="background:{self._t("md_code_bg")};color:{self._t("md_code_text")};'
-            f'padding:1px 6px;font-family:{MONO_CSS};font-size:13px;border-radius:3px;">'
+            f'padding:0 4px;font-family:{MONO_CSS};font-size:13px;border-radius:3px;">'
         )
         pre_border = self._t("md_pre_border_left")
         pre_border_css = (
@@ -340,6 +349,13 @@ class MarkdownRenderMixin:
             ),
             html,
         )
+        # 其余链接（localhost 地址等）同样用强调色、不加下划线：Qt 默认的纯蓝下划线在深色底上
+        # 几乎看不清
+        html = _re.sub(
+            r'<a href="((?!lingxi-file:|action:)[^"]*)">',
+            lambda m: f'<a href="{m.group(1)}" style="color:{accent};text-decoration:none;">',
+            html,
+        )
 
         html = html.replace(
             '<table>',
@@ -363,11 +379,18 @@ class MarkdownRenderMixin:
             f'<blockquote style="border-left:3px solid {self._t("md_blockquote_border")};margin:6px 0;'
             f'padding:4px 14px;color:{self._t("md_blockquote_text")};{bq_bg_css}">'
         )
-        # 标题
-        for i in range(1, 4):
-            html = html.replace(
-                f'<h{i}>', f'<h{i} style="margin:14px 0 6px 0;color:{self._t("md_h_color")};">'
+        # 标题：和上一段拉开、和下面的内容贴近；字号压到正文附近。换成带样式的段落——
+        # Qt 给 <hN> 套自己的字号级别（h1 是 xx-large），style 里写的 font-size 盖不过它
+        for i, size in enumerate((18, 16, 15, 14, 14, 14), start=1):
+            html = _re.sub(
+                rf'<h{i}(?:\s[^>]*)?>(.*?)</h{i}>',
+                lambda m, s=size: (
+                    f'<p style="margin:18px 0 6px 0;font-size:{s}px;font-weight:600;'
+                    f'color:{self._t("md_h_color")};">{m.group(1)}</p>'),
+                html, flags=_re.DOTALL,
             )
+        # 回复以标题开头：上方已经有模型那行的间距，不再多空 18
+        html = _re.sub(r'^\s*<p style="margin:18px 0 6px 0;', '<p style="margin:0 0 6px 0;', html)
 
         return (
             f'<div style="color:{self._t("md_text")};font-size:14px;'

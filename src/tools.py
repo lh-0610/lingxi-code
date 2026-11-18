@@ -3321,7 +3321,7 @@ from .tools_fs import delete_path, move_path, copy_path, make_directory  # noqa:
 from .tools_image import read_image, _IMAGE_EXTS  # noqa: E402  _IMAGE_EXTS 供 read_file 指向 read_image
 from .tools_browser import (  # noqa: E402
     browser_open, browser_snapshot, browser_find, browser_read_text,
-    browser_click, browser_type, browser_console, browser_close,
+    browser_click, browser_type, browser_console, browser_close, browser_screenshot,
 )
 
 # 导出
@@ -3349,7 +3349,7 @@ ALL_TOOLS = [
     fetch_url, web_search,
     search_knowledge,
     browser_open, browser_snapshot, browser_find, browser_read_text,
-    browser_click, browser_type, browser_console, browser_close,
+    browser_click, browser_type, browser_console, browser_close, browser_screenshot,
 ]
 
 
@@ -3439,6 +3439,7 @@ TOOL_DISPLAY_NAMES = {
     "browser_click": "🌐 浏览器点击",
     "browser_type": "🌐 浏览器输入",
     "browser_console": "🌐 浏览器控制台",
+    "browser_screenshot": "🌐 浏览器截图",
     "browser_close": "🌐 关闭浏览器",
 }
 

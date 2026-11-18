@@ -119,6 +119,44 @@ THEMES = {
         # 会话行运行态底色（生成中=靛蓝软底,对齐 design active 行 / 待确认浅琥珀）
         "row_gen_bg":        "#eef0fe",
         "row_pending_bg":    "#fbf2e0",
+        # 左侧栏（设计稿「左侧栏：编码与知识库两个工作区」）
+        "sb_card_bg":          "#ffffff",
+        "sb_card_border":      "#e3e4ea",
+        "sb_seg_bg":           "#eceef3",
+        "sb_seg_active_bg":    "#ffffff",
+        "sb_seg_active_text":  "#4a59e0",
+        "sb_seg_idle_text":    "#5a6172",
+        "sb_accent":           "#4a59e0",
+        "sb_row_text":         "#2b3142",
+        "sb_row_hover_bg":     "#eceef3",
+        "sb_row_current_bg":   "#eef0fe",
+        "sb_row_current_text": "#3b48c9",
+        "sb_group_text":       "#3a4152",
+        "sb_group_active_text": "#222838",
+        "sb_meta":             "#5a6172",
+        "sb_chip_bg":          "#eef0fe",
+        "sb_chip_text":        "#4a59e0",
+        "sb_dot_done":         "#1a7f37",
+        "sb_placeholder":      "#7a8193",
+        "sb_badge_bg":         "#4a59e0",
+        "sb_badge_text":       "#ffffff",
+        "sb_danger":           "#b42318",
+        # 知识库卡片五态
+        "kb_ok_text":          "#1a7f37",
+        "kb_busy_border":      "#c8cbf3",
+        "kb_busy_track":       "#eef0fe",
+        "kb_stale_bg":         "#fffaf0",
+        "kb_stale_border":     "#f0d28a",
+        "kb_stale_text":       "#9a6700",
+        "kb_stale_detail":     "#6b4e00",
+        "kb_error_bg":         "#fff5f5",
+        "kb_error_border":     "#f2c6c6",
+        "kb_error_text":       "#b42318",
+        "kb_error_detail":     "#7a1d14",
+        "kb_primary_bg":       "#4a59e0",
+        "kb_primary_text":     "#ffffff",
+        "kb_btn_bg":           "#f7f8fa",
+        "kb_btn_disabled":     "#9aa0ad",
         # Role btn idle
         "role_bg":            "#ffffff",
         "role_border":        "#e8e8ed",
@@ -187,8 +225,8 @@ THEMES = {
         "copy_link_border":  "transparent",
         # Markdown
         "md_text":           "#1f2430",
-        "md_code_bg":        "#eef1f6",
-        "md_code_text":      "#232b7a",
+        "md_code_bg":        "#f1f2f5",
+        "md_code_text":      "#2b3142",
         "md_pre_bg":         "#f3f5f8",
         "md_pre_text":       "#1f2430",
         "md_pre_border_left":"#c8cdf7",
@@ -432,6 +470,44 @@ THEMES = {
         # 会话行运行态底色
         "row_gen_bg":        "#1d2133",
         "row_pending_bg":    "#2a2318",
+        # 左侧栏
+        "sb_card_bg":          "#20242b",
+        "sb_card_border":      "#3a3f4b",
+        "sb_seg_bg":           "#16181d",
+        "sb_seg_active_bg":    "#2a2f4d",
+        "sb_seg_active_text":  "#c3caff",
+        "sb_seg_idle_text":    "#c9ceda",
+        "sb_accent":           "#95a0fa",
+        "sb_row_text":         "#d5d9e2",
+        "sb_row_hover_bg":     "#20242b",
+        "sb_row_current_bg":   "#2a2f4d",
+        "sb_row_current_text": "#c3caff",
+        "sb_group_text":       "#d5d9e2",
+        "sb_group_active_text": "#e7e9ee",
+        "sb_meta":             "#a9afbd",
+        "sb_chip_bg":          "#2a2f4d",
+        "sb_chip_text":        "#c3caff",
+        "sb_dot_done":         "#5cc77f",
+        "sb_placeholder":      "#9aa1b2",
+        "sb_badge_bg":         "#95a0fa",
+        "sb_badge_text":       "#16181d",
+        "sb_danger":           "#f09a8d",
+        # 知识库卡片五态
+        "kb_ok_text":          "#7cc79a",
+        "kb_busy_border":      "#3f4573",
+        "kb_busy_track":       "#262b45",
+        "kb_stale_bg":         "#2a2318",
+        "kb_stale_border":     "#6e5530",
+        "kb_stale_text":       "#f0c178",
+        "kb_stale_detail":     "#e8c98f",
+        "kb_error_bg":         "#2a1d1c",
+        "kb_error_border":     "#6e3530",
+        "kb_error_text":       "#f09a8d",
+        "kb_error_detail":     "#f0b8ae",
+        "kb_primary_bg":       "#95a0fa",
+        "kb_primary_text":     "#16181d",
+        "kb_btn_bg":           "#1b1e24",
+        "kb_btn_disabled":     "#7a8190",
         # Role btn idle
         "role_bg":            "transparent",
         "role_border":        "#3a3f4b",
@@ -500,8 +576,8 @@ THEMES = {
         "copy_link_border":  "transparent",
         # Markdown
         "md_text":           "#e7e9ee",
-        "md_code_bg":        "#262a32",
-        "md_code_text":      "#c3caff",
+        "md_code_bg":        "#23262d",
+        "md_code_text":      "#d5d9e0",
         "md_pre_bg":         "#191c22",
         "md_pre_text":       "#e7e9ee",
         "md_pre_border_left":"#7b89f7",
@@ -750,7 +826,7 @@ QMainWindow, QDialog {{
     font-family: {UI_CSS};
 }}
 
-/* 侧边栏 */
+/* 侧边栏（设计稿「左侧栏：编码与知识库两个工作区」） */
 #sidebar {{
     background-color: {p['sidebar_bg']};
     border-right: 1px solid {p['sidebar_border']};
@@ -761,204 +837,244 @@ QMainWindow, QDialog {{
 #sidebarBrandTitle {{
     color: {p['text']};
     font-family: {UI_CSS};
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 600;
     letter-spacing: 0px;
-}}
-#sidebarBrandSub {{
-    color: {p['text_subtle']};
-    font-size: 12px;
 }}
 #sidebarFooter {{
     background: transparent;
     border: none;
+    border-top: 1px solid {p['sb_card_border']};
 }}
-#sidebarSettingsBtn {{
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    color: {p['text_dim']};
-    font-size: 16px;
+#sidebarSettingsBtn, #sidebar QPushButton#sidebarBgBtn {{
+    background: {p['sb_card_bg']};
+    border: 1px solid {p['sb_card_border']};
+    border-radius: 10px;
+    color: {p['sb_row_text']};
+    font-size: 13px;
     padding: 0;
 }}
-#sidebarSettingsBtn:hover {{
-    background: {p['history_hover_bg']};
-    color: {p['text']};
-    border-color: {p['sidebar_border']};
+#sidebar QPushButton#sidebarBgBtn {{
+    text-align: left;
+    padding: 0 10px 0 10px;
 }}
-#sidebarSettingsBtn:pressed {{
-    background: {p['history_active_bg']};
+#sidebarSettingsBtn:hover, #sidebar QPushButton#sidebarBgBtn:hover {{
+    border-color: {p['kb_busy_border']};
+}}
+#sidebarSettingsBtn:pressed, #sidebar QPushButton#sidebarBgBtn:pressed {{
+    background: {p['sb_row_hover_bg']};
+}}
+#sidebar QLabel#sbBadge {{
+    background: {p['sb_badge_bg']};
+    color: {p['sb_badge_text']};
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0 5px;
+    min-width: 8px;
 }}
 #sidebar QPushButton#newChatBtn {{
-    background: {p['new_chat_bg']};
-    border: 1px solid {p['new_chat_border']};
-    color: {p['new_chat_text']};
+    background: {p['sb_card_bg']};
+    border: 1px solid {p['sb_card_border']};
+    color: {p['sb_row_text']};
     font-size: 14px;
     font-weight: 600;
     text-align: left;
-    padding: 10px 16px;
-    border-radius: 8px;
+    padding: 0 12px;
+    border-radius: 10px;
 }}
 #sidebar QPushButton#newChatBtn:hover {{
-    background-color: {p['new_chat_hover_bg']};
-    border-color: {p['new_chat_hover_border']};
-    color: {p['new_chat_hover_text']};
+    border-color: {p['kb_busy_border']};
 }}
-/* 侧栏 编码|知识库 模式段控（撑满侧栏宽度，复用顶栏段控配色） */
-#ragModeSeg {{
-    background: {p['seg_bg']};
-    border: 1px solid {p['seg_border']};
+#sidebar QLineEdit#sidebarSearch {{
+    background: {p['sb_card_bg']};
+    color: {p['sb_row_text']};
+    border: 1px solid {p['sb_card_border']};
     border-radius: 9px;
+    padding: 0 6px 0 2px;
+    font-size: 13px;
+}}
+#sidebar QLineEdit#sidebarSearch:focus {{
+    border-color: {p['sb_accent']};
+}}
+/* 编码 | 知识库 工作区切换 */
+#ragModeSeg {{
+    background: {p['sb_seg_bg']};
+    border: none;
+    border-radius: 10px;
 }}
 #ragModeSeg QPushButton[class="segBtn"] {{
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    padding: 9px 0;
+    border: none;
+    border-radius: 8px;
     font-size: 13px;
-    color: {p['seg_idle_text']};
+    color: {p['sb_seg_idle_text']};
 }}
 #ragModeSeg QPushButton[class="segBtn"]:hover {{
-    color: {p['seg_hover_text']};
+    color: {p['sb_seg_active_text']};
 }}
 #ragModeSeg QPushButton[class="segBtn"]:checked {{
-    background: {p['seg_active_bg']};
-    border: 1px solid {p['seg_active_border']};
-    color: {p['seg_active_text']};
+    background: {p['sb_seg_active_bg']};
+    color: {p['sb_seg_active_text']};
     font-weight: 600;
 }}
-/* 知识库管理卡片：轻背景 + 圆角，不堆边框 */
+/* 知识库卡片：五态（kbState 属性驱动，见 rag_sidebar 模块说明） */
 #kbCard {{
-    background: {p['seg_bg']};
-    border-radius: 10px;
+    background: {p['sb_card_bg']};
+    border: 1px solid {p['sb_card_border']};
+    border-radius: 12px;
 }}
-#kbCard QLabel#kbCardStatus {{
-    font-size: 12px;
-    color: {p['history_label']};
-    padding: 1px 2px;
+#kbCard[kbState="indexing"] {{ border-color: {p['kb_busy_border']}; }}
+#kbCard[kbState="none"] {{ border: 1px dashed {p['kb_busy_border']}; }}
+#kbCard[kbState="stale"] {{ background: {p['kb_stale_bg']}; border-color: {p['kb_stale_border']}; }}
+#kbCard[kbState="error"] {{ background: {p['kb_error_bg']}; border-color: {p['kb_error_border']}; }}
+#kbCard QLabel {{ background: transparent; }}
+#kbCard QLabel#kbCardName {{
+    font-size: 14px;
+    font-weight: 600;
+    color: {p['sb_group_active_text']};
 }}
-/* 状态圆点颜色（kbState 属性驱动；中间调在浅/深主题都可读） */
-#kbCard QLabel#kbCardStatus[kbState="ok"] {{ color: #21a366; }}
-#kbCard QLabel#kbCardStatus[kbState="indexing"] {{ color: {p['seg_active_text']}; }}
-#kbCard QLabel#kbCardStatus[kbState="stale"] {{ color: #d97706; }}
-#kbCard QLabel#kbCardStatus[kbState="error"] {{ color: #dc2626; }}
+#kbCard QLabel#kbCardState {{ font-size: 12px; color: {p['sb_meta']}; }}
+#kbCard[kbState="ok"] QLabel#kbCardState {{ color: {p['kb_ok_text']}; }}
+#kbCard[kbState="reading"] QLabel#kbCardState, #kbCard[kbState="indexing"] QLabel#kbCardState {{ color: {p['sb_accent']}; }}
+#kbCard[kbState="stale"] QLabel#kbCardState {{ color: {p['kb_stale_text']}; }}
+#kbCard[kbState="error"] QLabel#kbCardState {{ color: {p['kb_error_text']}; }}
+#kbCard QLabel#kbCardStatus {{ font-size: 12px; color: {p['sb_meta']}; }}
+#kbCard[kbState="stale"] QLabel#kbCardStatus {{ color: {p['kb_stale_detail']}; }}
+#kbCard[kbState="error"] QLabel#kbCardStatus {{ color: {p['kb_error_detail']}; }}
 #kbCard QPushButton[class="kbCardBtn"] {{
-    background: transparent;
-    border: 1px solid {p['seg_border']};
-    border-radius: 6px;
-    padding: 5px 0;
+    background: {p['kb_btn_bg']};
+    border: 1px solid {p['sb_card_border']};
+    border-radius: 8px;
     font-size: 12px;
-    color: {p['seg_idle_text']};
+    color: {p['sb_row_text']};
 }}
-#kbCard QPushButton[class="kbCardBtn"]:hover {{
-    color: {p['seg_hover_text']};
-    background: {p['history_hover_bg']};
+#kbCard[kbState="stale"] QPushButton[class="kbCardBtn"],
+#kbCard[kbState="error"] QPushButton[class="kbCardBtn"] {{ background: {p['sb_card_bg']}; }}
+#kbCard QPushButton[class="kbCardBtn"]:hover {{ border-color: {p['kb_busy_border']}; }}
+#kbCard QPushButton[class="kbCardBtn"][primary="true"] {{
+    background: {p['kb_primary_bg']};
+    border-color: {p['kb_primary_bg']};
+    color: {p['kb_primary_text']};
+    font-weight: 600;
 }}
 #kbCard QPushButton[class="kbCardBtn"]:disabled {{
-    color: {p['seg_border']};
+    color: {p['kb_btn_disabled']};
+    background: {p['kb_btn_bg']};
+    border-color: {p['sb_card_border']};
 }}
-#sidebar QPushButton#projectHeader {{
+#kbCard QProgressBar#kbCardBusy {{
+    background: {p['kb_busy_track']};
+    border: none;
+    border-radius: 2px;
+}}
+#kbCard QProgressBar#kbCardBusy::chunk {{
+    background: {p['sb_accent']};
+    border-radius: 2px;
+}}
+/* 知识库列表为空时的说明卡 */
+#sidebar #kbEmptyCard {{
+    background: {p['sb_card_bg']};
+    border: 1px solid {p['sb_card_border']};
+    border-radius: 10px;
+}}
+#sidebar QLabel#kbEmptyTitle {{ font-size: 13px; font-weight: 600; color: {p['sb_row_text']}; background: transparent; }}
+#sidebar QLabel#kbEmptyText {{ font-size: 12px; color: {p['sb_meta']}; background: transparent; }}
+/* 分组标题：折叠箭头 + 名字；知识库的「知识库对话」是不折叠的小标题（kind=section） */
+#sidebar QPushButton#projectHeader, #sidebar QPushButton#projectHeaderActive {{
     background: transparent;
     border: none;
-    color: {p['history_label']};
-    font-size: 12px;
+    border-radius: 8px;
+    color: {p['sb_group_text']};
+    font-size: 13px;
     font-weight: 600;
     text-align: left;
-    padding: 8px 10px 4px 10px;
-    letter-spacing: 0.5px;
+    padding: 0 8px;
 }}
-#sidebar QPushButton#projectHeader:hover {{
-    color: {p['text']};
+#sidebar QPushButton#projectHeaderActive {{ color: {p['sb_group_active_text']}; }}
+#sidebar QPushButton#projectHeader:hover, #sidebar QPushButton#projectHeaderActive:hover {{
+    background: {p['sb_row_hover_bg']};
 }}
-#sidebar QPushButton#projectHeaderActive {{
+#sidebar QPushButton#projectHeader[kind="section"], #sidebar QPushButton#projectHeaderActive[kind="section"] {{
+    color: {p['sb_meta']};
+    font-size: 12px;
+    font-weight: 400;
+    padding: 0 10px;
+}}
+#sidebar QPushButton#projectHeader[kind="section"]:hover, #sidebar QPushButton#projectHeaderActive[kind="section"]:hover {{
+    background: transparent;
+}}
+#sidebar QLabel#sbChip {{
+    background: {p['sb_chip_bg']};
+    color: {p['sb_chip_text']};
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 1px 6px;
+}}
+#sidebar QLabel#sbCount, #sidebar QLabel#sbTime {{
+    color: {p['sb_meta']};
+    font-size: 12px;
+    background: transparent;
+}}
+#sidebar QLabel#sbDoneDot {{
+    background: {p['sb_dot_done']};
+    border-radius: 3px;
+}}
+#sidebar QPushButton#sbMoreBtn {{
     background: transparent;
     border: none;
-    color: {p['new_chat_hover_text']};
-    font-size: 12px;
-    font-weight: 600;
-    text-align: left;
-    padding: 8px 10px 4px 10px;
-    letter-spacing: 0.5px;
+    border-radius: 6px;
+    padding: 0;
+}}
+#sidebar QPushButton#sbMoreBtn:hover {{
+    background: {p['sb_card_border']};
 }}
 #sidebar #historyRow {{
     background: transparent;
+    border-radius: 8px;
 }}
-/* 整行 hover 底色——配合 HistoryRow 的 WA_Hover,覆盖标题/× 全宽,和选中态一致。
-   放在 rowstate/current 之前:后定义者胜,故运行态/选中底色优先级更高(hover 时不被盖) */
+/* 整行 hover 底色（HistoryRow 开了 WA_Hover）；放在 current 之前：选中底色优先 */
 #sidebar #historyRow:hover {{
-    background: {p['history_hover_bg']};
-    border-radius: 9px;
+    background: {p['sb_row_hover_bg']};
 }}
-/* 运行态会话行底色（生成中 / 待确认）——属性选择器,不污染 tooltip 继承 */
-#sidebar #historyRow[rowstate="generating"] {{
-    background: {p['row_gen_bg']};
-    border-radius: 9px;
-}}
-#sidebar #historyRow[rowstate="pending"] {{
-    background: {p['row_pending_bg']};
-    border-radius: 9px;
-}}
-/* 选中(当前)会话整行底色——放在 rowstate 之后,选中态优先于运行态底色 */
 #sidebar #historyRow[current="true"] {{
-    background: {p['history_active_bg']};
-    border-radius: 9px;
+    background: {p['sb_row_current_bg']};
 }}
 #sidebar #historyEmptyHint {{
-    color: {p['history_label']};
+    color: {p['sb_meta']};
     font-size: 12px;
-    padding: 2px 0 6px 22px;
+    padding: 2px 0 6px 26px;
 }}
-#historyLabel {{
-    color: {p['history_label']};
+#sidebar QPushButton#loadMoreBtn {{
+    background: transparent;
+    border: none;
+    color: {p['sb_meta']};
     font-size: 12px;
-    font-weight: 600;
-    letter-spacing: {p['history_label_spacing']};
-    padding: 18px 14px 8px 14px;
+    text-align: left;
+    padding: 0 0 0 26px;
+}}
+#sidebar QPushButton#loadMoreBtn:hover {{
+    color: {p['sb_accent']};
 }}
 
-/* 历史项 */
-/* padding-right=0 让右侧的删除按钮(×)能贴近文字、不被 padding 推开。
- * 之前在 sidebar.py 里用 btn.setStyleSheet 注入这一句，会让 btn 自带 stylesheet
- * 从而切断 app 级 QToolTip 规则继承——tooltip 颜色异常。移到这里走类选择器就没这个坑。
- */
+/* 历史项（会话标题按钮）。不在 sidebar.py 里给按钮单独 setStyleSheet：自带样式表会切断
+ * app 级 QToolTip 规则继承——tooltip 颜色异常；走类选择器就没这个坑。 */
 QPushButton[class="historyItem"] {{
     background: transparent;
     border: none;
-    color: {p['history_item']};
-    font-size: 14px;
+    color: {p['sb_row_text']};
+    font-size: 13px;
     text-align: left;
-    padding: 9px 0 9px 12px;
-    border-radius: 9px;
+    padding: 0;
 }}
-QPushButton[class="historyItem"]:hover {{
-    color: {p['history_hover_text']};
-}}
-/* 选中态：按钮本身透明,整行底色由 #historyRow[current="true"] 提供(整行高亮)；
- * 这里只保留加粗 + 选中文字色,避免按钮底色和整行底色叠成"嵌套块"。*/
 QPushButton[class="historyItemActive"] {{
-    background-color: transparent;
-    border: none;
-    color: {p['history_active_text']};
-    font-size: 14px;
-    font-weight: 600;
-    text-align: left;
-    padding: 9px 0 9px 12px;
-    border-radius: 9px;
-}}
-/* 后台会话完成、尚未查看：绿点 + 绿字（切回该会话查看后恢复普通样式）。
- * 绿色两主题通用，故硬编码不走 palette。*/
-QPushButton[class="historyItemDone"] {{
     background: transparent;
     border: none;
-    color: #22c55e;
-    font-size: 14px;
+    color: {p['sb_row_current_text']};
+    font-size: 13px;
     font-weight: 600;
     text-align: left;
-    padding: 9px 0 9px 12px;
-    border-radius: 9px;
-}}
-QPushButton[class="historyItemDone"]:hover {{
-    color: #16a34a;
+    padding: 0;
 }}
 
 /* 聊天区 */

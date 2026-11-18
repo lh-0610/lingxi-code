@@ -29,10 +29,11 @@ class _Host(RagSidebarMixin, QWidget):
         super().__init__()
         self.bridge = SignalBridge()
         self.bridge.kb_status.connect(self._on_kb_status)
+        self.bridge.kb_status_read.connect(self._on_kb_status_read)
         self.toasts = []
         lay = QVBoxLayout(self)
         self._build_rag_sidebar(lay)
-        self.new_chat_btn = QPushButton("+ 新对话")
+        self.new_chat_btn = QPushButton("新对话")
         lay.addWidget(self.new_chat_btn)
 
     def _show_toast(self, msg):
@@ -47,7 +48,7 @@ def host(qapp):
 class _FakeThread:
     """同步执行的假线程：让重建流程确定性跑完（含 done 信号），便于断言。"""
 
-    def __init__(self, target=None, daemon=None):
+    def __init__(self, target=None, daemon=None, **kw):
         self._target = target
 
     def start(self):
@@ -67,10 +68,10 @@ class TestSidebarUISync:
         host._apply_rag_mode_to_ui(True)
         assert host.kb_mode_btn.isChecked() and not host.code_mode_btn.isChecked()
         assert not host.kb_card.isHidden()
-        assert host.new_chat_btn.text() == "+ 新知识库对话"
+        assert host.new_chat_btn.text() == "新知识库对话"
         host._apply_rag_mode_to_ui(False)
         assert host.code_mode_btn.isChecked() and host.kb_card.isHidden()
-        assert host.new_chat_btn.text() == "+ 新对话"
+        assert host.new_chat_btn.text() == "新对话"
 
     def test_sync_from_session_by_kind(self, host):
         """侧栏跟随当前会话的 session_kind（会话级）。"""
@@ -145,13 +146,26 @@ class TestWorkspaceHelpers:
         assert any("知识库与当前配置不同" in t for t in host.toasts)
 
 
+@pytest.fixture()
+def sync_threads(monkeypatch):
+    """状态读取改成后台线程后，断言最终状态的用例用同步假线程跑（结果信号同线程直达槽）。"""
+    import threading
+    monkeypatch.setattr(threading, "Thread", _FakeThread)
+
+
 class TestKbStatusStates:
+    @pytest.fixture(autouse=True)
+    def _sync(self, sync_threads):
+        pass
+
     def test_unconfigured(self, host, monkeypatch):
         from src import config
         monkeypatch.setattr(config, "RAG_KB_DIR", "")
         host._refresh_kb_status()
         assert host.kb_status_label.property("kbState") == "none"
-        assert "未配置" in host.kb_status_label.text()
+        assert host.kb_card_name.text() == "还没选知识库目录"
+        assert not host.kb_reindex_btn.isVisibleTo(host.kb_card), "没目录时只给「选择目录」"
+        assert host.kb_dir_btn.property("primary") == "true"
 
     def test_available_with_chunks(self, host, monkeypatch, tmp_path):
         from src import config
@@ -177,10 +191,144 @@ class TestKbStatusStates:
         host._refresh_kb_status()
         assert host.kb_status_label.property("kbState") == "stale"
 
+    def test_needs_rebuild_makes_reindex_the_primary_button(self, host, monkeypatch, tmp_path):
+        from src import config
+        import src.rag.retriever as rmod
+        kb = tmp_path / "kbdir"
+        kb.mkdir()
+        monkeypatch.setattr(config, "RAG_KB_DIR", str(kb))
+        monkeypatch.setattr(rmod, "index_status", lambda **kw: {
+            "chunks": 5, "ok": False, "reason": "知识库目录已切换（或索引缺目录信息），需重建索引"})
+        host._refresh_kb_status()
+        assert host.kb_card.property("kbState") == "stale"
+        assert host.kb_reindex_btn.property("primary") == "true"
+        assert host.kb_card_state.text() == "需要重建"
+        assert host.kb_card_name.text() == "kbdir"
+
+    def test_failed_rebuild_offers_retry(self, host):
+        host.bridge.kb_status.emit("error", "重建失败: embed down", True)
+        assert host.kb_reindex_btn.text() == "重试"
+        assert host.kb_card_state.text() == "重建失败"
+        assert host.kb_status_label.text() == "embed down", "说明行不重复「重建失败」"
+
+    def test_indexing_shows_a_busy_bar_only_while_indexing(self, host, monkeypatch, tmp_path):
+        from src import config
+        kb = tmp_path / "kb"
+        kb.mkdir()
+        monkeypatch.setattr(config, "RAG_KB_DIR", str(kb))
+        host._set_kb_status("indexing", "切走也不会中断，完成后会提示。")
+        assert host.kb_busy_bar.isVisibleTo(host.kb_card)
+        assert host.kb_busy_bar.maximum() == 0, "没有真实进度，只画不确定的忙碌条"
+        host._set_kb_status("ok", "3 块")
+        assert not host.kb_busy_bar.isVisibleTo(host.kb_card)
+
     def test_rebuild_failed_state(self, host):
         host.bridge.kb_status.emit("error", "重建失败: boom", True)
         assert host.kb_status_label.property("kbState") == "error"
         assert "重建失败" in host.kb_status_label.toolTip()
+
+
+class TestKbStatusOffMainThread:
+    """第一次读知识库状态要加载向量库、打开索引（实测约 1.8s）。早先在主线程读，
+    第一次从编码切到知识库整个界面卡住。"""
+
+    def _kb(self, monkeypatch, tmp_path, name="kb"):
+        from src import config
+        kb = tmp_path / name
+        kb.mkdir()
+        monkeypatch.setattr(config, "RAG_KB_DIR", str(kb))
+        return kb
+
+    def _pump_until(self, qapp, pred, timeout=5.0):
+        import time
+        deadline = time.time() + timeout
+        while not pred() and time.time() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        return pred()
+
+    def test_slow_read_does_not_block_the_ui(self, host, qapp, monkeypatch, tmp_path):
+        import time
+
+        import src.rag.retriever as rmod
+        self._kb(monkeypatch, tmp_path)
+
+        def slow(**kw):
+            time.sleep(0.8)
+            return {"chunks": 7, "ok": True, "reason": ""}
+
+        monkeypatch.setattr(rmod, "index_status", slow)
+        t0 = time.perf_counter()
+        host._refresh_kb_status()
+        assert time.perf_counter() - t0 < 0.3, "读状态不该占着主线程"
+        assert host.kb_status_label.property("kbState") == "reading"
+        assert "读取中" in host.kb_card_state.text()
+        assert self._pump_until(qapp, lambda: host.kb_status_label.property("kbState") == "ok")
+        assert "7 块" in host.kb_status_label.text()
+
+    def test_an_older_result_never_overwrites_a_newer_one(self, host, monkeypatch, tmp_path,
+                                                          sync_threads):
+        import src.rag.retriever as rmod
+        kb = self._kb(monkeypatch, tmp_path)
+        monkeypatch.setattr(rmod, "index_status", lambda **kw: {"chunks": 3, "ok": True, "reason": ""})
+        host._refresh_kb_status()
+        assert "3 块" in host.kb_status_label.text()
+        # 上一次（序号更小）的结果迟到：丢掉
+        host._on_kb_status_read(host._kb_status_seq - 1, str(kb), {"chunks": 999, "ok": True, "reason": ""})
+        assert "999" not in host.kb_status_label.text()
+
+    def test_a_result_for_another_directory_is_dropped(self, host, monkeypatch, tmp_path,
+                                                       sync_threads):
+        import src.rag.retriever as rmod
+        self._kb(monkeypatch, tmp_path)
+        monkeypatch.setattr(rmod, "index_status", lambda **kw: {"chunks": 3, "ok": True, "reason": ""})
+        host._refresh_kb_status()
+        host._on_kb_status_read(host._kb_status_seq, str(tmp_path / "别的目录"),
+                                {"chunks": 999, "ok": True, "reason": ""})
+        assert "999" not in host.kb_status_label.text()
+
+    def test_second_switch_shows_the_last_result_without_flashing(self, host, qapp, monkeypatch,
+                                                                  tmp_path):
+        import threading
+        import time
+
+        import src.rag.retriever as rmod
+        self._kb(monkeypatch, tmp_path)
+        monkeypatch.setattr(rmod, "index_status", lambda **kw: {"chunks": 5, "ok": True, "reason": ""})
+        host._refresh_kb_status()
+        assert self._pump_until(qapp, lambda: "5 块" in host.kb_status_label.text())
+        gate = threading.Event()
+
+        def blocked(**kw):
+            gate.wait(5)
+            return {"chunks": 5, "ok": True, "reason": ""}
+
+        monkeypatch.setattr(rmod, "index_status", blocked)
+        host._refresh_kb_status()
+        assert "5 块" in host.kb_status_label.text(), "读过的直接显示，不闪「读取中」"
+        gate.set()
+        time.sleep(0.05)
+
+    def test_reindex_drops_the_cached_count(self, host, monkeypatch, tmp_path, sync_threads):
+        import src.rag.retriever as rmod
+        self._kb(monkeypatch, tmp_path)
+        monkeypatch.setattr(rmod, "index_status", lambda **kw: {"chunks": 5, "ok": True, "reason": ""})
+        host._refresh_kb_status()
+        assert host._kb_status_cache is not None
+        host.bridge.kb_status.emit("error", "重建失败: boom", True)
+        assert host._kb_status_cache is None, "索引变了，缓存的块数不能再拿来显示"
+
+    def test_reading_fails_shows_error(self, host, monkeypatch, tmp_path, sync_threads):
+        import src.rag.retriever as rmod
+        self._kb(monkeypatch, tmp_path)
+
+        def boom(**kw):
+            raise RuntimeError("chroma 打不开")
+
+        monkeypatch.setattr(rmod, "index_status", boom)
+        host._refresh_kb_status()
+        assert host.kb_status_label.property("kbState") == "error"
+        assert "chroma 打不开" in host.kb_status_label.toolTip()
 
 
 class TestReindexFlow:
@@ -301,7 +449,7 @@ class TestRagCollapseKey:
                 self.history_layout = QVBoxLayout(self.history_widget)
 
             def _render_project_group(self, project_path, project_name, sessions,
-                                      is_active, collapse_key=None):
+                                      is_active, collapse_key=None, section=False):
                 calls.append((project_name, project_path, collapse_key))
 
         monkeypatch.setattr(sb.agent, "list_sessions", lambda *a, **k: [])

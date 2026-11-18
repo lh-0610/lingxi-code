@@ -34,6 +34,7 @@ from .theme import color as _c
 
 CAPTION_HEIGHT = 56          # 顶部这么高的一条里，空白处都能拖动窗口
 BUTTON_W, BUTTON_H = 46, 56  # 宽是 Windows 惯用的 46；高和顶栏一样，图标和顶栏按钮在一条线上
+HOVER_H, HOVER_R = 36, 8      # 悬停底色：居中的圆角块，和顶栏图标按钮的悬停一样大小
 RESIZE_BORDER = 6            # 四边这么宽可以拖着改大小（逻辑像素）
 
 # Win32 常量
@@ -92,17 +93,25 @@ class _CaptionButton(QAbstractButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         fg = QColor(_c("dlg_title"))     # 用正文色：次要色在浅色主题下太淡（实机看过）
+        # 悬停底色只画居中的圆角块，不铺满 56px 高的整列（用户反馈太高）。按钮本身（可点区域）
+        # 仍是整列：最大化时鼠标甩到屏幕右上角照样点得中关闭
+        bg_rect = QRectF(3, (self.height() - HOVER_H) / 2, self.width() - 6, HOVER_H)
         if self.kind == "close" and (hover or down):
-            p.fillRect(self.rect(), QColor("#c42b1c" if not down else "#b22a1b"))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#c42b1c" if not down else "#b22a1b"))
+            p.drawRoundedRect(bg_rect, HOVER_R, HOVER_R)
             fg = QColor("#ffffff")
         elif hover or down:
             bg = QColor(_c("dlg_hover_bg"))
             if down:
                 bg = bg.darker(110)
-            p.fillRect(self.rect(), bg)
+            p.setPen(Qt.NoPen)
+            p.setBrush(bg)
+            p.drawRoundedRect(bg_rect, HOVER_R, HOVER_R)
         pen = QPen(fg, 1.0)
         pen.setCosmetic(True)
         p.setPen(pen)
+        p.setBrush(Qt.NoBrush)           # 底色的画刷别带进图形（最大化的方框会被填上）
         cx, cy = self.width() / 2, self.height() / 2
         s = 5.0                          # 图形半宽（10px 的图形，Windows 惯例）
         if self.kind == "min":
