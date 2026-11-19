@@ -98,11 +98,13 @@ class BrowserBridge(QObject):
 
     _ACTIVITY_LABELS = {"open": "打开页面", "js": "执行脚本", "frames": "列框架",
                         "settle": "等待页面", "close": "关闭浏览器",
-                        "qturl": "读地址", "console": "读控制台", "grab": "截图"}
+                        "qturl": "读地址", "console": "读控制台", "grab": "截图",
+                        "mouse": "点击"}
     _LX_LABELS = {"snapshot": "快照", "find": "查找", "click": "点击", "type": "输入",
                   "readText": "读正文", "console": "控制台", "info": "查元素", "state": "读状态",
                   "watchPrepare": "准备操作", "watchBaseline": "记样式", "watchReport": "核对样式",
-                  "reveal": "滚到元素", "watchSettling": "等过渡结束"}
+                  "reveal": "滚到元素", "watchSettling": "等过渡结束",
+                  "pointOf": "定位点击点", "pointArrived": "确认点击送达"}
 
     def _activity_label(self, req):
         op = req["op"]
@@ -155,6 +157,8 @@ class BrowserBridge(QObject):
                 self._console(req, args)
             elif op == "grab":
                 self._grab(req, args)
+            elif op == "mouse":
+                self._mouse(req, args)
             elif op == "settle":
                 QTimer.singleShot(args.get("ms", 800), self, lambda: self._reply(req, {"ok": True}))
             else:
@@ -348,6 +352,27 @@ class BrowserBridge(QObject):
 
         walk(self._browser.page.mainFrame(), "f")
         self._reply(req, {"ok": True, "frames": info})
+
+    def _mouse(self, req, args):
+        """往页面发一次真实的鼠标点击（复审 #9）：先移过去（hover 菜单、pointerenter），
+        再按下、抬起。坐标是页面的 CSS 像素，按缩放换成 view 的坐标。
+
+        面板没显示 / 太小时 Chromium 不收输入事件，回 ok=False，工具层改走脚本点击。"""
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        view = self._browser.view
+        if not shiboken6.isValid(view) or not view.isVisible() or view.width() < 50:
+            self._reply(req, {"ok": False, "error": "面板没显示，收不到鼠标事件"})
+            return
+        target = view.focusProxy() or view
+        zoom = self._browser.page.zoomFactor() or 1.0
+        pt = QPoint(int(args["x"] * zoom), int(args["y"] * zoom))
+        if not target.rect().contains(pt):
+            self._reply(req, {"ok": False, "error": "点击点不在可见区域里"})
+            return
+        QTest.mouseMove(target, pt)
+        QTest.mouseClick(target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pt)
+        self._reply(req, {"ok": True})
 
     def _grab(self, req, args):
         """截页面当前可见区域（view.grab），PNG base64。宽度超过 max_width 等比缩小。

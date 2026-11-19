@@ -33,6 +33,8 @@ _DELTA_SETTLE_MS = 400
 _DELTA_SETTLE_HIDDEN_MS = 900
 # 记样式基线前最多等聚焦 / 滚动带出来的过渡多久（复审 #1 #2）
 _SETTLE_TRANSITION_MAX_MS = 1000
+# 真实鼠标点击后确认送达：最多查几次（每次隔 30ms）
+_PRESS_CONFIRM_TRIES = 20
 _NO_PAGE = "还没有打开的页面：先用 browser_open(url) 打开。"
 
 # ref 签发登记：(frame, ref) -> 签发时的 docId。换文档后旧 ref 一律报失效，
@@ -550,6 +552,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
     """点击快照/find 给出的 ref 元素。默认附动作前后的"变化行 diff"；文字树没变时改报
     操作处附近**实际计算样式**的变化（动作前后逐项比对，不按 class 名猜）。
     "样式都没有变化"就是确实没反应，别反复点；颜色含义 / 图表要核对用 browser_screenshot。
+    点击是真实的鼠标事件：元素被弹窗 / 遮罩挡住时会报"被挡住"并给出挡在上面的东西，先处理它。
     可能先问用户；提交/删除/支付这类有后果的动作每次都问。"""
     url, err = _page_url()
     if err:
@@ -587,11 +590,46 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
         fp, refusal = _reconfirm_after_prepare(ref, frame, info, cons, origin=origin)
         if refusal:
             return refusal
-    r = _lx("click", {"ref": ref,
-                      "expect": {"doc": cur_doc, "fp": fp}}, frame)
+    r, note = _press(ref, {"doc": cur_doc, "fp": fp}, frame)
     if not r.get("ok"):
+        if r.get("occluded"):
+            return ("点击失败：这个元素被别的东西挡住了，真人也点不到。先处理挡在上面的东西"
+                    "（关掉弹窗 / 遮罩、等加载层消失），再重新 browser_snapshot。挡在上面的是：\n"
+                    + tree.fence(r.get("by") or "", frame_url))
         return _err(r, "点击")
-    return f"已点击 {_describe_for_model(info, ref)}" + _delta_text(before, frame, url)
+    return f"已点击 {_describe_for_model(info, ref)}{note}" + _delta_text(before, frame, url)
+
+
+def _press(ref, expect, frame):
+    """点一下：顶层页面发真实鼠标事件（复审 #9），iframe 里、原生 <select> 的选项、没有大小的
+    元素、面板没显示时退回脚本点击（el.click()）。返回 (结果, 补充说明)。
+
+    真实事件的好处：靠 mousedown / pointerdown 打开的组件（antd Select、Radix 菜单）点得开；
+    被遮罩挡住的按钮点不中（和真人一样，报出来而不是假装点中了）；点开的新窗口算用户发起。"""
+    if frame:
+        return _lx("click", {"ref": ref, "expect": expect}, frame), ""
+    if _view_hidden():
+        # 面板没显示：Chromium 不收输入事件（视口也可能是 0 尺寸），只能脚本点
+        return (_lx("click", {"ref": ref, "expect": expect}),
+                "（面板没显示，改用脚本点击；靠按下鼠标才打开的组件可能没反应）")
+    p = _lx("pointOf", {"ref": ref, "expect": expect})
+    if not p.get("ok"):
+        return p, ""
+    if p.get("synthetic"):
+        return _lx("click", {"ref": ref, "expect": expect}), ""
+    m = _bridge_call("mouse", x=p["x"], y=p["y"])
+    if not m.get("ok"):
+        # 面板没显示：Chromium 不收输入事件，只能脚本点
+        return (_lx("click", {"ref": ref, "expect": expect}),
+                "（面板没显示，改用脚本点击；靠按下鼠标才打开的组件可能没反应）")
+    # 事件是异步送进页面的：确认真的到了这个元素再往下（一般第一下就到了）
+    for _ in range(_PRESS_CONFIRM_TRIES):
+        a = _lx("pointArrived")
+        if a.get("down") or a.get("click"):
+            return {"ok": True}, ""
+        _bridge_call("settle", ms=30)
+    # 没确认到：多半是鼠标移上去时页面把这个元素换掉了。不再补一次脚本点击（可能点两次）
+    return {"ok": True}, "（鼠标点击已发出，但没确认送到这个元素，可能被页面换掉了；看下面的变化核对）"
 
 
 @tool

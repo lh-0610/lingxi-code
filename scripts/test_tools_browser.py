@@ -66,6 +66,8 @@ def _setup_page(fake, url=_LOCAL, info=None):
     fake.set("open", None, {"ok": True, "loaded": True, "url": url,
                             "title": "演示页", "loadMs": 12})
     fake.set("lx", "click", {"ok": True, "role": "button", "name": "添加一行"})
+    # 假页面没有真实的 view：点击定位一律回「走脚本点击」（真实鼠标那条路在 test_browser_bridge）
+    fake.set("lx", "pointOf", {"ok": True, "synthetic": True, "why": "no-box"})
     fake.set("lx", "type", {"ok": True, "value": "你好"})
     fake.set("lx", "console", {"ok": True, "entries": [], "url": url})
     fake.set("console", None, {"ok": True, "entries": [], "url": url})

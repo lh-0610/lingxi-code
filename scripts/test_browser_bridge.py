@@ -619,8 +619,8 @@ def trusted_tools(browser, servers, monkeypatch):
         sess.browser_origin_allowlist.update(old_allow)
 
 
-def _open_visual(browser, servers, tb):
-    r = _tool(browser, tb.browser_open.func, servers[0] + "/visual.html")
+def _open_visual(browser, servers, tb, path="/visual.html"):
+    r = _tool(browser, tb.browser_open.func, servers[0] + path)
     assert "已打开" in r, r
     # 页面得是可见、有焦点的：offscreen 里不显示的话 visibilityState=hidden，焦点事件不触发、
     # CSS 动画不走、定时器被节流——这几个误判陷阱全都不会发作，测了等于没测（变异实测）
@@ -688,6 +688,53 @@ def test_no_false_change(browser, servers, trusted_tools, name, why):
     out = _click(browser, tb, snap, name)
     assert "实际样式变了" not in out, f"{why}：不该报变化\n{out}"
     assert "样式都没有变化" in out, out
+
+
+def _js_value(browser, code):
+    return _call(browser, "js", code=code).get("value")
+
+
+def test_real_mouse_opens_pointerdown_menus(browser, servers, trusted_tools):
+    """复审 #9：Radix 式菜单只在 pointerdown 时打开，合成的 el.click() 点不开还报「没变化」。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/pointer.html")
+    out = _click(browser, tb, snap, "更多操作")
+    assert out.startswith("已点击 button（ref=") and "脚本点击" not in out, out
+    assert "[expanded=true]" in out, out
+    assert _js_value(browser, "document.getElementById('menu').hidden") is False
+
+
+def test_real_mouse_hits_the_overlay_of_a_transparent_input(browser, servers, trusted_tools):
+    """antd Select：透明输入框上叠着显示值的兄弟元素——真人点的就是那块，不算被挡住。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/pointer.html")
+    out = _click(browser, tb, snap, "语言")
+    assert out.startswith("已点击 combobox") and "没确认送到" not in out, out
+    assert _js_value(browser, "document.querySelector('#sel input').getAttribute('aria-expanded')") == "true"
+
+
+def test_button_under_a_mask_is_not_clicked(browser, servers, trusted_tools):
+    """被全屏遮罩盖住的按钮真人点不到：报出挡在上面的东西，不能假装点中了。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/pointer.html")
+    _call(browser, "js", code="document.body.classList.add('masked'); true")
+    out = _click(browser, tb, snap, "立即付款")
+    assert out.startswith("点击失败") and "挡住" in out and "<browser-content" in out, out
+    assert _js_value(browser, "document.getElementById('out').textContent") == "-"
+    _call(browser, "js", code="document.body.classList.remove('masked'); true")
+    out2 = _click(browser, tb, snap, "立即付款")
+    assert out2.startswith("已点击"), out2
+    assert _js_value(browser, "document.getElementById('out').textContent") == "付款按钮被点了"
+
+
+def test_hidden_panel_falls_back_to_a_script_click(browser, servers, trusted_tools):
+    """面板没显示时 Chromium 不收输入事件：退回脚本点击，并说明可能点不开的情况。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/pointer.html")
+    snap = _tool(browser, tb.browser_snapshot.func, mode="all")
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "立即付款"))
+    assert "改用脚本点击" in out, out
+    assert _js_value(browser, "document.getElementById('out').textContent") == "付款按钮被点了"
 
 
 def test_real_change_on_an_element_with_a_focus_transition_is_reported(browser, servers,

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>真实鼠标点击</title>
+<style>
+  /* antd Select 式：真正的输入框透明，上面叠一块显示当前值的兄弟元素 */
+  .sel { position: relative; width: 160px; height: 32px; border: 1px solid #ccc; }
+  .sel .search { position: absolute; inset: 0; }
+  .sel .search input { width: 100%; height: 100%; opacity: 0; border: 0; padding: 0; }
+  .sel .item { position: absolute; inset: 0; line-height: 32px; padding-left: 8px; }
+  #mask { position: fixed; inset: 0; background: rgba(0, 0, 0, .4); z-index: 9; display: none; }
+  body.masked #mask { display: block; }
+</style>
+</head>
+<body>
+<!-- Radix DropdownMenu.Trigger：只在 pointerdown（左键）时打开，合成 click 点不开 -->
+<button id="radix" aria-haspopup="menu" aria-expanded="false">更多操作</button>
+<div id="menu" role="menu" hidden><div role="menuitem">重命名</div></div>
+
+<div class="sel" id="sel">
+  <span class="search"><input role="combobox" aria-label="语言" aria-expanded="false" readonly></span>
+  <span class="item">日本語</span>
+</div>
+
+<button id="pay" onclick="document.getElementById('out').textContent='付款按钮被点了'">立即付款</button>
+<div id="out">-</div>
+<div id="mask"></div>
+<script>
+  const t = document.getElementById('radix');
+  t.addEventListener('pointerdown', e => {
+    if (e.button === 0) { document.getElementById('menu').hidden = false; t.setAttribute('aria-expanded', 'true'); }
+  });
+  // antd 在外层 mousedown 时展开
+  document.getElementById('sel').addEventListener('mousedown', () =>
+    document.querySelector('#sel input').setAttribute('aria-expanded', 'true'));
+</script>
+</body>
+</html>

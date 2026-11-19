@@ -439,6 +439,86 @@
     return null;
   }
 
+  // ── 真实鼠标点击（复审 #9）──────────────────────────────────
+  // 合成的 el.click() 只发一个 click：靠 mousedown / pointerdown 打开的组件（antd Select、
+  // Radix 菜单）点不开，还报「样式都没有变化」；被全屏遮罩盖住的按钮也能点中（真人点不到）；
+  // 打开的新窗口在 Qt 看来不算用户发起。改成工具层往 view 发真实鼠标事件，这里负责：
+  // 滚到可见、算点击坐标、命中检测（点下去落在谁身上）、确认事件真的到了。
+  const arrival = { el: null, down: false, click: false };
+
+  function within(node, el) {
+    for (let n = node; n; n = n.parentElement || (n.getRootNode && n.getRootNode().host) || null)
+      if (n === el) return true;
+    return false;
+  }
+
+  // 落点和目标在同一个小组件里（往上 3 层内有共同祖先，不算 body / html）：组件库常把真正的
+  // 输入框做成透明的，上面叠一块显示当前值的兄弟元素（antd Select），真人点的就是那块。
+  // 全屏遮罩和目标的共同祖先是 body，照样算挡住。
+  function sameWidget(hit, el) {
+    let a = el;
+    for (let i = 0; i < 3; i++) {
+      a = a.parentElement || (a.getRootNode && a.getRootNode().host) || null;
+      if (!a || a === document.body || a === document.documentElement) return false;
+      if (within(hit, a)) return true;
+    }
+    return false;
+  }
+
+  function hitAt(x, y) {
+    let hit = document.elementFromPoint(x, y);
+    while (hit && hit.shadowRoot) {          // 开放 shadow DOM：往里找到真正落点
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    return hit;
+  }
+
+  for (const t of ["pointerdown", "mousedown", "click"])
+    window.addEventListener(t, e => {
+      const el = arrival.el;
+      if (!el || !e.isTrusted) return;
+      if (within(e.target, el) || within(el, e.target) || sameWidget(e.target, el)) {
+        if (t === "click") arrival.click = true; else arrival.down = true;
+      }
+    }, true);
+
+  function pointOf(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    const el = r.el;
+    const bad = checkExpect(opts, el);
+    if (bad) return bad;
+    arrival.el = null;
+    // 原生 <select> 的选项在系统弹窗里，鼠标点不到：照旧走脚本
+    if (el.tagName === "OPTION") return { ok: true, synthetic: true, why: "option" };
+    el.scrollIntoView({ block: "center", inline: "center" });
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1)
+      return { ok: true, synthetic: true, why: "no-box" };   // 透明 0 尺寸的原生控件等
+    // 中心点被挡就试几个内部点（角上贴着别的元素、中间有个浮动图标……）
+    const pts = [[0.5, 0.5], [0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75]];
+    let blocker = null;
+    for (const [fx, fy] of pts) {
+      const x = rect.left + rect.width * fx, y = rect.top + rect.height * fy;
+      if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+      const hit = hitAt(x, y);
+      if (!hit) continue;
+      if (within(hit, el) || within(el, hit) || sameWidget(hit, el)) {
+        arrival.el = el; arrival.down = false; arrival.click = false;
+        return { ok: true, x, y };
+      }
+      blocker = blocker || hit;
+    }
+    if (blocker) return { ok: false, occluded: true, error: "元素被别的东西挡住了", by: describe(blocker) };
+    return { ok: true, synthetic: true, why: "offscreen" };
+  }
+
+  function pointArrived() {
+    return { ok: true, down: arrival.down, click: arrival.click };
+  }
+
   function click(opts) {
     const r = resolve(opts && opts.ref);
     if (!r.ok) return r;
@@ -834,7 +914,7 @@
   window.__lx = {
     snapshot, find, click, type, act, readText, info, watchPrepare, watchSettling, watchBaseline,
     watchReport,
-    reveal,
+    reveal, pointOf, pointArrived,
     console: (opts) => { const out = consoleBuf.slice(); if (opts && opts.clear) consoleBuf.length = 0; return { ok: true, entries: out, url: location.href, docId }; },
     state: () => ({ ok: true, url: location.href, title: document.title, readyState: document.readyState, generation, docId }),
   };
