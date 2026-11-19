@@ -43,24 +43,53 @@ def truncate(text: str, cap: int) -> str:
     return text[:keep] + _TRUNCATE_MARKER
 
 
-def compute_delta(before: str, after: str, cap: int = DELTA_DEFAULT_CHARS) -> str:
+def compute_delta(before: str, after: str, cap: int = DELTA_DEFAULT_CHARS, *,
+                  before_cut: bool = False, after_cut: bool = False) -> str:
     """all 模式快照前后的"变化行 diff"（§3.2）。
 
     只回增删行（+ 新增 / - 删除），带原缩进，不重发全树。实测点一次"添加一行"：
     diff 22 字 vs 全量 926 字（42×）。无变化时明确写 DELTA_EMPTY（文字树没变，不等于页面没变），
     防模型以为没生效反复点。交互树看不见纯内容变化（§3.6），所以 diff 必须用 all 模式算；
     删除线 / aria 状态 tree.js 会标成 [strikethrough] / [checked] / [pressed] / [selected]。
+    before_cut / after_cut：那一份快照被截断了（tree.js 的 stats.truncated）。
     """
-    before_lines = (before or "").splitlines()
-    after_lines = (after or "").splitlines()
-    diff = difflib.unified_diff(before_lines, after_lines, lineterm="", n=0)
-    changed = [
-        line for line in diff
-        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-    ]
+    before_lines = _drop_cut_line((before or "").splitlines())
+    after_lines = _drop_cut_line((after or "").splitlines())
+    sm = difflib.SequenceMatcher(None, before_lines, after_lines, autojunk=False)
+    ops = sm.get_opcodes()
+    # 截断的快照只有前一截：页面上面插一条，最底下那条就被挤出上限，逐行比会多出一行假的
+    # 「- 第 859 条」（复审 #3）。最后一段相同的内容一直延伸到某一侧的末尾时，另一侧在它
+    # 之后多出来的行只是被截掉 / 没截到的尾巴，不算增删。
+    last_eq = next((op for op in reversed(ops) if op[0] == "equal"), None)
+    tail_before = tail_after = None
+    if last_eq is not None:
+        _, i1, i2, j1, j2 = last_eq
+        if j2 == len(after_lines) and (after_cut or _cut(after)):
+            tail_before = i2           # before 里这之后的「删除」是 after 截掉的尾巴
+        if i2 == len(before_lines) and (before_cut or _cut(before)):
+            tail_after = j2            # after 里这之后的「新增」是 before 截掉的尾巴
+    changed = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            continue
+        if tag in ("delete", "replace") and not (tail_before is not None and i1 >= tail_before):
+            changed.extend("-" + ln for ln in before_lines[i1:i2])
+        if tag in ("insert", "replace") and not (tail_after is not None and j1 >= tail_after):
+            changed.extend("+" + ln for ln in after_lines[j1:j2])
     if not changed:
         return DELTA_EMPTY
     return truncate("\n".join(changed), cap)
+
+
+def _cut(text: str) -> bool:
+    return (text or "").rstrip().endswith(_TRUNCATE_MARKER)
+
+
+def _drop_cut_line(lines):
+    """截断那一行只剩半截：不拿它比（前后截在不同位置，半截行永远对不上）。"""
+    if lines and lines[-1].rstrip().endswith(_TRUNCATE_MARKER):
+        return lines[:-1]
+    return lines
 
 
 def fence(content: str, url: str) -> str:

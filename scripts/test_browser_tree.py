@@ -51,6 +51,41 @@ def test_compute_delta_cap():
     assert len(delta) <= 200
 
 
+def _items(rng):
+    return "\n".join(f'- listitem "待办 第 {i} 条"' for i in rng)
+
+
+def test_truncated_tail_is_not_reported_as_deleted():
+    """复审 #3：1500 条的列表顶上插一条，截断的快照最底下那条被挤出上限——不是删除。"""
+    before = _items(range(1, 860))
+    after = '- listitem "新加的待办"\n' + _items(range(1, 859))
+    delta = tree.compute_delta(before, after, before_cut=True, after_cut=True)
+    assert delta == '+- listitem "新加的待办"', delta
+    # 没截断时真删了最后一条：照报
+    real = tree.compute_delta(before, after)
+    assert '-- listitem "待办 第 859 条"' in real
+
+
+def test_untruncated_before_with_truncated_after_still_reports_real_deletions():
+    before = _items(range(1, 6))
+    after = _items([1, 2, 4, 5])                 # 删了第 3 条，后面没被挤掉
+    delta = tree.compute_delta(before, after, after_cut=True)
+    assert '-- listitem "待办 第 3 条"' in delta
+
+
+def test_tail_cut_before_does_not_show_fake_additions():
+    """动作前那份被截断、动作后那份没截：after 末尾多出来的只是 before 没截到的尾巴。"""
+    before = _items(range(1, 4))
+    after = _items(range(1, 7))
+    assert tree.compute_delta(before, after, before_cut=True) == tree.DELTA_EMPTY
+
+
+def test_half_cut_last_line_is_ignored():
+    before = _items(range(1, 4)) + '\n- listitem "待办 第' + tree._TRUNCATE_MARKER
+    after = _items(range(1, 4)) + '\n- listitem "待办 第 4 ' + tree._TRUNCATE_MARKER
+    assert tree.compute_delta(before, after) == tree.DELTA_EMPTY
+
+
 def test_compute_delta_ignores_diff_headers():
     # unified_diff 的 ---/+++ 头不该混进变化行
     delta = tree.compute_delta("a", "b")

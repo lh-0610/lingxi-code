@@ -101,7 +101,8 @@ class BrowserBridge(QObject):
                         "qturl": "读地址", "console": "读控制台", "grab": "截图"}
     _LX_LABELS = {"snapshot": "快照", "find": "查找", "click": "点击", "type": "输入",
                   "readText": "读正文", "console": "控制台", "info": "查元素", "state": "读状态",
-                  "watchPrepare": "准备操作", "watchBaseline": "记样式", "watchReport": "核对样式"}
+                  "watchPrepare": "准备操作", "watchBaseline": "记样式", "watchReport": "核对样式",
+                  "reveal": "滚到元素", "watchSettling": "等过渡结束"}
 
     def _activity_label(self, req):
         op = req["op"]
@@ -384,7 +385,11 @@ class BrowserBridge(QObject):
             if target is None:
                 self._reply(req, {"ok": False, "error": "frame 不存在 " + frame})
                 return
-        self._reply(req, {"ok": True, "url": target.url().toString()})
+        # loading / nav：动作之后判断「点击已经触发了导航、新页面还没到」（复审 #5）
+        page = self._browser.page
+        self._reply(req, {"ok": True, "url": target.url().toString(),
+                          "loading": bool(self._page_loading),
+                          "nav": getattr(page, "nav_seq", 0)})
 
     def _console(self, req, args):
         """console 通道 = Python sink（页面 console/alert/拦截通知）+ 隔离世界资源失败缓冲。"""

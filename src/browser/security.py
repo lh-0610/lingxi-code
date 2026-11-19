@@ -8,6 +8,7 @@
 本模块不碰 UI、不读会话状态，方便单测穷举。
 """
 import html
+import re
 import urllib.parse
 
 # ── 网址规则（§6.2）─────────────────────────────────────────────
@@ -77,9 +78,14 @@ def parse_origin(url: str) -> str:
 CONSEQUENCE_KEYWORDS = (
     "提交", "购买", "支付", "付款", "下单", "确认订单", "转账", "删除", "移除",
     "注册", "注销", "登录", "发送", "发布",
+    # 复审 #20：React / Vue 的表单常是「onSubmit + fetch POST」，不写 method，结构上看着
+    # 像 GET 表单；按钮多叫「确定 / 确认 / 保存」——只能靠名字兜底
+    "确定", "确认", "保存",
     "signin", "signup", "submit", "pay", "purchase",
-    "delete", "remove", "checkout", "confirm", "transfer", "buy", "send", "publish",
+    "delete", "remove", "checkout", "confirm", "transfer", "buy", "send", "publish", "save",
 )
+# 太短、子串匹配会误中（book / token / look）的词，按整词匹配
+CONSEQUENCE_WORDS = re.compile(r"\b(ok)\b")
 
 
 def is_consequential(info: dict, *, submit: bool = False, origin: str | None = None) -> bool:
@@ -100,6 +106,10 @@ def is_consequential(info: dict, *, submit: bool = False, origin: str | None = N
     typ = (info.get("type") or "").lower()
     name = (info.get("name") or "").lower()
     method = (info.get("formMethod") or "").lower()
+    # 按钮自己的 formmethod 盖过表单的 method（复审 #20：GET 表单里一个
+    # <button formmethod="post" formaction="/api/account/close"> 以前被判成无后果）
+    if typ in ("submit", "image") and info.get("btnFormMethod"):
+        method = info["btnFormMethod"].lower()
     in_form = bool(info.get("inForm"))
 
     if in_form and method == "post":
@@ -111,7 +121,7 @@ def is_consequential(info: dict, *, submit: bool = False, origin: str | None = N
             return True
     if submit and not in_form:
         return origin != ORIGIN_TRUSTED
-    return any(k in name for k in CONSEQUENCE_KEYWORDS)
+    return any(k in name for k in CONSEQUENCE_KEYWORDS) or bool(CONSEQUENCE_WORDS.search(name))
 
 
 # ── 动作分级 × 权限模式（§6.1 表）─────────────────────────────────

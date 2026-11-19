@@ -11,6 +11,15 @@
   .flash { box-shadow: 0 0 0 4px rgb(255, 0, 0); }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   .spinner { display: inline-block; width: 10px; height: 10px; animation: spin 0.5s linear infinite; }
+  /* bootstrap / antd 式焦点样式：带过渡（复审 #1） */
+  .ff { border: 2px solid rgb(200, 200, 200); transition: border-color .3s, box-shadow .3s; }
+  .ff:focus { border-color: rgb(13, 110, 253); box-shadow: 0 0 0 3px rgb(180, 200, 255); }
+  /* 滚到可见才淡入（复审 #2） */
+  .reveal { opacity: 0; transform: translateY(20px); transition: opacity .4s, transform .4s; }
+  .reveal.in { opacity: 1; transform: none; }
+  /* 真变化，但带过渡（复审 #6：面板隐藏时过渡不走） */
+  .fade { background-color: rgb(255, 255, 255); transition: background-color .3s; }
+  .fade.on { background-color: rgb(0, 128, 0); }
 </style>
 </head>
 <body>
@@ -37,7 +46,36 @@
   <div class="opt" role="option" id="optB">上海</div>
 </div>
 
+<!-- 假变化陷阱：焦点样式带过渡，点了什么都不做（复审 #1） -->
+<div><button id="ffbtn" class="ff">过渡焦点按钮</button></div>
+
+<!-- 聚焦时页面往名字里插字（antd Tabs 的「Tab 1 of 3」）：第一次点击不能被拒（复审 #10） -->
+<div><button id="tabby">标签甲</button> <span id="tabout">-</span></div>
+
+<!-- 真变化带过渡 -->
+<div><button id="fadebtn" class="fade">变色过渡</button></div>
+
+<!-- 真变化，按钮本身还带聚焦过渡：基线等聚焦过渡跑完再记，点击的变化才不会被当成
+     「动作前就在变」吞掉（复审 #1） -->
+<div><button id="ffreal" class="ff">聚焦过渡又变色</button></div>
+
+<!-- 慢导航：服务器 8 秒才回（复审 #5） -->
+<div><a id="slowlink" href="/slow">慢链接</a></div>
+
+<!-- 假变化陷阱：滚到可见才淡入，按钮什么都不做（复审 #2） -->
+<div style="height: 1600px"></div>
+<div class="reveal" id="rv"><button id="rvbtn">底部按钮</button></div>
+
 <script>
+  document.getElementById("tabby").addEventListener("focus", e => {
+    if (!e.target.dataset.n) { e.target.dataset.n = "1"; e.target.textContent = "Tab 1 of 3 标签甲"; }
+  });
+  document.getElementById("tabby").addEventListener("click", () =>
+    document.getElementById("tabout").textContent = "标签甲被点了");
+  document.getElementById("fadebtn").addEventListener("click", e => e.target.classList.toggle("on"));
+  document.getElementById("ffreal").addEventListener("click", e => e.target.style.color = "rgb(200, 0, 0)");
+  new IntersectionObserver(es => es.forEach(x => x.isIntersecting && x.target.classList.add("in")))
+    .observe(document.getElementById("rv"));
   document.getElementById("done").addEventListener("click", () =>
     document.getElementById("todo").classList.toggle("done"));
   const f = document.getElementById("focusy");

@@ -547,7 +547,7 @@ def test_select_type_and_option_click(env):
     _run(env.app, tb.browser_click.func, oref)
     assert _js(env.app, "document.getElementById('s').value") == "广州"
     bad = _run(env.app, tb.browser_type.func, cref, "不存在的城市")
-    assert "没有匹配选项" in bad, bad
+    assert "没有匹配的选项" in bad and "上海" in bad, bad   # 可选值在围栏里照样给
 
 
 def test_read_text_multiple_articles(env):

@@ -353,6 +353,18 @@ class TestGateFallbacks:
         assert "已点击" in tb.browser_click.func("e20")
         assert not env.ui.asked
 
+    def test_subagent_refuses_consequential_actions(self, env):
+        """复审 #20：浏览器不在 worktree 隔离里，子 Agent 的提交 / 删除改的是真实数据。"""
+        env.sess.is_subagent = True
+        _setup_page(env.fake, info={"ok": True, "ref": "e20", "tag": "button", "type": "button",
+                                    "role": "button", "name": "删除账户", "inForm": False})
+        pm.apply(env.sess, "auto")
+        out = tb.browser_click.func("e20")
+        assert "子 Agent 不能做有后果的浏览器操作" in out and not env.fake.args_of("lx", "click")
+        assert not env.ui.asked
+        pm.apply(env.sess, "bypass")      # 用户选了跳过所有确认：照旧放行
+        assert "已点击" in tb.browser_click.func("e20")
+
     def test_confirm_dialog_error_refuses(self, env, monkeypatch):
         pm.apply(env.sess, "manual")
 

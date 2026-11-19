@@ -35,6 +35,24 @@
     return s.length > max ? s.slice(0, max) + "…" : s;
   };
 
+  // 密码类输入框：值一律不出快照、不回显（复审 #18）。用户在面板里亲手输的密码以前会
+  // 以 [value="…"] 进文字树，发给模型服务商、落进会话历史。除了 type=password，
+  // 浏览器自动填充用的这几种 autocomplete 也算；「显示密码」把 type 临时改成 text 的，
+  // 见过一次是密码框就一直按密码框处理（seenSecret）。
+  const SECRET_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/;
+  const seenSecret = new WeakSet();
+  function isSecret(el) {
+    if (!el || el.tagName !== "INPUT") return false;
+    if (seenSecret.has(el)) return true;
+    const t = (el.type || "").toLowerCase();
+    const ac = (el.getAttribute("autocomplete") || "").toLowerCase();
+    if (t === "password" || SECRET_AUTOCOMPLETE.test(ac)) {
+      seenSecret.add(el);
+      return true;
+    }
+    return false;
+  }
+
   function roleOf(el) {
     const explicit = (el.getAttribute("role") || "").trim().split(/\s+/)[0];
     if (explicit) return explicit;
@@ -74,7 +92,10 @@
     if (tag === "TH") return "columnheader";
     if (tag === "OPTION") return "option";
     if (tag === "DETAILS") return "group";
-    if (el.isContentEditable) return "textbox";
+    // 可编辑区只有最外层（编辑宿主）算输入框：里面每个 <p> 也是 isContentEditable，
+    // 以前各算一个无名 textbox、各占一个 ref，正文反而看不到（复审 #11）
+    if (el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable))
+      return "textbox";
     if (el.hasAttribute("onclick")) return "button";
     return "generic";
   }
@@ -113,7 +134,17 @@
   function visible(el) {
     if (el.getAttribute("aria-hidden") === "true") return false;
     const cs = getComputedStyle(el);
-    return cs.display !== "none" && cs.visibility !== "hidden" && cs.visibility !== "collapse";
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse")
+      return false;
+    // 只给读屏软件的文字（sr-only：绝对定位、1×1、内容裁掉）屏幕上看不见，比如组件库的
+    // aria-live 播报区：不进文字树，免得点一下选项就报出一行「变化」（复审 #4）。
+    // 可交互的照留（antd Select 的搜索框是透明的，但能输入）
+    if ((cs.position === "absolute" || cs.position === "fixed")
+        && (cs.overflow === "hidden" || cs.clip !== "auto" || cs.clipPath !== "none")) {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 1 && r.height <= 1 && !INTERACTIVE.has(roleOf(el))) return false;
+    }
+    return true;
   }
 
   function pruneRefs() {
@@ -122,7 +153,6 @@
       if (!el.isConnected) {
         refs.delete(id);
         elRefs.delete(el);
-        if (el.removeAttribute) el.removeAttribute("data-lxref");
       }
     }
   }
@@ -133,7 +163,8 @@
     const id = "e" + (++refSeq);
     refs.set(id, el);
     elRefs.set(el, id);
-    el.setAttribute("data-lxref", id);
+    // ref 只留在隔离世界的 Map 里，不写成 DOM 属性（复审 #21）：以前打 data-lxref，
+    // 会存 innerHTML 的编辑器 / CMS 会把它存进用户数据
     return id;
   }
 
@@ -160,9 +191,14 @@
     else if (pressed === "mixed") line += " [pressed=mixed]";
     const exp = el.getAttribute("aria-expanded");
     if (exp !== null) line += " [expanded=" + exp + "]";
-    if (role === "textbox" || role === "searchbox" || role === "combobox") {
-      const v = el.value || "";
-      if (v) line += " [value=" + JSON.stringify(clean(v, 50)) + "]";
+    if (role === "textbox" || role === "searchbox" || role === "combobox"
+        || role === "spinbutton" || role === "slider") {
+      // 数字框 / 滑块的值、可编辑区（富文本框）的正文也要看得到（复审 #7）
+      let v = el.value || "";
+      if (!v && el.isContentEditable) v = el.innerText || "";
+      if (!v && (role === "spinbutton" || role === "slider")) v = el.getAttribute("aria-valuenow") || "";
+      if (v && isSecret(el)) line += " [filled]";
+      else if (v) line += " [value=" + JSON.stringify(clean(v, 50)) + "]";
     }
     if ((role === "option" && el.selected) || el.getAttribute("aria-selected") === "true")
       line += " [selected]";
@@ -361,6 +397,8 @@
       role: roleOf(a), name: nameOf(a, roleOf(a)),
       method: form ? (form.getAttribute("method") || "get").toLowerCase() : "",
       action: form ? (form.getAttribute("action") || "") : "",
+      btnMethod: a.getAttribute ? (a.getAttribute("formmethod") || "").toLowerCase() : "",
+      btnAction: a.getAttribute ? (a.getAttribute("formaction") || "") : "",
       href: a.getAttribute ? (a.getAttribute("href") || "") : "",
     });
   }
@@ -384,6 +422,9 @@
       inForm: !!form,
       formMethod: form ? (form.getAttribute("method") || "get").toLowerCase() : "",
       formAction: form ? (form.getAttribute("action") || "") : "",
+      // 提交按钮自己的 formmethod / formaction 盖过表单的（复审 #20）
+      btnFormMethod: (a.getAttribute("formmethod") || "").toLowerCase(),
+      btnFormAction: a.getAttribute("formaction") || "",
     };
   }
 
@@ -437,8 +478,10 @@
       const opt = Array.from(el.options).find(
         o => o.value === want || (o.textContent || "").trim() === want);
       if (!opt) {
-        return { ok: false, error: "select 没有匹配选项: " + want + "（可选: "
-          + Array.from(el.options).map(o => o.value || (o.textContent || "").trim()).join("/") + "）" };
+        // 选项文字是页面写的：单独给，由工具层围进 untrusted 围栏（复审 #19），不拼进错误文案
+        return { ok: false, error: "select 没有匹配的选项",
+          options: Array.from(el.options).slice(0, 50).map(
+            o => clean(o.value || o.textContent || "", 80)) };
       }
       el.value = opt.value;
       opt.selected = true;
@@ -446,6 +489,11 @@
       el.dispatchEvent(new Event("change", { bubbles: true }));
       return { ok: true, value: el.value };
     }
+    // 只有 input / textarea / 可编辑区能收文字。role=textbox 的 div 拿 input 的 value setter
+    // 调会抛「Illegal invocation」（复审 #11）：明说，让模型去找里面真正的输入框
+    if (!el.isContentEditable && el.tagName !== "INPUT" && el.tagName !== "TEXTAREA")
+      return { ok: false, error: "这个元素不能直接输入文字（不是输入框，也不是可编辑区）："
+        + "先点它，再在快照里找里面真正的输入框" };
     el.scrollIntoView({ block: "center" });
     el.focus();
     if (el.isContentEditable) {
@@ -464,6 +512,7 @@
       if (form && form.requestSubmit) form.requestSubmit();
       else el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     }
+    if (isSecret(el)) return { ok: true, secret: true, filled: !!el.value };
     return { ok: true, value: (el.value || el.textContent || "").slice(0, 100) };
   }
 
@@ -584,7 +633,7 @@
 
   function noteRecords(records) {
     for (const m of records) {
-      if (m.type !== "attributes" || m.attributeName === "data-lxref") continue;
+      if (m.type !== "attributes") continue;
       if (mutated.size < MUT_CAP) mutated.add(m.target);
     }
   }
@@ -676,13 +725,44 @@
     return { ok: true };
   }
 
+  // 作用范围里正在跑的**有限时长**动画 / 过渡（复审 #1 #2）：聚焦样式带 transition
+  // （bootstrap / antd 常见）、滚到可见触发的淡入，都是我们自己的准备动作带出来的，
+  // 基线要等它们跑完再记，否则动作前后一比，过渡的后半段就被报成「动作的效果」。
+  // 一直循环的（转圈）不在这里等，比较时按属性跳过（loopingProps）。
+  function finiteRunning(scope) {
+    const set = new Set(scope);
+    const out = [];
+    try {
+      for (const a of document.getAnimations()) {
+        const t = a.effect && a.effect.target;
+        if (!t || !set.has(t) || a.playState !== "running") continue;
+        const timing = a.effect.getComputedTiming();
+        if (!isFinite(timing.endTime)) continue;
+        const left = timing.endTime - (timing.localTime || 0);
+        if (left > 0) out.push({ el: t, left });
+      }
+    } catch (e) { /* 拿不到就当没有 */ }
+    return out;
+  }
+
+  function watchSettling(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    const running = finiteRunning(scopeOf(r.el));
+    return { ok: true, ms: Math.ceil(running.reduce((m, x) => Math.max(m, x.left), 0)) };
+  }
+
   function watchBaseline(opts) {
     const r = resolve(opts && opts.ref);
     if (!r.ok) return r;
-    drainMutations();                       // 聚焦、滚动、快照打的 data-lxref：丢掉
-    const items = scopeOf(r.el).map(el => ({ el, ...styleOf(el) }));
+    drainMutations();                       // 聚焦、滚动带出来的属性变化：丢掉
+    const scope = scopeOf(r.el);
+    // 等过了上限还在过渡的：动作前就在变，不算动作的效果
+    let still = 0;
+    for (const x of finiteRunning(scope)) { busy.add(x.el); still++; }
+    const items = scope.map(el => ({ el, ...styleOf(el) }));
     baseline = { target: r.el, items, docId };
-    return { ok: true, scope: items.length };
+    return { ok: true, scope: items.length, still };
   }
 
   function describe(el) {
@@ -743,8 +823,18 @@
              busy: busyCount, elsewhere };
   }
 
+  // 截图前把 ref 滚到可见（以前主世界按 data-lxref 属性查，现在 ref 不进 DOM）
+  function reveal(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    r.el.scrollIntoView({ block: "center", inline: "center" });
+    return { ok: true };
+  }
+
   window.__lx = {
-    snapshot, find, click, type, act, readText, info, watchPrepare, watchBaseline, watchReport,
+    snapshot, find, click, type, act, readText, info, watchPrepare, watchSettling, watchBaseline,
+    watchReport,
+    reveal,
     console: (opts) => { const out = consoleBuf.slice(); if (opts && opts.clear) consoleBuf.length = 0; return { ok: true, entries: out, url: location.href, docId }; },
     state: () => ({ ok: true, url: location.href, title: document.title, readyState: document.readyState, generation, docId }),
   };

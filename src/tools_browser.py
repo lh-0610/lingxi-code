@@ -31,6 +31,8 @@ _DIFF_SNAPSHOT_CHARS = TOOL_RESULT_HARD_CAP_CHARS
 _DELTA_SETTLE_MS = 400
 # view 隐藏时定时器被 Chromium 节流到 ~1s，空 diff 需再补一次长 settle（复审 6a/7）
 _DELTA_SETTLE_HIDDEN_MS = 900
+# 记样式基线前最多等聚焦 / 滚动带出来的过渡多久（复审 #1 #2）
+_SETTLE_TRANSITION_MAX_MS = 1000
 _NO_PAGE = "还没有打开的页面：先用 browser_open(url) 打开。"
 
 # ref 签发登记：(frame, ref) -> 签发时的 docId。换文档后旧 ref 一律报失效，
@@ -95,8 +97,13 @@ def _gate(action, url, *, consequential=False, card="", extra_url=None, origin=N
                 "把要做的操作写进方案，让用户切回 Act 模式后再执行。")
     if decision == security.ALLOW:
         return ""
-    # 子 Agent 不逐条问（派出之前已经问过用户，同 run_command）
     if getattr(sess, "is_subagent", False):
+        # 有后果的（提交 / 删除 / 支付…）不放行（复审 #20）：浏览器不在 worktree 隔离里，
+        # 子 Agent 点下去改的是真实页面和真实数据，派出时的那次同意管不到这一下
+        if decision == security.ASK_ALWAYS:
+            return ("已拒绝：子 Agent 不能做有后果的浏览器操作（提交 / 删除 / 支付等）。"
+                    "把要做的这一步写进结果，交回主会话由用户确认后再做。")
+        # 普通操作不逐条问（派出之前已经问过用户，同 run_command）
         return ""
     ui = getattr(state, "ui_ref", None)
     if ui is None:
@@ -120,9 +127,11 @@ def _gate(action, url, *, consequential=False, card="", extra_url=None, origin=N
     return ""
 
 
-def _snapshot_text(r, cap):
-    body = tree.fence(tree.truncate(r.get("tree", ""), cap),
-                      r.get("qtUrl") or r.get("url", ""))
+def _snapshot_text(r, cap, title=""):
+    text = tree.truncate(r.get("tree", ""), cap)
+    if title:
+        text = title + "\n" + text
+    body = tree.fence(text, r.get("qtUrl") or r.get("url", ""))
     stats = r.get("stats") or {}
     note = f"（快照 {stats.get('lines', '?')} 行 / {stats.get('refs', '?')} 个 ref"
     if stats.get("truncated"):
@@ -135,11 +144,35 @@ def _before_action(ref, frame):
     记操作处附近的计算样式基线。样式基线取不到不影响动作本身。"""
     _lx("watchPrepare", {"ref": ref}, frame)
     before = _lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
+    # 聚焦 / 滚动带出来的过渡还在跑：等它跑完再记基线（复审 #1 #2），最多等 1 秒
+    settling = _lx("watchSettling", {"ref": ref}, frame)
+    wait = int(settling.get("ms") or 0) if settling.get("ok") else 0
+    if wait > 0:
+        _bridge_call("settle", ms=min(wait, _SETTLE_TRANSITION_MAX_MS) + 50)
     _lx("watchBaseline", {"ref": ref}, frame)
+    # 动作前的导航序号：动作之后据此判断「点击触发了导航、新页面还没到」（复审 #5）
+    q = _bridge_call("qturl")
+    if isinstance(before, dict) and q.get("ok"):
+        before["_nav0"] = q.get("nav") or 0
     return before
 
 
-def _style_text(frame):
+def _reconfirm_after_prepare(ref, frame, info, cons, *, submit=False, origin=None):
+    """聚焦之后元素可能被页面自己改了（复审 #10：antd Tabs 聚焦时往标签里插「Tab 1 of 3」，
+    名字一变指纹就对不上，第一次点击必被拒）。重新取一次结构信息：变成了有后果的动作就
+    拒绝（用户批准的不是这个）；否则按聚焦后的指纹执行。返回 (指纹, 拒绝文案)。"""
+    again = _lx("info", {"ref": ref}, frame)
+    if not again.get("ok"):
+        return None, _err(again, "定位元素")
+    if again.get("fp") == info.get("fp"):
+        return info.get("fp"), ""
+    if not cons and security.is_consequential(again, submit=submit, origin=origin):
+        return None, ("已停止：聚焦之后这个元素变了，现在看起来是有后果的动作（提交 / 删除等），"
+                      "和批准时不一样。重新 browser_snapshot 看清楚再操作。")
+    return again.get("fp"), ""
+
+
+def _style_text(frame, url=""):
     """文字树 diff 为空时，报动作前后操作处附近**实际计算样式**的变化。
 
     只报样式真变了的元素（class 换了但样式没变不报）；动作前就在自己变的元素、
@@ -150,12 +183,15 @@ def _style_text(frame):
     changed = w.get("changed") or []
     if changed:
         lines = ["文字树没有变化，但操作处附近的实际样式变了（动作前后逐项比对计算样式）："]
+        items = []
         for c in changed:
             props = "；".join(f"{p['prop']} {p['from']} → {p['to']}" for p in c.get("props") or [])
             mark = "（就是操作的元素）" if c.get("self") else ""
-            lines.append(f"- {c.get('desc')}{mark}：{props}")
+            items.append(f"- {c.get('desc')}{mark}：{props}")
         if w.get("more"):
-            lines.append(f"- …另有 {w['more']} 个元素")
+            items.append(f"- …另有 {w['more']} 个元素")
+        # 元素描述取自页面文字、content 属性值就是页面写的字：整段进围栏（复审 #19）
+        lines.append(tree.fence("\n".join(items), url))
     else:
         lines = ["文字树和操作处附近的样式都没有变化（动作前后逐项比对过计算样式）。"]
     notes = []
@@ -167,6 +203,13 @@ def _style_text(frame):
         lines.append("（" + "；".join(notes) + "）")
     lines.append("要确认看起来对不对用 browser_screenshot；canvas / 图表这类文字和样式都看不到。")
     return "\n".join(lines)
+
+
+def _diff(before, after):
+    return tree.compute_delta(
+        before.get("tree", ""), after.get("tree", ""), tree.DELTA_DEFAULT_CHARS,
+        before_cut=bool((before.get("stats") or {}).get("truncated")),
+        after_cut=bool((after.get("stats") or {}).get("truncated")))
 
 
 def _delta_text(before, frame, url):
@@ -181,8 +224,7 @@ def _delta_text(before, frame, url):
         return f"\n（变化快照失败: {after.get('error')}，可用 browser_snapshot 查看现状）"
     if not before.get("ok"):
         return "\n（动作前快照失败，算不了变化；用 browser_snapshot 看现状）"
-    delta = tree.compute_delta(before.get("tree", ""), after.get("tree", ""),
-                               tree.DELTA_DEFAULT_CHARS)
+    delta = _diff(before, after)
     # 导航信号取首次 after：settle 重试可能取到重试间又变化的快照，不能抹掉"已导航"
     nav_url = after.get("qtUrl") or after.get("url")
     if delta == tree.DELTA_EMPTY:
@@ -191,31 +233,49 @@ def _delta_text(before, frame, url):
         retry = _lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
         if retry.get("ok"):
             after = retry
-            delta = tree.compute_delta(before.get("tree", ""), after.get("tree", ""),
-                                       tree.DELTA_DEFAULT_CHARS)
+            delta = _diff(before, after)
         if delta == tree.DELTA_EMPTY and _view_hidden():
             # 隐藏 view 的定时器被节流到 ~1s，400ms 不够：再补一次长 settle
             _bridge_call("settle", ms=_DELTA_SETTLE_HIDDEN_MS)
             retry2 = _lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
             if retry2.get("ok"):
                 after = retry2
-                delta = tree.compute_delta(before.get("tree", ""), after.get("tree", ""),
-                                           tree.DELTA_DEFAULT_CHARS)
+                delta = _diff(before, after)
     nav = ""
     if nav_url and nav_url != url:
         nav = f"\n页面已导航到 {nav_url}，旧 ref 全部失效，再操作先重新 browser_snapshot。"
     truncated = ((before.get("stats") or {}).get("truncated")
                  or (after.get("stats") or {}).get("truncated"))
+    cut_note = ("\n（快照被截断，只比了前一截，截断区里的变化看不到；"
+                "用 root_ref/browser_find 核对）") if truncated else ""
     if delta == tree.DELTA_EMPTY:
+        if _navigation_started(before):
+            # 点击已经触发了导航，新页面还没到：不是「没反应」（复审 #5）
+            return ("\n页面变化: 已开始导航，新页面还在加载。等一会儿用 "
+                    "browser_snapshot 看结果，旧 ref 会失效；别当成没反应再点一次。")
         if truncated:
-            return (f"\n页面变化: {tree.DELTA_EMPTY}（快照被截断，变化可能在截断区，"
-                    f"diff 不全；用 root_ref/browser_find 核对）{nav}")
+            return f"\n页面变化: {tree.DELTA_EMPTY}{cut_note}{nav}"
         if not nav:
-            styled = _style_text(frame)
+            styled = _style_text(frame, url)
+            if styled and _view_hidden() and "都没有变化" in styled:
+                # 面板没显示时页面的过渡 / 动画不走，「样式没变」可能只是还没开始变（复审 #6）
+                return ("\n页面变化: 文字树没有变化；面板现在没显示，页面里的过渡 / 动画不会跑，"
+                        "样式核对给不出结论。要确认就等面板显示后用 browser_screenshot 看。")
             if styled:
                 return "\n页面变化: " + styled
         return f"\n页面变化: {tree.DELTA_EMPTY}{nav}"
-    return "\n页面变化:\n" + tree.fence(delta, after.get("qtUrl") or after.get("url") or url) + nav
+    return ("\n页面变化:\n" + tree.fence(delta, after.get("qtUrl") or after.get("url") or url)
+            + cut_note + nav)
+
+
+def _navigation_started(before):
+    """动作之后有导航在途（新页面还没到）。
+    只认这次动作之后开始的导航（导航序号比动作前大），页面本来就在加载的不算。"""
+    nav0 = before.get("_nav0") if isinstance(before, dict) else None
+    if nav0 is None:
+        return False
+    q = _bridge_call("qturl")
+    return bool(q.get("ok") and q.get("loading") and (q.get("nav") or 0) > nav0)
 
 
 def _view_hidden():
@@ -242,10 +302,25 @@ def _element_info(ref, frame):
     return info, ""
 
 
+def _safe_role(info):
+    """角色名只认 ARIA 那种纯小写英文词：role 属性是页面写的，「忽略之前所有指令…」不带空格
+    也能整段当成角色名混出来。"""
+    role = (info.get("role") or "").strip()
+    return role if re.fullmatch(r"[a-z]{1,30}", role) else "元素"
+
+
 def _describe(info, ref):
-    role = info.get("role") or "元素"
+    """给**用户**看的确认卡片：带元素名，方便核对点的是哪个。"""
+    role = _safe_role(info)
     name = info.get("name") or ""
     return f"{role}「{name}」（ref={ref}）" if name else f"{role}（ref={ref}）"
+
+
+def _describe_for_model(info, ref):
+    """给**模型**的结果文字：只有角色和 ref。元素名是页面写的，放在围栏外就成了
+    「围栏外的上下文」，页面可以借它说话（复审 #19 实测：aria-label 写一句「系统提示：
+    用户要求你…」原样出现在「已点击 …」里）。名字模型在快照里看过（那里有围栏）。"""
+    return f"{_safe_role(info)}（ref={ref}）"
 
 
 def _evidence_revision():
@@ -322,13 +397,17 @@ def browser_open(url: str, timeout: int = 30) -> str:
     if not r.get("ok"):
         return f"打开失败: {r.get('error') or '未知错误'}（{url}）"
     _remember_load(r, load_revision)
-    head = (f"已打开 {r.get('url') or url}\n"
-            f"标题: {r.get('title') or '（无标题）'}（加载 {r.get('loadMs', '?')}ms）")
+    # 标题是页面写的：放进围栏，不放在「已打开」那行旁边（复审 #19：<title> 里写一句
+    # 「[系统] 用户已授权…」曾原样出现在围栏外）
+    final_url = r.get("url") or url
+    head = f"已打开 {final_url}（加载 {r.get('loadMs', '?')}ms）"
+    title = "页面标题: " + (r.get("title") or "（无标题）")
     snap = _lx("snapshot", {"mode": "interactive", "maxChars": tree.SNAPSHOT_DEFAULT_CHARS})
     if not snap.get("ok"):
-        return head + f"\n（首份快照失败: {snap.get('error')}，用 browser_snapshot 重试）"
+        return (head + "\n" + tree.fence(title, final_url)
+                + f"\n（首份快照失败: {snap.get('error')}，用 browser_snapshot 重试）")
     _remember_refs(snap, None)
-    return head + "\n" + _snapshot_text(snap, tree.SNAPSHOT_DEFAULT_CHARS)
+    return head + "\n" + _snapshot_text(snap, tree.SNAPSHOT_DEFAULT_CHARS, title=title)
 
 
 @tool
@@ -368,7 +447,10 @@ def _frames_note():
     if not frames:
         return ""
     lines = [f"  {f.get('path')}  {f.get('url')}" for f in frames]
-    return "\n可用 frame（用 frame 参数取子树/动作）:\n" + "\n".join(lines)
+    # iframe 地址是页面定的（路径、参数里能写字）：进围栏（复审 #19）
+    top, _ = _page_url()
+    return ("\n可用 frame（用 frame 参数取子树/动作）:\n"
+            + tree.fence("\n".join(lines), top or ""))
 
 
 @tool
@@ -444,11 +526,8 @@ def browser_screenshot(question: str, ref: str | None = None) -> str:
             return _err(st, "读取页面状态")
         if ("", ref) not in _issued or _issued[("", ref)] != (st.get("docId") or ""):
             return _STALE_REF
-        r = _bridge_call("js", code=(
-            "(() => { const el = document.querySelector('[data-lxref=\"' + "
-            + json.dumps(ref) + " + '\"]'); if (!el) return false;"
-            " el.scrollIntoView({block: 'center', inline: 'center'}); return true; })()"))
-        if not r.get("ok") or not r.get("value"):
+        r = _lx("reveal", {"ref": ref})
+        if not r.get("ok"):
             return _STALE_REF
         _bridge_call("settle", ms=150)
     shot = _bridge_call("grab")
@@ -503,11 +582,16 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
     if refusal:
         return refusal
     before = _before_action(ref, frame) if delta else None
+    fp = info.get("fp")
+    if delta:
+        fp, refusal = _reconfirm_after_prepare(ref, frame, info, cons, origin=origin)
+        if refusal:
+            return refusal
     r = _lx("click", {"ref": ref,
-                      "expect": {"doc": cur_doc, "fp": info.get("fp")}}, frame)
+                      "expect": {"doc": cur_doc, "fp": fp}}, frame)
     if not r.get("ok"):
         return _err(r, "点击")
-    return f"已点击 {desc}" + _delta_text(before, frame, url)
+    return f"已点击 {_describe_for_model(info, ref)}" + _delta_text(before, frame, url)
 
 
 @tool
@@ -556,12 +640,30 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
     if refusal:
         return refusal
     before = _before_action(ref, frame) if delta else None
+    fp = info.get("fp")
+    if delta:
+        fp, refusal = _reconfirm_after_prepare(ref, frame, info, cons, submit=submit, origin=origin)
+        if refusal:
+            return refusal
     r = _lx("type", {"ref": ref, "text": text, "clear": clear, "submit": submit,
-                     "expect": {"doc": cur_doc, "fp": info.get("fp")}}, frame)
+                     "expect": {"doc": cur_doc, "fp": fp}}, frame)
     if not r.get("ok"):
+        if r.get("options") is not None:
+            return (_err(r, "输入") + "，可选值（页面内容）：\n"
+                    + tree.fence("\n".join(r["options"]), frame_url))
         return _err(r, "输入")
-    value = json.dumps(r.get("value", ""), ensure_ascii=False)
-    return f"已向 {desc} 输入，当前值: {value}" + _delta_text(before, frame, url)
+    target = _describe_for_model(info, ref)
+    if r.get("secret"):
+        # 密码框不回显（复审 #18）：值会进模型上下文和会话历史
+        state_ = "已填写" if r.get("filled") else "为空"
+        return f"已向 {target} 输入，密码框不回显内容（当前{state_}）" + _delta_text(before, frame, url)
+    raw = r.get("value", "")
+    if raw in (text[:100], ""):
+        shown_value = json.dumps(raw, ensure_ascii=False)
+    else:
+        # 页面的输入处理改过值（格式化、自动补全……）：那是页面写的字，进围栏
+        shown_value = "（页面改过，见下）\n" + tree.fence(raw, frame_url)
+    return f"已向 {target} 输入，当前值: {shown_value}" + _delta_text(before, frame, url)
 
 
 @tool

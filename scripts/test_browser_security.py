@@ -83,6 +83,17 @@ def test_parse_origin_invalid_returns_empty():
     ({"tag": "button", "type": "button", "name": "删除账户"}, False),  # 关键词为辅
     ({"tag": "button", "type": "button", "name": "立即购买"}, False),
     ({"tag": "a", "name": "Checkout"}, False),
+    # 复审 #20：GET 表单里的按钮自带 formmethod=post
+    ({"tag": "button", "type": "submit", "inForm": True, "formMethod": "get",
+      "btnFormMethod": "post", "name": "关闭账户"}, False),
+    ({"tag": "input", "type": "submit", "inForm": True, "formMethod": "get",
+      "btnFormMethod": "POST", "name": "go"}, False),
+    # 复审 #20：onSubmit + fetch 的表单看着像 GET，只能靠按钮名
+    ({"tag": "button", "type": "submit", "inForm": True, "formMethod": "get", "name": "确定"}, False),
+    ({"tag": "button", "type": "button", "name": "确认"}, False),
+    ({"tag": "button", "type": "button", "name": "保存设置"}, False),
+    ({"tag": "button", "type": "button", "name": "Save"}, False),
+    ({"tag": "button", "type": "button", "name": "OK"}, False),
 ])
 def test_is_consequential_true(info, submit):
     assert sec.is_consequential(info, submit=submit) is True
@@ -95,7 +106,12 @@ def test_is_consequential_true(info, submit):
     ({"tag": "input", "type": "text", "inForm": True}, False),      # GET 表单输入不提交
     ({"tag": "input", "type": "text", "inForm": True, "formMethod": "get"}, True),  # GET 回车按普通点击
     ({"tag": "button", "type": "submit", "inForm": True, "formMethod": "get", "name": "搜索"}, False),
-    ({"tag": "button", "type": "submit", "name": "保存"}, False),   # 表单外 submit 按钮惰性
+    ({"tag": "button", "type": "submit", "name": "下一步"}, False),   # 表单外 submit 按钮惰性
+    ({"tag": "button", "type": "button", "name": "Facebook"}, False),  # ok 按整词，不误中 book
+    ({"tag": "button", "type": "button", "name": "token 设置"}, False),
+    # GET 表单里按钮写 formmethod=get：照普通点击
+    ({"tag": "button", "type": "submit", "inForm": True, "formMethod": "post",
+      "btnFormMethod": "get", "name": "搜索"}, False),
     ({"tag": "input", "type": "image", "inForm": False}, False),
     ({}, False),
     (None, False),
