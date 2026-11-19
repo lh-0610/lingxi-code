@@ -574,6 +574,56 @@ def test_browser_tab_lifecycle(browser_ui, qapp, browser_server):
     assert not ui.file_panel.isVisible()
 
 
+def test_agent_cursor_overlay(browser_ui, qapp, browser_server, monkeypatch):
+    """设计稿「浏览器：灵犀的鼠标」：浮层盖住网页、不接收鼠标；只认自己标签的指针事件；
+    点击 / 输入中 / 被挡住三种样子；状态卡写上点的是什么；设置关了就不画指针。"""
+    from PySide6.QtCore import QPoint, Qt
+    from src import config
+    from src.browser import page as page_mod
+    from src.browser.bridge import get_bridge
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp, 10)
+    view = ui.file_panel._browser_view
+    ov = view.overlay
+    assert ov.testAttribute(Qt.WA_TransparentForMouseEvents), "用户照常点网页"
+    tid = page_mod.current_tab_id()
+    get_bridge().activity.emit("点击")
+    get_bridge().cursor_event.emit(tid + 99, 10.0, 10.0, "click", "点击「别的标签」")
+    _pump(qapp, 3)
+    assert not ov.cursor_on, "别的标签的指针事件不画在这页上"
+    get_bridge().cursor_event.emit(tid, 40.0, 30.0, "click", "点击「保存」")
+    _pump(qapp, 3)
+    assert ov.cursor_on and ov.kind == "click" and ov.label == "灵犀"
+    assert view.status_card.title.text() == "灵犀正在点击「保存」"
+    emb = view._embedded
+    assert ov.geometry().topLeft() == emb.mapTo(view.page_frame, QPoint(0, 0)) \
+        and ov.size() == emb.size(), "浮层正好盖住网页那一块"
+    get_bridge().cursor_event.emit(tid, 80.0, 30.0, "type", "输入「用户名」")
+    _pump(qapp, 3)
+    assert ov.kind == "type" and ov.label == "灵犀 · 输入中"
+    # 模型常用「输入 + 回车」代替点按钮：单独标出来，还要散一圈涟漪（用户实测看着像没点）
+    get_bridge().cursor_event.emit(tid, 80.0, 30.0, "submit", "输入并回车「要做什么？」")
+    _pump(qapp, 3)
+    assert ov.kind == "submit" and ov.label == "灵犀 · 回车" and ov.ripple_at is not None
+    assert view.status_card.title.text() == "灵犀正在输入并回车「要做什么？」"
+    get_bridge().cursor_event.emit(tid, 80.0, 30.0, "type", "输入「用户名」")
+    _pump(qapp, 3)
+    get_bridge().cursor_event.emit(tid, 80.0, 30.0, "blocked", "被挡住了")
+    _pump(qapp, 3)
+    assert ov.kind == "blocked" and ov.label == "被挡住了"
+    assert view.status_card.title.text() == "灵犀正在输入「用户名」", "被挡住不改状态卡"
+    ov.grab()                                   # 三种样子都画得出来（不抛异常）
+    ov.reset()
+    monkeypatch.setattr(config, "AGENT_CURSOR", False)
+    get_bridge().cursor_event.emit(tid, 40.0, 30.0, "click", "点击「保存」")
+    _pump(qapp, 3)
+    assert not ov.cursor_on, "设置里关掉就不画指针"
+    get_bridge().activity.emit("")
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
 def test_status_card_follows_bridge_activity(browser_ui, qapp, browser_server):
     """模型操作页面：页面描靛蓝边 + 底部状态卡「灵犀正在点击」，标签上出小圆点；
     动作之间的短空档不收（免得一闪一闪），停下一会儿才收。"""
@@ -588,7 +638,8 @@ def test_status_card_follows_bridge_activity(browser_ui, qapp, browser_server):
     _pump(qapp)
     assert view.status_card.isVisible() and view.model_active
     assert view.status_card.title.text() == "灵犀正在点击"
-    assert view.page_frame.property("active") == "true"
+    assert view.overlay.active and view.overlay.isVisible(), "操作中：网页四周的柔光（浮层）"
+    assert view.page_frame.layout().contentsMargins().left() == 0, "不再给页面框留边距（网页不重排）"
     assert label.dot.isVisible()
     get_bridge().activity.emit("")
     _pump(qapp)
@@ -602,7 +653,12 @@ def test_status_card_follows_bridge_activity(browser_ui, qapp, browser_server):
         _pump(qapp, 2)
         time.sleep(0.05)
     assert not view.status_card.isVisible() and not label.dot.isVisible()
-    assert view.page_frame.property("active") == "false"
+    # 停手 1.5 秒后柔光淡出（浮层自己的计时）
+    deadline = time.time() + 4
+    while view.overlay.isVisible() and time.time() < deadline:
+        _pump(qapp, 2)
+        time.sleep(0.05)
+    assert not view.overlay.isVisible() and not view.overlay.active
     ui.file_panel.close_all()
     _pump(qapp, 20)
 

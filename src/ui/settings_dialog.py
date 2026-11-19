@@ -287,6 +287,10 @@ class SettingsDialog(dialogs.CardDialog):
         trim_hint.setWordWrap(True)
         a.addWidget(trim_hint)
 
+        self._add_section(a, "侧栏浏览器")
+        self._add_bool(a, "agent_cursor",
+                       "模型操作网页时显示「灵犀的鼠标」（指针 + 点击涟漪，不动你的鼠标）", default=True)
+
         self._add_section(a, "回复里的链接")
         self._add_combo(a, "link_open_mode", "点击回复里的网页链接", [
             ("用系统浏览器打开", "system"),
@@ -1158,6 +1162,7 @@ class SettingsDialog(dialogs.CardDialog):
             _cfg.WEB_SEARCH_PROVIDER = str(self.config.get("web_search_provider") or "auto")
             _cfg.WEB_SEARCH_DEEP = bool(self.config.get("web_search_deep", False))
             _cfg.LINK_OPEN_MODE = "panel" if self.config.get("link_open_mode") == "panel" else "system"
+            _cfg.AGENT_CURSOR = bool(self.config.get("agent_cursor", True))
         except Exception:
             pass
 

@@ -668,7 +668,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
         fp, refusal = _reconfirm_after_prepare(ref, frame, info, cons, origin=origin)
         if refusal:
             return refusal
-    r, note = _press(ref, {"doc": cur_doc, "fp": fp}, frame)
+    r, note = _press(ref, {"doc": cur_doc, "fp": fp}, frame, label=_cursor_label("点击", info))
     if not r.get("ok"):
         if r.get("occluded"):
             return ("点击失败：这个元素被别的东西挡住了，真人也点不到。先处理挡在上面的东西"
@@ -679,7 +679,16 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
             + _after_action(before, frame, url, tabs0, cur0))
 
 
-def _press(ref, expect, frame):
+def _cursor_label(verb, info):
+    """「灵犀的鼠标」和状态卡上的说明：点 / 输入的是什么。只给用户看（不回给模型），
+    用元素名没关系；太长截掉。"""
+    name = (info.get("name") or "").strip() if isinstance(info, dict) else ""
+    if len(name) > 16:
+        name = name[:16] + "…"
+    return f"{verb}「{name}」" if name else verb
+
+
+def _press(ref, expect, frame, label=""):
     """点一下：顶层页面发真实鼠标事件（复审 #9），iframe 里、原生 <select> 的选项、没有大小的
     元素、面板没显示时退回脚本点击（el.click()）。返回 (结果, 补充说明)。
 
@@ -693,10 +702,13 @@ def _press(ref, expect, frame):
                 "（面板没显示，改用脚本点击；靠按下鼠标才打开的组件可能没反应）")
     p = _lx("pointOf", {"ref": ref, "expect": expect})
     if not p.get("ok"):
+        if p.get("occluded") and p.get("x") is not None:
+            # 画在网页上的指针变红、停在被挡的那一点：和结果里的「被挡住」对得上
+            _bridge_call("cursor", kind="blocked", x=p["x"], y=p["y"], label="被挡住了")
         return p, ""
     if p.get("synthetic"):
         return _lx("click", {"ref": ref, "expect": expect}), ""
-    m = _bridge_call("mouse", x=p["x"], y=p["y"])
+    m = _bridge_call("mouse", x=p["x"], y=p["y"], label=label)
     if not m.get("ok"):
         # 面板没显示：Chromium 不收输入事件，只能脚本点
         return (_lx("click", {"ref": ref, "expect": expect}),
@@ -765,6 +777,14 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
             return refusal
     r = _lx("type", {"ref": ref, "text": text, "clear": clear, "submit": submit,
                      "expect": {"doc": cur_doc, "fp": fp}}, frame)
+    if r.get("ok") and not frame and not _view_hidden():
+        # 「灵犀的鼠标」停到输入框右边，标签「输入中」
+        a = _lx("anchorOf", {"ref": ref})
+        if a.get("ok"):
+            # 回车提交单独标出来：模型常用「输入 + 回车」代替点按钮，不标的话看着像
+            # 待办自己冒出来了（用户实测）
+            _bridge_call("cursor", kind="submit" if submit else "type", x=a["x"], y=a["y"],
+                         label=_cursor_label("输入并回车" if submit else "输入", info))
     if not r.get("ok"):
         if r.get("options") is not None:
             return (_err(r, "输入") + "，可选值（页面内容）：\n"
@@ -822,12 +842,21 @@ def browser_console(level: str = "error", clear: bool = False,
             if earlier else "")
     if not entries:
         scope = "" if include_previous else "本次页面加载"
-        return f"{scope}没有 {level} 级别的控制台输出。{cleared}{note}"
+        return f"{_console_whose(r)}{scope}没有 {level} 级别的控制台输出。{cleared}{note}"
     lines = [f"[{e.get('level')}] {e.get('text', '')}" for e in entries]
     body = tree.truncate("\n".join(lines), tree.CONSOLE_DEFAULT_CHARS)
     scope = "全部加载" if include_previous else "本次页面加载"
-    return (f"控制台（{level}，{scope}，{len(entries)} 条）:\n"
+    return (f"{_console_whose(r)}控制台（{level}，{scope}，{len(entries)} 条）:\n"
             + tree.fence(body, r.get("url", "")) + cleared + note)
+
+
+def _console_whose(r):
+    """开着不止一个标签时，说清这是哪个标签的控制台：模型点开新标签后接着读控制台，
+    读到的是新标签的，却当成了原来那页的结论（用户实测：「关于」页没报错被说成待办页没报错）。"""
+    if len(_tab_ids()) < 2:
+        return ""
+    from .browser.security import fence_url
+    return f"[标签 #{r.get('tab')} · {fence_url(r.get('url') or '')}] "
 
 
 @tool

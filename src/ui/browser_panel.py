@@ -144,6 +144,223 @@ class _LoadBar(QWidget):
         p.end()
 
 
+class _AgentOverlay(QWidget):
+    """「灵犀的鼠标」+ 操作中的柔光边框（设计稿「浏览器：灵犀的鼠标」），浮在网页上面一层。
+
+    - 柔光：3px 实边 + 往里晕开两层光（约 20px、60px），每 2 秒缓慢明暗呼吸。早先是给页面
+      框留 2px 边距露出底色的细线，不显眼，而且每次开始 / 停下操作网页都要重新排版一次
+    - 指针：靛蓝箭头 + 小标签（「灵犀」/「输入中」/「被挡住了」），从上一个位置滑到这次的点
+      （0.25 秒），点击处一圈涟漪。只是给人看：真正的事件由 bridge 直接发给 view，
+      **不动系统鼠标**，用户自己的光标不受影响
+    - 不接收鼠标（用户照常点网页），不改网页内容；截图工具截的是 view 本身，不含这一层
+    """
+    MOVE_MS, RIPPLE_MS, BREATH_MS, IDLE_HIDE_MS = 250, 420, 2000, 1500
+
+    def __init__(self, parent, theme):
+        super().__init__(parent)
+        from PySide6.QtCore import QElapsedTimer, QPointF
+        self._theme = theme
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.active = False
+        self.cursor_on = False
+        self.kind = ""                  # click / type / blocked
+        self.label = "灵犀"
+        self.pos_from = self.pos_to = QPointF(-100, -100)
+        self.ripple_at = None
+        self._clock = QElapsedTimer()
+        self._clock.start()
+        self._moved_at = self._ripple_at = -10_000
+        self._fade = 1.0                # 停手后淡出
+        self._fading_since = None
+        self._tick = QTimer(self)
+        self._tick.setInterval(33)      # 动画进行时 ~30 帧；只有柔光呼吸时降到 10 帧
+        self._tick.timeout.connect(self._on_tick)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(self.IDLE_HIDE_MS)
+        self._idle.timeout.connect(self._start_fade)
+        self.hide()
+
+    # ── 对外 ──
+    def set_active(self, on):
+        if on:
+            self.active = True
+            self._fading_since = None
+            self._fade = 1.0
+            self._idle.stop()
+            self._run()
+        elif self.active:
+            self._idle.start()          # 停手 1.5 秒后柔光和指针一起淡出
+
+    def show_cursor(self, x, y, kind, label):
+        from PySide6.QtCore import QPointF
+        now = self._clock.elapsed()
+        if not self.cursor_on:
+            # 第一次出现从页面中央滑过去，让人看得见它从哪来
+            self.pos_from = QPointF(self.width() / 2, self.height() / 2)
+        else:
+            self.pos_from = self._cursor_pos(now)
+        self.pos_to = QPointF(x, y)
+        self._moved_at = now
+        self.cursor_on = True
+        self.kind = kind
+        self.label = {"type": "灵犀 · 输入中", "submit": "灵犀 · 回车",
+                      "blocked": "被挡住了"}.get(kind, "灵犀")
+        if kind in ("click", "submit"):
+            self.ripple_at = QPointF(x, y)
+            self._ripple_at = now + self.MOVE_MS     # 滑到了再散开
+        self.set_active(True)
+
+    def reset(self):
+        self.active = self.cursor_on = False
+        self._tick.stop()
+        self._idle.stop()
+        self.hide()
+
+    # ── 动画 ──
+    def _run(self):
+        self.show()
+        self.raise_()
+        if not self._tick.isActive():
+            self._tick.start()
+        self.update()
+
+    def _start_fade(self):
+        self._fading_since = self._clock.elapsed()
+
+    def _on_tick(self):
+        now = self._clock.elapsed()
+        if self._fading_since is not None:
+            self._fade = max(0.0, 1.0 - (now - self._fading_since) / 300)
+            if self._fade <= 0:
+                self.reset()
+                return
+        busy = now - self._moved_at < self.MOVE_MS or now - self._ripple_at < self.RIPPLE_MS + self.MOVE_MS
+        self._tick.setInterval(33 if busy or self._fading_since is not None else 100)
+        self.update()
+
+    BORDER, RADIUS = 3.0, 10.0          # 实边宽度、圆角半径（逻辑像素）
+
+    @staticmethod
+    def _falloff(n, scale, border):
+        """到边的距离 → 光的亮度（一维），实边以内开始算：两段指数叠加，近处 ~35px 比较
+        浓，远处 ~110px 很淡（用户：颜色深一点、往里一点）。scale 是设备像素比。"""
+        import numpy as np
+        d = np.minimum(np.arange(n), np.arange(n)[::-1]) / scale - border
+        glow = 0.42 * np.exp(-d / 13) + 0.12 * np.exp(-d / 42)
+        return np.clip(glow, 0, 1).astype(np.float32)
+
+    def _glow_pixmap(self, w, h, accent):
+        """网页四周的柔光，按尺寸算一次缓存。
+        - 光：横向、纵向各一条衰减曲线，像两盏灯那样叠加（1 - (1-横)(1-竖)），处处平滑、
+          角上自然浓一点。早先是一圈圈圆角矩形叠出来的，角上叠出斜向亮缝（用户：「四个角
+          漏光」），再早分两组画，接缝处有一道台阶
+        - 实边和外轮廓：圆角矩形（按到圆角矩形边的距离算，边缘抗锯齿），圆角外面透明"""
+        import numpy as np
+        from PySide6.QtGui import QImage, QPixmap
+        key = (w, h, accent.name())
+        if getattr(self, "_glow_key", None) == key:
+            return self._glow
+        dpr = max(1.0, self.devicePixelRatioF())
+        W, H = max(1, int(w * dpr)), max(1, int(h * dpr))
+        fx = self._falloff(W, dpr, self.BORDER)
+        fy = self._falloff(H, dpr, self.BORDER)
+        glow = 1.0 - (1.0 - fy[:, None]) * (1.0 - fx[None, :])
+        # 到圆角矩形边的距离（里面为正）：圆角处是到圆心的距离，其余是到最近一条边的距离
+        r = self.RADIUS * dpr
+        ys = np.arange(H, dtype=np.float32)[:, None] + 0.5
+        xs = np.arange(W, dtype=np.float32)[None, :] + 0.5
+        qx = np.maximum(r - xs, xs - (W - r))          # 落在左右圆角带里有多深（>0 才算）
+        qy = np.maximum(r - ys, ys - (H - r))
+        corner = (qx > 0) & (qy > 0)
+        edge = np.minimum(np.minimum(xs, W - xs), np.minimum(ys, H - ys))
+        inside = np.where(corner, r - np.sqrt(np.maximum(qx, 0) ** 2 + np.maximum(qy, 0) ** 2), edge)
+        inside = inside / dpr                           # 换回逻辑像素
+        border = np.clip(self.BORDER + 0.5 - inside, 0, 1)     # 实边（带半像素抗锯齿）
+        mask = np.clip(inside + 0.5, 0, 1)              # 圆角外面透明
+        a = np.maximum(border * 0.95, glow) * mask
+        img = np.empty((H, W, 4), dtype=np.uint8)
+        # ARGB32_Premultiplied 在小端机器上按 B G R A 排；颜色要乘上透明度
+        # 很淡的地方只有 8 位精度，会量化出一圈圈色带：加一点抖动把色阶打散
+        noise = np.random.default_rng(7).random((H, W), dtype=np.float32)
+        alpha = np.floor(255 * a + noise)
+        img[..., 3] = alpha.astype(np.uint8)
+        k = alpha / 255.0
+        img[..., 0] = np.floor(accent.blue() * k + noise).clip(0, 255).astype(np.uint8)
+        img[..., 1] = np.floor(accent.green() * k + noise).clip(0, 255).astype(np.uint8)
+        img[..., 2] = np.floor(accent.red() * k + noise).clip(0, 255).astype(np.uint8)
+        np.minimum(img[..., :3], img[..., 3:4], out=img[..., :3])   # 预乘：颜色不能超过透明度
+        qimg = QImage(img.data, W, H, W * 4, QImage.Format_ARGB32_Premultiplied).copy()
+        pm = QPixmap.fromImage(qimg)
+        pm.setDevicePixelRatio(dpr)
+        self._glow_key, self._glow = key, pm
+        return pm
+
+    def _cursor_pos(self, now):
+        from PySide6.QtCore import QPointF
+        t = min(1.0, max(0.0, (now - self._moved_at) / self.MOVE_MS))
+        t = 1 - (1 - t) ** 3                    # 先快后慢
+        return QPointF(self.pos_from.x() + (self.pos_to.x() - self.pos_from.x()) * t,
+                       self.pos_from.y() + (self.pos_to.y() - self.pos_from.y()) * t)
+
+    def paintEvent(self, _e):
+        import math
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QPolygonF
+        if not (self.active or self.cursor_on):
+            return
+        now = self._clock.elapsed()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        accent = qcolor(self._theme("mv_indigo"))
+        breath = 0.72 + 0.28 * (0.5 + 0.5 * math.sin(now / self.BREATH_MS * 2 * math.pi))
+        w, h = self.width(), self.height()
+        # 柔光按尺寸画一次缓存，呼吸只调透明度（每帧重画 60 圈不划算）
+        p.setOpacity(breath * self._fade)
+        p.drawPixmap(0, 0, self._glow_pixmap(w, h, accent))
+        p.setOpacity(1.0)
+        if not self.cursor_on:
+            p.end()
+            return
+        pos = self._cursor_pos(now)
+        color = qcolor(self._theme("mv_bad")) if self.kind == "blocked" else accent
+        # 涟漪：滑到之后从落点散开
+        if self.ripple_at is not None and 0 <= now - self._ripple_at < self.RIPPLE_MS:
+            t = (now - self._ripple_at) / self.RIPPLE_MS
+            c = QColor(accent)
+            c.setAlphaF(0.55 * (1 - t) * self._fade)
+            p.setPen(QPen(c, 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(self.ripple_at, 6 + 16 * t, 6 + 16 * t)
+            c.setAlphaF(0.25 * (1 - t) * self._fade)
+            p.setPen(Qt.NoPen)
+            p.setBrush(c)
+            p.drawEllipse(self.ripple_at, 6, 6)
+        p.setOpacity(self._fade)
+        # 箭头（设计稿那个形状，尖端对准落点）
+        pts = [(0, 0), (0, 19), (5, 14.5), (8.5, 22), (12, 20.5), (8.5, 13), (15.5, 13)]
+        poly = QPolygonF([QPointF(pos.x() + x, pos.y() + y) for x, y in pts])
+        p.setPen(QPen(qcolor(self._theme("mv_view_bg")), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(color)
+        p.drawPolygon(poly)
+        # 小标签
+        f = QFont(self.font())
+        f.setPixelSize(11)
+        p.setFont(f)
+        tw = p.fontMetrics().horizontalAdvance(self.label)
+        pill = QRectF(pos.x() + 16, pos.y() + 16, tw + 16, 20)
+        if pill.right() > w - 4:                    # 贴右边时标签放到左边
+            pill.moveRight(pos.x() - 4)
+        path = QPainterPath()
+        path.addRoundedRect(pill, 10, 10)
+        p.setPen(Qt.NoPen)
+        p.fillPath(path, color)
+        p.setPen(qcolor(self._theme("mv_view_bg")))
+        p.drawText(pill, Qt.AlignCenter, self.label)
+        p.end()
+
+
 class _StatusCard(QFrame):
     """模型正在操作页面时浮在页面底部的卡片：「灵犀正在点击」+ 第几步 + 停止。"""
 
@@ -466,6 +683,9 @@ class BrowserView(QWidget):
         self.content.addWidget(self.error_page)
         lay.addWidget(self.content, 1)
 
+        # 「灵犀的鼠标」+ 操作中的柔光：浮在网页上面一层（状态卡再在它上面）
+        self.overlay = _AgentOverlay(self.page_frame, self._theme)
+        self.page_split.splitterMoved.connect(lambda *_: self._place_overlay())
         self.status_card = _StatusCard(self.page_frame)
         self.status_card.setVisible(False)
         self.status_card.stop_clicked.connect(self._on_stop_clicked)
@@ -479,6 +699,7 @@ class BrowserView(QWidget):
 
         self._embed(self._tab().view)
         get_bridge().activity.connect(self._on_activity)
+        get_bridge().cursor_event.connect(self._on_cursor_event)
         # F12 只在本面板（含子控件）有焦点时生效，不抢整窗口的 F12（那是「调试」标签）
         QShortcut(QKeySequence("F12"), self,
                   context=Qt.ShortcutContext.WidgetWithChildrenShortcut).activated.connect(
@@ -597,6 +818,7 @@ class BrowserView(QWidget):
         self._releasing = True
         self._service_timer.stop()
         self._linger.stop()
+        self.overlay.reset()
         self._drop_devtools()
         if self._embedded is not None and shiboken6.isValid(self._embedded):
             try:
@@ -875,10 +1097,34 @@ class BrowserView(QWidget):
         self.tab_state_changed.emit()
 
     def _set_outline(self, on):
-        self.page_frame.setProperty("active", "true" if on else "false")
-        self.page_frame.layout().setContentsMargins(*((2, 2, 2, 2) if on else (0, 0, 0, 0)))
-        self.page_frame.style().unpolish(self.page_frame)
-        self.page_frame.style().polish(self.page_frame)
+        """模型操作中：网页四周的柔光（浮层画，不再给页面框留边距——那样每次开始 / 停下
+        网页都要重新排版一次）。"""
+        self._place_overlay()
+        self.overlay.set_active(on)
+        self.status_card.raise_()
+
+    def _place_overlay(self):
+        """浮层盖住网页那一块（不盖开发者工具）。"""
+        v = self._embedded
+        if v is None or not shiboken6.isValid(v) or not v.isVisible():
+            return
+        from PySide6.QtCore import QPoint, QRect
+        self.overlay.setGeometry(QRect(v.mapTo(self.page_frame, QPoint(0, 0)), v.size()))
+
+    def _on_cursor_event(self, tab_id, x, y, kind, label):
+        """bridge 报的「灵犀的鼠标」动作（页面 CSS 坐标）：只认自己这个标签。"""
+        if tab_id != self.tab_id or self._releasing:
+            return
+        if label and kind != "blocked":
+            self.status_card.title.setText(f"灵犀正在{label}")
+        from .. import config as _cfg
+        if not _cfg.AGENT_CURSOR:
+            return
+        tab = page._browser.tab(self.tab_id) if page._browser is not None else None
+        zoom = (tab.page.zoomFactor() if tab is not None and shiboken6.isValid(tab.page) else 1.0) or 1.0
+        self._place_overlay()
+        self.overlay.show_cursor(x * zoom, y * zoom, kind, label)
+        self.status_card.raise_()
 
     def _place_status_card(self):
         f = self.page_frame
@@ -893,6 +1139,7 @@ class BrowserView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        QTimer.singleShot(0, self, self._place_overlay)
         if self.status_card.isVisible():
             QTimer.singleShot(0, self, self._place_status_card)
 
@@ -1064,8 +1311,6 @@ class BrowserView(QWidget):
             f"QStackedWidget#browserContent {{ background: transparent; }}"
             f"QFrame#browserPageFrame {{ background: {t('mv_view_bg')}; border: none;"
             f" border-top: 1px solid {t('dlg_border')}; }}"
-            f"QFrame#browserPageFrame[active=\"true\"] {{ border: 2px solid {t('dlg_input_focus')};"
-            f" border-radius: 4px; }}"
             f"QSplitter#browserSplit::handle {{ background: {t('dlg_border')}; }}"
             f"QWidget#browserDevtoolsHead {{ background: {t('dlg_nav_bg')};"
             f" border-bottom: 1px solid {t('dlg_border')}; }}"

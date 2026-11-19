@@ -83,6 +83,8 @@ DEFAULT_WORKSPACE = str(_config.get("default_workspace", "") or "")
 # 点回复里的网页链接怎么开：system = 系统浏览器（默认；侧栏浏览器播不了 H.264 视频），
 # panel = 侧栏浏览器。本机地址（localhost）不看这项，总在侧栏浏览器开。设置 → 高级，立即生效
 LINK_OPEN_MODE = "panel" if _config.get("link_open_mode") == "panel" else "system"
+# 模型操作侧栏浏览器时，在网页上画「灵犀的鼠标」（指针 + 点击涟漪）。设置 → 高级，立即生效
+AGENT_CURSOR = bool(_config.get("agent_cursor", True))
 # 非 Python 项目可自定义检查命令，用 {file} 占位被检文件；
 # 留空 = 只对 Python 自动用 ruff（没装则退化到 py_compile 只查语法）
 CHECK_COMMAND = _config.get("check_command", "")

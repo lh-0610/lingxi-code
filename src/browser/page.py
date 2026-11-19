@@ -359,6 +359,21 @@ def is_browser_open() -> bool:
     return _browser is not None
 
 
+# 用户最近一次在灵犀的输入框里打字（monotonic）：模型真实点击网页会让网页拿走键盘焦点，
+# 用户正打着字时点完要还回去（bridge._mouse）。由界面在输入框的按键里记
+_USER_TYPING_GRACE_S = 3.0
+_user_typed_at = 0.0
+
+
+def note_user_typing():
+    global _user_typed_at
+    _user_typed_at = time.monotonic()
+
+
+def user_typing_recently() -> bool:
+    return time.monotonic() - _user_typed_at < _USER_TYPING_GRACE_S
+
+
 def current_tab_id():
     b = _browser
     return b.current_id if b is not None else None

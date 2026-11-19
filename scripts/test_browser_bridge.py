@@ -714,6 +714,11 @@ def test_blank_link_opens_a_new_tab_and_switches_to_it(browser, servers, trusted
     assert _tabs_now()[1] == ids[0]
     stale = _tool(browser, tb.browser_click.func, new_ref)
     assert stale.startswith("ref 已失效"), stale
+    # 开着两个标签读控制台：说清是哪个标签的（用户实测：读到新标签的却当成原来那页的结论）
+    _tool(browser, tb.browser_tabs.func, "select", cur)
+    con = _tool(browser, tb.browser_console.func, level="all")
+    assert con.startswith(f"[标签 #{cur} · ") and "states.html" in con.split("]")[0], con
+    _tool(browser, tb.browser_tabs.func, "select", ids[0])
     # 原标签自己那份快照的 ref：切回来照样能用（ref 登记按标签分开，新标签的快照不冲掉它）
     again = _tool(browser, tb.browser_click.func, _ref_of(snap, "弹出表单页"), delta=False)
     assert again.startswith("已点击"), again
@@ -826,6 +831,78 @@ def test_button_under_a_mask_is_not_clicked(browser, servers, trusted_tools):
     out2 = _click(browser, tb, snap, "立即付款")
     assert out2.startswith("已点击"), out2
     assert _js_value(browser, "document.getElementById('out').textContent") == "付款按钮被点了"
+
+
+def test_real_click_does_not_move_the_users_mouse(browser, servers, trusted_tools):
+    """用户实测：真实点击把他的鼠标拽走了（QTest.mouseMove 会 QCursor.setPos）。
+    事件要直接发给 view，系统光标原地不动；点击照样送到。"""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QCursor
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/pointer.html")
+    QCursor.setPos(QPoint(3, 4))
+    browser.processEvents()
+    before = QCursor.pos()
+    out = _click(browser, tb, snap, "更多操作")
+    assert "[expanded=true]" in out, out
+    assert QCursor.pos() == before, f"系统光标被移动了：{before} → {QCursor.pos()}"
+
+
+def test_click_emits_the_agent_cursor_and_typing_parks_it(browser, servers, trusted_tools):
+    """「灵犀的鼠标」：点击报 click（带点的是什么），输入报 type（停在输入框右边），
+    被挡住报 blocked。坐标是页面 CSS 像素，落在元素上。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/pointer.html")
+    seen = []
+    bridge_mod.get_bridge().cursor_event.connect(lambda *a: seen.append(a))
+    _click(browser, tb, snap, "更多操作")
+    kinds = [s[3] for s in seen]
+    assert "click" in kinds, seen
+    click = next(s for s in seen if s[3] == "click")
+    rect = _call(browser, "js", code=(
+        "JSON.stringify(document.getElementById('radix').getBoundingClientRect())"))["value"]
+    import json as _json
+    r = _json.loads(rect)
+    assert r["left"] <= click[1] <= r["right"] and r["top"] <= click[2] <= r["bottom"], (click, r)
+    assert click[4] == "点击「更多操作」"
+    seen.clear()
+    _call(browser, "js", code="document.body.insertAdjacentHTML('beforeend', "
+                              "\"<input aria-label='昵称框'>\"); true")
+    snap2 = _tool(browser, tb.browser_snapshot.func, mode="all")
+    _tool(browser, tb.browser_type.func, _ref_of(snap2, "昵称框"), "小明", delta=False)
+    assert [s[3] for s in seen] == ["type"] and seen[0][4] == "输入「昵称框」", seen
+    seen.clear()
+    _call(browser, "js", code="document.body.classList.add('masked'); true")
+    _click(browser, tb, snap, "立即付款")
+    assert [s[3] for s in seen] == ["blocked"], seen
+
+
+def test_focus_goes_back_only_when_the_user_was_typing(browser, servers, trusted_tools):
+    """用户正在灵犀输入框里打字：模型点完网页把键盘焦点还给他。没在打字就留在网页上
+    （antd 下拉框这类一失焦就收起）。"""
+    from PySide6.QtWidgets import QApplication, QLineEdit
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/pointer.html")
+    view = page_mod.get_browser().view
+    box = QLineEdit(view.window())        # 和网页在同一个窗口里，像灵犀的输入框
+    box.setGeometry(0, 0, 10, 10)
+    box.show()
+
+    def focus_box():
+        box.setFocus()
+        for _ in range(20):
+            browser.processEvents()
+        assert QApplication.focusWidget() is box
+
+    focus_box()
+    page_mod.note_user_typing()
+    _click(browser, tb, snap, "更多操作")
+    assert QApplication.focusWidget() is box, "正在打字：焦点还给输入框"
+    focus_box()
+    page_mod._user_typed_at = 0.0          # 很久没打字
+    _click(browser, tb, snap, "立即付款")
+    assert QApplication.focusWidget() is not box, "没在打字：焦点留在网页上"
+    box.deleteLater()
 
 
 def test_hidden_panel_falls_back_to_a_script_click(browser, servers, trusted_tools):

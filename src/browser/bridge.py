@@ -28,6 +28,9 @@ _bridge_lock = threading.Lock()
 class BrowserBridge(QObject):
     request = Signal(object)          # {op, args, holder, ev}
     activity = Signal(str)            # 主线程 dispatch 时发动作名（面板徽标），回包时发 ""
+    # 「灵犀的鼠标」（设计稿「浏览器：灵犀的鼠标」）：标签 id、页面 CSS 坐标、动作
+    # （click / type / blocked）、说明（点的是什么，状态卡用）
+    cursor_event = Signal(int, float, float, str, str)
 
     def __init__(self):
         super().__init__()
@@ -134,7 +137,7 @@ class BrowserBridge(QObject):
                   "readText": "读正文", "console": "控制台", "info": "查元素", "state": "读状态",
                   "watchPrepare": "准备操作", "watchBaseline": "记样式", "watchReport": "核对样式",
                   "reveal": "滚到元素", "watchSettling": "等过渡结束",
-                  "pointOf": "定位点击点", "pointArrived": "确认点击送达"}
+                  "pointOf": "定位点击点", "pointArrived": "确认点击送达", "anchorOf": "定位输入框"}
 
     def _activity_label(self, req):
         op = req["op"]
@@ -193,6 +196,12 @@ class BrowserBridge(QObject):
                 self._grab(req, args)
             elif op == "mouse":
                 self._mouse(req, args)
+            elif op == "cursor":
+                # 输入中 / 被挡住：只挪画在网页上的指针，不发任何事件
+                self.cursor_event.emit(self._browser.current_id, float(args.get("x", 0)),
+                                       float(args.get("y", 0)), str(args.get("kind") or ""),
+                                       str(args.get("label") or ""))
+                self._reply(req, {"ok": True})
             elif op == "tabs":
                 self._reply(req, {"ok": True, "tabs": self._tab_list(),
                                   "current": self._browser.current_id})
@@ -419,9 +428,17 @@ class BrowserBridge(QObject):
         """往页面发一次真实的鼠标点击（复审 #9）：先移过去（hover 菜单、pointerenter），
         再按下、抬起。坐标是页面的 CSS 像素，按缩放换成 view 的坐标。
 
-        面板没显示 / 太小时 Chromium 不收输入事件，回 ok=False，工具层改走脚本点击。"""
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtTest import QTest
+        面板没显示 / 太小时 Chromium 不收输入事件，回 ok=False，工具层改走脚本点击。
+
+        事件直接发给 view 的 focusProxy，**不动系统鼠标**：早先用 QTest.mouseMove 移过去，
+        它会顺带 QCursor.setPos，把用户正在用的鼠标拽到页面上（用户实测）。
+
+        键盘焦点：用户正在灵犀输入框里打字（见 page.note_user_typing）就不碰，点完万一被
+        网页拿走也还回去；没在打字就像真点击那样交给网页。直接发的事件 Qt 不会自己挪焦点。"""
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QApplication
+        from src.browser import page as page_mod
         view = self._browser.view
         if not shiboken6.isValid(view) or not view.isVisible() or view.width() < 50:
             self._reply(req, {"ok": False, "error": "面板没显示，收不到鼠标事件"})
@@ -432,8 +449,24 @@ class BrowserBridge(QObject):
         if not target.rect().contains(pt):
             self._reply(req, {"ok": False, "error": "点击点不在可见区域里"})
             return
-        QTest.mouseMove(target, pt)
-        QTest.mouseClick(target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pt)
+        typing_in = QApplication.focusWidget() if page_mod.user_typing_recently() else None
+        if typing_in is None:
+            # 直接发的事件 Qt 不算真点击，不会「点哪焦点给哪」：没在打字就照真点击那样把
+            # 焦点交给网页（有的页面靠 document 有焦点才处理键盘 / focus 事件）
+            target.setFocus(Qt.FocusReason.MouseFocusReason)
+        local, glob = QPointF(pt), QPointF(target.mapToGlobal(pt))
+        left, none = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+        for etype, button, buttons in ((QEvent.Type.MouseMove, none, none),
+                                       (QEvent.Type.MouseButtonPress, left, left),
+                                       (QEvent.Type.MouseButtonRelease, left, none)):
+            QApplication.sendEvent(target, QMouseEvent(etype, local, glob, button, buttons,
+                                                       Qt.KeyboardModifier.NoModifier))
+        # 画在网页上的「灵犀的鼠标」：滑过去 + 点一下的涟漪（只是给人看，不碍事件）
+        self.cursor_event.emit(self._browser.current_id, pt.x() / zoom, pt.y() / zoom,
+                               "click", str(args.get("label") or ""))
+        if typing_in is not None and shiboken6.isValid(typing_in) and typing_in is not target \
+                and not view.isAncestorOf(typing_in):
+            typing_in.setFocus(Qt.FocusReason.OtherFocusReason)
         self._reply(req, {"ok": True})
 
     def _grab(self, req, args):

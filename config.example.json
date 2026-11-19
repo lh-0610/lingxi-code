@@ -43,6 +43,7 @@
   "fetch_url_allow_proxy": false,
   "default_workspace": "",
   "link_open_mode": "system",
+  "agent_cursor": true,
   "_link_open_mode_说明": "点回复里的网页链接怎么打开：system = 系统浏览器（默认，B 站这类 H.264 视频侧栏浏览器播不了），panel = 侧栏浏览器。本机地址（localhost）总在侧栏浏览器打开。设置 → 高级 → 回复里的链接，立即生效。",
   "_default_workspace_说明": "没打开项目（无项目 · 全局工作区）时，AI 读写文件、运行命令所在的文件夹。留空 = 「文档」下的「灵犀工作区」，不存在会自动建。设置 → 高级 → 无项目工作区 里改，重启生效。",
   "_fetch_url_allow_proxy_说明": "fetch_url 是否走系统代理。默认 false（直连，SSRF 防线完整、能校验目标真实 IP）。必须靠代理才能访问外网时设 true，但此时跳过防 DNS 重绑定的 peer 校验。",

@@ -1541,6 +1541,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         if self._handle_confirm_bar_keys(obj, event):
             return True
 
+        # 用户在输入框里打字：模型这时真实点击网页，点完把键盘焦点还回来（bridge._mouse）
+        if obj is getattr(self, "entry", None) and event.type() == event.Type.KeyPress:
+            from ..browser import page as _bpage
+            _bpage.note_user_typing()
+
         if hasattr(self, 'settings_btn') and obj == self.settings_btn and self._settings_btn_icon:
             if event.type() == event.Type.Enter:
                 self.settings_btn.setIcon(self._settings_btn_icon_hover)

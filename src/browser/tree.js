@@ -499,7 +499,7 @@
       return { ok: true, synthetic: true, why: "no-box" };   // 透明 0 尺寸的原生控件等
     // 中心点被挡就试几个内部点（角上贴着别的元素、中间有个浮动图标……）
     const pts = [[0.5, 0.5], [0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75]];
-    let blocker = null;
+    let blocker = null, bx = 0, by = 0;
     for (const [fx, fy] of pts) {
       const x = rect.left + rect.width * fx, y = rect.top + rect.height * fy;
       if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
@@ -509,10 +509,21 @@
         arrival.el = el; arrival.down = false; arrival.click = false;
         return { ok: true, x, y };
       }
-      blocker = blocker || hit;
+      if (!blocker) { blocker = hit; bx = x; by = y; }
     }
-    if (blocker) return { ok: false, occluded: true, error: "元素被别的东西挡住了", by: describe(blocker) };
+    if (blocker)
+      return { ok: false, occluded: true, error: "元素被别的东西挡住了", by: describe(blocker), x: bx, y: by };
     return { ok: true, synthetic: true, why: "offscreen" };
+  }
+
+  // 输入时「灵犀的鼠标」停在哪：输入框右边、垂直居中（页面 CSS 坐标，看不见就不给）
+  function anchorOf(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    const rect = r.el.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > innerHeight || rect.width < 1)
+      return { ok: false, error: "不在可见区域" };
+    return { ok: true, x: Math.min(rect.right - 6, innerWidth - 12), y: rect.top + rect.height / 2 };
   }
 
   function pointArrived() {
@@ -914,7 +925,7 @@
   window.__lx = {
     snapshot, find, click, type, act, readText, info, watchPrepare, watchSettling, watchBaseline,
     watchReport,
-    reveal, pointOf, pointArrived,
+    reveal, pointOf, pointArrived, anchorOf,
     console: (opts) => { const out = consoleBuf.slice(); if (opts && opts.clear) consoleBuf.length = 0; return { ok: true, entries: out, url: location.href, docId }; },
     state: () => ({ ok: true, url: location.href, title: document.title, readyState: document.readyState, generation, docId }),
   };
