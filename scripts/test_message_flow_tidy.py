@@ -388,6 +388,9 @@ class TestAnswerTypography:
         numbered = _md("步骤：\n\n1. 改\n2. 测")
         assert re.search(r'<td width="22"[^>]*>2\.</td><td[^>]*>测</td>', numbered)
 
-    def test_plain_links_get_accent_without_underline(self):
-        html = _md("服务在 http://localhost:8765/ 上")
-        assert '<a href="http://localhost:8765/" style="color:#5b6cf0;text-decoration:none;">' in html
+    def test_web_links_get_accent_with_a_light_underline(self):
+        """设计稿「回复里的链接」：强调色 + 浅一档的下划线 + 箭头（本机 ▸，公网 ↗）。"""
+        html = _md("服务在 http://localhost:8765/ 上，文档见 [官网](https://example.com/a)")
+        assert '<a href="http://localhost:8765/" style="color:#5b6cf0;text-decoration:underline;' in html
+        assert ">localhost:8765<" in html and "▸" in html
+        assert ">官网<" in html and "↗" in html

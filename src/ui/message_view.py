@@ -524,7 +524,35 @@ class BodyText(QLabel):
         self.linkActivated.connect(self.link_clicked)
         # 右键菜单要知道点在哪个链接上：QLabel 不给按位置查链接，跟着悬停记下来
         self.linkHovered.connect(lambda href: self.setProperty("lx_hover_link", href or ""))
+        self.linkHovered.connect(self._show_link_tip)
         self.setText(text)
+
+    def _show_link_tip(self, href):
+        """悬停链接：完整网址 + 点了会怎样（设计稿「回复里的链接」）。链接上只显示标题或
+        缩短的网址，真实地址要在这里看得到——点之前知道会去哪。"""
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QToolTip
+        tip = link_tip(href)
+        if tip:
+            QToolTip.showText(QCursor.pos(), tip, self)
+        else:
+            QToolTip.hideText()
+
+
+def link_tip(href: str) -> str:
+    """正文链接的悬停提示文字；不是链接（移开了）返回 ""。"""
+    href = href or ""
+    if href.startswith(("http://", "https://")):
+        from .. import config as _cfg
+        from ..browser import security
+        if security.is_localhost(href) or _cfg.LINK_OPEN_MODE == "panel":
+            how = "点击在侧栏浏览器打开"
+        else:
+            how = "点击用系统浏览器打开"
+        return f"{href}\n{how} · 右键更多"
+    if href.startswith("lingxi-file:"):
+        return "在右侧文件面板里打开"
+    return ""
 
 
 class MetaLine(QWidget):

@@ -119,17 +119,33 @@ def _label_selection(label: QLabel) -> str:
     return label.selectedText().replace(" ", "\n").replace(" ", "\n")
 
 
-def _link_items(menu: QMenu, href: str):
-    from ..browser import security
+def _link_items(menu: QMenu, href: str, text: str = ""):
+    """链接的几项（设计稿「消息区：回复里的链接」）：网页给两种打开方式，左键按设置走、
+    右键都能选；再是复制地址 / 复制链接文字。"""
     host = _host()
     if href.startswith(("http://", "https://")):
-        local = security.is_localhost(href)
         if host is not None:
-            add_item(menu, "在浏览器面板打开" if local else "在系统浏览器中打开",
-                     lambda: host.context_menu_open_link(href))
+            add_item(menu, "在侧栏浏览器打开", lambda: host.open_link_in_panel(href))
+            add_item(menu, "用系统浏览器打开", lambda: host.open_link_in_system(href))
+            menu.addSeparator()
     elif href and host is not None:
         add_item(menu, "打开", lambda: host.context_menu_open_link(href))
     add_item(menu, "复制链接地址", lambda: QApplication.clipboard().setText(href))
+    if text:
+        add_item(menu, "复制链接文字", lambda: QApplication.clipboard().setText(text))
+
+
+def _anchor_text(html: str, href: str) -> str:
+    """富文本里这个链接显示的文字（去掉标签和末尾的箭头）。"""
+    import html as _html
+    import re
+    m = re.search(r'<a href="' + re.escape(_html.escape(href, quote=True)) + r'"[^>]*>(.*?)</a>',
+                  html or "", re.S) or re.search(
+        r'<a href="' + re.escape(href) + r'"[^>]*>(.*?)</a>', html or "", re.S)
+    if not m:
+        return ""
+    text = _html.unescape(re.sub(r"<[^>]+>", "", m.group(1)))
+    return text.rstrip("  ↗▸").strip()
 
 
 def build_text_menu(w: QWidget, pos) -> QMenu | None:
@@ -190,7 +206,7 @@ def build_text_menu(w: QWidget, pos) -> QMenu | None:
         href = w.property("lx_hover_link") or ""
         if href:
             menu.addSeparator()
-            _link_items(menu, href)
+            _link_items(menu, href, _anchor_text(w.text(), href))
         menu.addSeparator()
         n = _plain_len(w)
         add_item(menu, "全选", lambda: w.setSelection(0, n), shortcut="Ctrl+A", enabled=n > 0)

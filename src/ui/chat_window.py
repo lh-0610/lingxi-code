@@ -868,18 +868,35 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.entry.setFocus()
 
     def context_menu_open_link(self, href):
-        """右键「在浏览器面板打开 / 打开」：和点链接走同一条路（本机地址进侧栏浏览器，文件进文件面板）。"""
+        """右键「打开」：和点链接走同一条路（文件进文件面板，网页按设置）。"""
         self._on_file_link_clicked(href)
 
-    def _on_file_link_clicked(self, href):
-        """点回复正文里的文件链接（`lingxi-file:src/ui/task_panel.py:835`）。
+    def open_link_in_panel(self, href):
+        """右键「在侧栏浏览器打开」。"""
+        self._open_browser_in_panel(href)
 
-        入口和任务面板「改动的文件」一样走文件面板；带行号的打开后滚到那一行。
-        localhost 的 http 链接不走外部浏览器，在侧栏浏览器面板打开（§7.4）。
+    @staticmethod
+    def open_link_in_system(href):
+        """右键「用系统浏览器打开」（也是公网链接的默认，侧栏浏览器播不了 H.264 视频）。"""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(href))
+
+    def _on_file_link_clicked(self, href):
+        """点回复正文里的链接。
+
+        - 文件链接（`lingxi-file:src/ui/task_panel.py:835`）：和任务面板「改动的文件」一样走
+          文件面板，带行号的打开后滚到那一行；
+        - 本机地址（localhost）：在侧栏浏览器面板打开（§7.4），调试时模型也看得到这一页；
+        - 公网网址：按设置（config.LINK_OPEN_MODE），默认系统浏览器。以前公网链接点了没反应。
         """
         from ..browser import security
-        if (href or "").startswith(("http://", "https://")) and security.is_localhost(href):
-            self._open_browser_in_panel(href)
+        if (href or "").startswith(("http://", "https://")):
+            from .. import config as _cfg
+            if security.is_localhost(href) or _cfg.LINK_OPEN_MODE == "panel":
+                self._open_browser_in_panel(href)
+            else:
+                self.open_link_in_system(href)
             return
         from .markdown_render import parse_file_link
         target = parse_file_link(href)

@@ -71,6 +71,12 @@ class _Host:
     def context_menu_open_link(self, href):
         self.opened.append(href)
 
+    def open_link_in_panel(self, href):
+        self.opened.append(("panel", href))
+
+    def open_link_in_system(self, href):
+        self.opened.append(("system", href))
+
 
 @pytest.fixture()
 def host(qapp):
@@ -143,20 +149,32 @@ def test_chat_label_copy_markdown_quote_and_link(qapp, host):
     lb.setSelection(0, 3)
     menu = cm.build_text_menu(lb, QPoint(1, 1))
     assert labels(menu) == ["复制", "复制为 Markdown", "引用到输入框", "-",
-                            "在浏览器面板打开", "复制链接地址", "-", "全选"]
+                            "在侧栏浏览器打开", "用系统浏览器打开", "-", "复制链接地址",
+                            "复制链接文字", "-", "全选"]
     trigger(menu, "复制为 Markdown")
     assert QApplication.clipboard().text() == "已启动，地址是 http://localhost:5173/"
-    trigger(menu, "在浏览器面板打开")
-    assert host.opened == ["http://localhost:5173/"]
+    trigger(menu, "在侧栏浏览器打开")
+    assert host.opened == [("panel", "http://localhost:5173/")]
+    trigger(menu, "复制链接文字")
+    assert QApplication.clipboard().text() == "http://localhost:5173/"
     trigger(menu, "全选")
     assert lb.selectedText().startswith("已启动")
 
 
-def test_public_link_says_system_browser(qapp, host):
-    lb = QLabel("x")
+def test_public_link_offers_both_ways_to_open(qapp, host):
+    """设计稿「回复里的链接」：左键按设置走，右键两种打开方式都给，外加复制链接文字（标题）。"""
+    lb = QLabel()
+    lb.setTextFormat(Qt.RichText)
     lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
-    lb.setProperty("lx_hover_link", "https://example.com/a")
-    assert "在系统浏览器中打开" in labels(cm.build_text_menu(lb, QPoint(1, 1)))
+    lb.setText('见 <a href="https://example.com/a?x=1&amp;y=2" style="color:#000">'
+               '示例官网<span>&#8201;↗</span></a>')
+    lb.setProperty("lx_hover_link", "https://example.com/a?x=1&y=2")
+    menu = cm.build_text_menu(lb, QPoint(1, 1))
+    assert labels(menu)[2:6] == ["在侧栏浏览器打开", "用系统浏览器打开", "-", "复制链接地址"]
+    trigger(menu, "用系统浏览器打开")
+    assert host.opened == [("system", "https://example.com/a?x=1&y=2")]
+    trigger(menu, "复制链接文字")
+    assert QApplication.clipboard().text() == "示例官网", "去掉箭头，只要标题"
 
 
 # ── 全局过滤器：真实右键事件 ─────────────────────────────────────

@@ -78,6 +78,101 @@ def _linkify_localhost(md_text: str) -> str:
     return "".join(parts)
 
 
+# ── 网页链接（设计稿「消息区：回复里的链接」）────────────────────
+# 正文里光秃秃的网址：中文、空格、尖括号都不算网址的一部分（中文标点紧跟在后面很常见）
+_BARE_URL = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+_URL_TRAIL = ".,;:!?'\"]"
+_NO_LINK_TAGS = ("a", "code", "pre")
+_SHORT_URL_MAX = 36
+
+
+def _trim_url(url: str):
+    """网址末尾粘着的标点不算网址（「见 https://x.com/a。」、括号里的网址）。返回 (网址, 剩下的)。"""
+    tail = ""
+    while url:
+        ent = re.search(r"&(?:[a-z]+|#\d+);$", url)
+        if ent:
+            # 文本节点里的 & < > 是转义过的：末尾的整个实体（如 &gt;）不算网址
+            if ent.group(0) in ("&amp;", "&lt;", "&gt;", "&quot;", "&#x27;", "&#39;"):
+                tail = ent.group(0) + tail
+                url = url[:ent.start()]
+                continue
+            break
+        ch = url[-1]
+        if ch in _URL_TRAIL or ch == ";" or (ch == ")" and url.count("(") < url.count(")")):
+            tail = ch + tail
+            url = url[:-1]
+            continue
+        break
+    return url, tail
+
+
+def _autolink_bare_urls(html: str) -> str:
+    """把 HTML 文本节点里的 http(s) 网址包成 <a>；已经在链接、行内代码、代码块里的不动。"""
+    if "http" not in html:
+        return html
+    depth = dict.fromkeys(_NO_LINK_TAGS, 0)
+    out = []
+    for part in re.split(r"(<[^>]+>)", html):
+        if part.startswith("<"):
+            m = re.match(r"<(/?)([a-zA-Z]+)", part)
+            if m and m.group(2).lower() in depth:
+                tag = m.group(2).lower()
+                depth[tag] = max(0, depth[tag] + (-1 if m.group(1) else 1))
+            out.append(part)
+            continue
+        if any(depth.values()) or "http" not in part:
+            out.append(part)
+            continue
+
+        def wrap(m):
+            url, tail = _trim_url(m.group(0))
+            if len(url) <= len("https://"):
+                return m.group(0)
+            return f'<a href="{url}">{url}</a>{tail}'
+        out.append(_BARE_URL.sub(wrap, part))
+    return "".join(out)
+
+
+def short_url(url: str, limit: int = _SHORT_URL_MAX) -> str:
+    """网址的简短显示：去掉协议和 www.，太长截成「域名/路径前段…」。"""
+    import html as _html
+    from urllib.parse import urlsplit
+    raw = _html.unescape(url)
+    try:
+        p = urlsplit(raw)
+    except ValueError:
+        return raw
+    host = p.netloc[4:] if p.netloc.startswith("www.") else p.netloc
+    rest = p.path.rstrip("/")
+    if p.query:
+        rest += "?" + p.query
+    s = host + rest
+    if len(s) > limit:
+        s = s[:limit - 1].rstrip("/-_.?&=") + "…"
+    return s
+
+
+def _style_web_link(href: str, inner: str, accent: str, line: str) -> str:
+    """一个网页链接的最终样子：标题（模型写的链接文字；就是网址本身时换成简短显示）+ 箭头。"""
+    import html as _html
+    from ..browser import security
+    text = _html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
+    raw = _html.unescape(href)
+    is_bare = text in (raw, raw.rstrip("/"), raw.split("://", 1)[-1],
+                       raw.split("://", 1)[-1].rstrip("/"))
+    if is_bare and "<code" not in inner:
+        label = _html.escape(short_url(href))
+    else:
+        # 模型写成行内代码的网址（`http://localhost:5173/`）保留代码样式（复审 12）；
+        # 行内代码自带颜色，会盖过链接的强调色：一起改成强调色
+        label = re.sub(r'(<code style="[^"]*?)color:[^;"]*', rf"\1color:{accent}", inner)
+    arrow = "▸" if security.is_localhost(raw) else "↗"
+    return (f'<a href="{href}" style="color:{accent};text-decoration:underline;'
+            f'text-decoration-color:{line};">{label}'
+            f'<span style="font-size:11px;text-decoration:none;">&#8201;{arrow}</span></a>')
+
+
 def file_link_href(rel_path: str, line: int = 0) -> str:
     """正文里的文件链接 href：`lingxi-file:src/ui/task_panel.py:835`。"""
     return f"{_FILE_LINK_PREFIX}{rel_path}" + (f":{line}" if line else "")
@@ -282,6 +377,8 @@ class MarkdownRenderMixin:
 
         html = markdown.markdown(md_text, extensions=['tables', 'fenced_code', 'nl2br'])
 
+        # 正文里光秃秃的网址变成链接（以前只认 localhost，公网地址点不了）；代码里的不动
+        html = _autolink_bare_urls(html)
         # 列表摊平成段落（QLabel 自带的列表缩进不好看），但要留下项目符号 / 序号
         html = _flatten_lists(html, self._t("mv_muted"))
         # 去掉 <em>/<i> 斜体标签，避免动作描述*...* 与正常对话字体不一样
@@ -349,10 +446,19 @@ class MarkdownRenderMixin:
             ),
             html,
         )
-        # 其余链接（localhost 地址等）同样用强调色、不加下划线：Qt 默认的纯蓝下划线在深色底上
-        # 几乎看不清
+        # 网页链接（设计稿「消息区：回复里的链接」）：强调色 + 浅一档的下划线 + 箭头。
+        # 公网 ↗（点了按设置用系统浏览器 / 侧栏浏览器开），本机 ▸（总在侧栏浏览器开）。
+        # 光秃秃的网址显示成「域名/路径前段…」，不再是一整串。Qt 富文本画不了虚线下划线
+        # （text-underline-style 不认，实测），用 text-decoration-color 把下划线调浅
+        line = self._t("mv_panel_accent")
         html = _re.sub(
-            r'<a href="((?!lingxi-file:|action:)[^"]*)">',
+            r'<a href="(https?://[^"]*)"[^>]*>(.*?)</a>',
+            lambda m: _style_web_link(m.group(1), m.group(2), accent, line),
+            html, flags=_re.DOTALL,
+        )
+        # 其余链接（mailto 之类）：强调色、不加下划线——Qt 默认的纯蓝下划线在深色底上几乎看不清
+        html = _re.sub(
+            r'<a href="((?!lingxi-file:|action:|https?://)[^"]*)">',
             lambda m: f'<a href="{m.group(1)}" style="color:{accent};text-decoration:none;">',
             html,
         )

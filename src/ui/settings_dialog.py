@@ -287,6 +287,20 @@ class SettingsDialog(dialogs.CardDialog):
         trim_hint.setWordWrap(True)
         a.addWidget(trim_hint)
 
+        self._add_section(a, "回复里的链接")
+        self._add_combo(a, "link_open_mode", "点击回复里的网页链接", [
+            ("用系统浏览器打开", "system"),
+            ("在侧栏浏览器打开", "panel"),
+        ])
+        link_hint = QLabel(
+            "• 本机地址（localhost）总在侧栏浏览器打开，调试自己的页面时模型也看得到\n"
+            "• 侧栏浏览器播不了 H.264 视频（B 站等），这类网站默认交给系统浏览器\n"
+            "• 右键链接两种打开方式都能选；改完立即生效"
+        )
+        link_hint.setObjectName("providerCardHint")
+        link_hint.setWordWrap(True)
+        a.addWidget(link_hint)
+
         self._add_section(a, "网络搜索")
         self._add_combo(a, "web_search_provider", "用哪个搜索服务", [
             ("自动：中文问题先 DeepSeek，其余先 Tavily；出错就换下一个", "auto"),
@@ -1143,6 +1157,7 @@ class SettingsDialog(dialogs.CardDialog):
             _cfg.BOCHA_API_KEY = str(self.config.get("bocha_api_key") or "")
             _cfg.WEB_SEARCH_PROVIDER = str(self.config.get("web_search_provider") or "auto")
             _cfg.WEB_SEARCH_DEEP = bool(self.config.get("web_search_deep", False))
+            _cfg.LINK_OPEN_MODE = "panel" if self.config.get("link_open_mode") == "panel" else "system"
         except Exception:
             pass
 

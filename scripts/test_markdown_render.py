@@ -44,9 +44,11 @@ def test_code_block_localhost_not_linkified():
     assert '<a href="http://localhost:5173/' not in html
 
 
-def test_public_url_not_turned_into_browser_link():
-    html = render("见 http://example.com/ 文档")
-    assert 'href="http://example.com' not in html
+def test_public_url_becomes_a_short_link():
+    """设计稿「回复里的链接」：公网网址以前不是链接、点不了；现在变成链接，显示简短形式。"""
+    html = render("见 http://www.example.com/docs/guide 文档")
+    assert '<a href="http://www.example.com/docs/guide"' in html
+    assert ">example.com/docs/guide<" in html, "去掉协议和 www."
 
 
 def test_fenced_code_keeps_asterisks():
