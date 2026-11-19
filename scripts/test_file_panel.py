@@ -528,15 +528,15 @@ def _pump_deletes(qapp, n=30):
 def test_browser_tab_lifecycle(browser_ui, qapp, browser_server):
     """开标签才创建 view；与文件标签并存；切走隐藏不销毁；关标签释放；能重开。"""
     from src.browser import page
-    from src.ui.file_panel import BROWSER_KEY
+    from src.ui.file_panel import BROWSER_KEY, is_browser_key
     ui = browser_ui
     assert page.is_browser_open() is False, "构造 ChatUI / 文件面板不该拉起浏览器"
 
     ui.file_panel.open_browser(browser_server + "/form.html")
     _pump(qapp)
     assert page.is_browser_open() is True
-    assert BROWSER_KEY in ui.file_panel.paths()
-    assert ui.file_panel.current_path() == BROWSER_KEY
+    assert ui.file_panel.has_browser()
+    assert is_browser_key(ui.file_panel.current_path())
     # 标签内容走 LeftSide 按钮（ElideMiddle 对 CJK 误判余量，tabText 会被截成"..."）：
     # 设计稿是页面图标 + 页面标题，加载完显示页面标题
     from PySide6.QtWidgets import QTabBar
@@ -550,7 +550,7 @@ def test_browser_tab_lifecycle(browser_ui, qapp, browser_server):
 
     ui.file_panel.open_file("a.py", [(1, "ctx", "x = 1")])
     _pump(qapp)
-    assert "a.py" in ui.file_panel.paths() and BROWSER_KEY in ui.file_panel.paths()
+    assert "a.py" in ui.file_panel.paths() and ui.file_panel.has_browser()
     browser_index = ui.file_panel._tab_index(BROWSER_KEY)
     ui.file_panel.tabs.setCurrentIndex(browser_index)
     _pump(qapp)
@@ -767,7 +767,7 @@ def test_close_tab_while_model_operating(browser_ui, qapp, browser_server):
     import time
     from src.browser import page
     from src.browser.bridge import get_bridge
-    from src.ui.file_panel import BROWSER_KEY
+    from src.ui.file_panel import BROWSER_KEY, is_browser_key
     ui = browser_ui
     ui.file_panel.open_browser()
     _pump(qapp)
@@ -807,26 +807,26 @@ def test_close_tab_while_model_operating(browser_ui, qapp, browser_server):
 def test_model_close_removes_tab(browser_ui, qapp, browser_server):
     """模型调 browser_close：view 销毁 → 面板自动收标签。"""
     from src.browser import page
-    from src.ui.file_panel import BROWSER_KEY
+    from src.ui.file_panel import BROWSER_KEY, is_browser_key
     ui = browser_ui
     ui.file_panel.open_browser(browser_server + "/form.html")
     assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
     page.close_browser()          # 等价于桥的 close op 对页面的处理
     _pump_deletes(qapp)
-    assert BROWSER_KEY not in ui.file_panel.paths()
+    assert not ui.file_panel.has_browser()
     assert ui.file_panel._browser_view is None
 
 
 def test_localhost_link_opens_panel_but_public_does_not(browser_ui, qapp, browser_server):
     from src.browser import page
-    from src.ui.file_panel import BROWSER_KEY
+    from src.ui.file_panel import BROWSER_KEY, is_browser_key
     ui = browser_ui
     ui._on_file_link_clicked("https://example.com/article")
     _pump(qapp)
-    assert BROWSER_KEY not in ui.file_panel.paths(), "公网链接不进侧栏浏览器"
+    assert not ui.file_panel.has_browser(), "公网链接不进侧栏浏览器"
     ui._on_file_link_clicked(browser_server + "/form.html")
     _pump(qapp)
-    assert BROWSER_KEY in ui.file_panel.paths()
+    assert ui.file_panel.has_browser()
     assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
     ui.file_panel.close_all()
     _pump(qapp, 20)
@@ -834,13 +834,13 @@ def test_localhost_link_opens_panel_but_public_does_not(browser_ui, qapp, browse
 
 def test_open_browser_in_panel_trusts_origin(browser_ui, qapp):
     from src import session
-    from src.ui.file_panel import BROWSER_KEY
+    from src.ui.file_panel import BROWSER_KEY, is_browser_key
     ui = browser_ui
     sess = session.get_active()
     ui._open_browser_in_panel("http://localhost:5173/app", sess)
     _pump(qapp)
     assert "http://localhost:5173" in sess.browser_origin_allowlist
-    assert BROWSER_KEY in ui.file_panel.paths()
+    assert ui.file_panel.has_browser()
     ui.file_panel.close_all()
     _pump(qapp, 20)
 
@@ -947,13 +947,13 @@ def test_model_open_opens_tab_and_view_visible(ui, qapp, fp_server, monkeypatch)
     from src import tools_browser as tb
     from src.browser import page as page_mod
     from src.browser import security as sec
-    from src.ui.file_panel import BROWSER_KEY
+    from src.ui.file_panel import BROWSER_KEY, is_browser_key
     from src import session as _session
     sess = _session.current_session()
     sess.browser_origin_allowlist.add(sec.parse_origin(fp_server))
     _fp_run(qapp, tb.browser_open.func, fp_server + "/form.html")
     _pump(qapp, 20)
-    assert BROWSER_KEY in ui.file_panel.paths(), "模型开页应自动开浏览器标签"
+    assert ui.file_panel.has_browser(), "模型开页应自动开浏览器标签"
     view = page_mod._browser.view
     assert view.isVisible(), "view 应显示（不 hidden）"
     from src.browser.bridge import get_bridge
@@ -963,22 +963,55 @@ def test_model_open_opens_tab_and_view_visible(ui, qapp, fp_server, monkeypatch)
     _pump(qapp, 10)
 
 
+def test_each_page_gets_its_own_panel_tab_kept_in_sync(ui, qapp, fp_server):
+    """多标签：每个网页一个面板标签。模型开了新标签，面板多一个并切过去；用户点回原来的
+    面板标签，模型的当前标签跟着变；关一个面板标签只关那一页。"""
+    from src import tools_browser as tb
+    from src.browser import page as page_mod
+    from src.browser import security as sec
+    from src.ui.file_panel import browser_key, is_browser_key
+    from src import session as _session
+    sess = _session.current_session()
+    sess.browser_origin_allowlist.add(sec.parse_origin(fp_server))
+    _fp_run(qapp, tb.browser_open.func, fp_server + "/form.html")
+    _pump(qapp, 20)
+    _fp_run(qapp, tb.browser_open.func, fp_server + "/form.html?b", new_tab=True)
+    _pump(qapp, 20)
+    fp = ui.file_panel
+    b = page_mod._browser
+    first, second = list(b.tabs)
+    keys = [k for k in fp.paths() if is_browser_key(k)]
+    assert keys == [browser_key(first), browser_key(second)], keys
+    assert fp.current_path() == browser_key(second), "模型开的新标签：面板切过去"
+    assert fp.stack.currentWidget() is fp._bviews[second][0]
+    fp.tabs.setCurrentIndex(fp._tab_index(browser_key(first)))
+    _pump(qapp, 5)
+    assert b.current_id == first, "用户点回原来的网页：模型之后的操作作用于它"
+    fp.close_file(browser_key(second))
+    _pump(qapp, 10)
+    assert list(page_mod._browser.tabs) == [first]
+    assert [k for k in fp.paths() if is_browser_key(k)] == [browser_key(first)]
+    fp.close_all()
+    _pump(qapp, 10)
+    assert page_mod._browser is None
+
+
 def test_manual_open_browser_button(ui, qapp, fp_server):
     """14：顶栏的地球按钮（原来在右侧栏标签行，挪到顶栏）开空白页；关后再点复用上次地址。"""
     from src.browser import page as page_mod
-    from src.ui.file_panel import BROWSER_KEY
+    from src.ui.file_panel import BROWSER_KEY, is_browser_key
     assert not hasattr(ui.file_panel, "open_browser_btn"), "右侧栏标签行不再放浏览器入口"
     ui.browser_btn.click()
     _pump(qapp, 10)
-    assert BROWSER_KEY in ui.file_panel.paths()
+    assert ui.file_panel.has_browser()
     ui.file_panel.open_browser(fp_server + "/form.html")
     _pump(qapp, 10)
     ui.file_panel.close_file(BROWSER_KEY)
     _pump(qapp, 10)
-    assert BROWSER_KEY not in ui.file_panel.paths()
+    assert not ui.file_panel.has_browser()
     ui.browser_btn.click()
     _pump(qapp, 20)
-    assert BROWSER_KEY in ui.file_panel.paths()
+    assert ui.file_panel.has_browser()
     import time
     end = time.time() + 10
     while time.time() < end and "form.html" not in page_mod._browser.page.url().toString():

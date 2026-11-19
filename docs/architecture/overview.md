@@ -33,7 +33,7 @@ src/                     # 主代码
   tools_web.py           # 网络只读：fetch_url（SSRF 防护 + 重定向逐跳校验 + 默认不走代理）/ web_search（Tavily）
   tools_browser.py       # 侧栏浏览器的 9 个工具（open/snapshot/find/read_text/click/type/console/close/screenshot）：确认闸门在工具内部 + ref 签发登记（核对 docId）+ 页面文字围 untrusted + 动作前后变化行 diff（文字树没变时报操作处附近的计算样式差异）+ 截图交识别模型 + 浏览器检查证据
   browser/               # 侧栏浏览器（模型和人共用一个页面；懒加载，顶层不 import WebEngine；详见 subsystems.md「侧栏浏览器」节）
-    page.py              # 常驻 off-the-record profile（NoCache）+ 注入 tree.js + ConsolePage（控制台按加载序号 nav 记、弹框/新窗口/下载/非 http(s) 一律拦）+ get_browser/close_browser + HTTP 缓存闸门（load_url：清缓存和导航绝不重叠）
+    page.py              # 常驻 off-the-record profile（NoCache）+ 注入 tree.js + ConsolePage（控制台按加载序号 nav 记、弹框/下载/非 http(s) 一律拦）+ 多标签（Browser.tabs / 当前标签、新窗口请求按发起方开标签或拦下，close_tab）+ get_browser/close_browser + HTTP 缓存闸门（load_url：清缓存和导航绝不重叠）
     bridge.py            # worker ↔ 主线程的非阻塞桥（Signal 投递 + Event 分片等待、响应停止）；open 前清渲染进程内存缓存；ref 编号种子跨文档单调递增
     security.py          # 纯逻辑：网址规则（只许 http/https）、来源授权与动作分级、有后果动作判定（提交/POST/回车）
     tree.py              # 纯逻辑：变化行 diff、untrusted 围栏（转义伪造的结束标签）、字符上限

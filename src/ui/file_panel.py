@@ -56,8 +56,24 @@ def _norm(path: str) -> str:
     return (path or "").replace("\\", "/")
 
 
-# 浏览器标签的哨兵 tabData（不是文件路径）：paths() 只用来判面板空不空，无持久化顾虑
+# 浏览器标签的哨兵 tabData（不是文件路径）：paths() 只用来判面板空不空，无持久化顾虑。
+# 每个网页一个标签：lingxi:browser#<标签 id>；单独的 BROWSER_KEY 指「当前那个网页标签」
 BROWSER_KEY = "lingxi:browser"
+
+
+def browser_key(tab_id) -> str:
+    return f"{BROWSER_KEY}#{tab_id}"
+
+
+def is_browser_key(key) -> bool:
+    return bool(key) and (key == BROWSER_KEY or str(key).startswith(BROWSER_KEY + "#"))
+
+
+def browser_tab_id(key):
+    try:
+        return int(str(key).split("#", 1)[1])
+    except (IndexError, ValueError):
+        return None
 BACKGROUND_KEY = "lingxi:background"
 DEBUG_KEY = "lingxi:debug"
 
@@ -169,12 +185,41 @@ class FilePanel(QFrame):
         self._rows: dict[str, list] = {}        # 归一化路径 → 交进来的逐行差异（切主题要重画）
         self._hints: dict[str, str] = {}        # 归一化路径 → 内容说明（diff / 新文件 / 无差异）
         self._spans: dict[str, dict] = {}       # 归一化路径 → {行下标: 高亮范围}（切主题不用重解析）
-        self._browser_view = None               # 浏览器标签内容（第一次 open_browser 才创建，懒加载）
-        self._browser_tab_label = None          # 浏览器标签文字（LeftSide 按钮，见 open_browser）
+        # 浏览器：每个网页一个标签（key = lingxi:browser#<标签 id>），标签 id → (BrowserView, 标签文字)
+        self._bviews: dict[int, tuple] = {}
         self._browser_last_url = ""             # 手动入口复用的上次地址
         self._widget_tabs: dict[str, dict] = {}  # 后台 / 调试这类常驻控件标签：key → 控件与文案
         self._build_ui()
         self.apply_theme()
+        # 浏览器开 / 关标签、当前标签换了：面板跟着变（模型点开新标签也看得见）。
+        # page 模块顶层不碰 WebEngine，这里接信号不会把它拉起来
+        from ..browser import page as _bpage
+        _bpage._notifier.tab_added.connect(self._on_browser_tab_added)
+        _bpage._notifier.tab_closed.connect(self._on_browser_tab_closed)
+        _bpage._notifier.current_changed.connect(self._on_browser_current_changed)
+        _bpage._notifier.popup_blocked.connect(self._on_popup_blocked)
+
+    # ── 浏览器标签的兼容入口：只有一个浏览器标签时代的调用方 / 测试 ──
+    @property
+    def _browser_view(self):
+        """当前浏览器标签的视图（没开浏览器是 None）。"""
+        entry = self._bviews.get(self._current_browser_id())
+        return entry[0] if entry else None
+
+    @property
+    def _browser_tab_label(self):
+        entry = self._bviews.get(self._current_browser_id())
+        return entry[1] if entry else None
+
+    def _current_browser_id(self):
+        from ..browser import page as _bpage
+        cur = _bpage.current_tab_id()
+        if cur in self._bviews:
+            return cur
+        return next(iter(self._bviews), None)
+
+    def has_browser(self) -> bool:
+        return bool(self._bviews)
 
     # ── 主题 ──
     def _t(self, key: str) -> str:
@@ -221,8 +266,9 @@ class FilePanel(QFrame):
         for view in self._panes.values():
             view.apply_theme(self._t("mv_view_bg"), self._t("mv_text"))
             self._fill(view, self._rows.get(self._path_of(view)) or [])
-        if self._browser_view is not None and shiboken6.isValid(self._browser_view):
-            self._browser_view.apply_theme()
+        for view, _label in self._bviews.values():
+            if shiboken6.isValid(view):
+                view.apply_theme()
         self._sync_header()
 
     # ── 搭建 ──
@@ -346,44 +392,103 @@ class FilePanel(QFrame):
         self._show_self()
 
     def open_browser(self, url: str = ""):
-        """开"浏览器"标签（已开就切过去）；url 非空则导航。第一次点开才创建 view（懒加载）。"""
+        """开浏览器（已开就切到当前那个网页标签）；url 非空则在当前标签导航。
+        浏览器第一次打开才创建（懒加载）；每个网页一个标签，见 _ensure_browser_view。"""
         if url:
             self._browser_last_url = url
-        if self._browser_view is not None and shiboken6.isValid(self._browser_view):
-            index = self._tab_index(BROWSER_KEY)
-            if index >= 0:
-                self.tabs.setCurrentIndex(index)
-            if url:
-                self._browser_view.navigate(url)
-            self._sync_header()
-            self._show_self()
-            return
+        from ..browser import page as _bpage
+        b = _bpage.get_browser()
+        for tid in list(b.tabs):
+            self._ensure_browser_view(tid)
+        cur = b.current_id
+        index = self._tab_index(browser_key(cur))
+        if index >= 0:
+            self.tabs.setCurrentIndex(index)
+        entry = self._bviews.get(cur)
+        if url and entry is not None:
+            entry[0].navigate(url)
+        self._sync_header()
+        self._show_self()
+
+    def _ensure_browser_view(self, tab_id):
+        """给浏览器的一个标签建面板标签（已有就不动）。返回是否新建了。"""
+        from ..browser import page as _bpage
+        b = _bpage._browser
+        if tab_id in self._bviews or b is None or b.tab(tab_id) is None:
+            return False
         from .browser_panel import BrowserView   # 惰性 import：构造面板不碰 WebEngine
-        view = BrowserView(self.stack, theme_lookup=self.theme_lookup)
-        self._browser_view = view
+        view = BrowserView(self.stack, theme_lookup=self.theme_lookup, tab_id=tab_id)
         self.stack.addWidget(view)
-        index = self.tabs.addTab("")
+        key = browser_key(tab_id)
+        # 新网页标签排在最后一个网页标签后面（文件标签不夹在中间）
+        last = max((i for i in range(self.tabs.count()) if is_browser_key(self.tabs.tabData(i))),
+                   default=self.tabs.count() - 1)
+        index = self.tabs.insertTab(last + 1, "")
+        # insertTab 的位置和 stack 的顺序要一致：stack 按标签下标切
+        self.stack.removeWidget(view)
+        self.stack.insertWidget(index, view)
         # 标签内容走 LeftSide 按钮而非 tabText：ElideMiddle 对 CJK 会误判余量截成"..."
         # （原生字体下实测）。设计稿：页面图标 + 页面标题 + 模型操作中的小圆点
         label = _BrowserTabLabel(self.tabs)
         self.tabs.setTabButton(index, QTabBar.LeftSide, label)
-        self._browser_tab_label = label
-        self.tabs.setTabData(index, BROWSER_KEY)
+        self.tabs.setTabData(index, key)
         self.tabs.setTabToolTip(index, "模型可操作的侧边栏浏览器（F12 开发者工具）")
-        btn = self._tab_close_button("关闭浏览器标签",
-                                     lambda _checked=False: self.close_file(BROWSER_KEY))
+        btn = self._tab_close_button("关闭这个网页",
+                                     lambda _checked=False, k=key: self.close_file(k))
         self.tabs.setTabButton(index, QTabBar.RightSide, btn)
-        view.closed.connect(lambda: self.close_file(BROWSER_KEY))
-        view.tab_state_changed.connect(self._refresh_browser_tab)
+        self._bviews[tab_id] = (view, label)
+        view.closed.connect(lambda t=tab_id: self._drop_browser_view(t))
+        view.tab_state_changed.connect(lambda t=tab_id: self._refresh_browser_tab(t))
         view.stop_requested.connect(self.browser_stop_requested)
         view.background_requested.connect(self.background_requested)
+        # 「更多」里的关闭浏览器：整个浏览器（所有网页）
         view.close_requested.connect(lambda: self.close_file(BROWSER_KEY))
-        self.tabs.setCurrentIndex(index)
-        self._refresh_browser_tab()
-        if url:
-            view.navigate(url)
-        self._sync_header()
-        self._show_self()
+        self._refresh_browser_tab(tab_id)
+        return True
+
+    def _drop_browser_view(self, tab_id):
+        """浏览器那边已经关了这个标签：只拆面板上的标签和视图（不再去关一次）。"""
+        entry = self._bviews.pop(tab_id, None)
+        if entry is None:
+            return
+        view, _label = entry
+        index = self._tab_index(browser_key(tab_id))
+        if index >= 0:
+            self.tabs.removeTab(index)
+        if shiboken6.isValid(view):
+            self.stack.removeWidget(view)
+            view.detach()
+            view.deleteLater()
+        if self.tabs.count() == 0:
+            self.close_all()
+        else:
+            self._on_tab_changed(self.tabs.currentIndex())
+
+    def _on_browser_tab_added(self, tab_id):
+        from ..browser import page as _bpage
+        if not self.isVisible() and not self._bviews:
+            return        # 面板还没开浏览器：等 open_browser 一起建（browser_created 会开）
+        if self._ensure_browser_view(tab_id) and _bpage.current_tab_id() == tab_id:
+            index = self._tab_index(browser_key(tab_id))
+            if index >= 0:
+                self.tabs.setCurrentIndex(index)     # 模型点开的新标签：切过去让用户看见
+            self._show_self()
+
+    def _on_browser_tab_closed(self, tab_id):
+        self._drop_browser_view(tab_id)
+
+    def _on_browser_current_changed(self, tab_id):
+        """模型切了标签：用户正看着浏览器就跟着切（看着文件时不打断）。"""
+        if not is_browser_key(self.current_path()):
+            return
+        index = self._tab_index(browser_key(tab_id))
+        if index >= 0 and index != self.tabs.currentIndex():
+            self.tabs.setCurrentIndex(index)
+
+    def _on_popup_blocked(self, url):
+        view = self._browser_view
+        if view is not None and shiboken6.isValid(view):
+            view.flash(f"页面自己弹出的新窗口已拦截：{url}")
 
     def open_last_browser(self):
         """用户手动开浏览器（顶栏的地球按钮，复审 14）：已开就切过去；关过就复用上次地址，没有就空白页。"""
@@ -455,21 +560,25 @@ class FilePanel(QFrame):
                 self._on_tab_changed(self.tabs.currentIndex())
             return
         if key == BROWSER_KEY:
-            index = self._tab_index(key)
-            if index < 0:
+            # 整个浏览器（所有网页）：各标签的视图由 tab_closed 通知拆掉
+            if not self._bviews:
                 return
-            view = self._browser_view
-            self._browser_view = None
-            self._browser_tab_label = None
-            self.tabs.removeTab(index)
-            if view is not None:
-                self.stack.removeWidget(view)
-                view.release()          # 释放 view/page，profile 常驻（§11.6）
-                view.deleteLater()
-            if self.tabs.count() == 0:
-                self.close_all()
-            else:
-                self._on_tab_changed(self.tabs.currentIndex())
+            for view, _label in list(self._bviews.values()):
+                if shiboken6.isValid(view):
+                    view.detach()
+            from ..browser import page as _bpage
+            _bpage.close_browser()        # 释放 view/page，profile 常驻（§11.6）
+            for tid in list(self._bviews):
+                self._drop_browser_view(tid)
+            return
+        if is_browser_key(key):
+            # 一个网页：浏览器那边关掉它（最后一个等于关浏览器），面板标签随 tab_closed 拆
+            tid = browser_tab_id(key)
+            entry = self._bviews.get(tid)
+            if entry is None:
+                return
+            entry[0].release()
+            self._drop_browser_view(tid)
             return
         index = self._tab_index(key)
         if index < 0:
@@ -489,13 +598,16 @@ class FilePanel(QFrame):
 
     def close_all(self):
         """关掉所有标签页并收起面板（对话区恢复原来的宽度）。"""
-        if self._browser_view is not None:
-            view = self._browser_view
-            self._browser_view = None
-            self._browser_tab_label = None
-            self.stack.removeWidget(view)
-            view.release()
-            view.deleteLater()
+        if self._bviews:
+            views = [v for v, _l in self._bviews.values()]
+            self._bviews.clear()
+            for view in views:
+                if shiboken6.isValid(view):
+                    self.stack.removeWidget(view)
+                    view.detach()
+                    view.deleteLater()
+            from ..browser import page as _bpage
+            _bpage.close_browser()
         for key in list(self._panes):
             view = self._panes.pop(key)
             self._rows.pop(key, None)
@@ -512,6 +624,11 @@ class FilePanel(QFrame):
         self.closed.emit()
 
     def _tab_index(self, key: str) -> int:
+        if key == BROWSER_KEY:          # 「当前那个网页标签」
+            cur = self._current_browser_id()
+            if cur is None:
+                return -1
+            key = browser_key(cur)
         for i in range(self.tabs.count()):
             if _norm(self.tabs.tabData(i)) == key:
                 return i
@@ -529,6 +646,11 @@ class FilePanel(QFrame):
 
     def _on_tab_changed(self, index: int):
         self.stack.setCurrentIndex(index)
+        key = self.tabs.tabData(index) if index >= 0 else ""
+        if is_browser_key(key) and browser_tab_id(key) is not None:
+            # 用户点了某个网页标签：模型之后的操作也作用于它（双向同步）
+            from ..browser import page as _bpage
+            _bpage.set_current_tab(browser_tab_id(key))
         self._sync_header()
 
     def _close_icon(self, size: int = 12):
@@ -552,14 +674,19 @@ class FilePanel(QFrame):
         btn.clicked.connect(slot)
         return btn
 
-    def _refresh_browser_tab(self):
-        """浏览器标签跟着页面走：标题、图标、出错、模型操作中的小圆点。"""
-        label, view = self._browser_tab_label, self._browser_view
-        if label is None or view is None or not shiboken6.isValid(label) or not shiboken6.isValid(view):
+    def _refresh_browser_tab(self, tab_id=None):
+        """网页标签跟着页面走：标题、图标、出错、模型操作中的小圆点。"""
+        if tab_id is None:
+            tab_id = self._current_browser_id()
+        entry = self._bviews.get(tab_id)
+        if entry is None:
+            return
+        view, label = entry
+        if not shiboken6.isValid(label) or not shiboken6.isValid(view):
             return
         label.set_state(view.tab_title(), view.tab_icon(), busy=view.model_active,
                         failed=view.failed)
-        index = self._tab_index(BROWSER_KEY)
+        index = self._tab_index(browser_key(tab_id))
         if index >= 0:
             p = view.page_url()
             tip = (view.tab_title() + "\n" + p) if p and p != "about:blank" \
@@ -579,11 +706,12 @@ class FilePanel(QFrame):
 
     def _sync_header(self):
         key = _norm(self.current_path())
-        self.file_header.setVisible(bool(key) and key != BROWSER_KEY
+        self.file_header.setVisible(bool(key) and not is_browser_key(key)
                                     and key not in self._widget_tabs)
-        if self._browser_tab_label is not None and shiboken6.isValid(self._browser_tab_label):
-            # 标签上的 QLabel 不继承 QTabBar::tab 的 color，选中/未选中自己刷
-            self._browser_tab_label.apply(self._tab_label_qss(key == BROWSER_KEY), self._t)
+        for tid, (_view, label) in self._bviews.items():
+            if shiboken6.isValid(label):
+                # 标签上的 QLabel 不继承 QTabBar::tab 的 color，选中/未选中自己刷
+                label.apply(self._tab_label_qss(key == browser_key(tid)), self._t)
         for wkey, entry in self._widget_tabs.items():
             if shiboken6.isValid(entry["label"]):
                 entry["label"].setStyleSheet(self._tab_label_qss(key == wkey))
@@ -593,7 +721,7 @@ class FilePanel(QFrame):
             self.path_label.setToolTip(entry["header"])
             self.hint_label.setText(entry["hint"])
             return
-        if key == BROWSER_KEY:
+        if is_browser_key(key):
             self.path_label.setText("浏览器")
             self.path_label.setToolTip("模型可操作的侧边栏浏览器")
             self.hint_label.setText("模型可操作的侧边栏浏览器 · F12 开发者工具")

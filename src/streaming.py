@@ -191,6 +191,7 @@ PLAN_MODE_READONLY_TOOLS = {
     # browser_click / browser_type 是动作，**不在**这里（Plan 拦下）；browser_close 改状态也不在
     "browser_open", "browser_snapshot", "browser_find", "browser_read_text", "browser_console",
     "browser_screenshot",  # 截图交识别模型：只读页面（滚动到 ref 不改页面数据），网络外发同 read_image
+    "browser_tabs",  # 列 / 切 / 关标签：不改页面数据（关标签同关浏览器，只清本地浏览状态）
 }
 
 

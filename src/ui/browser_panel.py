@@ -8,9 +8,9 @@ F12、更多）→ 2px 加载条 → 内容区。内容区三种状态：
 - **连不上**：我们自己的错误页（重新加载 / 去后台看看），不用 Chromium 那页英文。
 开发者工具（F12）停靠在页面下方、可拖动分隔条，也能弹成单独窗口。
 
-**嵌入而非另建**：view 直接用 page.get_browser().view——模型和人操作同一个 page，
-桥的导航/点击在面板里实时可见。关标签调 page.close_browser() 释放 view/page；
-模型自己调 browser_close 时 view 被销毁，destroyed 信号通知面板收标签。
+**嵌入而非另建**：每个网页一个面板标签，各嵌浏览器对应标签的 view——模型和人操作同一个
+page，桥的导航/点击在面板里实时可见。关面板标签调 page.close_tab() 关掉那一页（最后一页
+等于关浏览器）；模型关标签 / browser_close 时 page 发 tab_closed，面板拆掉对应视图。
 
 **懒加载硬约束**（§11.7）：本模块顶层不 import QtWebEngine*；view 随第一次
 open_browser（或第一次 browser_* 工具调用）由 page.get_browser() 创建。
@@ -367,9 +367,13 @@ class BrowserView(QWidget):
     background_requested = Signal()         # 错误页「去后台看看」
     close_requested = Signal()              # 「更多」里的关闭浏览器
 
-    def __init__(self, parent=None, theme_lookup=None):
+    def __init__(self, parent=None, theme_lookup=None, tab_id=None):
         super().__init__(parent)
         self.setObjectName("browserView")
+        # 这个视图对应浏览器的哪个标签（每个网页一个面板标签）；不给就是当前标签
+        if tab_id is None:
+            tab_id = page.get_browser().current_id
+        self.tab_id = tab_id
         self._theme = theme_lookup or (lambda key: "#64748b")
         self._embedded = None
         self._wired_page = None
@@ -473,7 +477,7 @@ class BrowserView(QWidget):
         self._service_timer.setInterval(2000)
         self._service_timer.timeout.connect(self._refresh_empty)
 
-        self._embed(page.get_browser().view)
+        self._embed(self._tab().view)
         get_bridge().activity.connect(self._on_activity)
         # F12 只在本面板（含子控件）有焦点时生效，不抢整窗口的 F12（那是「调试」标签）
         QShortcut(QKeySequence("F12"), self,
@@ -535,9 +539,8 @@ class BrowserView(QWidget):
         self.page_split.addWidget(self.devtools_panel)
         self.page_split.setStretchFactor(1, 2)
         view.destroyed.connect(self._on_view_destroyed)
-        b = page.get_browser()
         self._unwire_page()
-        p = b.page
+        p = self._tab().page
         p.urlChanged.connect(self._on_url_changed)
         p.titleChanged.connect(self._on_title_changed)
         p.iconChanged.connect(self._on_icon_changed)
@@ -565,9 +568,16 @@ class BrowserView(QWidget):
             except (RuntimeError, TypeError):
                 pass
 
+    def _tab(self):
+        b = page.get_browser()
+        return b.tab(self.tab_id) or b.current
+
     def _ensure_embedded(self):
         if self._embedded is None or not shiboken6.isValid(self._embedded):
-            self._embed(page.get_browser().view)
+            b = page._browser
+            if b is None or b.tab(self.tab_id) is None:
+                return            # 这个标签已经关了：面板会随 tab_closed 拆掉本视图
+            self._embed(b.tab(self.tab_id).view)
 
     def _on_view_destroyed(self):
         self._embedded = None
@@ -575,7 +585,15 @@ class BrowserView(QWidget):
             self.closed.emit()
 
     def release(self):
-        """关标签时调：释放 view/page（profile 常驻不销毁，§11.6）。停靠的开发者工具先拆掉。"""
+        """关这个网页标签：拆本视图，再让浏览器关掉对应的标签（最后一个等于关浏览器，
+        profile 常驻不销毁，§11.6）。"""
+        self.detach()
+        page.close_tab(self.tab_id)
+
+    def detach(self):
+        """只拆本视图（停计时器、摘开发者工具、断页面信号），不动浏览器那边的标签。"""
+        if self._releasing:
+            return
         self._releasing = True
         self._service_timer.stop()
         self._linger.stop()
@@ -587,7 +605,6 @@ class BrowserView(QWidget):
                 pass
         self._unwire_page()
         self._embedded = None
-        page.close_browser()
 
     # ── 状态 ────────────────────────────────────────────────────
     def page_url(self) -> str:
@@ -796,6 +813,9 @@ class BrowserView(QWidget):
                 sess.browser_origin_allowlist.add(origin)
         self.navigate(url)
 
+    def flash(self, text):
+        self._flash(text)
+
     def _flash(self, text):
         self.badge.setText(text)
         self.badge.setVisible(True)
@@ -826,6 +846,9 @@ class BrowserView(QWidget):
 
     # ── 模型正在操作 ────────────────────────────────────────────
     def _on_activity(self, text):
+        # 桥的动作作用于当前标签：别的网页标签不亮「操作中」
+        if text and page.current_tab_id() != self.tab_id:
+            return
         self._activity_text = text
         if text:
             self._linger.stop()
@@ -980,11 +1003,10 @@ class BrowserView(QWidget):
 
     def _open_devtools(self):
         from PySide6.QtWebEngineWidgets import QWebEngineView
-        b = page.get_browser()
         if self._devtools_view is None or not shiboken6.isValid(self._devtools_view):
             self._devtools_view = QWebEngineView(self.devtools_panel)
             self._devtools_box.addWidget(self._devtools_view)
-        b.page.setDevToolsPage(self._devtools_view.page())
+        self._tab().page.setDevToolsPage(self._devtools_view.page())
         self._devtools_popped = False
         self.devtools_panel.setVisible(True)
         total = max(300, self.page_split.height())
@@ -999,6 +1021,7 @@ class BrowserView(QWidget):
         """弹成单独窗口：停靠的那份收起，用 Browser.open_devtools 开独立窗口（同一个页面只能挂一份）。"""
         self._hide_devtools()
         self._devtools_popped = True
+        page.set_current_tab(self.tab_id)        # 独立窗口挂在当前标签上
         page.get_browser().open_devtools()
 
     def _drop_devtools(self):

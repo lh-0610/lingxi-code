@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>新标签</title></head>
+<body>
+<!-- B 站视频卡片就是这种：target=_blank，以前一律被拦，点了没反应 -->
+<a id="blank" href="/states.html" target="_blank">在新标签打开</a>
+<button id="opener" onclick="window.open('/form.html')">弹出表单页</button>
+<div id="out">-</div>
+<script>
+  // 广告式：页面自己定时弹窗（不是用户 / 模型点的），要拦下
+  if (location.search.includes("popup"))
+    setTimeout(() => window.open("/form.html?ad"), 300);
+</script>
+</body>
+</html>

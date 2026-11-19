@@ -37,16 +37,87 @@ _SETTLE_TRANSITION_MAX_MS = 1000
 _PRESS_CONFIRM_TRIES = 20
 _NO_PAGE = "还没有打开的页面：先用 browser_open(url) 打开。"
 
-# ref 签发登记：(frame, ref) -> 签发时的 docId。换文档后旧 ref 一律报失效，
-# 配错 frame 也报失效（不能点中别的 frame / 新文档的同号元素）
+# ref 签发登记：((标签, frame), ref) -> 签发时的 docId。换文档后旧 ref 一律报失效，
+# 配错 frame / 标签也报失效（不能点中别的 frame / 别的标签 / 新文档的同号元素）
 _issued: dict = {}
+
+
+def _cur_tab():
+    from .browser import page
+    return getattr(page._browser, "current_id", None)
+
+
+def _tab_ids():
+    from .browser import page
+    return list(getattr(page._browser, "tabs", None) or [])
+
+
+def _tabs_note():
+    """不止一个标签时，结果末尾提一句（模型不知道有别的标签，就不会想到切回去）。"""
+    ids = _tab_ids()
+    if len(ids) < 2:
+        return ""
+    return f"\n（共 {len(ids)} 个标签，当前 #{_cur_tab()}；browser_tabs 查看 / 切换）"
+
+
+_NEW_TAB_LOAD_WAIT_S = 10
+
+
+def _new_tab_text(tabs0, cur0):
+    """动作打开了新标签：返回给模型的说明（切过去了就附新页面的交互快照），没有返回 ""。
+
+    新窗口请求是异步到的：调用方在动作后、算变化前后各查一次。像 browser-use 那样
+    自动切到新标签——模型点「在新标签打开」的链接，要的就是那一页。"""
+    new = [t for t in _tab_ids() if t not in tabs0]
+    cur = _cur_tab()
+    if not new and cur == cur0:
+        return ""
+    if cur in new:
+        # 等新页面加载完再快照（最多 10 秒）
+        import time as _t
+        deadline = _t.monotonic() + _NEW_TAB_LOAD_WAIT_S
+        while _t.monotonic() < deadline:
+            q = _bridge_call("qturl", timeout=5)
+            if q.get("ok") and not q.get("loading") and q.get("url") not in ("", "about:blank"):
+                break
+            _bridge_call("settle", ms=200)
+        head = (f"\n这次操作打开了新标签 #{cur}，已切换过去（原来的标签 #{cur0} 还在，"
+                "browser_tabs 可切回）。新标签的页面：\n")
+        snap = _lx("snapshot", {"mode": "interactive", "maxChars": tree.SNAPSHOT_DEFAULT_CHARS})
+        if not snap.get("ok"):
+            return head + f"（快照失败: {snap.get('error')}，用 browser_snapshot 重试）"
+        _remember_refs(snap, None)
+        return head + _snapshot_text(snap, tree.SNAPSHOT_DEFAULT_CHARS,
+                                     title="页面标题: " + (snap.get("title") or "（无标题）"))
+    if new:
+        ids = "、".join(f"#{t}" for t in new)
+        return f"\n这次操作在后台打开了新标签 {ids}（没切换过去；browser_tabs 可切过去看）。"
+    return f"\n当前标签变成了 #{cur}（原来是 #{cur0}）；先 browser_snapshot 看看。"
+
+
+def _after_action(before, frame, url, tabs0, cur0):
+    """动作之后：开了新标签就报新标签（这时的「变化」比的是两个不同页面，没有意义），
+    否则照常报变化行 diff / 样式核对。"""
+    if before is None:
+        _bridge_call("settle", ms=150)     # 没算变化：给新窗口请求一点时间到达
+        return _new_tab_text(tabs0, cur0)
+    opened = _new_tab_text(tabs0, cur0)
+    if opened:
+        return opened
+    delta = _delta_text(before, frame, url)
+    return _new_tab_text(tabs0, cur0) or delta
+
+
+def _fk(frame):
+    """ref 登记的作用域：哪个标签里的哪个 frame（每个文档的 ref 都从 e1 数起，不分开会串号）。"""
+    return (_cur_tab(), frame or "")
 _STALE_REF = ("ref 已失效：页面已换文档，或该 ref 不是当前快照/find 签发的。"
               "重新 browser_snapshot 拿新 ref 再操作。")
 
 
 def _remember_refs(r, frame):
     doc = r.get("docId") or ""
-    fk = frame or ""
+    fk = _fk(frame)
     for k in [k for k, v in _issued.items() if k[0] == fk and v != doc]:
         del _issued[k]
     for ref in re.findall(r"\[ref=(e\d+)\]", r.get("tree", "")):
@@ -340,7 +411,7 @@ def _remember_load(r, load_revision):
         # 放在验证状态里：它每轮开头整份重置，上一轮的加载不会被这一轮误认
         # （evidence_revision 每轮从 0 数起，跨轮比版本号会撞上）
         _session.get_verification()["browser_last_load"] = {
-            "nav": r.get("nav"), "evidence_revision": load_revision,
+            "nav": r.get("nav"), "tab": r.get("tab"), "evidence_revision": load_revision,
             "url": r.get("url") or "", "loaded": bool(r.get("loaded"))}
     except Exception:
         pass
@@ -360,7 +431,9 @@ def _note_browser_check(r, entries_all):
     if not isinstance(load, dict) or not load.get("loaded") or not v.get("dirty_files"):
         return
     nav = r.get("nav")
-    if nav is None or load.get("nav") != nav or load.get("cleared"):
+    # 带上标签：切标签后另一个标签的加载序号可能恰好相等，会误记一次「浏览器检查」
+    if nav is None or load.get("nav") != nav or load.get("tab") != r.get("tab") \
+            or load.get("cleared"):
         return                      # 页面后来又自己导航过，或这次加载的报错已被清空
     url = r.get("url") or load.get("url") or ""
     if not security.is_localhost(url):
@@ -379,7 +452,7 @@ def _note_browser_check(r, entries_all):
 
 
 @tool
-def browser_open(url: str, timeout: int = 30) -> str:
+def browser_open(url: str, timeout: int = 30, new_tab: bool = False) -> str:
     """在侧边栏浏览器打开网址（只允许 http/https），返回标题 + 首份交互快照（含可点元素的 ref）。
     本机 dev server（localhost）直接开；公网页面按权限模式可能先问用户。
     打开后按快照里的 ref 点击/输入；页面变了 ref 会失效，重新 browser_snapshot。"""
@@ -395,6 +468,10 @@ def browser_open(url: str, timeout: int = 30) -> str:
     except (TypeError, ValueError):
         timeout = 30
     load_revision = _evidence_revision()
+    if new_tab and _tab_ids():
+        nt = _bridge_call("tab_new")
+        if not nt.get("ok"):
+            return f"打开失败: {nt.get('error') or '新建标签失败'}（{url}）"
     r = _bridge_call("open", timeout=timeout, url=url)
     if not r.get("ok"):
         return f"打开失败: {r.get('error') or '未知错误'}（{url}）"
@@ -409,7 +486,7 @@ def browser_open(url: str, timeout: int = 30) -> str:
         return (head + "\n" + tree.fence(title, final_url)
                 + f"\n（首份快照失败: {snap.get('error')}，用 browser_snapshot 重试）")
     _remember_refs(snap, None)
-    return head + "\n" + _snapshot_text(snap, tree.SNAPSHOT_DEFAULT_CHARS, title=title)
+    return head + "\n" + _snapshot_text(snap, tree.SNAPSHOT_DEFAULT_CHARS, title=title) + _tabs_note()
 
 
 @tool
@@ -436,7 +513,7 @@ def browser_snapshot(mode: str = "interactive", max_depth: int = 12,
     out = _snapshot_text(r, cap)
     if frame is None:
         out += _frames_note()
-    return out
+    return out + _tabs_note()
 
 
 def _frames_note():
@@ -526,7 +603,7 @@ def browser_screenshot(question: str, ref: str | None = None) -> str:
         st = _lx("state")
         if not st.get("ok"):
             return _err(st, "读取页面状态")
-        if ("", ref) not in _issued or _issued[("", ref)] != (st.get("docId") or ""):
+        if (_fk(None), ref) not in _issued or _issued[(_fk(None), ref)] != (st.get("docId") or ""):
             return _STALE_REF
         r = _lx("reveal", {"ref": ref})
         if not r.get("ok"):
@@ -566,7 +643,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
     if not st.get("ok"):
         return _err(st, "读取页面状态")
     cur_doc = st.get("docId") or ""
-    if (frame or "", ref) not in _issued or _issued[(frame or "", ref)] != cur_doc:
+    if (_fk(frame), ref) not in _issued or _issued[(_fk(frame), ref)] != cur_doc:
         return _STALE_REF
     info, err = _element_info(ref, frame)
     if err:
@@ -584,6 +661,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
                     extra_url=frame_url if frame else None, origin=origin)
     if refusal:
         return refusal
+    tabs0, cur0 = _tab_ids(), _cur_tab()
     before = _before_action(ref, frame) if delta else None
     fp = info.get("fp")
     if delta:
@@ -597,7 +675,8 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
                     "（关掉弹窗 / 遮罩、等加载层消失），再重新 browser_snapshot。挡在上面的是：\n"
                     + tree.fence(r.get("by") or "", frame_url))
         return _err(r, "点击")
-    return f"已点击 {_describe_for_model(info, ref)}{note}" + _delta_text(before, frame, url)
+    return (f"已点击 {_describe_for_model(info, ref)}{note}"
+            + _after_action(before, frame, url, tabs0, cur0))
 
 
 def _press(ref, expect, frame):
@@ -650,7 +729,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
     if not st.get("ok"):
         return _err(st, "读取页面状态")
     cur_doc = st.get("docId") or ""
-    if (frame or "", ref) not in _issued or _issued[(frame or "", ref)] != cur_doc:
+    if (_fk(frame), ref) not in _issued or _issued[(_fk(frame), ref)] != cur_doc:
         return _STALE_REF
     info, err = _element_info(ref, frame)
     if err:
@@ -677,6 +756,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
                     extra_url=frame_url if frame else None, origin=origin)
     if refusal:
         return refusal
+    tabs0, cur0 = _tab_ids(), _cur_tab()
     before = _before_action(ref, frame) if delta else None
     fp = info.get("fp")
     if delta:
@@ -694,14 +774,16 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
     if r.get("secret"):
         # 密码框不回显（复审 #18）：值会进模型上下文和会话历史
         state_ = "已填写" if r.get("filled") else "为空"
-        return f"已向 {target} 输入，密码框不回显内容（当前{state_}）" + _delta_text(before, frame, url)
+        return (f"已向 {target} 输入，密码框不回显内容（当前{state_}）"
+                + _after_action(before, frame, url, tabs0, cur0))
     raw = r.get("value", "")
     if raw in (text[:100], ""):
         shown_value = json.dumps(raw, ensure_ascii=False)
     else:
         # 页面的输入处理改过值（格式化、自动补全……）：那是页面写的字，进围栏
         shown_value = "（页面改过，见下）\n" + tree.fence(raw, frame_url)
-    return f"已向 {target} 输入，当前值: {shown_value}" + _delta_text(before, frame, url)
+    return (f"已向 {target} 输入，当前值: {shown_value}"
+            + _after_action(before, frame, url, tabs0, cur0))
 
 
 @tool
@@ -724,7 +806,8 @@ def browser_console(level: str = "error", clear: bool = False,
     _note_browser_check(r, entries)
     if clear:
         load = _session.get_verification().get("browser_last_load")
-        if isinstance(load, dict) and load.get("nav") == r.get("nav"):
+        if isinstance(load, dict) and load.get("nav") == r.get("nav") \
+                and load.get("tab") == r.get("tab"):
             load["cleared"] = True  # 这次加载之后的读数看不到清掉的那些报错，不再算检查
     if level != "all":
         entries = [e for e in entries if e.get("level") == level]
@@ -745,6 +828,54 @@ def browser_console(level: str = "error", clear: bool = False,
     scope = "全部加载" if include_previous else "本次页面加载"
     return (f"控制台（{level}，{scope}，{len(entries)} 条）:\n"
             + tree.fence(body, r.get("url", "")) + cleared + note)
+
+
+@tool
+def browser_tabs(action: str = "list", tab_id: int | None = None) -> str:
+    """浏览器标签：action=list 列出所有标签（当前的标 *）；select 切到 tab_id——之后的快照、
+    点击、输入都作用于它；close 关掉 tab_id（关最后一个等于关浏览器）。
+    点开「在新标签打开」的链接会自动开新标签并切过去；想自己开一个用 browser_open(url, new_tab=True)。"""
+    from .browser import page
+    if page._browser is None:
+        return _NO_PAGE
+    if action not in ("list", "select", "close"):
+        return f"action 只能是 list / select / close，收到: {action}"
+    if action != "list":
+        try:
+            tab_id = int(tab_id)
+        except (TypeError, ValueError):
+            return f"{action} 要给 tab_id（browser_tabs 列出的 #号）"
+    if action == "select":
+        r = _bridge_call("tab_select", id=tab_id)
+        if not r.get("ok"):
+            return _err(r, "切换标签")
+        return f"已切到标签 #{tab_id}，之后的操作都作用于它；先 browser_snapshot 看看。\n" + _tab_lines(r)
+    if action == "close":
+        r = _bridge_call("tab_close", id=tab_id)
+        if not r.get("ok"):
+            return _err(r, "关闭标签")
+        if r.get("last"):
+            return f"已关闭标签 #{tab_id}，这是最后一个，浏览器也关了（cookie、缓存已清理）。"
+        _bridge_call("settle", ms=50)
+        lst = _bridge_call("tabs")
+        return f"已关闭标签 #{tab_id}。\n" + (_tab_lines(lst) if lst.get("ok") else "")
+    r = _bridge_call("tabs")
+    if not r.get("ok"):
+        return _err(r, "列标签")
+    return _tab_lines(r)
+
+
+def _tab_lines(r):
+    tabs = r.get("tabs") or []
+    cur = r.get("current")
+    lines = []
+    for t in tabs:
+        mark = "*" if t.get("id") == cur else " "
+        state_ = "（加载中）" if t.get("loading") else ""
+        lines.append(f"{mark} #{t.get('id')} {t.get('title') or '（无标题）'} — {t.get('url') or 'about:blank'}{state_}")
+    # 标题、地址是页面写的：进围栏
+    return (f"共 {len(tabs)} 个标签，当前 #{cur}：\n"
+            + tree.fence("\n".join(lines), (next((t for t in tabs if t.get("id") == cur), {}) or {}).get("url", "")))
 
 
 @tool

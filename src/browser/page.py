@@ -10,8 +10,8 @@ QtWebEngine*；profile / page / view 都在首次 get_browser() 时才构造。b
 关闭时清 cookie / visited links，HTTP 缓存标脏、下一次导航前清（见「HTTP 缓存闸门」）；
 **localStorage 没有清除 API，会留到进程退出**（off-the-record 只在内存，不落盘）。
 
-安全默认值（§6.4）：下载拒、新窗口拒、alert/confirm/prompt dismiss、摄像头/麦克风/定位/通知
-一律 deny。profile 不传 storageName → 不落盘（off-the-record），cookie 不持久化、缓存只在内存。
+安全默认值（§6.4）：下载拒、alert/confirm/prompt dismiss、摄像头/麦克风/定位/通知一律 deny；
+新窗口按是否用户 / 模型发起开新标签或拦下（多标签，见 Browser）。profile 不传 storageName → 不落盘（off-the-record），cookie 不持久化、缓存只在内存。
 """
 import os
 import threading
@@ -30,8 +30,13 @@ _CONSOLE_CAP = 200
 
 
 class _BrowserNotifier(QObject):
-    """模型首次拉起浏览器时通知 UI 开面板标签（复审 7：让用户看得见、view 不 hidden）。"""
+    """模型首次拉起浏览器时通知 UI 开面板标签（复审 7：让用户看得见、view 不 hidden）。
+    多标签：每开 / 关一个标签、当前标签换了都通知面板（面板每个网页一个标签，双向同步）。"""
     browser_created = Signal()
+    tab_added = Signal(int)            # 标签 id
+    tab_closed = Signal(int)
+    current_changed = Signal(int)
+    popup_blocked = Signal(str)        # 页面自己弹的新窗口被拦下（地址），面板闪一行提示
 
 
 _notifier = _BrowserNotifier()
@@ -72,10 +77,17 @@ def _console_page_class():
             # 第几次页面加载：控制台条目带上它，browser_console 默认只给最近一次加载的，
             # 免得改好代码重开后还看到上一次的旧报错（评测 012）
             self.nav_seq = 0
+            # 这个页面有没有导航在途：按页记（多标签后不能只有一个全局标志）
+            self.lx_loading = False
             self.loadStarted.connect(self._on_load_started)
+            self.loadFinished.connect(self._on_load_finished)
 
         def _on_load_started(self):
             self.nav_seq += 1
+            self.lx_loading = True
+
+        def _on_load_finished(self, _ok):
+            self.lx_loading = False
 
         def _note(self, level, text):
             self._sink.append({"level": level, "text": str(text)[:2000], "t": time.time(),
@@ -106,10 +118,8 @@ def _console_page_class():
             self._note("warn", f"已拦截非 http(s) 导航: {url.toString()}")
             return False
 
-        def createWindow(self, windowtype):
-            # P1 拒绝新窗口 / target=_blank（§6.4）；返回 None 即拦截
-            self._note("warn", "链接要求新窗口，已拦截")
-            return None
+        # 不覆写 createWindow：新窗口 / target=_blank 走 newWindowRequested（Browser 里接），
+        # 按「是不是用户发起的」决定开新标签还是拦下（以前一律拦，B 站点视频没反应）
 
     _page_cls = ConsolePage
     return _page_cls
@@ -139,34 +149,156 @@ def _get_profile():
     return _profile
 
 
+MAX_TABS = 10
+# 模型点击 / 输入之后这么久之内到达的新窗口请求，算模型发起的（脚本点击退路下
+# isUserInitiated 是 False，和广告弹窗分不开，只能按时间归因）
+_MODEL_ACTION_GRACE_S = 1.5
+
+
+class Tab:
+    """一个标签：自己的 view / page / 控制台缓冲。"""
+
+    def __init__(self, tab_id, view, page, console_sink, opener=None):
+        self.id = tab_id
+        self.view = view
+        self.page = page
+        self.console_sink = console_sink
+        self.opener = opener          # 从哪个标签点开的（None = 自己开的）
+
+
 class Browser(QObject):
-    """一个浏览器实例：常驻 off-the-record profile + 注入文字树的 page + view。主线程构造。"""
+    """浏览器：常驻 off-the-record profile + 若干标签（各有注入文字树的 page + view）。主线程构造。
+
+    `view` / `page` / `console_sink` 指**当前标签**——模型的动作、桥的请求都作用于当前标签，
+    面板里切标签就是切当前标签（双向同步）。页面要求开新窗口（target=_blank、window.open）时：
+    用户发起的（真实点击，模型的点击现在也是真实鼠标事件）、或模型动作后不久到达的，开新标签；
+    页面自己弹的（广告、定时弹窗）拦下并提示。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-
-        self.console_sink = deque(maxlen=_CONSOLE_CAP)
         self.profile = _get_profile()
         self.profile.downloadRequested.connect(self._on_download)
+        self.tabs = {}                 # id -> Tab，按打开顺序
+        self.current_id = None
+        self._seq = 0
+        self.model_action_at = 0.0     # 最近一次模型点击 / 输入（monotonic），见 note_model_action
+        self.new_tab()
 
-        self.view = QWebEngineView()
-        self.page = _console_page_class()(self.profile, self.view, self.console_sink)
-        self.view.setPage(self.page)
-        self.page.featurePermissionRequested.connect(self._deny_permission)
+    # ── 当前标签 ──
+    @property
+    def current(self):
+        return self.tabs.get(self.current_id)
+
+    @property
+    def view(self):
+        t = self.current
+        return t.view if t else None
+
+    @property
+    def page(self):
+        t = self.current
+        return t.page if t else None
+
+    @property
+    def console_sink(self):
+        t = self.current
+        return t.console_sink if t else deque(maxlen=_CONSOLE_CAP)
+
+    def tab(self, tab_id):
+        return self.tabs.get(tab_id)
+
+    def tab_of_page(self, pg):
+        return next((t for t in self.tabs.values() if t.page is pg), None)
+
+    # ── 开 / 关 / 切 ──
+    def new_tab(self, *, make_current=True, opener=None):
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        self._seq += 1
+        sink = deque(maxlen=_CONSOLE_CAP)
+        view = QWebEngineView()
+        pg = _console_page_class()(self.profile, view, sink)
+        view.setPage(pg)
+        pg.featurePermissionRequested.connect(
+            lambda frame, feature, p=pg: self._deny_permission(p, frame, feature))
+        pg.newWindowRequested.connect(lambda req, p=pg: self._on_new_window(p, req))
+        tab = Tab(self._seq, view, pg, sink, opener=opener)
+        self.tabs[tab.id] = tab
+        first = self.current_id is None
+        if make_current or first:
+            self.current_id = tab.id
+        tid = tab.id
+        # 下一轮事件循环再通知：别在 bridge dispatch / 页面信号中途重入面板控件
+        QTimer.singleShot(0, _notifier, lambda: _notifier.tab_added.emit(tid))
+        if (make_current or first) and not first:
+            QTimer.singleShot(0, _notifier, lambda: _notifier.current_changed.emit(tid))
+        return tab
+
+    def set_current(self, tab_id):
+        if tab_id not in self.tabs or tab_id == self.current_id:
+            return
+        self.current_id = tab_id
+        _notifier.current_changed.emit(tab_id)
+
+    def close_tab(self, tab_id):
+        """关一个标签。最后一个由调用方走 close_browser（清 cookie 那一套）。"""
+        tab = self.tabs.pop(tab_id, None)
+        if tab is None:
+            return
+        if self.current_id == tab_id:
+            # 回到打开它的那个标签（还在的话），否则相邻的最后一个
+            back = tab.opener if tab.opener in self.tabs else None
+            self.current_id = back if back is not None else (list(self.tabs)[-1] if self.tabs else None)
+            if self.current_id is not None:
+                _notifier.current_changed.emit(self.current_id)
+        _release_tab(tab)
+        _notifier.tab_closed.emit(tab_id)
+
+    def note_model_action(self):
+        self.model_action_at = time.monotonic()
+
+    def _on_new_window(self, opener_page, req):
+        from PySide6.QtWebEngineCore import QWebEngineNewWindowRequest as R
+        url = req.requestedUrl().toString()
+        opener = self.tab_of_page(opener_page)
+        by_model = time.monotonic() - self.model_action_at < _MODEL_ACTION_GRACE_S
+        sink = opener.console_sink if opener else self.console_sink
+        nav = getattr(opener_page, "nav_seq", 0)
+        if not (req.isUserInitiated() or by_model):
+            sink.append({"level": "warn", "text": f"已拦截页面自己弹出的新窗口: {url}",
+                         "t": time.time(), "nav": nav})
+            _notifier.popup_blocked.emit(url)
+            return
+        if len(self.tabs) >= MAX_TABS:
+            sink.append({"level": "warn", "t": time.time(), "nav": nav,
+                         "text": f"标签已开满 {MAX_TABS} 个，新窗口没打开: {url}"})
+            _notifier.popup_blocked.emit(url)
+            return
+        background = req.destination() == R.DestinationType.InNewBackgroundTab
+        tab = self.new_tab(make_current=not background,
+                           opener=opener.id if opener else None)
+        # openIn 保留 window.opener：第三方登录弹窗要靠它把结果传回原页
+        req.openIn(tab.page)
 
     def _on_download(self, item):
         try:
             item.cancel()
         except Exception:
             pass
-        nav = getattr(self.page, "nav_seq", 0) if shiboken6.isValid(self.page) else 0
-        self.console_sink.append({"level": "warn", "text": "下载已拦截（浏览器不下载文件）",
-                                  "t": time.time(), "nav": nav})
+        tab = None
+        try:
+            tab = self.tab_of_page(item.page())
+        except Exception:
+            pass
+        tab = tab or self.current
+        if tab is None:
+            return
+        nav = getattr(tab.page, "nav_seq", 0) if shiboken6.isValid(tab.page) else 0
+        tab.console_sink.append({"level": "warn", "text": "下载已拦截（浏览器不下载文件）",
+                                 "t": time.time(), "nav": nav})
 
-    def _deny_permission(self, frame, feature):
+    def _deny_permission(self, pg, frame, feature):
         from PySide6.QtWebEngineCore import QWebEnginePage
-        self.page.setFeaturePermission(
+        pg.setFeaturePermission(
             frame, feature, QWebEnginePage.PermissionPolicy.PermissionDeniedByUser)
 
     def open_devtools(self):
@@ -182,22 +314,34 @@ class Browser(QObject):
         self._devtools_view.show()
 
     def release(self):
-        """释放 page / view（WebEngine 进程内存不小，关浏览器时调用）。主线程。
+        """释放所有标签的 page / view（WebEngine 进程内存不小，关浏览器时调用）。主线程。
         profile 常驻不销毁（§11.6），只丢引用。"""
-        # 先停掉在途加载：冷启动时旧 page 带着未完成的导航被析构，会在共享渲染进程下
-        # 撞死下一次导航（loadStarted 后 loadFinished 永不来，复审 8）
-        if self.page is not None and shiboken6.isValid(self.page):
-            try:
-                self.page.triggerAction(self.page.WebAction.Stop)
-            except Exception:
-                pass
-        for attr in ("_devtools_view", "view"):
-            w = getattr(self, attr, None)
-            if w is not None and shiboken6.isValid(w):
-                w.deleteLater()
-            setattr(self, attr, None)
-        self.page = None
+        w = getattr(self, "_devtools_view", None)
+        if w is not None and shiboken6.isValid(w):
+            w.deleteLater()
+        self._devtools_view = None
+        closed = list(self.tabs)
+        for tab in list(self.tabs.values()):
+            _release_tab(tab)
+        self.tabs.clear()
+        self.current_id = None
         self.profile = None
+        for tid in closed:
+            _notifier.tab_closed.emit(tid)
+
+
+def _release_tab(tab):
+    # 先停掉在途加载：冷启动时旧 page 带着未完成的导航被析构，会在共享渲染进程下
+    # 撞死下一次导航（loadStarted 后 loadFinished 永不来，复审 8）
+    if tab.page is not None and shiboken6.isValid(tab.page):
+        try:
+            tab.page.triggerAction(tab.page.WebAction.Stop)
+        except Exception:
+            pass
+    if tab.view is not None and shiboken6.isValid(tab.view):
+        tab.view.deleteLater()        # page 是 view 的子对象，一起走
+    tab.view = None
+    tab.page = None
 
 
 def get_browser() -> Browser:
@@ -213,6 +357,32 @@ def get_browser() -> Browser:
 
 def is_browser_open() -> bool:
     return _browser is not None
+
+
+def current_tab_id():
+    b = _browser
+    return b.current_id if b is not None else None
+
+
+def set_current_tab(tab_id):
+    if _browser is not None:
+        _browser.set_current(tab_id)
+
+
+def close_tab(tab_id):
+    """关一个标签（主线程）。最后一个标签走 close_browser：清 cookie、在途请求回「已关闭」。"""
+    b = _browser
+    if b is None or tab_id not in b.tabs:
+        return
+    if len(b.tabs) <= 1:
+        close_browser()
+        return
+    was_current = b.current_id == tab_id
+    b.close_tab(tab_id)
+    if was_current:
+        # 在途请求作用的是刚关掉的那页：立刻回，不等超时
+        from src.browser import bridge
+        bridge.notify_tab_closed()
 
 
 def close_browser():

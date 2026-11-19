@@ -9,6 +9,7 @@
 import http.server
 import importlib.util
 import os
+import re
 import threading
 import time
 
@@ -688,6 +689,106 @@ def test_no_false_change(browser, servers, trusted_tools, name, why):
     out = _click(browser, tb, snap, name)
     assert "实际样式变了" not in out, f"{why}：不该报变化\n{out}"
     assert "样式都没有变化" in out, out
+
+
+def _tabs_now():
+    b = page_mod._browser
+    return (list(b.tabs), b.current_id) if b is not None else ([], None)
+
+
+def test_blank_link_opens_a_new_tab_and_switches_to_it(browser, servers, trusted_tools):
+    """〇 多标签：target=_blank（B 站视频卡片）以前被拦、点了没反应。现在开新标签并切过去，
+    结果里带新页面的快照；原来的标签还在。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/newtab.html")
+    out = _click(browser, tb, snap, "在新标签打开")
+    ids, cur = _tabs_now()
+    assert len(ids) == 2 and cur == ids[1], (ids, cur)
+    assert f"打开了新标签 #{cur}，已切换过去" in out and "states.html" in out, out
+    assert "页面变化" not in out, "开了新标签就不拿两个不同页面比变化"
+    lst = _tool(browser, tb.browser_tabs.func)
+    assert f"* #{cur}" in lst and f"  #{ids[0]}" in lst and "<browser-content" in lst, lst
+    # 新标签快照的 ref 拿到原标签上用：报失效，不能点中原标签里同号的元素
+    new_ref = _ref_of(out, "邮箱") or re.search(r"\[ref=(e\d+)\]", out).group(1)
+    _tool(browser, tb.browser_tabs.func, "select", ids[0])
+    assert _tabs_now()[1] == ids[0]
+    stale = _tool(browser, tb.browser_click.func, new_ref)
+    assert stale.startswith("ref 已失效"), stale
+    # 原标签自己那份快照的 ref：切回来照样能用（ref 登记按标签分开，新标签的快照不冲掉它）
+    again = _tool(browser, tb.browser_click.func, _ref_of(snap, "弹出表单页"), delta=False)
+    assert again.startswith("已点击"), again
+
+
+def test_window_open_from_a_model_click_is_allowed(browser, servers, trusted_tools):
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, "/newtab.html")
+    out = _click(browser, tb, snap, "弹出表单页")
+    ids, cur = _tabs_now()
+    assert len(ids) == 2 and "form.html" in out, out
+
+
+def test_script_click_on_a_hidden_panel_still_counts_as_the_model(browser, servers, trusted_tools):
+    """面板没显示时退回脚本点击，isUserInitiated 是 False——按「模型刚点过」归因，照样开。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/newtab.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "在新标签打开"))
+    assert "改用脚本点击" in out and "打开了新标签" in out, out
+    assert len(_tabs_now()[0]) == 2
+
+
+def test_page_initiated_popup_is_blocked(browser, servers, trusted_tools):
+    """页面自己弹的（广告、定时弹窗）：拦下并记进控制台，不开标签。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/newtab.html?popup")
+    # 弹窗是页面 300ms 后自己发的；面板没显示时隐藏页面的定时器被节流到 1 秒一档，
+    # 负载重时更晚——等到控制台记下拦截再断言（全量里固定等 1.2 秒偶尔不够，实测）
+    deadline = time.time() + 5
+    con = ""
+    while time.time() < deadline:
+        con = _tool(browser, tb.browser_console.func, level="all")
+        if "已拦截页面自己弹出的新窗口" in con:
+            break
+        time.sleep(0.1)
+    assert "已拦截页面自己弹出的新窗口" in con, con
+    assert len(_tabs_now()[0]) == 1
+
+
+def test_tab_close_and_open_in_new_tab(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/states.html")
+    out = _tool(browser, tb.browser_open.func, servers[0] + "/form.html", new_tab=True)
+    ids, cur = _tabs_now()
+    assert len(ids) == 2 and cur == ids[1] and "共 2 个标签" in out, out
+    closed = _tool(browser, tb.browser_tabs.func, "close", ids[1])
+    for _ in range(20):
+        browser.processEvents()
+    assert _tabs_now() == ([ids[0]], ids[0]), _tabs_now()
+    assert f"已关闭标签 #{ids[1]}" in closed
+    last = _tool(browser, tb.browser_tabs.func, "close", ids[0])
+    for _ in range(20):
+        browser.processEvents()
+    assert "浏览器也关了" in last and page_mod._browser is None
+    assert _tool(browser, tb.browser_tabs.func) == tb._NO_PAGE
+
+
+def test_browser_check_evidence_needs_the_same_tab(browser, servers, trusted_tools):
+    """切标签后另一个标签的加载序号可能恰好相等：不能误记一次「浏览器检查」。"""
+    from src import session as _session
+    from src import verification as _vf
+    tb = trusted_tools
+    v = _session.get_verification()
+    _vf.mark_dirty(v, "app.js")              # 只有本轮改过文件才记检查：先标一个
+    _tool(browser, tb.browser_open.func, servers[0] + "/states.html")
+    load = dict(v.get("browser_last_load") or {})
+    assert load.get("tab") == _tabs_now()[1]
+
+    def checks():
+        return [e for e in v.get("evidence", []) if e.get("checker") == "浏览器控制台"]
+    tb._note_browser_check({"nav": load["nav"], "tab": load["tab"] + 1, "url": load["url"]}, [])
+    assert not checks(), "别的标签恰好同号的加载，不算"
+    tb._note_browser_check({"nav": load["nav"], "tab": load["tab"], "url": load["url"]}, [])
+    assert checks(), "对照：同一个标签的这次加载要记上（不然上面那条是空测试）"
 
 
 def _js_value(browser, code):

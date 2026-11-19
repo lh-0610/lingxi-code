@@ -489,11 +489,10 @@ def test_console_channel_merged_and_capped(env):
     env.sess.browser_origin_allowlist.add(sec.parse_origin(env.local))
     out = _run(env.app, tb.browser_open.func, env.local + "/console.html")
     _pump(env.app, 1.0)
-    _run(env.app, tb.browser_click.func, _ref_of(out, "新窗口链接"), delta=False)
-    _pump(env.app, 0.3)
+    # 「新窗口链接」现在会开新标签（多标签，见 test_browser_bridge 的新标签用例），不再记拦截
     res = _run(env.app, tb.browser_console.func, level="all")
     assert "普通 log" in res and "页面 error" in res
-    assert "alert" in res and "新窗口" in res
+    assert "alert" in res
     assert "missing.js" in res or "nope.png" in res, "资源失败要进通道"
     err = _run(env.app, tb.browser_console.func, level="error")
     assert "资源加载失败" in err

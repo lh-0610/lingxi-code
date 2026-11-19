@@ -96,10 +96,40 @@ class BrowserBridge(QObject):
         for req in list(self._pending):
             self._reply(req, {"ok": False, "error": "浏览器已关闭"})
 
+    def _tab_list(self):
+        out = []
+        for t in self._browser.tabs.values():
+            pg = t.page
+            valid = pg is not None and shiboken6.isValid(pg)
+            out.append({"id": t.id, "url": pg.url().toString() if valid else "",
+                        "title": pg.title() if valid else "",
+                        "loading": bool(getattr(pg, "lx_loading", False)) if valid else False,
+                        "opener": t.opener})
+        return out
+
+    def _close_tab_now(self, tab_id):
+        from src.browser import page as page_mod
+        last = self._browser is not None and len(self._browser.tabs) <= 1
+        page_mod.close_tab(tab_id)
+        if last:
+            self._browser = None
+
+    def _tab_of(self, page):
+        b = self._browser
+        t = b.tab_of_page(page) if b is not None and page is not None else None
+        return t.id if t is not None else None
+
+    def _on_tab_closed(self):
+        """关掉的是当前标签：在途请求作用的就是那一页，立刻回，不等超时。"""
+        self._clear_open()
+        for req in list(self._pending):
+            self._reply(req, {"ok": False, "error": "这个标签已关闭"})
+
     _ACTIVITY_LABELS = {"open": "打开页面", "js": "执行脚本", "frames": "列框架",
                         "settle": "等待页面", "close": "关闭浏览器",
                         "qturl": "读地址", "console": "读控制台", "grab": "截图",
-                        "mouse": "点击"}
+                        "mouse": "点击", "tabs": "列标签", "tab_select": "切换标签",
+                        "tab_close": "关闭标签", "tab_new": "新建标签"}
     _LX_LABELS = {"snapshot": "快照", "find": "查找", "click": "点击", "type": "输入",
                   "readText": "读正文", "console": "控制台", "info": "查元素", "state": "读状态",
                   "watchPrepare": "准备操作", "watchBaseline": "记样式", "watchReport": "核对样式",
@@ -141,6 +171,10 @@ class BrowserBridge(QObject):
             self._reply(req, {"ok": False, "error": "browser closed"})
             return
         args = req["args"]
+        if op == "mouse" or (op == "lx" and args.get("method") in ("click", "type", "act")):
+            # 模型的点击 / 输入：之后不久到达的新窗口请求算它发起的（脚本点击时
+            # isUserInitiated 是 False，见 page._on_new_window）
+            self._browser.note_model_action()
         self._pending.append(req)
         try:
             if op == "open":
@@ -159,6 +193,31 @@ class BrowserBridge(QObject):
                 self._grab(req, args)
             elif op == "mouse":
                 self._mouse(req, args)
+            elif op == "tabs":
+                self._reply(req, {"ok": True, "tabs": self._tab_list(),
+                                  "current": self._browser.current_id})
+            elif op == "tab_select":
+                if args.get("id") not in self._browser.tabs:
+                    self._reply(req, {"ok": False, "error": f"没有标签 #{args.get('id')}"})
+                else:
+                    self._browser.set_current(args["id"])
+                    self._reply(req, {"ok": True, "tabs": self._tab_list(),
+                                      "current": self._browser.current_id})
+            elif op == "tab_close":
+                tid = args.get("id")
+                if tid not in self._browser.tabs:
+                    self._reply(req, {"ok": False, "error": f"没有标签 #{tid}"})
+                else:
+                    last = len(self._browser.tabs) <= 1
+                    # 先回包再关：关当前标签会把在途请求（包括这一个）都回成「已关闭」
+                    self._reply(req, {"ok": True, "last": last})
+                    QTimer.singleShot(0, self, lambda: self._close_tab_now(tid))
+            elif op == "tab_new":
+                if len(self._browser.tabs) >= page.MAX_TABS:
+                    self._reply(req, {"ok": False, "error": f"标签已开满 {page.MAX_TABS} 个"})
+                else:
+                    tab = self._browser.new_tab(make_current=True)
+                    self._reply(req, {"ok": True, "id": tab.id})
             elif op == "settle":
                 QTimer.singleShot(args.get("ms", 800), self, lambda: self._reply(req, {"ok": True}))
             else:
@@ -217,6 +276,7 @@ class BrowserBridge(QObject):
         from src.browser import page as page_mod
         page = self._browser.page
         self._abort_open("被新的导航取代")
+        req["page"] = page
         self._wire_page(page)
         # call() 的 timeout 关键字被等待参数接走，args 里永远不会有 "timeout"——
         # 页面加载定时器跟着等待时限走，两者谁先到都返回超时错误（另一侧有 replied 守卫）
@@ -247,12 +307,13 @@ class BrowserBridge(QObject):
         # 空白新页面里没有旧脚本，不用清（关过浏览器则由闸门的"标脏"兜住）；在途导航时不清。
         blank = page.url().isEmpty() or page.url().toString() == "about:blank"
         page_mod.load_url(page, QUrl(args["url"]),
-                          clear_first=not blank, page_loading=self._page_loading,
+                          clear_first=not blank, page_loading=getattr(page, "lx_loading", False),
                           still_wanted=lambda: not (req.get("cancelled") or req.get("replied")
                                                     or self._open_req is not req))
 
     def _finish_open(self, req, *, ok, loaded, error):
-        page = self._browser.page if self._browser is not None else None
+        # 发起时的那一页：加载期间当前标签可能换了（页面自己开了新标签）
+        page = req.get("page") or (self._browser.page if self._browser is not None else None)
         valid = page is not None and shiboken6.isValid(page)
         t0 = req.get("t0", time.perf_counter())
         self._clear_open()
@@ -263,6 +324,7 @@ class BrowserBridge(QObject):
             "loadMs": round((time.perf_counter() - t0) * 1000),
             "error": error,
             "nav": getattr(page, "nav_seq", 0) if valid else 0,
+            "tab": self._tab_of(page),
         })
 
     def _clear_open(self):
@@ -413,7 +475,8 @@ class BrowserBridge(QObject):
         # loading / nav：动作之后判断「点击已经触发了导航、新页面还没到」（复审 #5）
         page = self._browser.page
         self._reply(req, {"ok": True, "url": target.url().toString(),
-                          "loading": bool(self._page_loading),
+                          "loading": bool(getattr(page, "lx_loading", False)),
+                          "tab": self._browser.current_id,
                           "nav": getattr(page, "nav_seq", 0)})
 
     def _console(self, req, args):
@@ -445,7 +508,7 @@ class BrowserBridge(QObject):
                     entries.append(e)
             entries.sort(key=lambda e: e.get("t") or 0)
             self._reply(req, {"ok": True, "entries": entries, "nav": nav,
-                              "url": b.page.url().toString()})
+                              "url": b.page.url().toString(), "tab": b.current_id})
 
         try:
             b.page.runJavaScript(code, page_mod.script_world(), cb)
@@ -472,6 +535,12 @@ def shutdown():
     """app 退出时清理（main.py _cleanup_on_exit 调）。"""
     if _bridge is not None:
         _bridge.shutdown()
+
+
+def notify_tab_closed():
+    """page.close_tab() 关掉当前标签时调（主线程）。"""
+    if _bridge is not None:
+        _bridge._on_tab_closed()
 
 
 def notify_closed():
