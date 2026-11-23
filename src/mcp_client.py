@@ -594,3 +594,18 @@ def shutdown():
 
     MCP_TOOLS = []
     logger.info("[MCP] 已关闭所有 MCP 连接")
+
+
+def restart() -> list:
+    """按 config.json 里现在的 mcp_servers 重连（设置热更新用）：关掉旧的全部连接，清空上一轮
+    留下的工具表 / 就绪信号 / 显示名，再走一遍 init_mcp。同步阻塞（最多约 20 秒），在后台线程调。"""
+    global _mcp_loop, _shutdown_event
+    shutdown()
+    _server_tools.clear()
+    _server_ready_events.clear()
+    MCP_DISPLAY_NAMES.clear()
+    _exit_stacks.clear()
+    _sessions.clear()
+    _mcp_loop = None
+    _shutdown_event = None
+    return init_mcp()

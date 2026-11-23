@@ -13,7 +13,7 @@ Agent 工具调用 · 写盘确认闸门 · 改完自检的验证闭环 · RAG �
 | 文档 | 内容 | 改这些之前先读 |
 |---|---|---|
 | [overview.md](docs/architecture/overview.md) | 目录与模块一览；支持的模型、自定义模型 | 找文件在哪、加模型 |
-| [core.md](docs/architecture/core.md) | 对话核心、项目（工作区）、`agent` facade、多会话并发、Prompt 缓存分层与前缀断裂检测、主循环边界与错误恢复 | `agent.py` `streaming.py` `session.py` `state.py` `roles.py` `cache_fingerprints.py` `llm_errors.py` `projects.py` |
+| [core.md](docs/architecture/core.md) | 对话核心、项目（工作区）、`agent` facade、多会话并发、Prompt 缓存分层与前缀断裂检测、设置热更新、主循环边界与错误恢复 | `agent.py` `streaming.py` `session.py` `state.py` `roles.py` `cache_fingerprints.py` `llm_errors.py` `projects.py` `config.py` `config_apply.py` `ui/config_watch.py` |
 | [runs-and-recovery.md](docs/architecture/runs-and-recovery.md) | 运行记录与中断恢复（B03）、运行账本（用量/费用/工具统计）、工具边界 inflight sidecar、运行结果卡（B06）、恢复检查与继续任务（B04） | `run_records.py` `run_ledger.py` `result_view.py` `ui/result_card.py` `ui/run_results.py` `recovery.py` `workspace_anchor.py` |
 | [tasks-and-input-queue.md](docs/architecture/tasks-and-input-queue.md) | 任务身份与要求/计划分离（B05）、统一退出屏障（B09a）、运行中输入队列（B09b） | `task_state.py` `ui/task_panel.py` `input_queue.py` `ui/queue_panel.py` `ui/send.py` `ui/run_admission.py` `ui/queue_dispatch.py` |
 | [background.md](docs/architecture/background.md) | 后台进程管理（B10a）、后台任务面板（B10b，右侧停靠栏的「后台」标签） | `background.py` `ui/background_panel.py` |
@@ -65,6 +65,7 @@ python scripts/replay_sessions.py
 - **路径**：`src/paths.py` 的 `_app_data_dir()` 在 dev 期返回 src 上一级目录（项目根），打包后返回 `%APPDATA%\灵犀`；`LINGXI_DATA_DIR` 可整体覆盖这个数据根（测试默认隔离就靠它，正常启动不设）
 - **测试默认隔离，不靠用例自觉**：`scripts/conftest.py` 在导入任何 src 之前设 `LINGXI_DATA_DIR` / `LINGXI_LOG_DIR` / `LINGXI_CONFIG_PATH`，把数据根（chat_memory 下的会话/索引/主题/权限规则/RAG 索引/长期记忆）、日志、配置全指到临时目录，worker 线程也默认落在临时根。`chat_memory` 下的文件路径一律用 `paths` 的函数在**调用时**取（`memory_dir()` / `theme_config_path()` 等），**别在导入期拼成常量**——`_base.THEME_CONFIG_PATH` 就这样绕过隔离，每跑一遍全量把用户真实主题翻转一次。防回归断言在 `scripts/test_test_isolation.py`
 - **写入 state**：必须 `state.X = ...`（不是 `agent.X = ...`）
+- **读配置在用的时候读**：`from . import config` 后 `config.X`（或函数里 `from .config import X`），别在模块顶层 `from .config import X`——设置是热更新的（`config.reload()` 就地重算），顶层抄走的值永远是启动时的。启动时就定下来的东西（客户端、线程、子进程）要跟着变的，在 `config_apply.apply` 里加一段。测试改配置 patch `config` 模块
 - **新增工具**：在 `src/tools.py` 用 `@tool` 装饰器定义，加进 `ALL_TOOLS`（`get_tool_map()` 自动从中构建 name→tool 映射）；如果是文件类工具记得用 `_resolve_path()` 解析相对路径。**同步在 `roles.py` 的 `SYSTEM_PROMPT` 工具清单里加一条说明**——注册了但提示词不提，模型就不知道有它（notify_user / search_knowledge 曾这样漏过）
 - **新增模型**：编辑 `src/models.py` 的 `MODEL_LIST` 元组列表，并在 `_create_llm()` 加 dispatch 分支
 - **新增 UI 子模块**：`src/ui/` 下放，注意从 `..` 引父包（`from .. import agent`），从 `.` 引同级（`from .theme import ...`）；`__init__.py` 只对外暴露 `ChatUI` / `SettingsDialog`

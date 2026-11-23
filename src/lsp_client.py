@@ -32,15 +32,8 @@ from urllib.parse import unquote, urlparse
 
 from .paths import logger
 
-# 配置项从 config.py 读，无则用默认
-try:
-    from .config import LSP_SERVERS
-except Exception:
-    LSP_SERVERS = ["pyright-langserver", "pylsp"]
-try:
-    from .config import LSP_LANGUAGES
-except Exception:
-    LSP_LANGUAGES = {}
+# 配置项用的时候从 config 读（设置改完热更新即生效），没有则用默认
+from . import config
 
 # ── 语言注册表 ────────────────────────────────────────────────────────────────
 # 语言组 → 候选服务器命令（取 PATH 上第一个可用的）+ 裸命令的默认 stdio 参数。
@@ -109,7 +102,9 @@ def _find_server() -> str | None:
 
     保留无参签名（历史调用方 / 测试按 python 后端打桩）。其它语言走 _find_server_for。
     """
-    servers = LSP_SERVERS if isinstance(LSP_SERVERS, list) else ["pyright-langserver", "pylsp"]
+    servers = getattr(config, "LSP_SERVERS", None)
+    if not isinstance(servers, list):
+        servers = ["pyright-langserver", "pylsp"]
     for cmd in servers:
         exe = cmd.split()[0] if cmd else ""
         if exe and shutil.which(exe):
@@ -119,7 +114,8 @@ def _find_server() -> str | None:
 
 def _candidate_commands(group: str) -> list[str]:
     """某语言组的候选命令：config.lsp_languages 覆盖优先，否则内置默认。"""
-    override = LSP_LANGUAGES.get(group) if isinstance(LSP_LANGUAGES, dict) else None
+    langs = getattr(config, "LSP_LANGUAGES", None)
+    override = langs.get(group) if isinstance(langs, dict) else None
     if isinstance(override, str) and override.strip():
         return [override.strip()]
     if isinstance(override, list) and override:

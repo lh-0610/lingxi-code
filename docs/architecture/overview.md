@@ -15,7 +15,8 @@ installer/               # 安装程序：lingxi.iss（Inno Setup，默认装到
 src/                     # 主代码
   __init__.py
   paths.py               # 路径常量 + logger 配置（启动清理 30 天前 .log）
-  config.py              # 解析 config.json，对外暴露常量（含 CUSTOM_MODELS / MCP_SERVERS）
+  config.py              # 解析 config.json，对外暴露常量（含 CUSTOM_MODELS / MCP_SERVERS）；reload() 热更新，用的时候读 config.X
+  config_apply.py        # 设置热更新：按变了的常量重建模型列表 / 清客户端缓存 / 重启遥控轮询 / 重连 MCP / 重开 LSP
   limits.py              # 集中的魔法数字常量（会话上限/重试/截断/搜索分页/debug 预览长度）
   state.py               # 全局共享状态 + **会话级字段代理**：通过 ModuleType property 把 state.X 转发到「当前线程的当前会话」（见 session.py）
   session.py             # 会话级运行时状态容器（Session 对象）+ 注册表 + 线程路由（current_session / bind_thread / active）—— 多会话并发的地基
@@ -82,6 +83,7 @@ src/                     # 主代码
     run_admission.py     # RunAdmissionMixin + _PendingRunRequest：待启动请求的准入（B09a 统一退出屏障）
     queue_dispatch.py    # QueueDispatchMixin：运行中输入队列的入队、派发与收尾（B09b）
     run_results.py       # RunResultMixin：运行结果卡（B06）与「继续任务」（B04）的 UI 侧
+    config_watch.py      # ConfigWatchMixin：监视 config.json、设置保存后刷新界面并提示（热更新的界面一半）
     timeline.py          # TimelineMixin：用户气泡的编辑/回退/分叉（后端在 memory.truncate_history/rewind_session/fork_session；只动对话与运行态，不撤销磁盘改动）
     message_view.py      # 消息流时间线：每轮一条线串起用户消息、思考、工具调用（一行一条，连续的收成可折叠的组）、计划步骤分段和结果卡；新一轮开始时上一轮的过程收成一行；样式一张表 mv_qss
     fonts.py             # 字体族与字号（界面 / 等宽），全界面唯一来源

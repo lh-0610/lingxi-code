@@ -8,7 +8,7 @@ import time
 
 import httpx
 
-from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, REMOTE_CONTROL
+from . import config
 from . import state
 from .paths import logger
 
@@ -16,6 +16,9 @@ _BASE_URL: str = ""
 _thread: threading.Thread | None = None
 _running = False          # shutdown 门控
 _offset = 0               # getUpdates offset
+# 第几代轮询线程。热更新改了 token / 开关会停掉旧线程、起新线程，而旧线程多半正卡在 30s 长轮询里
+# 退不掉；它醒来一看代数不是自己的就退，不会和新线程一起收消息（同一条消息执行两遍）。
+_gen = 0
 
 
 # ─── 内部分发 ────────────────────────────────────────────────────────────────────
@@ -34,7 +37,7 @@ def _handle_callback_query(cb: dict):
     # 白名单校验【点按钮的人】 from.id，而非消息所在 chat.id——后者在群组场景下
     # 任何成员都能过，前者保证只有你本人能批准（私聊里两者等价）
     from_id = str(cb.get("from", {}).get("id", ""))
-    if from_id != str(TELEGRAM_CHAT_ID):
+    if from_id != str(config.TELEGRAM_CHAT_ID):
         telegram_push.answer_callback(cb["id"], "无权限操作")
         return
 
@@ -79,13 +82,14 @@ def _dispatch(text: str):
 
 # ─── 长轮询主循环 ──────────────────────────────────────────────────────────────
 
-def _poll_loop():
+def _poll_loop(my_gen: int = 0, base_url: str = ""):
     global _offset, _running
+    base_url = base_url or _BASE_URL
     logger.info("Telegram 遥控轮询线程已启动")
     # 启动先跳过积压：离线期间堆积的旧消息/旧回调不该一上线就执行（offset=-1 只取最新一条，
     # 把 _offset 推到它之后即丢弃全部 backlog；也避免旧 callback 撞上重置归 1 的 confirm 计数器）。
     try:
-        _r0 = httpx.get(f"{_BASE_URL}/getUpdates", params={"offset": -1, "timeout": 0}, timeout=10)
+        _r0 = httpx.get(f"{base_url}/getUpdates", params={"offset": -1, "timeout": 0}, timeout=10)
         if _r0.status_code == 200:
             _d0 = _r0.json()
             if _d0.get("ok") and _d0.get("result"):
@@ -93,10 +97,10 @@ def _poll_loop():
                 logger.info(f"Telegram 跳过启动前积压，offset 从 {_offset} 开始")
     except Exception:
         pass
-    while _running:
+    while _running and _gen == my_gen:
         try:
             r = httpx.get(
-                f"{_BASE_URL}/getUpdates",
+                f"{base_url}/getUpdates",
                 params={"offset": _offset, "timeout": 30},
                 timeout=35,
             )
@@ -105,6 +109,8 @@ def _poll_loop():
                 time.sleep(5)
                 continue
 
+            if _gen != my_gen:
+                break   # 等这一轮的时候配置改了、换了新线程：这批更新留给新线程收
             data = r.json()
             if not data.get("ok"):
                 logger.warning(f"getUpdates 非 ok: {data}")
@@ -124,7 +130,7 @@ def _poll_loop():
                     continue
                 # 白名单校验【发消息的人】 from.id（群组场景下比 chat.id 更严，私聊等价）
                 sender_id = str(msg.get("from", {}).get("id", ""))
-                if sender_id != str(TELEGRAM_CHAT_ID):
+                if sender_id != str(config.TELEGRAM_CHAT_ID):
                     logger.debug(f"忽略非白名单消息: from_id={sender_id}")
                     continue
                 text = msg.get("text", "")
@@ -146,25 +152,27 @@ def start():
     """启动轮询守护线程。可安全重复调用。"""
     global _thread, _running, _BASE_URL
 
-    if not TELEGRAM_BOT_TOKEN:
+    if not config.TELEGRAM_BOT_TOKEN:
         logger.info("未配置 telegram_bot_token，遥控轮询不启动")
         return
-    if not REMOTE_CONTROL:
+    if not config.REMOTE_CONTROL:
         logger.info("remote_control=false，遥控轮询不启动")
         return
     if _thread is not None and _thread.is_alive():
         return  # 已在运行
 
-    _BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    _BASE_URL = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
     _running = True
-    _thread = threading.Thread(target=_poll_loop, daemon=True, name="telegram-poll")
+    _thread = threading.Thread(target=_poll_loop, args=(_gen, _BASE_URL),
+                               daemon=True, name="telegram-poll")
     _thread.start()
 
 
 def shutdown():
     """停止轮询线程。"""
-    global _running, _thread
+    global _running, _thread, _gen
     _running = False
+    _gen += 1   # 还卡在长轮询里的旧线程醒来就退，不再处理它拿到的那批更新
     if _thread is not None:
         # 轮询线程多半正卡在 30s 长轮询（httpx 同步请求没法中断），久等无益；
         # 给 0.5s 优雅退出，没退就交给 daemon 线程随主进程回收。原 join(3) 白等 3s。

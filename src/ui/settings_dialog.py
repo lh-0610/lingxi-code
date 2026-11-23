@@ -1,6 +1,6 @@
 """设置弹窗（窗内卡片：左侧分类导航 + 右侧可滚动表单 + 底部取消 / 保存）。
 
-直接读写 config.json，保存后提示重启生效。外框是 dialogs.CardDialog（设计稿「设置对话框 ·
+直接读写 config.json，保存后当场生效（config_apply 热更新；只有标题栏要重启）。外框是 dialogs.CardDialog（设计稿「设置对话框 ·
 应用内外框」），表单样式设在 self.body 上，配色全取当前主题。
 """
 import json
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ._base import BASE_DIR, CONFIG_PATH
-from ..paths import APP_DIR as _APP_DIR
+from ..paths import APP_DIR as _APP_DIR, logger
 from . import dialogs
 from .fonts import MONO_CSS
 from .theme import color as theme_color
@@ -110,7 +110,7 @@ class _ResizableTextEdit(QTextEdit):
 
 
 class SettingsDialog(dialogs.CardDialog):
-    """直接在 UI 里编辑 config.json。保存后写回文件，提示重启生效。
+    """直接在 UI 里编辑 config.json。保存后写回文件并热更新（见 config_apply）。
 
     布局（窗内卡片 800×620）：
       设置                                              ×
@@ -122,12 +122,12 @@ class SettingsDialog(dialogs.CardDialog):
       │ 高级   │                                      │
       │ roles / logs / config / 关于                  │
       └────────┴──────────────────────────────────────┘
-      密钥和 Base URL 改动要重启应用才生效        [取消] [保存]
+      保存后立即生效                              [取消] [保存]
     """
 
     def __init__(self, parent=None):
         super().__init__(parent, title="设置", width=800, height=620,
-                         hint="密钥和 Base URL 改动要重启应用才生效")
+                         hint="保存后立即生效")
         self._parent_window = parent
 
         try:
@@ -264,8 +264,7 @@ class SettingsDialog(dialogs.CardDialog):
             "一轮 = 一次模型调用 + 它请求的工具执行。到达上限会自动停下并说明原因。\n"
             "• 正常编码任务 10~20 轮封顶，触顶通常意味着模型陷进了循环\n"
             "• **设 0 = 不限轮次**：一直调用到模型自己停或你点停止。此时没有任何自动刹车，\n"
-            "  模型打转时 token 会一直烧下去——只在需要超长自主任务、且你会盯着时才这么设\n"
-            "• 改动需重启应用才生效"
+            "  模型打转时 token 会一直烧下去——只在需要超长自主任务、且你会盯着时才这么设"
         )
         rounds_hint.setObjectName("providerCardHint")
         rounds_hint.setWordWrap(True)
@@ -280,8 +279,7 @@ class SettingsDialog(dialogs.CardDialog):
             "• 默认 20 万：一百轮左右的任务一般到不了，不会触发\n"
             "• 设低（比如 100000）：上下文短；但每回收一次要重建一次缓存，实测长任务总花费多 6% 左右，"
             "模型也可能重读文件\n"
-            "• 设高：DeepSeek 这类 100 万窗口的模型可以设到几十万，更晚才回收；再高也不会超过模型自己的窗口\n"
-            "• 改动需重启应用才生效"
+            "• 设高：DeepSeek 这类 100 万窗口的模型可以设到几十万，更晚才回收；再高也不会超过模型自己的窗口"
         )
         trim_hint.setObjectName("providerCardHint")
         trim_hint.setWordWrap(True)
@@ -320,8 +318,7 @@ class SettingsDialog(dialogs.CardDialog):
             "• DeepSeek 搜索直接用「模型」页里 DeepSeek 的 key，中文结果最好，约 5 元 / 千次（失败和空结果不收费）\n"
             "• Tavily（tavily.com）每月有免费额度；博查（open.bochaai.com）只用它的普通搜索\n"
             "• 网站拒绝直接抓取（403 等）时，会改用 DeepSeek 的抓取接口再读一次\n"
-            "• 深度搜索更准，但每次搜索会多等几秒（要读网页原文），不额外花搜索额度\n"
-            "• 这几项保存后立即生效，不用重启"
+            "• 深度搜索更准，但每次搜索会多等几秒（要读网页原文），不额外花搜索额度"
         )
         search_hint.setObjectName("providerCardHint")
         search_hint.setWordWrap(True)
@@ -329,7 +326,7 @@ class SettingsDialog(dialogs.CardDialog):
 
         self._add_section(a, "无项目工作区")
         self._add_path_picker(a, "default_workspace",
-                              "没打开项目时，AI 读写文件、运行命令都在这个文件夹（重启生效）",
+                              "没打开项目时，AI 读写文件、运行命令都在这个文件夹",
                               placeholder="留空 = 「文档」下的「灵犀工作区」")
 
         self._add_section(a, "窗口")
@@ -346,7 +343,7 @@ class SettingsDialog(dialogs.CardDialog):
             "  —— config.json 在哪？点本弹窗左下角「config」按钮直达目录\n"
             "• 支持 4 种传输方式：stdio（本地进程）/ sse / streamable_http / auto（自动检测）\n"
             "• stdio 类型的 server 需要你的机器装了 Node.js\n"
-            "• 改动需重启应用才生效"
+            "• 保存设置或改完 config.json 后自动重连，不用重启"
         )
         mcp_hint.setObjectName("providerCardHint")
         mcp_hint.setWordWrap(True)
@@ -642,8 +639,7 @@ class SettingsDialog(dialogs.CardDialog):
         """自定义模型区：列出现有条目 + 添加按钮。
 
         数据存到 self._custom_models（list of dict），保存时整体写回 config.json
-        的 custom_models 字段。重启应用后才在顶栏下拉里看到新模型——所以加完
-        会提示用户重启。
+        的 custom_models 字段。保存后热更新，模型菜单里马上就有。
         """
         from .. import config as _cfg
         # 拷贝出来本地编辑，避免直接改 config 模块全局
@@ -666,8 +662,7 @@ class SettingsDialog(dialogs.CardDialog):
         add_btn.clicked.connect(self._on_add_custom_model)
         layout.addWidget(add_btn)
 
-        # 重启提示（小灰字，不显眼但能看见）
-        tip = QLabel("提示：新增 / 修改自定义模型后需要重启应用才会出现在顶栏下拉里")
+        tip = QLabel("提示：新增 / 修改自定义模型后点「保存」，模型菜单里马上就有")
         tip.setObjectName("customModelTip")
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -769,7 +764,7 @@ class SettingsDialog(dialogs.CardDialog):
             self, "删除自定义模型？",
             f"确认删除「{cm.get('name', cm.get('model_id', '?'))}」？",
             "删除", glyph="trash",
-            informative="这一项会从设置移除，重启后顶栏下拉里也消失。",
+            informative="这一项会从设置移除，保存后模型菜单里也就没有了。",
         ):
             del self._custom_models[index]
             self._refresh_custom_models_ui()
@@ -910,7 +905,7 @@ class SettingsDialog(dialogs.CardDialog):
                        "sk-...", password=True)
         embed_hint = QLabel(
             "走 OpenAI 兼容的 /embeddings 接口；留空则复用「模型」页的通义千问端点 / Key。\n"
-            "改 Embedding 模型 / 端点后，旧索引不再匹配 —— 需【重启】并在侧栏知识库卡片点「重建索引」。")
+            "改 Embedding 模型 / 端点后，旧索引不再匹配 —— 保存后在侧栏知识库卡片点「重建索引」。")
         embed_hint.setObjectName("providerCardHint")
         embed_hint.setWordWrap(True)
         layout.addWidget(embed_hint)
@@ -1142,41 +1137,34 @@ class SettingsDialog(dialogs.CardDialog):
                 for cm in self._custom_models
             ]
 
+        # 先写临时文件再替换：直接覆盖写到一半时，监视 config.json 的热更新可能读到半截文件
         try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            tmp = CONFIG_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, CONFIG_PATH)
         except Exception as e:
             dialogs.critical(self, "保存失败", "配置没能写入 config.json，请检查文件权限。",
                              detail=str(e))
             return
 
-        # 让"命令确认推手机"开关即时生效（confirm_bars 运行时读 config 模块属性）——
-        # 否则它是启动时读的模块常量，改完要重启才生效。其余配置仍需重启（已有行为）。
+        # 热更新：改动当场生效（模型列表、密钥、遥控、MCP……），见 config_apply。
+        # 传刚写下的内容，不再读一遍盘；深拷贝一份，免得和本对话框手里的 dict 共用
+        import copy
+        from .. import config_apply
         try:
-            from .. import config as _cfg
-            _rc = self.config.get("remote_control") or {}
-            _cfg.REMOTE_TELEGRAM_CONFIRM = bool(_rc.get("telegram_confirm", True))
-            # 网络搜索几项同理即时生效：web_search 每次调用时才读这几个模块属性
-            _cfg.WEB_SEARCH_API_KEY = str(self.config.get("web_search_api_key") or "")
-            _cfg.BOCHA_API_KEY = str(self.config.get("bocha_api_key") or "")
-            _cfg.WEB_SEARCH_PROVIDER = str(self.config.get("web_search_provider") or "auto")
-            _cfg.WEB_SEARCH_DEEP = bool(self.config.get("web_search_deep", False))
-            _cfg.LINK_OPEN_MODE = "panel" if self.config.get("link_open_mode") == "panel" else "system"
-            _cfg.AGENT_CURSOR = bool(self.config.get("agent_cursor", True))
+            self.applied_result = config_apply.reload_and_apply(copy.deepcopy(self.config))
         except Exception:
-            pass
+            logger.warning("设置热更新失败", exc_info=True)
+            self.applied_result = None
 
-        # 打码表跟着刷新：刚填进去的 key 立刻生效，否则按新配置跑工具时它的值还能原样出现
-        try:
-            from .. import secret_mask as _secret_mask
-            _secret_mask.refresh(self.config)
-        except Exception:
-            pass
-
-        # 密钥 / Base URL 是启动时加载的模块常量，改完要重启才生效。给个一键重启，
-        # 省掉小白"怎么重启"的困惑;重启失败则退回手动(不会把用户卡死)。
+        res = self.applied_result
+        if res is None or not res.restart_needed:
+            self.accept()   # 主窗口按 applied_result 刷新模型按钮、给个「已生效」的提示
+            return
+        # 只剩系统标题栏要重启：窗口建的时候就定了
         reply = dialogs.success(
-            self, "已保存", "配置已写入 config.json。密钥和 Base URL 的改动要重启应用才生效。",
+            self, "已保存", "其它改动已经生效。标题栏的改动要重启应用才生效。",
             dialogs.Yes | dialogs.No, dialogs.Yes,
             labels={dialogs.Yes: "立即重启", dialogs.No: "稍后"})
         self.accept()

@@ -1,7 +1,10 @@
 """config.json 加载与密钥导出。
 
-启动时一次性读取，对外暴露各家上游的常量。
-任何模块要拿密钥/base_url 都从这里导入，不要重复读文件。
+对外暴露各家上游的常量。任何模块要拿配置都从这里取，不要重复读文件。
+
+**热更新**：`reload()` 重读 config.json、就地重算本模块的全部常量（改完设置不用重启）。
+所以别的模块要在**用的时候**读 `config.X`（`from . import config` 后 `config.X`，或函数里
+`from .config import X`）；在模块顶层 `from .config import X` 会把启动时的值抄走，热更新到不了。
 """
 import json
 
@@ -9,15 +12,25 @@ from .paths import CONFIG_PATH, logger
 from .limits import RAG_MIN_CHUNK_SIZE as _RAG_MIN_CHUNK_SIZE
 
 
-try:
-    with open(CONFIG_PATH, "r", encoding="utf-8-sig") as _f:
-        _config = json.load(_f)
-except FileNotFoundError:
-    logger.warning("config.json 不存在，请复制 config.example.json 为 config.json 并填入密钥")
-    _config = {}
-except json.JSONDecodeError as e:
-    logger.error(f"config.json 格式错误: {e}，使用空配置")
-    _config = {}
+# reload() 先把读好、校验过的内容放进 _RELOAD_SEED 再重新执行本模块：
+# 重新执行时直接用它，不再读一遍文件——两次读之间文件可能正被写一半，读到半截会变成空配置，把密钥全清掉。
+_seed = globals().pop("_RELOAD_SEED", None)
+if _seed is not None:
+    _config = _seed
+else:
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as _f:
+            _config = json.load(_f)
+    except FileNotFoundError:
+        logger.warning("config.json 不存在，请复制 config.example.json 为 config.json 并填入密钥")
+        _config = {}
+    except json.JSONDecodeError as e:
+        logger.error(f"config.json 格式错误: {e}，使用空配置")
+        _config = {}
+    if not isinstance(_config, dict):
+        logger.error("config.json 顶层应是对象，使用空配置")
+        _config = {}
+del _seed
 
 
 OLLAMA_BASE_URL = _config.get("ollama_base_url", "http://127.0.0.1:11434")
@@ -34,7 +47,7 @@ DEEPSEEK_BASE_URL = _config.get("deepseek_base_url", "https://api.deepseek.com")
 RESPONSES_API_KEY = _config.get("responses_api_key", "") or DEEPSEEK_API_KEY
 RESPONSES_BASE_URL = _config.get("responses_base_url", "") or "https://api.deepseek.com"
 
-# 各 provider 的可选 model_id 列表（用户在设置里编辑，重启后生效）
+# 各 provider 的可选 model_id 列表（用户在设置里编辑，保存即生效：config_apply 就地重建模型列表）
 MIMO_MODELS       = _config.get("mimo_models", ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni"])
 QWEN_CLOUD_MODELS = _config.get("qwen_cloud_models", ["qwen3.5-plus", "qwen-max", "qwen-plus", "qwen-turbo"])
 OLLAMA_MODELS     = _config.get("ollama_models", ["qwen3.5:latest"])
@@ -147,7 +160,7 @@ REMOTE_BLOCKLIST: list = _remote_cfg.get("readonly_blocklist", []) or []
 REMOTE_TELEGRAM_CONFIRM: bool = _remote_cfg.get("telegram_confirm", True)
 
 # 网络搜索：Tavily / 博查（只用博查的普通 Web Search，不用收费更高、带大模型总结的 AI Search——
-# 总结本来就由灵犀自己的模型做）。设置里改这几项会即时生效（settings_dialog._save 直接改这里）。
+# 总结本来就由灵犀自己的模型做）。web_search 每次调用时才读这几项。
 WEB_SEARCH_API_KEY: str = _config.get("web_search_api_key", "")
 BOCHA_API_KEY: str = _config.get("bocha_api_key", "")
 # auto：有博查 key 时中文问题走博查、其余走 Tavily，一个出错就换另一个；tavily / bocha：只用它
@@ -171,6 +184,8 @@ RUN_COMMAND_ENV_KEEP: list = [
 
 # MCP Servers 配置（字典，key=server 名，value=启动参数）
 MCP_SERVERS: dict = _cfg_dict(_config, "mcp_servers")
+# MCP 总开关（设置 → 高级）。连接时 mcp_client 自己读文件；放这里是让热更新看得出它变了、去重连
+MCP_ENABLED: bool = _config.get("mcp_enabled", True) is not False
 
 def set_rag_kb_dir(path: str) -> bool:
     """把知识库目录写回 config.json 的 rag.kb_dir，并同步更新本模块的 RAG_KB_DIR。
@@ -319,3 +334,47 @@ CONTEXT_TRIM_TOKENS: int = _context_trim_tokens_from(_config)
 
 _model_pricing = _config.get("model_pricing")
 MODEL_PRICING: dict = _model_pricing if isinstance(_model_pricing, dict) else {}
+
+
+# ── 热更新 ──
+
+def _public_snapshot() -> dict:
+    """本模块对外的常量（全大写名）当前值，reload 前后比一比就知道改了哪些。"""
+    return {k: v for k, v in globals().items() if k.isupper() and not k.startswith("_")}
+
+
+def read_file():
+    """读 config.json 并校验。返回 dict；没有文件返回 {}；读不了 / 格式坏了返回 None（调用方保持现状）。"""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:   # JSONDecodeError / UnicodeDecodeError 都是 ValueError
+        logger.warning(f"config.json 读不了或格式不对，配置保持不变: {e}")
+        return None
+    if not isinstance(data, dict):
+        logger.warning("config.json 顶层不是对象，配置保持不变")
+        return None
+    return data
+
+
+def reload(data: dict | None = None) -> set[str] | None:
+    """重读 config.json，就地重算本模块全部常量。返回值变了的常量名；文件读不了返回 None（什么都不动）。
+
+    重新执行本模块（importlib.reload）而不是另写一套解析：默认值、非法值回退、告警全和启动时同一份代码。
+    同一个模块对象，`from . import config` 拿到的引用不变，用的时候读 `config.X` 就是新值。"""
+    import importlib
+    import sys
+    if data is None:
+        data = read_file()
+        if data is None:
+            return None
+    before = _public_snapshot()
+    globals()["_RELOAD_SEED"] = data
+    try:
+        importlib.reload(sys.modules[__name__])
+    finally:
+        globals().pop("_RELOAD_SEED", None)
+    after = _public_snapshot()
+    return {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}

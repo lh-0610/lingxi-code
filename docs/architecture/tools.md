@@ -55,7 +55,7 @@
 - **收集**：`config.json` 里字段名含 `key` / `token` / `secret` / `password` / `passwd` / `credential` / `authorization` 的非空字符串（含这类字段下的字符串列表），**递归**进嵌套对象与数组（`custom_models`、`mcp_servers.*.env`、请求头都覆盖）；加环境变量里名字像密钥的值（判定直接复用 `tools._SECRET_ENV_PARTS`，不另抄一份）。值按空白切开取片段（`Bearer xxx` 只收 xxx），只收长度 `>= 12` 的片段；**路径、URL 不收**——`GOOGLE_APPLICATION_CREDENTIALS` 这类变量装的是路径，收了的话前缀打码会把输出里所有 `C:\Users…` 都换掉。
 - **打码**：`mask(text)` 把命中的值换成 `‹已隐藏：字段名›`；字母、数字都有的随机样式值只出现开头一段（`>= 8` 字符，如 `key[:10]`）也打码——这么长的前缀已经能定位到具体 key；纯字母的口令只认完整出现（开头 8 个字母就是个普通词）。重叠命中取更长的那个。非字符串、内部异常一律原样返回，宁可漏打码也不让工具结果丢失。
 - **接入点**（缺一不可）：`streaming._execute_tool` 拿到 `result` 之后（所有工具的唯一出口，含并行预取回放的 `_preinvoked`），以及 `tools._run_command` 的 `_reader` 逐行推给界面之前。此外 `_run_command` 在拼接完整输出后**再整段打一次**：流式按行/逐块切分，密钥恰好横跨两块时逐块打码会漏；不经 `_execute_tool` 直接调用（测试、子 Agent 内部）也要挡。
-- **刷新**：进程内首次用到时构建一次；设置页 `_save()` 写完 config.json 后调 `secret_mask.refresh(self.config)`，新填的 key 立刻生效。打码表是进程级缓存，测试里要 patch `_loaded` / `_secrets` 隔离。
+- **刷新**：进程内首次用到时构建一次；设置热更新（`config_apply.apply`，设置保存或手改 config.json 都走）调 `secret_mask.refresh`，新填的 key 立刻生效。打码表是进程级缓存，测试里要 patch `_loaded` / `_secrets` 隔离。
 - **边界**：不改 config.json 的存储方式、不禁止读它（打码后照样能看配置，只是值被替换）；`verification.redact` 是另一套（证据摘要的正则打码），保持不动。回归见 `scripts/test_secret_mask.py`。
 
 ### 计划稳定性（tools.py / roles.py / UI）

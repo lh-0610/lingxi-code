@@ -74,13 +74,27 @@
 - 以前是无状态的"超预算（DeepSeek 20 万）就把最近 6 条之外的大结果全折掉"：每轮从完整历史重算，刚滑出最近 6 条的那条当轮才变成存根，前缀**每轮**都从那里断。估算修好后日志里一次没触发过，但 83 轮的任务已经到 15.7 万，再跑二三十轮就会撞上；评测 011 基线里它触发了 107 次、`models.py` 被重读 13–19 遍
 - `_trim_tool_results` 从最老的折起，最近 6 条和不超过 1000 字的小结果不动。**按内容排先后试过、没有用**：先折"之后被改过的文件"的旧读取、先折搜索 / 命令输出、把正在改的文件留到最后等五种顺序，回放下来被迫重读 6–7 次、成本差 1% 以内——降到一半要把能折的几乎折完，折谁在先不改变结果
 - **能折出来的不到水位线间距一半就先不折**：折不下去多少还要重建一次缓存，下一轮又触发，等于回到每轮都断。只有超过真正的历史预算（`hard_limit` = `_current_history_budget()`）时不管多少都折。窗口小的模型历史预算不到回收线，就按预算和它的一半（`_trim_watermarks`）
-- **回收线是设置项**：`config.CONTEXT_TRIM_TOKENS`（config.json 的 `context_trim_tokens`，设置弹窗「高级」页可改，默认 20 万，改动需重启；0 = 跟历史预算走；非 0 的值低于 2 万按 2 万算）。设得比 `MAX_HISTORY_BUDGET`（20 万）高时，`_current_history_budget` 的上限跟着抬到回收线——不然线设在 40 万、预算却在 20 万就开始压缩，那条线永远到不了；再高也不超过模型窗口，所以只对 DeepSeek 这类 100 万窗口的模型有意义
+- **回收线是设置项**：`config.CONTEXT_TRIM_TOKENS`（config.json 的 `context_trim_tokens`，设置弹窗「高级」页可改，默认 20 万，保存即生效；0 = 跟历史预算走；非 0 的值低于 2 万按 2 万算）。设得比 `MAX_HISTORY_BUDGET`（20 万）高时，`_current_history_budget` 的上限跟着抬到回收线——不然线设在 40 万、预算却在 20 万就开始压缩，那条线永远到不了；再高也不超过模型窗口，所以只对 DeepSeek 这类 100 万窗口的模型有意义
 - **线设低是用钱换短上下文，不省钱**。用真实实现回放那五个任务（不回收时峰值 10–17 万）：10 万 → 五个都触发 1–2 次，成本合计 +5.9%（单个 +2%～+19%），两个任务里共 7 次改文件前读取已被折掉；12 万 → +5.6%；15 万 → 只有最长的两个触发、但各 +13%，合计 +6.6%（触发得晚，剩下的轮数不够回本）；18 万以上 → 一次不触发。每次触发要按未命中重付留下的那一半，之后每轮少带的部分按命中价算，要四十来轮才回本。上下文短了模型是不是更好，没有数据。所以默认和历史预算取齐：平时不碰，只拦住会撞预算的超长任务。估算不含工具 schema，实际输入约多 1.5 万
 - **折过哪些随会话文件落盘**（`evicted_tool_results`，只留历史里还在的 id）：重开程序接着跑，发出去的前缀和关掉之前一样。旧会话没有这个键 → 当成没折过。新对话清空
 - **合成 tool_call_id 必须会话内唯一**（`streaming._normalize_tool_calls`）：部分本地模型不返回 tool_call id，兜底用 `call_<name>_<uuid4 前 12 位>`，**不能用每轮重置的计数器**——回收按 tool_call_id 记且随 `evicted_tool_results` 落盘，跨轮重复的 id 会让新一轮的结果顶着旧 id 被当成"已回收"误折，哪怕它就在最近 keep_recent 条里
 - 之后两步只在回收折不动、仍超出历史预算时才轮得到，仍是无状态的：`_cap_oversized_tool_results`（单条超 2.4 万字截头尾）、`_compact_history`（LLM 把中段压成摘要，留最近 20 条）。全程只动发送副本，`state.chat_history` 和界面保留完整历史
 - 回归守卫在 `scripts/test_tool_eviction.py`（`test_prefix_stays_identical_between_trips`）：和 system prompt 那条一样，破坏之后一切照常工作，只是每轮开始按未命中计费
 - **改发送流程 / 工具输出 / 回收逻辑后，跑一遍离线回放**：`python scripts/replay_sessions.py`（可传会话 ID 或 `--dir`，默认本地 `chat_memory/`）。它把已保存的会话按轮截到"模型即将发出第 N 条 AI 消息"那一刻，走**完整**的 `_prepare_stream_history`（不是只测 `_trim_tool_results` 一步），逐轮报告估算 token、与上一轮第一个不同的位置及原因、是否回收、是否会触发压缩，末尾汇总断裂次数与折算成本。前缀比对复用 `cache_fingerprints`、成本折算复用 `run_ledger` 的单价配置，都不另写一份。**不联网、不写盘、不改 chat_memory**：日志/配置/数据根指到临时目录、MCP 打桩、压缩要调的 LLM 换成占位实例（只报告"这一轮会触发压缩"，不真的压）。**成本是近似**：历史上每轮的 system 和易变运行态无法复原，用的是当前值，且不注入项目上下文/规则/长期记忆；命中按"与上一轮相同的前缀"估算，不是服务商真实上报值——用来看改动前后的**相对退化**。合成会话的回归在 `scripts/test_replay_regression.py`（几十轮、能触发几次回收，断言两次回收之间前缀不断、回收后下一轮起恢复稳定、只有末尾易变消息变化不算断裂；真实会话不进仓库、测试不读 `chat_memory/`）
+
+## 设置热更新（config.py + config_apply.py + ui/config_watch.py）
+- **改设置不用重启**：设置对话框点保存、手改 config.json，改动都当场生效。唯一例外是「使用系统标题栏」（`NATIVE_TITLE_BAR`，窗口建的时候就定了），只有它变了才弹「立即重启 / 稍后」
+- **单一真相源是 config 模块，用的时候读**：`config.reload(data=None)` 重新执行 config.py（`importlib.reload`，默认值、非法值回退、告警和启动时是同一份代码），同一个模块对象上就地重算全部常量，返回值变了的常量名。所以别的模块要 `from . import config` 后读 `config.X`，或在函数里 `from .config import X`；**模块顶层 `from .config import X` 会把启动时的值抄走，热更新到不了**（models / notify / telegram_* / claude_code / lsp_client 原来就是这样，已改）。测试要改配置就 patch `config` 模块的属性，patch 各模块里的副本已经不起作用
+- **读到一半的文件不清空配置**：`reload` 先自己读、校验（`config.read_file`，读不了 / 不是对象返回 None，调用方保持现状），再把内容通过 `_RELOAD_SEED` 交给重新执行的模块用，不读第二遍——两次读之间文件可能正被写一半，原来的启动代码读坏了会退成空配置、把密钥全清掉。设置对话框保存改成写临时文件再 `os.replace`
+- **`config_apply.apply(changed)` 只管启动时定下来的东西**：其余配置本来就是用的时候读，reload 完就生效
+  - 密钥 / 端点 / 各家模型清单 / 自定义模型变了（`_affects_models`：`*_API_KEY` `*_BASE_URL` `*_MODELS` `CUSTOM_MODELS`，排除 `RAG_` `WEB_SEARCH_` `BOCHA_`）→ `models.refresh_model_list()` **就地**重建 `BUILTIN_MODEL_LIST` / `MODEL_LIST`（`from .models import MODEL_LIST` 抄走的是同一个 list，换对象的话 agent 那边还指着旧表）并清 `_LLM_CACHE`；返回旧下标 → 新下标，按「类型 + model_id，显示名也同的优先」对；每个打开的会话的 `current_model_index` 对到新列表，模型被删掉的退回默认模型并报给界面；清 `agent._BOUND_LLM_CACHE`、重新激活当前模型。缓存键里没有密钥 / 端点，不清的话改了 key 还用旧客户端
+  - 打码表 `secret_mask.refresh`，新填的 key 立刻进表
+  - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `REMOTE_CONTROL` 变了 → 遥控轮询停掉重起。旧线程多半卡在 30s 长轮询里退不掉，轮询线程带**代数**（`telegram_poll._gen`），`shutdown` 让代数 +1，旧线程醒来发现不是自己的代就退，拿到的那批更新不处理，不会和新线程把同一条消息执行两遍
+  - `MCP_SERVERS` / `MCP_ENABLED`（新加的常量，原来总开关只有 mcp_client 自己读文件）变了 → 后台线程 `mcp_client.restart()`：关掉旧连接、清掉上一轮的工具表 / 就绪信号 / 显示名，按文件重连，再清绑定缓存让模型拿到新工具；连续改两次排队（锁），最后一次读到的是最新配置
+  - `LSP_SERVERS` / `LSP_LANGUAGES` 变了 → 关掉正在跑的语言服务器，下次查定义按新配置起
+- **界面这一半**（`ConfigWatchMixin`）：设置对话框保存后自己调 `config_apply.reload_and_apply`，主窗口拿 `applied_result` 刷新模型按钮、提示「设置已保存，已生效」；模型被删、当前会话换了模型时提示换成了哪个。`QFileSystemWatcher` 同时看 config.json 和所在目录（写临时文件再替换会让文件从监视里掉出去，目录事件里加回来），只在 config.json 的 mtime 变了时等 400ms 重读；写坏了提示「格式不对，这次改动没有生效」、配置不动。两条路会撞（对话框保存也触发监视），重读比较的是值，第二次是空操作
+- **已知边界**：正在跑的会话，其模型被删时下一轮就换成默认模型；主线程重建列表和 worker 读 `MODEL_LIST[下标]` 之间没有锁，窗口极小，不处理。`default_model_id` 只管启动时选哪个，改了不切换当前会话
+- 测试 `scripts/test_config_hot_reload.py`（突变验证过：不用种子、列表换对象、不对下标、不清绑定缓存、旧轮询线程照收、保存不重载、监视不触发、总开关不看、重连不清旧表、标题栏不要求重启，各自都有用例挂）；`scripts/conftest.py` 的自动夹具在测试触发了热更新后把 config 和模型列表还原
 
 ## 主循环边界与错误恢复（src/agent.py + llm_errors.py）
 - **轮次上限** `config.AGENT_MAX_ROUNDS`（config.json 的 `agent_max_rounds`，设置弹窗「高级」页可改，默认 50；**设 0 = 不限**）：主循环原本是裸 `while True`，模型只要一直返回 tool_calls 就一直跑，唯一刹车是用户点停止。触顶后停下并把结论**写进 chat_history**（只弹 UI 的话，用户接着发消息时模型看不到自己被截断，会以为任务做完了）

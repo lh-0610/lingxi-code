@@ -271,22 +271,22 @@ class TestMakeArgs:
 class TestCandidateCommands:
     def test_builtin_default(self, monkeypatch):
         import src.lsp_client as lsp_mod
-        monkeypatch.setattr(lsp_mod, "LSP_LANGUAGES", {})
+        monkeypatch.setattr(lsp_mod.config, "LSP_LANGUAGES", {})
         assert lsp_mod._candidate_commands("go") == ["gopls"]
 
     def test_override_string(self, monkeypatch):
         import src.lsp_client as lsp_mod
-        monkeypatch.setattr(lsp_mod, "LSP_LANGUAGES", {"go": "my-gopls --stdio"})
+        monkeypatch.setattr(lsp_mod.config, "LSP_LANGUAGES", {"go": "my-gopls --stdio"})
         assert lsp_mod._candidate_commands("go") == ["my-gopls --stdio"]
 
     def test_override_list(self, monkeypatch):
         import src.lsp_client as lsp_mod
-        monkeypatch.setattr(lsp_mod, "LSP_LANGUAGES", {"rust": ["ra-a", "ra-b"]})
+        monkeypatch.setattr(lsp_mod.config, "LSP_LANGUAGES", {"rust": ["ra-a", "ra-b"]})
         assert lsp_mod._candidate_commands("rust") == ["ra-a", "ra-b"]
 
     def test_override_bad_type_ignored(self, monkeypatch):
         import src.lsp_client as lsp_mod
-        monkeypatch.setattr(lsp_mod, "LSP_LANGUAGES", {"go": 123})
+        monkeypatch.setattr(lsp_mod.config, "LSP_LANGUAGES", {"go": 123})
         assert lsp_mod._candidate_commands("go") == ["gopls"]
 
 

@@ -133,8 +133,8 @@ def _find_index(mtype):
 def _responses_llm(monkeypatch, effort):
     idx = _find_index("responses")
     assert idx >= 0, "需要 config 里有 responses_models 条目（默认 deepseek-flash）"
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
-    monkeypatch.setattr(models, "RESPONSES_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "RESPONSES_BASE_URL", "https://api.deepseek.com")
     return models._create_llm_uncached(model_index=idx, effort=effort)
 
 
@@ -154,7 +154,7 @@ def test_responses_effort_sent(monkeypatch, effort, wire):
 def test_responses_legacy_bool_still_works(monkeypatch):
     """未改的旧调用点仍按布尔传 reasoning=：True → high，False → none。"""
     idx = _find_index("responses")
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-test")
     llm_off = models._create_llm_uncached(model_index=idx, reasoning=False)
     assert (llm_off.extra_body or {}).get("reasoning", {}).get("effort") == "none"
     llm_on = models._create_llm_uncached(model_index=idx, reasoning=True)
@@ -189,7 +189,7 @@ def test_unsupported_model_ignores_effort(monkeypatch):
     """不支持思考的类型忽略档位：任何档位都不注入 reasoning 参数。"""
     monkeypatch.setattr(models, "MODEL_LIST",
                         [("deepseek-v4-pro", "deepseek", "deepseek-v4-pro", False)])
-    monkeypatch.setattr(models, "DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "DEEPSEEK_API_KEY", "sk-test")
     for effort in ("off", "low", "high", "max"):
         llm = models._create_llm_uncached(model_index=0, effort=effort)
         extra = llm.extra_body or {}
@@ -212,7 +212,7 @@ def test_custom_openai_protocol_ignores_effort(monkeypatch):
 def test_llm_cache_key_differs_by_effort(monkeypatch):
     idx = _find_index("responses")
     assert idx >= 0
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-test")
     monkeypatch.setattr(models, "_LLM_CACHE", {})
     low = models._create_llm(idx, effort="low")
     low_again = models._create_llm(idx, effort="low")
@@ -228,7 +228,7 @@ def test_llm_cache_key_normalizes_unsupported_models(monkeypatch):
     """不支持思考的模型：不同档位落到同一个缓存条目（实际不发参数）。"""
     monkeypatch.setattr(models, "MODEL_LIST", [("deepseek-v4-pro", "deepseek",
                                                 "deepseek-v4-pro", False)])
-    monkeypatch.setattr(models, "DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(models, "_LLM_CACHE", {})
     a = models._create_llm(0, effort="low")
     b = models._create_llm(0, effort="max")

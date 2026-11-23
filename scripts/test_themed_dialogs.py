@@ -594,7 +594,7 @@ class TestSettingsCard:
         assert bar_visible is False
         assert idx == 3 and checked == [False, False, False, True, False]
         assert [b.text() for b in settings.nav_buttons] == ["模型", "远程", "知识库", "权限", "高级"]
-        assert settings.hint_label.text() == "密钥和 Base URL 改动要重启应用才生效"
+        assert settings.hint_label.text() == "保存后立即生效"
         assert settings.cancel_btn.role == dialogs.SECONDARY
 
     @pytest.mark.parametrize("name", ["light", "dark"])

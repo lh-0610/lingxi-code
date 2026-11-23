@@ -17,28 +17,7 @@ from langchain_core.messages import HumanMessage
 
 from . import state
 from . import reasoning as _reasoning
-from .config import (
-    OLLAMA_BASE_URL,
-    CLOUD_API_KEY,
-    CLOUD_BASE_URL,
-    ANTHROPIC_API_KEY,
-    GOOGLE_API_KEY,
-    MIMO_API_KEY,
-    MIMO_BASE_URL,
-    DEEPSEEK_API_KEY,
-    DEEPSEEK_BASE_URL,
-    RESPONSES_API_KEY,
-    RESPONSES_BASE_URL,
-    CUSTOM_MODELS,
-    MODEL_CONTEXT_WINDOWS,
-    MIMO_MODELS,
-    QWEN_CLOUD_MODELS,
-    OLLAMA_MODELS,
-    ANTHROPIC_MODELS,
-    GEMINI_MODELS,
-    DEEPSEEK_MODELS,
-    RESPONSES_MODELS,
-)
+from . import config
 
 
 # 可选模型列表: (显示名, 类型, 模型ID, 支持思考)
@@ -52,23 +31,23 @@ def _build_builtin_model_list():
     out = []
     # Claude Code（CLI 模式）——固定一条，底层模型走 claude_code_model（空=CLI 默认）
     out.append(("Claude Code", "claude-code", "claude", False))
-    for mid in MIMO_MODELS:
+    for mid in config.MIMO_MODELS:
         out.append((mid, "mimo", mid, False))
-    for mid in OLLAMA_MODELS:
+    for mid in config.OLLAMA_MODELS:
         out.append((mid, "ollama", mid, True))   # 本地模型默认允许 thinking
-    for mid in QWEN_CLOUD_MODELS:
+    for mid in config.QWEN_CLOUD_MODELS:
         out.append((mid, "cloud", mid, False))
-    for mid in ANTHROPIC_MODELS:
+    for mid in config.ANTHROPIC_MODELS:
         out.append((mid, "anthropic", mid, False))
-    for mid in GEMINI_MODELS:
+    for mid in config.GEMINI_MODELS:
         out.append((mid, "gemini", mid, False))
-    for mid in DEEPSEEK_MODELS:
+    for mid in config.DEEPSEEK_MODELS:
         out.append((mid, "deepseek", mid, False))
     # Responses API 模型（OpenAI Responses 协议：DeepSeek V4 等）
     # 与 deepseek（Chat Completions）是同族姐妹通道——走 output_version="responses/v1"
     # 的语义化格式（reasoning item / 内置 web_search / call_id 配对）。默认支持思考
     # （DeepSeek Responses 默认开启思考模式，reasoning 参数控制强度）。
-    for mid in RESPONSES_MODELS:
+    for mid in config.RESPONSES_MODELS:
         out.append((mid, "responses", mid, True))
     return out
 
@@ -80,11 +59,11 @@ def _build_model_list():
     """合成最终的 MODEL_LIST：内置 + 用户自定义。
 
     自定义条目 4-tuple 跟内置一致 (name, type, model_id, supports_thinking)，
-    type 固定 = "custom"。真正的 protocol / base_url / api_key 走 CUSTOM_MODELS
+    type 固定 = "custom"。真正的 protocol / base_url / api_key 走 config.CUSTOM_MODELS
     那个 dict（_create_llm 时按 model_id 反查）。
     """
     base = list(BUILTIN_MODEL_LIST)
-    for cm in CUSTOM_MODELS or []:
+    for cm in config.CUSTOM_MODELS or []:
         try:
             base.append((
                 f"⚙ {cm.get('name', cm.get('model_id', '?'))}",
@@ -98,6 +77,29 @@ def _build_model_list():
 
 
 MODEL_LIST = _build_model_list()
+
+
+def refresh_model_list() -> dict[int, int]:
+    """按（热更新后的）config 重建模型列表，返回 旧下标 → 新下标；旧的那项已经删掉的映射到 -1。
+
+    **就地**改 BUILTIN_MODEL_LIST / MODEL_LIST：`from .models import MODEL_LIST` 抄走的是同一个
+    list 对象，换成新对象的话那些地方还指着旧表。同一项的认法同 last_model_index：类型 + model_id
+    相同，显示名也相同的优先（自定义模型可能和内置模型同 model_id）。
+    建好的客户端（_LLM_CACHE）一并清掉：密钥 / Base URL 在建的时候就定了，不在缓存键里。"""
+    old = list(MODEL_LIST)
+    BUILTIN_MODEL_LIST[:] = _build_builtin_model_list()
+    MODEL_LIST[:] = _build_model_list()
+    _LLM_CACHE.clear()
+    mapping = {}
+    taken = set()
+    for i, (name, mtype, mid, _) in enumerate(old):
+        same = [j for j, (_, t, m, _) in enumerate(MODEL_LIST) if (t, m) == (mtype, mid)]
+        exact = [j for j in same if MODEL_LIST[j][0] == name and j not in taken]
+        pick = (exact or [j for j in same if j not in taken] or [-1])[0]
+        if pick >= 0:
+            taken.add(pick)
+        mapping[i] = pick
+    return mapping
 
 
 # ── 模型标识解析（default_model_id / vision_model_id 共用）──
@@ -201,8 +203,8 @@ def last_model_index():
 
 
 def _lookup_custom_model(model_id: str):
-    """按 model_id 在 CUSTOM_MODELS 里找回完整配置。找不到返回 None。"""
-    for cm in CUSTOM_MODELS or []:
+    """按 model_id 在 config.CUSTOM_MODELS 里找回完整配置。找不到返回 None。"""
+    for cm in config.CUSTOM_MODELS or []:
         if cm.get("model_id") == model_id:
             return cm
     return None
@@ -230,17 +232,17 @@ def get_model_config_issues(model_index=None):
             issues.append(f"{name} 需要先在设置里填 {label}。")
 
     if mtype == "cloud":
-        require_key("qwen_api_key", CLOUD_API_KEY)
+        require_key("qwen_api_key", config.CLOUD_API_KEY)
     elif mtype == "anthropic":
-        require_key("anthropic_api_key", ANTHROPIC_API_KEY)
+        require_key("anthropic_api_key", config.ANTHROPIC_API_KEY)
     elif mtype == "mimo":
-        require_key("mimo_api_key", MIMO_API_KEY)
+        require_key("mimo_api_key", config.MIMO_API_KEY)
     elif mtype == "gemini":
-        require_key("google_api_key", GOOGLE_API_KEY)
+        require_key("google_api_key", config.GOOGLE_API_KEY)
     elif mtype == "deepseek":
-        require_key("deepseek_api_key", DEEPSEEK_API_KEY)
+        require_key("deepseek_api_key", config.DEEPSEEK_API_KEY)
     elif mtype == "responses":
-        require_key("responses_api_key", RESPONSES_API_KEY)
+        require_key("responses_api_key", config.RESPONSES_API_KEY)
     elif mtype == "custom":
         cm = _lookup_custom_model(model_id) or {}
         if _looks_like_placeholder(cm.get("api_key", "")):
@@ -341,7 +343,7 @@ def current_model_supports_vision():
 def check_ollama():
     """检测 Ollama 服务是否可用"""
     try:
-        urllib.request.urlopen(OLLAMA_BASE_URL, timeout=3)
+        urllib.request.urlopen(config.OLLAMA_BASE_URL, timeout=3)
         return True
     except Exception:
         return False
@@ -425,10 +427,10 @@ def context_window_for(mtype: str, model_id: str) -> int:
     """
     try:
         # 0) config.json model_context_windows 按 model_id 显式覆盖（最高优先）
-        if model_id in MODEL_CONTEXT_WINDOWS:
-            return int(MODEL_CONTEXT_WINDOWS[model_id])
+        if model_id in config.MODEL_CONTEXT_WINDOWS:
+            return int(config.MODEL_CONTEXT_WINDOWS[model_id])
         # 1) 用户在 config.json custom_models 显式覆盖
-        for cm in CUSTOM_MODELS:
+        for cm in config.CUSTOM_MODELS:
             if cm.get("model_id") == model_id:
                 val = cm.get("context_window")
                 if val is not None:
@@ -470,7 +472,7 @@ def _create_llm(model_index=None, reasoning=None, effort=None):
     LONG_TIMEOUT = 1800  # 30 分钟
 
     if mtype == "ollama":
-        kwargs = {"model": model_id, "base_url": OLLAMA_BASE_URL}
+        kwargs = {"model": model_id, "base_url": config.OLLAMA_BASE_URL}
         # 本地模型只有布尔的 reasoning；off 以外一律按"开"
         if action in ("on", "low", "high", "max"):
             kwargs["reasoning"] = True
@@ -478,29 +480,29 @@ def _create_llm(model_index=None, reasoning=None, effort=None):
     elif mtype == "anthropic":
         return ChatAnthropic(  # type: ignore[call-arg]  # langchain_anthropic pydantic 别名,mypy 桩误报 model/max_tokens
             model=model_id,
-            api_key=ANTHROPIC_API_KEY,
+            api_key=config.ANTHROPIC_API_KEY,
             max_tokens=_max_tokens_for(mtype, model_id),
             default_request_timeout=LONG_TIMEOUT,
         )
     elif mtype == "mimo":
         return ChatAnthropic(  # type: ignore[call-arg]  # langchain_anthropic pydantic 别名,mypy 桩误报 model/max_tokens
             model=model_id,
-            api_key=MIMO_API_KEY,
-            base_url=MIMO_BASE_URL,
+            api_key=config.MIMO_API_KEY,
+            base_url=config.MIMO_BASE_URL,
             max_tokens=_max_tokens_for(mtype, model_id),
             default_request_timeout=LONG_TIMEOUT,
         )
     elif mtype == "gemini":
         return ChatGoogleGenerativeAI(
             model=model_id,
-            google_api_key=GOOGLE_API_KEY,
+            google_api_key=config.GOOGLE_API_KEY,
             timeout=LONG_TIMEOUT,
         )
     elif mtype == "deepseek":
         kwargs = {
             "model": model_id,
-            "api_key": DEEPSEEK_API_KEY,
-            "base_url": DEEPSEEK_BASE_URL,
+            "api_key": config.DEEPSEEK_API_KEY,
+            "base_url": config.DEEPSEEK_BASE_URL,
             "timeout": LONG_TIMEOUT,
         }
         # DeepSeek V4 服务端默认开启思考模式，但 langchain 不能把 reasoning_content
@@ -517,8 +519,8 @@ def _create_llm(model_index=None, reasoning=None, effort=None):
         # system 走 instructions 字段、多轮历史放 input，均交由 SDK 内部处理。
         kwargs = {
             "model": model_id,
-            "api_key": RESPONSES_API_KEY,
-            "base_url": RESPONSES_BASE_URL,
+            "api_key": config.RESPONSES_API_KEY,
+            "base_url": config.RESPONSES_BASE_URL,
             "output_version": "responses/v1",
             "timeout": LONG_TIMEOUT,
         }
@@ -532,7 +534,7 @@ def _create_llm(model_index=None, reasoning=None, effort=None):
             kwargs["extra_body"] = {"reasoning": {"effort": action}}
         return ChatOpenAI(**kwargs)
     elif mtype == "custom":
-        # 用户自定义模型：从 CUSTOM_MODELS 反查完整配置，按 protocol 选 SDK
+        # 用户自定义模型：从 config.CUSTOM_MODELS 反查完整配置，按 protocol 选 SDK
         cm = _lookup_custom_model(model_id) or {}
         protocol = (cm.get("protocol") or "openai").lower()
         api_key = cm.get("api_key", "")
@@ -575,8 +577,8 @@ def _create_llm(model_index=None, reasoning=None, effort=None):
     else:
         kwargs = {
             "model": model_id,
-            "api_key": CLOUD_API_KEY,
-            "base_url": CLOUD_BASE_URL,
+            "api_key": config.CLOUD_API_KEY,
+            "base_url": config.CLOUD_BASE_URL,
             "timeout": LONG_TIMEOUT,
         }
         return ChatOpenAI(**kwargs)

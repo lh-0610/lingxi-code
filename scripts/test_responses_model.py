@@ -28,7 +28,7 @@ def test_responses_type_registered_in_builtin_list(monkeypatch):
     assert default_entries, "responses 类型未注册进 builtin 列表"
     assert ("deepseek-flash", "responses", "deepseek-flash", True) in default_entries
 
-    monkeypatch.setattr(models, "RESPONSES_MODELS", ["deepseek-v4-pro"])
+    monkeypatch.setattr(models.config, "RESPONSES_MODELS", ["deepseek-v4-pro"])
     entries = [e for e in models._build_builtin_model_list() if e[1] == "responses"]
     assert entries == [("deepseek-v4-pro", "responses", "deepseek-v4-pro", True)]
 
@@ -45,8 +45,8 @@ def test_create_llm_responses_output_version(monkeypatch):
     """responses 分支应创建 ChatOpenAI 且 output_version='responses/v1'。"""
     idx = _find_responses_index()
     assert idx >= 0, "需要 config 里有 responses_models 条目（默认 deepseek-flash）"
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
-    monkeypatch.setattr(models, "RESPONSES_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "RESPONSES_BASE_URL", "https://api.deepseek.com")
     llm = _create_llm(model_index=idx, reasoning=True)
     # ChatOpenAI 的 output_version 可直接读（model_dump/dict 不暴露它）
     assert llm.__class__.__name__ == "ChatOpenAI"
@@ -58,8 +58,8 @@ def test_create_llm_responses_thinking_off_injects_reasoning(monkeypatch):
     """responses 关闭思考时应在 extra_body 里带 reasoning.effort=none（DeepSeek 默认思考）。"""
     idx = _find_responses_index()
     assert idx >= 0
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
-    monkeypatch.setattr(models, "RESPONSES_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "RESPONSES_BASE_URL", "https://api.deepseek.com")
     llm = _create_llm(model_index=idx, reasoning=False)
     extra = llm.extra_body or {}
     assert extra.get("reasoning", {}).get("effort") == "none", f"关闭思考应带 effort=none，实际 {extra}"
@@ -72,8 +72,8 @@ def test_create_llm_responses_thinking_on_sends_effort(monkeypatch):
     """
     idx = _find_responses_index()
     assert idx >= 0
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test")
-    monkeypatch.setattr(models, "RESPONSES_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-test")
+    monkeypatch.setattr(models.config, "RESPONSES_BASE_URL", "https://api.deepseek.com")
     llm = _create_llm(model_index=idx, reasoning=True)
     extra = llm.extra_body or {}
     assert extra.get("reasoning", {}).get("effort") == "high", f"开启思考应带 effort=high，实际 {extra}"
@@ -117,7 +117,7 @@ def test_get_model_config_issues_responses_requires_key(monkeypatch):
     """responses 类型在没有填 key 时应提示配置 responses_api_key。"""
     idx = _find_responses_index()
     assert idx >= 0
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "")
     issues = get_model_config_issues(idx)
     assert any("responses_api_key" in i for i in issues), f"期望提示缺 key，实际 {issues}"
 
@@ -126,7 +126,7 @@ def test_get_model_config_issues_responses_key_ok(monkeypatch):
     """填好 key 的 responses 模型不应报缺 key。"""
     idx = _find_responses_index()
     assert idx >= 0
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-valid-not-placeholder")
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-valid-not-placeholder")
     issues = get_model_config_issues(idx)
     assert not any("responses_api_key" in i for i in issues), f"填了 key 仍报缺：{issues}"
 

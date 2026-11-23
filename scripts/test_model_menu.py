@@ -44,7 +44,7 @@ def model_list(monkeypatch):
     """固定模型清单；Responses 那条填好 key（其余缺 key 的走「更多模型」）。"""
     monkeypatch.setattr(models, "MODEL_LIST", MODELS)
     monkeypatch.setattr(agent, "MODEL_LIST", MODELS)
-    monkeypatch.setattr(models, "RESPONSES_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(models.config, "RESPONSES_API_KEY", "sk-test", raising=False)
     return MODELS
 
 

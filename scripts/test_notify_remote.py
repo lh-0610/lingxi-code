@@ -17,9 +17,9 @@ from src.streaming import _hits_remote_blocklist
 def notify_env(monkeypatch):
     calls = []
     monkeypatch.setattr(tp, "push", lambda level, title, msg: calls.append((level, title, msg)) or True)
-    monkeypatch.setattr(notify_mod, "NOTIFY_ENABLED", True)
-    monkeypatch.setattr(notify_mod, "NOTIFY_LEVELS", ["error", "action_needed", "done"])
-    monkeypatch.setattr(notify_mod, "NOTIFY_THROTTLE_SECONDS", 10)
+    monkeypatch.setattr(notify_mod.config, "NOTIFY_ENABLED", True)
+    monkeypatch.setattr(notify_mod.config, "NOTIFY_LEVELS", ["error", "action_needed", "done"])
+    monkeypatch.setattr(notify_mod.config, "NOTIFY_THROTTLE_SECONDS", 10)
     notify_mod._last_sent.clear()
     return calls
 
@@ -30,7 +30,7 @@ class TestNotify:
         assert len(notify_env) == 1
 
     def test_disabled_blocks(self, notify_env, monkeypatch):
-        monkeypatch.setattr(notify_mod, "NOTIFY_ENABLED", False)
+        monkeypatch.setattr(notify_mod.config, "NOTIFY_ENABLED", False)
         assert notify_mod.notify("done", "T", "M", "evt") is False
         assert notify_env == []
 
@@ -56,9 +56,9 @@ class TestNotify:
 def notify_long_env(monkeypatch):
     calls = []
     monkeypatch.setattr(tp, "push_long", lambda level, title, msg: calls.append((level, title, msg)) or True)
-    monkeypatch.setattr(notify_mod, "NOTIFY_ENABLED", True)
-    monkeypatch.setattr(notify_mod, "NOTIFY_LEVELS", ["error", "action_needed", "done"])
-    monkeypatch.setattr(notify_mod, "NOTIFY_THROTTLE_SECONDS", 10)
+    monkeypatch.setattr(notify_mod.config, "NOTIFY_ENABLED", True)
+    monkeypatch.setattr(notify_mod.config, "NOTIFY_LEVELS", ["error", "action_needed", "done"])
+    monkeypatch.setattr(notify_mod.config, "NOTIFY_THROTTLE_SECONDS", 10)
     notify_mod._last_sent.clear()
     return calls
 
@@ -69,7 +69,7 @@ class TestNotifyLong:
         assert notify_long_env == [("done", "回复", "很长的完整内容")]
 
     def test_respects_disabled(self, notify_long_env, monkeypatch):
-        monkeypatch.setattr(notify_mod, "NOTIFY_ENABLED", False)
+        monkeypatch.setattr(notify_mod.config, "NOTIFY_ENABLED", False)
         assert notify_mod.notify_long("done", "回复", "x", "agent_done") is False
         assert notify_long_env == []
 
@@ -114,7 +114,7 @@ def callback_env(monkeypatch):
     monkeypatch.setattr(tp, "answer_callback", lambda cid, text="": answers.append((cid, text)) or True)
     monkeypatch.setattr(cb, "_resolve_remote_confirm",
                         lambda cid, allow, remember=False: resolves.append((cid, allow, remember)) or True)
-    monkeypatch.setattr(poll, "TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setattr(poll.config, "TELEGRAM_CHAT_ID", "12345")
     return answers, resolves
 
 

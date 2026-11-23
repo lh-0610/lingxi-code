@@ -139,7 +139,7 @@ class TestSendTimeConfigMessage:
     def test_resolve_bound_llm_raises_readable_error(self, monkeypatch):
         sess = session.Session()
         sess.current_model_index = self._deepseek_index()
-        monkeypatch.setattr(models, "DEEPSEEK_API_KEY", "")
+        monkeypatch.setattr(models.config, "DEEPSEEK_API_KEY", "")
         monkeypatch.setattr(agent, "_BOUND_LLM_CACHE", {})
 
         def _boom(*args, **kwargs):
@@ -187,7 +187,7 @@ class TestSendTimeConfigMessage:
         """不是配置问题（没有 issues）的构造失败要原样抛出，不许被包装成"去填 key"。"""
         sess = session.Session()
         sess.current_model_index = self._deepseek_index()
-        monkeypatch.setattr(models, "DEEPSEEK_API_KEY", "sk-real-key-value")
+        monkeypatch.setattr(models.config, "DEEPSEEK_API_KEY", "sk-real-key-value")
         monkeypatch.setattr(agent, "_BOUND_LLM_CACHE", {})
 
         def _boom(*args, **kwargs):

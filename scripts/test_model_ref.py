@@ -147,7 +147,7 @@ def _open_settings(qapp, tmp_path, monkeypatch, cfg, entries):
     from src.ui import dialogs
     from src.ui import settings_dialog as sd
 
-    monkeypatch.setattr(models, "MODEL_LIST", entries)
+    monkeypatch.setattr(models, "MODEL_LIST", list(entries))   # 保存会热更新、就地重建列表：给副本
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     monkeypatch.setattr(sd, "CONFIG_PATH", str(cfg_path))

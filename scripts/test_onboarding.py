@@ -9,7 +9,7 @@ from src import models
 def test_config_issue_points_to_settings(monkeypatch):
     """没填 key 时提示指向「设置」，不再叫人改 config.json。"""
     idx = next(i for i, m in enumerate(models.MODEL_LIST) if m[1] == "mimo")
-    monkeypatch.setattr(models, "MIMO_API_KEY", "")
+    monkeypatch.setattr(models.config, "MIMO_API_KEY", "")
     issues = models.get_model_config_issues(idx)
     assert issues, "缺 key 应有提示"
     assert "设置" in issues[0]
@@ -19,8 +19,8 @@ def test_config_issue_points_to_settings(monkeypatch):
 def _blank_all_cloud_keys(monkeypatch):
     for k in ("CLOUD_API_KEY", "ANTHROPIC_API_KEY", "MIMO_API_KEY",
               "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "RESPONSES_API_KEY"):
-        monkeypatch.setattr(models, k, "")
-    monkeypatch.setattr(models, "CUSTOM_MODELS", [])
+        monkeypatch.setattr(models.config, k, "")
+    monkeypatch.setattr(models.config, "CUSTOM_MODELS", [])
 
 
 def test_has_usable_model_false_when_no_keys(monkeypatch):
@@ -32,7 +32,7 @@ def test_has_usable_model_false_when_no_keys(monkeypatch):
 def test_has_usable_model_true_with_one_key(monkeypatch):
     """填好一个云模型(mimo)的 key → 有可用模型。"""
     _blank_all_cloud_keys(monkeypatch)
-    monkeypatch.setattr(models, "MIMO_API_KEY", "tp-realkey-123")
+    monkeypatch.setattr(models.config, "MIMO_API_KEY", "tp-realkey-123")
     assert models.has_usable_model() is True
 
 
@@ -52,7 +52,7 @@ def test_custom_model_with_key_counts(monkeypatch):
     monkeypatch.setattr(models, "MODEL_LIST", [
         ("⚙ MyModel", "custom", "my-model", False),
     ])
-    monkeypatch.setattr(models, "CUSTOM_MODELS", [
+    monkeypatch.setattr(models.config, "CUSTOM_MODELS", [
         {"model_id": "my-model", "api_key": "sk-real-xyz", "protocol": "openai"},
     ])
     assert models.has_usable_model() is True

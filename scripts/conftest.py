@@ -44,8 +44,8 @@ os.makedirs(os.path.join(_TEST_DATA_DIR, "chat_memory"), exist_ok=True)
 _TEST_LOG_DIR = tempfile.mkdtemp(prefix="lingxi-test-logs-")
 os.environ["LINGXI_LOG_DIR"] = _TEST_LOG_DIR
 
-# 3. 不读开发者本地 config.json：src/config.py 一导入就把整份配置固化成模块常量，之后测试
-#    改不动。直接读真实配置会让**测试结果随个人配置而变**——实测有人把 responses_models
+# 3. 不读开发者本地 config.json：src/config.py 一导入就读 config.json 算出全部常量，测试
+#    拿到的就是个人配置。直接读真实配置会让**测试结果随个人配置而变**——实测有人把 responses_models
 #    留空，scripts/test_responses_model.py 就挂 6 个。指到一个不存在的临时路径后，config.py
 #    的每个 _config.get(...) 都走代码里的默认值；需要特定配置的测试自己 monkeypatch 常量
 #    （或像 test_settings_nested 那样把 CONFIG_PATH patch 到自己的临时文件）。
@@ -109,6 +109,26 @@ def _fresh_active_session():
     yield
     _session.unbind_thread()
     _paths.set_data_dir(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_after_hot_reload():
+    """测试里触发了设置热更新（设置对话框 _save、config.reload）的话，跑完把配置还原。
+
+    热更新就地改的是 config 模块的常量和 models.MODEL_LIST，不还原的话下一个测试拿到的是
+    上一个测试保存的配置（有没有模型、有没有 key 都跟着变）。没触发热更新的测试什么都不做。"""
+    import src.config as _cfg
+    before = {k: v for k, v in vars(_cfg).items() if k.isupper() or k == "_config"}
+    yield
+    if vars(_cfg).get("_config") is before["_config"]:
+        return
+    for k in [k for k in vars(_cfg) if k.isupper() and k not in before]:
+        delattr(_cfg, k)
+    for k, v in before.items():
+        setattr(_cfg, k, v)
+    from src import models, secret_mask
+    models.refresh_model_list()
+    secret_mask.refresh(_cfg._config)
 
 
 @pytest.fixture(autouse=True)

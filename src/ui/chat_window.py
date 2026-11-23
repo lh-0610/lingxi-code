@@ -47,12 +47,13 @@ from .send import SendMixin
 from .run_results import RunResultMixin
 from .timeline import TimelineMixin
 from .quote_input import QuoteInputMixin
+from .config_watch import ConfigWatchMixin
 
 
 class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
              SidebarMixin, HeaderMixin, RagSidebarMixin,
              SendMixin, RunAdmissionMixin, QueueDispatchMixin, RunResultMixin,
-             TimelineMixin, QuoteInputMixin, QMainWindow):
+             TimelineMixin, QuoteInputMixin, ConfigWatchMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("灵犀")
@@ -140,6 +141,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         QTimer.singleShot(300, self, self._show_current_model_config_warning)
         # 启动后空闲时预热知识库（加载向量库 + 读一次状态，首次约 1.8s）：第一次切到知识库就不卡
         QTimer.singleShot(2500, self, self._prewarm_kb_status)
+        # 改设置 / 手改 config.json 当场生效，不用重启（config_watch.py → config_apply.py）
+        self._install_config_watcher()
 
     # ── 主题工具 ──
     def _t(self, key):
@@ -161,7 +164,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
     def _open_settings_menu(self):
         """齿轮按钮：弹出 VSCode 风格的设置对话框。"""
         dlg = SettingsDialog(self)
-        dlg.exec()
+        if dlg.exec():
+            self._on_config_applied(getattr(dlg, "applied_result", None), from_settings=True)
 
     def _apply_tooltip_style(self):
         """把 QToolTip 颜色强行刷成跟主题一致。

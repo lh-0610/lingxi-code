@@ -15,7 +15,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from . import state
 from .paths import logger
-from .config import CLAUDE_CODE_MODEL, CLAUDE_CODE_SKIP_PERMISSIONS
+from . import config
 # 两个名字现在由 agent_loop 的统一收尾调用；这里保留导入是因为既有测试按模块属性
 # patch 它们（monkeypatch.setattr(claude_code, "save_session", ...)）。
 from .memory import save_session, maybe_generate_session_title  # noqa: F401
@@ -152,8 +152,8 @@ def claude_code_loop(ui) -> AgentResult:
             sys_prompt_file = _tf.name
         cmd = _build_claude_cmd(
             agent_mode=getattr(state, "agent_mode", "act"),
-            skip_permissions=CLAUDE_CODE_SKIP_PERMISSIONS,
-            model=CLAUDE_CODE_MODEL,
+            skip_permissions=config.CLAUDE_CODE_SKIP_PERMISSIONS,
+            model=config.CLAUDE_CODE_MODEL,
             system_prompt_file=sys_prompt_file,
         )
         stdin_data = full_prompt   # 用户 prompt 一律走 stdin，绝不进命令行

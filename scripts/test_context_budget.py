@@ -37,7 +37,7 @@ def test_config_override(monkeypatch):
     from src import models
 
     monkeypatch.setattr(
-        models, "CUSTOM_MODELS", [{"model_id": "my-model", "context_window": 999_999}]
+        models.config, "CUSTOM_MODELS", [{"model_id": "my-model", "context_window": 999_999}]
     )
     assert context_window_for("custom", "my-model") == 999_999
 
@@ -46,7 +46,7 @@ def test_model_context_windows_override(monkeypatch):
     """config.json 的 model_context_windows 按 model_id 覆盖内置窗口（最高优先）。"""
     from src import models
 
-    monkeypatch.setattr(models, "MODEL_CONTEXT_WINDOWS", {"mimo-v2.5-pro": 12_345})
+    monkeypatch.setattr(models.config, "MODEL_CONTEXT_WINDOWS", {"mimo-v2.5-pro": 12_345})
     assert context_window_for("mimo", "mimo-v2.5-pro") == 12_345
 
 

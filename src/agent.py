@@ -114,7 +114,7 @@ def resolve_bound_llm(session):
             # 建不出来基本就是配置没填全（典型：key 空 → OpenAIError('Missing credentials')）。
             # 启动期那次创建已由 _activate_llm 吞掉、只记日志；真正发消息走到这里才该告诉
             # 用户怎么办——直接把"去设置里填哪个 key"说出来，别把 SDK 的英文原文糊到脸上。
-            # 不进缓存：填好 key 后重启 / 再切一次模型就能立刻建出来。
+            # 不进缓存：在设置里填好 key 保存（热更新会清缓存）/ 再切一次模型就能立刻建出来。
             issues = get_model_config_issues(mi)
             if issues:
                 raise ModelConfigError("".join(issues)) from e   # 每条已以"。"结尾
@@ -138,7 +138,7 @@ def _activate_llm():
     配置问题由界面在启动 / 切模型时提示（_show_current_model_config_warning），真正发消息时
     resolve_bound_llm 再抛 ModelConfigError 说清缺哪个 key；这里只把 llm 置空并记一条日志。
 
-    失败不写缓存：用户填好 key 后重启 / 再切一次模型，应当能立刻建出来。
+    失败不写缓存：用户填好 key 保存后（热更新）/ 再切一次模型，应当能立刻建出来。
     """
     from . import session as _session
     try:
@@ -563,7 +563,7 @@ def _check_round_limit(ui, round_i):
     """轮次上限：模型持续返回 tool_calls 时主循环没有自然终点，触顶就停下来说明情况。
 
     触顶返回 limit_reached 结果，否则 None。
-    每轮重读 config（而不是 import 时定长），设置里改完重启即生效、测试也好 patch。
+    每轮重读 config（而不是 import 时定长），设置里改完保存即生效（热更新）、测试也好 patch。
     **0 = 不限**（用户在设置里显式关掉了刹车）。
     """
     from . import config as _cfg_mod

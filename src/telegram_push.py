@@ -4,7 +4,7 @@
 """
 import httpx
 
-from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from . import config
 from .paths import logger
 
 
@@ -25,7 +25,7 @@ def push(level: str, title: str, message: str) -> bool:
         title: 标题（一行粗体）
         message: 正文（可多行）
     """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         logger.debug("Telegram 未配置 token/chat_id，跳过推送")
         return False
 
@@ -35,12 +35,12 @@ def push(level: str, title: str, message: str) -> bool:
     # entities）。纯文本最稳，标题靠 emoji + 换行区分。
     text = f"{emoji} {title}\n{message}"
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         r = httpx.post(
             url,
             json={
-                "chat_id": TELEGRAM_CHAT_ID,
+                "chat_id": config.TELEGRAM_CHAT_ID,
                 "text": text,
             },
             timeout=10,
@@ -85,7 +85,7 @@ def push_confirm(text: str, confirm_id: str, is_destructive: bool = False) -> in
     注意：不用 parse_mode——命令/diff 常含未配对的 *_[`` ` `` 等字符，Markdown
     解析会 400（can't parse entities）让按钮发不出去。纯文本最稳（同 push()）。
     """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return None
 
     row = [
@@ -95,9 +95,9 @@ def push_confirm(text: str, confirm_id: str, is_destructive: bool = False) -> in
     if not is_destructive:
         row.append({"text": "📝 记住同类", "callback_data": f"c:{confirm_id}:r"})
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": config.TELEGRAM_CHAT_ID,
         "text": text,
         "reply_markup": {
             "inline_keyboard": [row],
@@ -115,9 +115,9 @@ def push_confirm(text: str, confirm_id: str, is_destructive: bool = False) -> in
 
 def answer_callback(callback_query_id: str, text: str = "") -> bool:
     """回答 callback_query，解除按钮 loading 状态。"""
-    if not TELEGRAM_BOT_TOKEN:
+    if not config.TELEGRAM_BOT_TOKEN:
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
     try:
         r = httpx.post(url, json={
             "callback_query_id": callback_query_id,
@@ -131,12 +131,12 @@ def answer_callback(callback_query_id: str, text: str = "") -> bool:
 
 def edit_message_text(message_id: int, text: str) -> bool:
     """编辑已有消息的文本（用于把确认按钮替换为结果文案）。"""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/editMessageText"
     try:
         r = httpx.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
+            "chat_id": config.TELEGRAM_CHAT_ID,
             "message_id": message_id,
             "text": text,
         }, timeout=10)
