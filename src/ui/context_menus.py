@@ -239,10 +239,95 @@ def _text_target(obj):
     return None
 
 
+# ── 选中文字浮出「引用 · 复制」（设计稿「消息区：引用」①）──
+# 浮条挂在 MessageView 上（quotes.SelectionBar）。这里借右键菜单的全局过滤器（反正每个事件
+# 都要进一趟 Python，不另装一个）：松开左键时选中了消息流里的文字就叫出来；按下鼠标、
+# 按 Esc、弹右键菜单就收。
+_bars = weakref.WeakSet()
+
+
+def register_selection_bar(bar):
+    _bars.add(bar)
+
+
+def _dismiss_bars(keep_obj=None):
+    for bar in list(_bars):
+        try:
+            if not bar.isVisible():
+                continue
+            if keep_obj is not None and isinstance(keep_obj, QWidget) and \
+                    (keep_obj is bar or bar.isAncestorOf(keep_obj)):
+                continue
+            bar.dismiss()
+        except RuntimeError:
+            pass
+
+
+def _selected_text(target) -> str:
+    if isinstance(target, QLabel):
+        return _label_selection(target) if target.hasSelectedText() else ""
+    if isinstance(target, (QTextEdit, QPlainTextEdit)):
+        return target.textCursor().selectedText().replace(" ", "\n")
+    return ""
+
+
+def _bar_host(target):
+    """target 所在的消息流（带 selection_bar 的祖先），不在消息流里返回 None。"""
+    w = target.parentWidget()
+    while w is not None:
+        bar = getattr(w, "selection_bar", None)
+        if bar is not None:
+            return w
+        w = w.parentWidget()
+    return None
+
+
+def _maybe_show_bar(obj, global_pos):
+    target = _text_target(obj)
+    if target is None or isinstance(target, QLineEdit):
+        return
+    if isinstance(target, (QTextEdit, QPlainTextEdit)) and not target.isReadOnly():
+        return
+    host = _bar_host(target)
+    if host is None:
+        return
+    ref = weakref.ref(target)
+
+    def show():
+        t = ref()
+        if t is None:
+            return
+        try:
+            text = _selected_text(t)
+            if text.strip():
+                host.selection_bar.show_for(text, global_pos)
+        except RuntimeError:
+            pass
+    # 等控件自己处理完这次松开（选区定下来）再看
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, host, show)
+
+
 class _ContextMenuFilter(QObject):
     def eventFilter(self, obj, event):
-        if event.type() != QEvent.ContextMenu:
+        t = event.type()
+        if t == QEvent.MouseButtonPress:
+            # 只看发给控件的那一份：真实点击先经过顶层窗口（QWindow，不是 QWidget）才分发到
+            # 按钮，在那一份上收浮条，点浮条上的「引用」时按钮先被藏了、点击落空（用户实测）
+            if _bars and isinstance(obj, QWidget):
+                _dismiss_bars(obj)
             return False
+        if t == QEvent.MouseButtonRelease:
+            if _bars and event.button() == Qt.LeftButton:
+                _maybe_show_bar(obj, event.globalPosition().toPoint())
+            return False
+        if t == QEvent.KeyPress:
+            if _bars and event.key() == Qt.Key_Escape:
+                _dismiss_bars()
+            return False
+        if t != QEvent.ContextMenu:
+            return False
+        _dismiss_bars()
         target = _text_target(obj)
         if target is None or target.contextMenuPolicy() != Qt.DefaultContextMenu:
             return False

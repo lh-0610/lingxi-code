@@ -264,9 +264,13 @@ def chat_ui(qapp, monkeypatch, isolated_memory):
 
 
 def test_quote_to_input_box(chat_ui):
+    """引用进输入框上方的卡片（设计稿「消息区：引用」），不往框里塞「> 」；
+    发送时拼成 Markdown 引用。"""
     chat_ui.entry.setPlainText("看看这个")
     chat_ui.context_menu_quote("第一行\n\n第二行")
-    assert chat_ui.entry.toPlainText() == "看看这个\n> 第一行\n>\n> 第二行\n\n"
+    assert chat_ui.entry.toPlainText() == "看看这个"
+    assert chat_ui._pending_quotes == ["第一行\n\n第二行"]
+    assert chat_ui._compose_input() == "> 第一行\n>\n> 第二行\n\n看看这个"
     assert cm._host() is chat_ui
 
 
@@ -328,7 +332,7 @@ def test_page_menu_link_and_selection(browser_view, chat_ui):
     trigger(menu, "复制链接地址")
     assert QApplication.clipboard().text() == "http://localhost:5173/docs"
     trigger(menu, "把选中文字发到输入框")
-    assert chat_ui.entry.toPlainText().startswith("> token")
+    assert chat_ui._pending_quotes == ["token"], "网页里引用也进输入框的引用卡"
 
 
 def test_page_menu_editable_field(browser_view):

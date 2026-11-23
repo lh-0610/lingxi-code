@@ -1575,6 +1575,12 @@ class UserTurn(QWidget):
         bottom = max(0, 8 - extra)
         v.setContentsMargins(14, bottom + extra, 14, bottom)
         v.setSpacing(0)
+        # 引用（设计稿「消息区：引用」）：开头连续的「> 」行画成小一号的引用块，在正文上面
+        self._quotes_box = QVBoxLayout()
+        self._quotes_box.setContentsMargins(0, 0, 0, 0)
+        self._quotes_box.setSpacing(6)
+        v.addLayout(self._quotes_box)
+        self._quotes = []
         self.body = _FitLabel()
         self.body.setWordWrap(True)
         self.body.setTextFormat(Qt.RichText)
@@ -1605,13 +1611,54 @@ class UserTurn(QWidget):
 
     def append(self, text):
         self._text += text
-        self.set_html(_esc(self._text).replace("\n", "<br>"))
+        self.set_text(self._text)
+
+    def set_text(self, text):
+        """用户原文：开头的引用拆成引用块，其余是正文（@文件 靛蓝加粗）。"""
+        from .quotes import split_leading_quotes
+        self._text = text or ""
+        quotes, rest = split_leading_quotes(self._text)
+        self._set_quotes(quotes)
+        self.body.setVisible(bool(rest.strip()) or not quotes)
+        self.set_html(_user_html(rest))
+
+    def quotes(self) -> list:
+        return list(self._quotes)
+
+    def _set_quotes(self, quotes):
+        if quotes == self._quotes:
+            return
+        from .quotes import QuoteBlock
+        while self._quotes_box.count():
+            w = self._quotes_box.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._quotes = list(quotes)
+        font = ui_font(13)
+        for q in quotes:
+            self._quotes_box.addWidget(QuoteBlock(q, bar=_P["quote_bar"], color=_P["quote_text"],
+                                                  font=font))
+        # 引用和下面的正文之间空一点（只有引用时不留）
+        self._quotes_box.setContentsMargins(0, 0, 0, 6 if quotes else 0)
 
     def set_html(self, html):
         # 发送时文本末尾带着换行（旧分隔约定）：去掉，不然用户消息下面空出两行
         html = re.sub(r"^(?:\s*<br\s*/?>)+|(?:<br\s*/?>\s*)+$", "", (html or "").strip())
         self.body.setText(
             f'<p style="margin:0; line-height:{round(self._LINE_HEIGHT * 100)}%;">{html}</p>')
+
+
+def _user_html(text: str) -> str:
+    """用户正文 → 气泡里的富文本：@文件引用靛蓝加粗，其余转义，换行变 <br>。"""
+    parts, pos = [], 0
+    for m in re.finditer(r'(?<!\S)@[^\s@]+', text or ""):
+        if m.start() > pos:
+            parts.append(_esc(text[pos:m.start()]))
+        parts.append(f'<b style="color:{_P["indigo"]};">{_esc(m.group(0))}</b>')
+        pos = m.end()
+    parts.append(_esc((text or "")[pos:]))
+    return "".join(parts).replace("\n", "<br>")
 
 
 class _Block(QWidget):
@@ -2031,6 +2078,7 @@ class MessageView(QScrollArea):
     user_edit_requested = Signal(int)     # 编辑这条消息并重发
     user_rewind_requested = Signal(int)   # 回退到这条之前（丢弃它及之后）
     user_fork_requested = Signal(int)     # 从这条之前分叉出新对话
+    quote_requested = Signal(str)         # 选中文字后点了浮条上的「引用」
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2071,6 +2119,14 @@ class MessageView(QScrollArea):
         sb = self.verticalScrollBar()
         sb.valueChanged.connect(self._on_scroll_value)
         sb.rangeChanged.connect(self._on_scroll_range)
+        # 选中文字浮出「引用 · 复制」（设计稿「消息区：引用」①；由 context_menus 的过滤器叫出来）
+        from . import context_menus
+        from .quotes import SelectionBar
+        self.selection_bar = SelectionBar(self)
+        self.selection_bar.apply_theme(theme_color)
+        self.selection_bar.quote_requested.connect(self.quote_requested)
+        sb.valueChanged.connect(lambda _v: self.selection_bar.dismiss())
+        context_menus.register_selection_bar(self.selection_bar)
 
     def _on_scroll_value(self, value):
         """滚动位置变了：停在底部附近就继续跟随，往上翻了就不跟。"""
@@ -2176,6 +2232,9 @@ class MessageView(QScrollArea):
         所以必须和背景一起设，分开设的话后设的会把背景冲掉（深色下聊天区一直是白底就是这个原因）。
         已经画出来的消息块不会自己变色，切主题后由 ChatUI 重绘消息流。"""
         self.setStyleSheet(mv_qss() + extra_qss)
+        bar = getattr(self, "selection_bar", None)
+        if bar is not None:
+            bar.apply_theme(theme_color)
 
     # 宽度变化：视口一变就当场 fit_content（下面的过滤器，滚动区缩放时视口的 Resize 同步送到），
     # 不改边距——原来先排版后改边距，中间那一帧内容按旧边距铺开：侧栏收起时整列铺到右边、
@@ -2259,7 +2318,9 @@ class MessageView(QScrollArea):
         self._add_turn(self._cur_round)
         self._cur_user = UserTurn()
         self._cur_round.add(self._cur_user)
-        self._cur_round.add_node(self._cur_user.body, "user", dy=11)
+        # 节点对着气泡里第一行（有引用时是引用的第一行；只有引用时正文是藏着的，锚在正文上就没了）
+        self._cur_round.add_node(self._cur_user.bubble, "user",
+                                 dy=lambda b: b.layout().contentsMargins().top() + 11)
         if text:
             self._cur_user.append(text)
         self._cur_assistant = None
@@ -2269,6 +2330,13 @@ class MessageView(QScrollArea):
         if self._cur_user is None:
             self.add_user_turn()
         self._cur_user.set_html(html)
+
+    def append_user_text(self, text):
+        """用户原文（实时发送时用；重画历史走 handle("user_msg")，同一套渲染）：
+        开头的引用画成引用块，@文件 靛蓝加粗。"""
+        if self._cur_user is None:
+            self.add_user_turn()
+        self._cur_user.set_text(text)
 
     def add_user_actions(self, index):
         """用户气泡右边的时间轴操作按钮：编辑 / 回退 / 分叉（幽灵图标按钮，与回复末尾同款），

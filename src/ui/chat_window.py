@@ -46,12 +46,13 @@ from .queue_dispatch import QueueDispatchMixin
 from .send import SendMixin
 from .run_results import RunResultMixin
 from .timeline import TimelineMixin
+from .quote_input import QuoteInputMixin
 
 
 class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
              SidebarMixin, HeaderMixin, RagSidebarMixin,
              SendMixin, RunAdmissionMixin, QueueDispatchMixin, RunResultMixin,
-             TimelineMixin, QMainWindow):
+             TimelineMixin, QuoteInputMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("灵犀")
@@ -236,6 +237,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._style_chat_area()
         if hasattr(self, "queue_panel"):
             self.queue_panel.apply_theme()
+        if hasattr(self, "quote_area"):
+            self._refresh_quote_cards()
         if hasattr(self, "empty_state"):
             self._refresh_empty_state_layout()
             self._position_empty_state()
@@ -627,6 +630,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.chat_area.file_link_clicked.connect(self._on_file_link_clicked)
         # 用户气泡上的时间轴操作（参数是该消息在 chat_history 里的绝对下标）
         self.chat_area.user_edit_requested.connect(self._on_user_edit)
+        self.chat_area.quote_requested.connect(self.context_menu_quote)
         self.chat_area.user_rewind_requested.connect(self._on_user_rewind)
         self.chat_area.user_fork_requested.connect(self._on_user_fork)
         self.chat_area.meta_provider = self._stream_meta               # 回复上方那行小字里的模式
@@ -850,23 +854,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._open_file_in_panel(rel_path)
         self._settle_file_panel()
 
-    # ── 右键菜单（ui/context_menus）要的两个入口 ──
-    def context_menu_quote(self, text):
-        """「引用到输入框」：选中的文字按 Markdown 引用（每行前加 > ）追加到输入框末尾。"""
-        lines = [ln.rstrip() for ln in (text or "").strip().splitlines()]
-        if not lines:
-            return
-        quoted = "\n".join(("> " + ln) if ln else ">" for ln in lines) + "\n\n"
-        from PySide6.QtGui import QTextCursor
-        cur = self.entry.textCursor()
-        cur.movePosition(QTextCursor.End)
-        existing = self.entry.toPlainText()
-        if existing and not existing.endswith("\n"):
-            quoted = "\n" + quoted
-        cur.insertText(quoted)
-        self.entry.setTextCursor(cur)
-        self.entry.setFocus()
-
+    # ── 右键菜单（ui/context_menus）要的入口；context_menu_quote 在 QuoteInputMixin ──
     def context_menu_open_link(self, href):
         """右键「打开」：和点链接走同一条路（文件进文件面板，网页按设置）。"""
         self._on_file_link_clicked(href)
@@ -1309,6 +1297,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         container_layout.setContentsMargins(12, 10, 10, 8)
         container_layout.setSpacing(6)
 
+        # 引用卡（设计稿「消息区：引用」）：一段一张，在文字上方
+        container_layout.addWidget(self._build_quote_area())
+
         # 待发送的图片：一排小 chip（缩略图 + 名字 + 移除），悬停看大图
         self.image_preview_area = QWidget()
         self.image_preview_area.setVisible(False)
@@ -1649,7 +1640,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     def _on_input_change(self):
         text = self.entry.toPlainText().strip()
-        has_input = bool(text) or bool(self._pending_images)
+        has_input = bool(text) or bool(self._pending_images) or bool(self._pending_quotes)
         if has_input != self._has_input:
             self._has_input = has_input
             from .. import session as _session
@@ -2316,7 +2307,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
     def _check_input_state(self):
         """文本或图片有任一存在即可发送"""
         text = self.entry.toPlainText().strip()
-        has_input = bool(text) or bool(self._pending_images)
+        has_input = bool(text) or bool(self._pending_images) or bool(self._pending_quotes)
         if has_input != self._has_input:
             self._has_input = has_input
             from .. import session as _session

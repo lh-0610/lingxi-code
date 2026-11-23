@@ -133,7 +133,8 @@ class SendMixin:
                 self._notify_remote_unaccepted("消息发送失败（无法启动新一轮）")
 
     def _send_message(self):
-        text = self.entry.toPlainText().strip()
+        # 引用卡 + 打的字拼成一份（Markdown 引用），发给模型、进历史、进队列的都是它
+        text = self._compose_input()
         images = self._pending_images[:]
         from .. import session as _session
         active = _session.get_active()
@@ -172,6 +173,7 @@ class SendMixin:
         if getattr(active, "is_generating", False):
             if self._enqueue_input(active, text, images, source="send"):
                 self.entry.clear()
+                self._clear_quotes()
                 self._pending_images.clear()
                 self._refresh_image_preview()
                 self._has_input = False
@@ -184,25 +186,14 @@ class SendMixin:
             return
         # 只有真的启动了新一轮才清理输入；等待接纳期间修改过的草稿不受影响
         self.entry.clear()
+        self._clear_quotes()
         self._pending_images.clear()
         self._refresh_image_preview()
         self._has_input = False
 
     def _append_user_text(self, text):
-        """显示用户消息：@文件引用渲染成靛蓝加粗，其余普通（MessageView 用户气泡）。"""
-        import re as _re
-        import html as _html
-        parts = []
-        pat = _re.compile(r'(?<!\S)@[^\s@]+')
-        pos = 0
-        for m in pat.finditer(text):
-            if m.start() > pos:
-                parts.append(_html.escape(text[pos:m.start()]))
-            parts.append(f'<b style="color:{self._t("mv_indigo")};">{_html.escape(m.group(0))}</b>')
-            pos = m.end()
-        if pos < len(text):
-            parts.append(_html.escape(text[pos:]))
-        self.chat_area.append_user_html("".join(parts).replace("\n", "<br>"))
+        """显示用户消息（MessageView 用户气泡）：开头的引用画成引用块，@文件引用靛蓝加粗。"""
+        self.chat_area.append_user_text(text)
 
     def _do_send(self, text: str, images=None, message_id=None) -> bool:
         """核心发送逻辑，GUI 和远程共用。返回是否真的启动了新一轮 worker。

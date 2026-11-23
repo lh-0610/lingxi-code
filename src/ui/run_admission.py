@@ -223,8 +223,10 @@ class RunAdmissionMixin:
 
     def _clear_sent_input(self, req):
         """接纳成功后清理输入：只清实际发送的那份，等待期间的新编辑 / 新附件一律保留。"""
-        if self.entry.toPlainText().strip() == req.text:
+        # 发出去的是「引用卡 + 打的字」拼成的那份：两样都没动过才一起清
+        if self._compose_input() == req.text:
             self.entry.clear()
+            self._clear_quotes()
         for _img in req.images:
             try:
                 self._pending_images.remove(_img)
