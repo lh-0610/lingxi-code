@@ -52,6 +52,7 @@ GUTTER = 38          # 每轮左侧线槽的宽度
 _ANSWER_DY = 12      # 回答节点对正文第一行的中线（14px 字、1.7 倍行高）
 _CX = 11             # 竖线和节点的中心 x（节点最宽 22px，留足不被裁）
 COLUMN_MAX = 820     # 消息栏最大宽度（含线槽）；窗口再宽，两侧留白
+COLUMN_SIDE = 24     # 消息栏两侧至少留这么宽（窄窗口时就是这么宽）
 
 
 def mv_qss() -> str:
@@ -94,7 +95,7 @@ def mv_qss() -> str:
 {mv} QLabel[mv="toolStatus"][tone="bad"] {{ color:{P['bad']}; }}
 {mv} QLabel[mv="toolStatus"][tone="warn"] {{ color:{P['orange']}; }}
 {mv} QLabel[mv="toolClock"] {{ color:{P['indigo']}; font-size:12px; }}
-{mv} #toolArgs {{ color:{P['text_sec']}; }}
+{mv} #toolArgs {{ color:{P['text_sec']}; padding-left:11px; }}  /* 和输出框里的字对齐：边框 1 + 内边距 6 + 文档边距 4 */
 {mv} #toolTail {{ color:{P['muted']}; font-family:{_MONO}; font-size:12px; padding:0px 0px 4px 31px; }}
 {mv} #toolFiles {{ color:{P['text_sec']}; font-size:12px; padding:0px 0px 4px 31px; }}
 {mv} #toolGroupHead {{ background:transparent; border-radius:7px; }}
@@ -662,6 +663,7 @@ class ThinkingChip(QWidget):
         self._open = not self._open
         self.panel.setVisible(self._open)
         self._refresh_label()
+        _settle_layout(self)
 
 
 # ── 工具调用：一行一条，连续的收成一组（设计稿「消息区：工具调用改成一行一条」）──
@@ -673,7 +675,10 @@ _TOOL_VERBS = {
     "执行命令": "运行", "读取文件": "读取", "读取多个文件": "读取", "读取图片": "读取",
     "列出目录": "列出", "单文件搜索": "搜索", "跨文件搜索": "搜索", "精确编辑": "编辑",
     "写入文件": "写入", "追加文件": "追加", "批量补丁": "补丁", "删除文件": "删除",
-    "移动/重命名": "移动", "复制文件": "复制", "网络搜索": "搜索网页", "抓取网页": "打开网页",
+    "移动/重命名": "移动", "复制文件": "复制", "网络搜索": "搜索网页",
+    # 不叫「打开网页」：fetch_url 是直接抓网页正文、不经过侧栏浏览器，叫「打开」看着像
+    # 浏览器该打开了却没开（用户实测）
+    "抓取网页": "抓取网页",
 }
 _KIND_OF = (
     ("read", ("读取文件", "读取多个文件", "读取图片")),
@@ -770,7 +775,9 @@ class ToolCallCard(QFrame):
     _OUT_MAX_BLOCKS = 4000   # 最多保留的行数（长命令的流式输出），更早的丢弃
     _FILES_MAX_LINKS = 6     # "改动了 N 个文件"那一行最多列几个文件名，全部的在悬停提示里
     CLOCK_AFTER_S = 2        # 跑了这么久还没结束才出「运行中 N 秒」：快的工具不闪一下
-    _INDENT = 31             # 展开区 / 最后一行输出 / 改动文件，和动作文字左对齐（8 + 15 + 8）
+    # 展开区（参数 + 输出框）和这一行的底色左边对齐：展开时行头整条有底色，框再缩进去一截
+    # 看着像错位（用户实测）。最后一行输出 / 改动文件那两行小字没有框，仍和动作文字对齐（QSS 里的 31）
+    _BODY_INDENT = 0
 
     file_clicked = Signal(str)   # 点了改动的文件名（项目相对路径）/ 改文件那一行的文件名
     state_changed = Signal()     # 失败、结束、输出到了：所在的组刷新组头
@@ -997,6 +1004,7 @@ class ToolCallCard(QFrame):
         if self._open and self._body is None:
             self._build_body()
         self._sync()
+        _settle_layout(self)
 
     def _on_head_clicked(self, pos):
         # 改文件那一行：点文件名看差异（只有一个路径时；「a → b」这种不是一个文件）
@@ -1021,7 +1029,7 @@ class ToolCallCard(QFrame):
         """第一次展开才建：参数（多行时）+ 输出框。"""
         self._body = QWidget()
         bl = QVBoxLayout(self._body)
-        bl.setContentsMargins(self._INDENT, 2, 0, 6)
+        bl.setContentsMargins(self._BODY_INDENT, 2, 0, 6)
         bl.setSpacing(6)
         self._args = QLabel()
         self._args.setWordWrap(True)
@@ -1230,6 +1238,7 @@ class _ToolGroup(QWidget):
         _hold_scroll(self)
         self._user_open = not self.is_open()
         self.refresh()
+        _settle_layout(self)
 
     def summary_text(self) -> str:
         counts = {}
@@ -1446,6 +1455,7 @@ class _ProcessSummary(QPushButton):
         self._open = not self._open
         self._sync()
         self._on_toggle(self._open)
+        _settle_layout(self)
 
 
 class RecoveryNote(QWidget):
@@ -1502,6 +1512,7 @@ class RecoveryNote(QWidget):
         self._open = not self._open
         self.link.setText("收起" if self._open else "详情")
         self.detail.setVisible(self._open and bool(self._details))
+        _settle_layout(self)
 
 
 def _split_recovery_text(text: str):
@@ -1657,6 +1668,8 @@ class AssistantTurn(QWidget):
     def _add(self, w, top_gap=14, node=None, process=False, **info):
         if not isinstance(w, _ToolGroup):
             self._close_group()          # 来了别的块：这一组工具调用结束
+        if w.objectName() != "msgActions":
+            self._drop_dangling_actions()
         if self._v.count() == 0:
             top_gap = 0
         blk = _Block(w, top_gap)
@@ -1666,6 +1679,23 @@ class AssistantTurn(QWidget):
         if process:
             self._process.append(blk)
         return w
+
+    def _drop_dangling_actions(self):
+        """上一段回复后面又来了别的块（工具调用、思考、提示……）：它只是过渡回复，不是最终
+        回答，底下那排复制 / 重新生成拿掉。
+
+        这排按钮不是最新一条时平时藏着、但照样占着位置（免得悬停显示时内容往下跳），
+        挂在过渡回复底下就成了一块看不见的空白——中间回复和工具行之间空出一大截（用户实测）。
+        实时（中间轮也走 render_final_markdown）和重绘历史都会给每段文字挂按钮，在这里统一收。"""
+        if self._v.count() == 0:
+            return
+        last = self._v.itemAt(self._v.count() - 1).widget()
+        if not (isinstance(last, _Block) and last.inner.objectName() == "msgActions"):
+            return
+        self._v.removeWidget(last)
+        last.setParent(None)
+        last.deleteLater()
+        self.actions = None
 
     # —— 块级操作 ——
     def _close_group(self):
@@ -1923,6 +1953,32 @@ def _hold_scroll(widget):
         w.hold_position()
 
 
+def _settle_layout(widget):
+    """展开 / 收起之后，从消息流最外层往里把这一串布局同步排一遍。
+
+    不排的话 Qt 是从里往外各排各的：里层先按外层还没缩的旧高度排，多出来的那截平均分给
+    兄弟块（用户气泡、正文、按钮行都被拉高），外层下一刻才缩回去——收起时整片闪一下。
+    外层先排，里层拿到的就是新高度；消息列表底下有弹性空白，吃掉列表本身还没缩的那截。"""
+    chain = []
+    w = widget
+    while w is not None and not isinstance(w, MessageView):
+        chain.append(w)
+        w = w.parentWidget()
+    if w is None:
+        return
+    # 外层这时还没被标成要重排（Qt 要等里层排完才往外传），父布局里也还缓存着子块的旧尺寸，
+    # 直接 activate 会原样返回：先由里往外 updateGeometry（清缓存、把父布局标成要重排）
+    for x in chain:
+        x.updateGeometry()
+    # 列表本身也立刻改到新高度（滚动区要等下一轮事件才改）：展开时不先把下面的回答挤扁一下
+    if w.widget() in chain:
+        w.fit_content()
+    for x in reversed(chain):
+        lay = x.layout()
+        if lay is not None:
+            lay.activate()
+
+
 def _label_plain_text(lbl) -> str:
     """标签显示出来的纯文字（富文本标签按 Qt 自己的排版取，位置和 setSelection 对得上）。"""
     if lbl.textFormat() == Qt.PlainText:
@@ -1956,6 +2012,14 @@ def _deleted(w) -> bool:
         return True
 
 
+class _Content(QWidget):
+    """消息列表。尺寸由 MessageView.fit_content 定，sizeHint 直接报当前尺寸：默认实现会按
+    「建议宽度」把整列排版高度再算一遍，滚动区每次缩放都要问它——布局只缓存一个宽度的高度，
+    两个宽度来回算互相冲掉，长对话每次缩放白算几毫秒到几十毫秒。"""
+    def sizeHint(self):
+        return self.size()
+
+
 class MessageView(QScrollArea):
     """消息流容器:QScrollArea + 纵向的轮次列表。对外 handle(text, tag) 镜像 show_message 协议,
     finalize_markdown(html) 对应 render_final_markdown,clear()/redraw 复位。"""
@@ -1972,17 +2036,26 @@ class MessageView(QScrollArea):
         super().__init__(parent)
         self.setObjectName("messageView")
         self.setProperty("mvRoot", "true")      # mv_qss 的作用范围（objectName 会被宿主改掉）
-        self.setWidgetResizable(True)
+        # 列表的宽高自己定（_fit_content），不用 widgetResizable：滚动区自己定高时按【视口宽度】
+        # 算排版高度，可列表限了宽、比视口窄——算出来的高度差十几像素（下一轮再补，贴底时跳一下），
+        # 而且每次都按两个宽度各排一遍，布局只缓存一个宽度的结果，互相冲掉，长对话一次十几毫秒
+        self.setWidgetResizable(False)
         self.setFrameShape(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._content = QWidget()
+        self._content = _Content()
         self._content.setObjectName("mvContent")
         self.apply_theme()
         self._col = QVBoxLayout(self._content)
-        self._col.setContentsMargins(32, 28, 32, 28)
+        # 消息栏最多 COLUMN_MAX 宽、居中，窄时两侧留 COLUMN_SIDE：列表本身限宽，由滚动区居中摆放，
+        # 不再按视口宽度改左右边距。侧栏开关、拖窗口时只要栏宽没变（窗口比栏宽就不变），
+        # 列表只是平移、不用重排——原来改边距每次都把整列重排一遍，长对话一次几十毫秒
+        self._col.setContentsMargins(COLUMN_SIDE, 28, COLUMN_SIDE, 28)
         self._col.setSpacing(0)
         self._col.addStretch(1)
+        self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setWidget(self._content)
+        self._content.installEventFilter(self)      # 内容变了（LayoutRequest）→ 重定高度
+        self.viewport().installEventFilter(self)    # 滚动条出现 / 消失，视口变窄 → 重定宽度
         self._cur_user = None
         self._cur_assistant = None
         self._cur_round = None
@@ -2104,11 +2177,31 @@ class MessageView(QScrollArea):
         已经画出来的消息块不会自己变色，切主题后由 ChatUI 重绘消息流。"""
         self.setStyleSheet(mv_qss() + extra_qss)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # 消息栏最多 COLUMN_MAX 宽，居中；窄窗口时两侧至少留 24px
-        side = max(24, (self.viewport().width() - COLUMN_MAX) // 2)
-        self._col.setContentsMargins(side, 28, side, 28)
+    # 宽度变化：视口一变就当场 fit_content（下面的过滤器，滚动区缩放时视口的 Resize 同步送到），
+    # 不改边距——原来先排版后改边距，中间那一帧内容按旧边距铺开：侧栏收起时整列铺到右边、
+    # 打开时被挤成窄条（用户实测「闪一下」）
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if (obj is self._content and t == QEvent.LayoutRequest) or (
+                obj is self.viewport() and t == QEvent.Resize):
+            self.fit_content()
+        return super().eventFilter(obj, event)
+
+    def fit_content(self):
+        """消息列表定宽定高：宽 = 视口宽，最多 COLUMN_MAX + 两侧留白（居中靠滚动区摆）；
+        高 = 按这个宽度排版要的高度，至少铺满视口。当场改，不等下一轮事件——中间那帧
+        尺寸不对就会闪：下面的回答被挤扁，或贴底时整片跳一下。"""
+        vp = self.viewport()
+        if vp.width() <= 0:
+            return
+        lay = self._col
+        width = max(min(vp.width(), COLUMN_MAX + 2 * COLUMN_SIDE), lay.totalMinimumSize().width())
+        h = (lay.totalHeightForWidth(width) if lay.hasHeightForWidth()
+             else lay.totalSizeHint().height())
+        h = max(h, vp.height())
+        content = self._content
+        if content.width() != width or content.height() != h:
+            content.resize(width, h)
 
     def clear(self):
         while self._col.count() > 1:   # 留最后的 stretch

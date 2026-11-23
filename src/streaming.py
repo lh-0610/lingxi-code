@@ -75,6 +75,11 @@ def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
         detail = str(args.get("path") or "").strip() or "全部"
         if str(args.get("k") or "").strip():
             detail += f"，筛选 {str(args['k']).strip()}"
+    elif name == "fetch_url":
+        # 只给网址：通用的参数串会把 max_chars 也带出来（「打开网页 https://… 12000」）
+        detail = str(args.get("url") or "")
+    elif name == "web_search":
+        detail = str(args.get("query") or "")
     elif name == "search_in_file":
         detail = f"{args.get('path', '')} → '{args.get('keyword', '')}'"
     elif name == "apply_patch":

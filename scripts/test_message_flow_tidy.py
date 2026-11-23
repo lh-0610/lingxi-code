@@ -245,6 +245,246 @@ class TestProcessSummary:
         mv.close()
 
 
+class TestInterimReplies:
+    def _rows(self, mv):
+        from PySide6.QtWidgets import QWidget
+        return [w for w in mv.findChildren(QWidget) if w.objectName() == "msgActions"
+                and w.parent() is not None]
+
+    def test_interim_reply_drops_its_buttons_final_keeps_them(self, qt_app):
+        """用户实测：中间回复和工具行之间空出一大截——过渡回复底下那排复制按钮平时藏着、
+        但占着位置。后面接了工具 / 思考的回复不挂按钮，最终回答照常挂。"""
+        from src.ui.message_view import BodyText, ToolCallCard
+        mv = _view()
+        _user(mv, "看一下这个网站", 0)
+        mv.handle("m\n", "ai_label")
+        mv.finalize_markdown("我先打开这个网站看看内容。", "我先打开这个网站看看内容。")
+        mv.add_message_actions(on_copy=lambda: None)          # 实时中间轮也走这一步
+        mv.handle("\n🌐 抓取网页", "tool_tag")
+        mv.handle("  https://example.com/\n", "tool_detail")
+        mv.handle("", "reset_ai_reply")
+        assert self._rows(mv) == [], "接了工具调用：过渡回复的按钮拿掉"
+        mv.finalize_markdown("网页抓到了，我再想想。", "网页抓到了，我再想想。")
+        mv.add_message_actions(on_copy=lambda: None)
+        mv.handle("", "think_header")                            # 接思考也一样
+        assert self._rows(mv) == []
+        mv.finalize_markdown("结论：可信度不高。", "结论：可信度不高。")
+        mv.add_message_actions(on_copy=lambda: None, on_regen=lambda: None)
+        mv.end_run()
+        mv.show()
+        _pump(qt_app, 10)
+        assert len(self._rows(mv)) == 1, "最终回答照常有复制 / 重新生成"
+        final = next(b for b in mv.findChildren(BodyText) if "结论" in b.text())
+        row = self._rows(mv)[0]
+        assert row.parentWidget().parentWidget() is final.parentWidget().parentWidget()
+        # 过渡回复和下面那行工具之间没有一整排按钮的空白
+        interim = next(b for b in mv.findChildren(BodyText) if "我先打开" in b.text())
+        tool = mv.findChildren(ToolCallCard)[0]
+        from PySide6.QtCore import QPoint
+        from src.ui.message_view import _ProcessSummary
+        for summary in mv.findChildren(_ProcessSummary):
+            summary.click()                                     # 展开过程，才量得到间距
+        _pump(qt_app, 10)
+        gap = tool.mapTo(mv.widget(), QPoint(0, 0)).y() - (
+            interim.mapTo(mv.widget(), QPoint(0, 0)).y() + interim.height())
+        assert gap < 28, f"过渡回复和工具行之间空了 {gap}px"
+
+    def test_fetch_url_row_says_fetch_and_shows_only_the_url(self):
+        """用户以为「打开网页」该用浏览器打开：fetch_url 是直接抓正文，叫「抓取网页」；
+        max_chars 不当成目标显示。"""
+        from src.streaming import describe_tool_call
+        from src.ui.message_view import _tool_verb
+        name, detail = describe_tool_call("fetch_url", {"url": "https://a.com/x", "max_chars": 12000})
+        assert detail == "https://a.com/x"
+        assert _tool_verb(name.split(" ", 1)[1]) == "抓取网页"
+        assert describe_tool_call("web_search", {"query": "黎曼猜想", "max_results": 8})[1] == "黎曼猜想"
+
+
+class TestToggleNoFlash:
+    """用户实测：点「查了 5 次网页」收起，用户气泡一瞬间被拉得很高（多出来的就是那几行的
+    高度），整片闪一下。Qt 从里往外排版，里层先按外层没缩的旧高度排；展开反过来，最后
+    那段回答会被先挤扁。点完返回的那一刻，各块就得是最终尺寸，事件循环里不能再变。"""
+
+    def _conversation(self, qt_app):
+        mv = _view()
+        mv.resize(760, 600)
+        _user(mv, "看一下这个网站https://example.com/", 0)
+        mv.handle("deepseek\n", "ai_label")
+
+        def interim(text):
+            mv.finalize_markdown(text, text)
+            mv.add_message_actions(on_copy=lambda: None)
+
+        def tool(detail):
+            mv.handle("\n🌐 抓取网页", "tool_tag")
+            mv.handle(f"  {detail}\n", "tool_detail")
+            mv.handle("", "reset_ai_reply")
+
+        interim("我先打开这个网站看看内容。")
+        tool("https://example.com/")
+        interim("这个网站背后有具体事件。")
+        for i in range(5):
+            tool(f"https://site{i}.com/")
+        final = "看完了。\n\n" + "\n\n".join(f"第 {i} 段：一些较长的回答正文内容。" * 3 for i in range(40))
+        # 收起、展开过程两种状态下都要比窗口高：滚动条出现会让视口变窄、正文重新折行，
+        # 那是正常的重排，不是这里要抓的闪
+        mv.finalize_markdown(final, final)
+        mv.add_message_actions(on_copy=lambda: None, on_regen=lambda: None)
+        mv.end_run()
+        mv.show()
+        _pump(qt_app, 20)
+        return mv
+
+    def _assert_settled_on_return(self, qt_app, mv, click):
+        from PySide6.QtWidgets import QWidget
+        click()
+        snap = {w: w.geometry() for w in mv.findChildren(QWidget) if w.isVisible()}
+        _pump(qt_app, 20)
+        content = mv.widget()
+        moved = [(type(w).__name__, w.objectName(), g.getRect(), w.geometry().getRect())
+                 for w, g in snap.items() if w is not content and w.geometry() != g]
+        assert moved == [], f"点完之后还在变（会闪）：{moved[:6]}"
+
+    def test_tool_group_toggle_settles_immediately(self, qt_app):
+        from src.ui.message_view import _ProcessSummary, _ToolGroup, UserTurn
+        mv = self._conversation(qt_app)
+        for s in mv.findChildren(_ProcessSummary):
+            if not s._open:
+                s.click()
+        _pump(qt_app, 20)
+        group = next(g for g in mv.findChildren(_ToolGroup) if g.framed())
+        bubble = mv.findChildren(UserTurn)[0].bubble
+        base = bubble.height()
+        for _ in range(4):                                   # 展开、收起各两次
+            self._assert_settled_on_return(qt_app, mv, group.toggle)
+            assert bubble.height() == base
+
+    def test_process_summary_toggle_settles_immediately(self, qt_app):
+        from src.ui.message_view import _ProcessSummary
+        mv = self._conversation(qt_app)
+        summary = mv.findChildren(_ProcessSummary)[0]
+        for _ in range(4):
+            self._assert_settled_on_return(qt_app, mv, summary.click)
+
+
+class TestResizeNoFlash:
+    @pytest.mark.parametrize("paragraphs", [30, 1], ids=["long", "short"])
+    def test_width_change_lays_out_on_the_spot(self, qt_app, paragraphs):
+        """用户实测：收起右侧面板，消息区变宽的那一下整列按旧边距铺到右边再缩回居中；
+        打开面板反过来被挤成窄窄一条。resizeEvent 返回时就得是最终排版。
+        短对话（内容不满一屏、列表高度不变）也要：那时改高度不会顺带重排。"""
+        from PySide6.QtWidgets import QWidget
+        from src.ui.message_view import MessageView, COLUMN_MAX, COLUMN_SIDE, _Round
+        host = QWidget()
+        host.resize(2000, 900)
+        mv = MessageView(host)
+        mv.setGeometry(0, 0, 1000, 900)
+        _user(mv, "看一下", 0)
+        text = "\n\n".join(f"第 {i} 段：一些较长的回答正文内容，" * 6 for i in range(paragraphs))
+        _answer(mv, text)
+        host.show()
+        _pump(qt_app, 20)
+        rnd = mv.findChildren(_Round)[0]
+        # 宽窗口（栏宽不变，只平移）和比栏还窄的窗口（栏宽跟着变）都要当场排好
+        for width in (1700, 1000, 1700, 1000, 700, 820, 600, 1700):
+            mv.setGeometry(0, 0, width, 900)           # 子控件：Resize 同步送达
+            assert rnd.width() == min(COLUMN_MAX, mv.viewport().width() - 2 * COLUMN_SIDE)
+            assert abs(rnd.mapTo(mv.viewport(), rnd.rect().center()).x()
+                       - mv.viewport().width() // 2) <= 2, "当场就居中"
+            snap = {w: w.geometry() for w in mv.findChildren(QWidget) if w.isVisible()}
+            _pump(qt_app, 20)
+            moved = [(type(w).__name__, w.objectName(), g.getRect(), w.geometry().getRect())
+                     for w, g in snap.items() if w.geometry() != g]
+            assert moved == [], f"宽度变了之后还在变（会闪）：{moved[:4]}"
+
+    def test_wide_resize_does_not_relayout_the_column(self, qt_app):
+        """用户实测：长会话开关侧栏、浏览器卡顿。窗口比消息栏宽时栏宽不变，宽度变化只该平移列表，
+        不把整列重新排一遍（原来改边距每次都重排，40 轮对话一次 200ms）。
+        判据钉机制：缩放前后列表的排版高度缓存还在——再问一次同宽度的高度是现成的。"""
+        import time
+        from PySide6.QtWidgets import QWidget
+        from src.ui.message_view import MessageView
+        host = QWidget()
+        host.resize(2000, 900)
+        mv = MessageView(host)
+        mv.setGeometry(0, 0, 1200, 900)
+        for r in range(8):
+            _user(mv, f"问题 {r}", r)
+            text = "\n\n".join(f"第 {i} 段：一些较长的回答正文内容，" * 6 for i in range(15))
+            _answer(mv, text)
+        host.show()
+        _pump(qt_app, 20)
+        content = mv.widget()
+        x0, w0 = content.x(), content.width()
+        relaid = []
+        from PySide6.QtCore import QObject, QEvent
+
+        class Watch(QObject):
+            def eventFilter(self, o, e):
+                if e.type() == QEvent.Resize and o is not content and o.parent() is not None \
+                        and isinstance(o, QWidget) and content.isAncestorOf(o):
+                    relaid.append(type(o).__name__)
+                return False
+
+        watch = Watch()
+        qt_app.installEventFilter(watch)
+        try:
+            mv.setGeometry(0, 0, 1700, 900)
+            _pump(qt_app, 10)
+        finally:
+            qt_app.removeEventFilter(watch)
+        assert content.width() == w0 and content.x() > x0, "栏宽不变，只是挪到新的中间"
+        assert relaid == [], f"栏宽没变却有子块被重新排版：{relaid[:5]}"
+        # 从头算一遍整列排版高度要多久，和缩放一次比：缩放不该再从头算（滚动区问 sizeHint 时
+        # Qt 会按另一个宽度把整列算一遍、冲掉缓存，见 _Content）。各取三次里最快的，免得偶发抖动
+        lay = mv._col
+
+        def cold_hfw():
+            for b in mv.findChildren(QWidget):
+                b.updateGeometry()
+            t0 = time.perf_counter()
+            lay.totalHeightForWidth(content.width())
+            return time.perf_counter() - t0
+
+        def one_resize(w):
+            t0 = time.perf_counter()
+            mv.setGeometry(0, 0, w, 900)
+            return time.perf_counter() - t0
+
+        cold = min(cold_hfw() for _ in range(3))
+        _pump(qt_app, 10)
+        resize = min(one_resize(w) for w in (1500, 1600, 1700))
+        assert resize < cold * 0.2, f"缩放一次 {resize * 1000:.2f}ms，从头排一遍 {cold * 1000:.2f}ms"
+
+
+class TestToolBodyAlign:
+    def test_expanded_box_lines_up_with_row_background(self, qt_app):
+        """用户实测：展开后行头整条有底色，输出框却缩进去 31，看着像错位。框和行头左边对齐，
+        参数文字和框里的字对齐。"""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QWidget
+        from src.ui.message_view import ToolCallCard
+        mv = _view()
+        _user(mv, "看一下", 0)
+        mv.handle("m\n", "ai_label")
+        mv.handle("\n🔧 更新计划", "tool_tag")
+        mv.handle('  {\n  "steps": ["读现有文件", "写页面", "跑测试", "起服务"]\n}\n', "tool_detail")
+        mv.handle("计划已更新\n", "tool_result")
+        mv.end_run()
+        mv.show()
+        _pump(qt_app, 10)
+        row = mv.findChildren(ToolCallCard)[0]
+        row.toggle()
+        _pump(qt_app, 10)
+        head = next(w for w in row.findChildren(QWidget) if w.objectName() == "toolRowHead")
+        x = lambda w: w.mapTo(row, QPoint(0, 0)).x()
+        assert row._out.isVisible()
+        assert x(row._out) == x(head), "输出框和行头（底色）左边对齐"
+        assert row._args.isVisible(), "多行参数：展开后先列参数"
+        text_x = x(row._args) + row._args.contentsMargins().left()
+        assert abs(text_x - (x(row._out) + 11)) <= 1, "参数文字和框里的字对齐"
+
+
 class TestRoundSeparator:
     def _seps(self, mv):
         from PySide6.QtWidgets import QFrame

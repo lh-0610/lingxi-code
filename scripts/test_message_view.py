@@ -299,7 +299,10 @@ class TestFoldAfterAnswer:
         mv.handle("我去替你看看最新的消息。", "ai_msg")
         mv.add_message_actions(on_copy=lambda: None)
         _tool(mv, "📖 读取文件", "src/login.py", "def login(): ...\n")
-        return [w for w in mv.findChildren(QWidget) if w.objectName() == "msgActions"][0]
+        # 过渡回复后面接了工具调用：它底下那排按钮拿掉了（平时藏着也占位，会成一块空白）
+        assert not [w for w in mv.findChildren(QWidget) if w.objectName() == "msgActions"
+                    and w.parent() is not None], "过渡回复不挂复制 / 重新生成"
+        return None
 
     def test_finished_round_shows_only_the_final_answer(self, qt_app):
         from src.ui.message_view import BodyText, ToolCallCard, _ProcessSummary
@@ -314,7 +317,7 @@ class TestFoldAfterAnswer:
         final = next(b for b in bodies if "决赛" in b.text())
         card = mv.findChildren(ToolCallCard)[0]
         assert final.isVisibleTo(mv)
-        assert not interim.isVisibleTo(mv) and not actions.isVisibleTo(mv) and not card.isVisibleTo(mv)
+        assert not interim.isVisibleTo(mv) and not card.isVisibleTo(mv)
         summary = mv.findChildren(_ProcessSummary)[0]
         summary.btn.click()
         _pump(qt_app)
