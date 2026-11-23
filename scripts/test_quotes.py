@@ -311,3 +311,155 @@ def test_selection_in_the_input_box_does_not_offer_quote(ui, qt_app):
     _release_on(ui.entry.viewport(), QPoint(5, 5))
     _pump(qt_app)
     assert not ui.chat_area.selection_bar.isVisible()
+
+
+# ── 收尾：排队面板 · Ctrl+F（设计稿「消息区 · 引用收尾」）─────────────
+
+def _queue_panel(qt_app, texts, width=760):
+    from src import input_queue
+    from src.ui.queue_panel import QueuePanel
+    from src.ui.theme import color as theme_color
+    panel = QueuePanel(theme_color)
+    q = input_queue.new_queue()
+    for t in texts:
+        input_queue.enqueue(q, input_queue.new_queue_item(t, []))
+    panel.resize(width, 400)
+    panel.render_queue(q)
+    panel.show()
+    _pump(qt_app)
+    return panel
+
+
+def _row_texts(panel):
+    from src.ui.queue_panel import _QueueText
+    return panel.findChildren(_QueueText)
+
+
+def test_queue_row_writes_quote_and_text_apart(qt_app):
+    """原来整段压成一行：「> 61,570,595,788 字节 这是多少？」——「>」露在外面，分不出哪句是问的。"""
+    from PySide6.QtWidgets import QLabel
+    panel = _queue_panel(qt_app, [
+        compose(["61,570,595,788 字节"], "这是多少？"),
+        compose(["源码归档：lean.tar.gz，239,275,554 字节", "61,570,595,788 字节"], "这两个哪个大？"),
+        compose(["只引用的一段"], ""),
+        "普通的一条",
+    ])
+    one, two, only, plain = _row_texts(panel)
+    assert one.quote_label.full() == "61,570,595,788 字节" and one.body_label.full() == "这是多少？"
+    assert one.more_label is None
+    assert two.quote_label.full().startswith("源码归档") and two.more_label.text() == "等 2 段"
+    assert only.body_label is None and only.quote_label.full() == "只引用的一段"
+    assert plain.quote_label is None and plain.body_label.full() == "普通的一条"
+    shown = [lbl.text() for lbl in panel.findChildren(QLabel)]
+    assert not any(t.lstrip().startswith(">") for t in shown), "「>」不再露出来"
+    assert one.toolTip() == compose(["61,570,595,788 字节"], "这是多少？"), "悬停看全文"
+    panel.close()
+
+
+def test_queue_row_quote_takes_at_most_four_tenths(qt_app):
+    from src.ui.queue_panel import _QUOTE_SHARE
+    long = "很长的一段引用，" * 30
+    panel = _queue_panel(qt_app, [compose([long], "问题"), compose(["短"], "问题"), compose([long], "")])
+    with_body, short, alone = _row_texts(panel)
+    assert 0 < with_body.quote_label.width() <= int(with_body.width() * _QUOTE_SHARE)
+    assert with_body.body_label.width() > with_body.width() * 0.4, "正文拿到剩下的宽度"
+    assert with_body.quote_label.text().endswith("…")
+    for row in (with_body, short):
+        q, b = row.quote_label.geometry(), row.body_label.geometry()
+        assert q.right() < b.left(), "引用和正文不叠在一起"
+    assert short.quote_label.width() == short.quote_label.natural_width(), "短引用按自己的宽度，不留空白"
+    assert alone.quote_label.width() > alone.width() * _QUOTE_SHARE, "没写正文：引用占满"
+    panel.close()
+
+
+def _quote_clamp(mv):
+    from src.ui.quotes import ClampText
+    return mv.findChildren(ClampText)[0]
+
+
+def test_find_reaches_quote_blocks_in_order(qt_app):
+    """原来 Ctrl+F 只搜 QLabel：气泡里的引用块（自己画字）搜不到。"""
+    from PySide6.QtWidgets import QLabel
+    mv = _view()
+    mv.append_user_text(compose(["61,570,595,788 字节"], "这是多少？"))
+    mv.handle("大约 61.6 GB，也就是 615 亿字节。", "ai_msg")
+    mv.show()
+    _pump(qt_app)
+    clamp = _quote_clamp(mv)
+    assert mv.find_text("字节") == (1, 2), "引用里那处在回复前面，排第一"
+    assert clamp._highlight == (15, 2)
+    assert not any(l.hasSelectedText() for l in mv.findChildren(QLabel))
+    assert mv.find_text("字节") == (2, 2)
+    assert clamp._highlight is None, "跳到别处：引用块里的标记去掉"
+    mv.clear_find()
+    mv.close()
+
+
+def test_find_hit_paints_the_selection_color(qt_app):
+    from PySide6.QtGui import QPalette
+    mv = _view()
+    mv.append_user_text(compose(["61,570,595,788 字节"], "这是多少？"))
+    mv.show()
+    _pump(qt_app)
+    clamp = _quote_clamp(mv)
+    hl = clamp.palette().color(QPalette.Highlight)
+
+    def has_highlight():
+        img = clamp.grab().toImage()
+        return any(img.pixelColor(x, y) == hl for x in range(0, img.width(), 1)
+                   for y in range(0, img.height(), 2))
+
+    assert not has_highlight()
+    mv.find_text("字节")
+    _pump(qt_app)
+    assert has_highlight(), "命中处铺上选区色"
+    mv.clear_find()
+    _pump(qt_app)
+    assert not has_highlight()
+    mv.close()
+
+
+def test_find_hit_in_folded_lines_expands_the_quote_then_folds_back(qt_app):
+    from PySide6.QtWidgets import QLabel
+    mv = _view()
+    long = "代码导航按扩展名选语言服务器，" * 12 + "Java 用 jdtls。"
+    mv.append_user_text(compose([long], "Java 那个要怎么装？"))
+    mv.handle("装 jdtls 要先装 JDK。", "ai_msg")
+    mv.show()
+    _pump(qt_app)
+    clamp = _quote_clamp(mv)
+    folded_h = clamp.height()
+    assert len(clamp._lines(clamp.width())) == 3
+    reply = [l for l in mv.findChildren(QLabel) if "要先装 JDK" in l.text()][0]
+    reply_y = reply.mapTo(mv.widget(), reply.rect().topLeft()).y()
+    assert mv.find_text("jdtls") == (1, 2)
+    # 不等事件循环：返回时就已经排好（否则有一帧引用叠在下面的回复上，闪一下）
+    assert clamp.height() > folded_h, "命中在第三行之后：整段展开，当场排好"
+    assert reply.mapTo(mv.widget(), reply.rect().topLeft()).y() > reply_y, "下面的回复当场让开"
+    _pump(qt_app)
+    assert clamp.is_expanded() and clamp.height() > folded_h
+    assert clamp._lines(clamp.width())[-1].endswith("jdtls。")
+    assert mv.find_text("jdtls") == (2, 2)
+    assert clamp.height() == folded_h, "跳到下一处：当场收回三行"
+    _pump(qt_app)
+    assert not clamp.is_expanded() and clamp.height() == folded_h
+    mv.find_text("jdtls")
+    _pump(qt_app)
+    assert clamp.is_expanded()
+    mv.clear_find()
+    _pump(qt_app)
+    assert not clamp.is_expanded() and clamp.height() == folded_h, "关掉搜索：收回"
+    mv.close()
+
+
+def test_visible_hit_does_not_expand(qt_app):
+    mv = _view()
+    long = "开头就有关键词，" + "后面是很长的补充说明，" * 30
+    mv.append_user_text(compose([long], "问题"))
+    mv.show()
+    _pump(qt_app)
+    clamp = _quote_clamp(mv)
+    assert mv.find_text("关键词") == (1, 1)
+    assert not clamp.is_expanded(), "命中就在看得见的前三行：不展开"
+    mv.clear_find()
+    mv.close()

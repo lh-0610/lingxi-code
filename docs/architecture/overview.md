@@ -95,7 +95,7 @@ src/                     # 主代码
     syntax_highlight.py  # 文件面板的语法高亮：tree-sitter 划出每行的「哪一段是哪一类」，只回字符范围不碰 Qt / 主题；Python / JS / TS / TSX 用单语言包的 highlights.scm，其余语言按节点类型名分类，认不出语言 / 没语法库 / 太大就返回空（照原样显示）
     confirm_bars.py      # ConfirmBarsMixin：run_command 命令确认卡 + edit_file diff 预览卡 + 危险命令判定 + 白名单 + Telegram 双向确认
     markdown_render.py   # MarkdownRenderMixin：_md_to_html / render_final_markdown / 思考块管理；行内代码里的项目文件路径在这里变成 lingxi-file: 链接（只认真实存在的文件，代码块不处理）
-    search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开）
+    search_overlay.py    # SearchOverlayMixin：Ctrl+F 对话内搜索条（查找本身在 MessageView.find_text：命中在收起的过程 / 卡片里会先展开；气泡里的引用块也搜，命中在收起的行里时临时展开）
     sidebar.py           # SidebarMixin：侧栏 + 会话列表（按项目分组，行右侧一个状态 / 时间，悬停「⋯」菜单重命名 / 删除）+ 项目添加/切换/移除 + 底栏后台任务数量 + 跨会话搜索框（标题/正文，worker 扫描经 bridge.session_search_done 回主线程渲染结果，点击跳转）
     header.py            # HeaderMixin：顶栏（撤销/隔离/角色/搜索/深浅色/任务面板，样式在 theme.py 的 #header 段）+ 按顶栏宽度分三档收文字 + 角色卡多卡扫描。模型与思考强度已挪到输入框底栏的模型按钮（model_btn / _show_model_menu）。计划|执行同样在底栏的模式按钮
     debug_inspector.py   # 调试面板（请求/响应/usage 可视化）：右侧停靠栏的「调试」标签，F12 打开 / 收起（原来是独立置顶窗口）

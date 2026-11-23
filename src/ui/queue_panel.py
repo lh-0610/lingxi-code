@@ -10,7 +10,7 @@
 """
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from .. import input_queue
 from ..limits import QUEUE_EXCERPT_CHARS
+from .quotes import _Bar, split_leading_quotes
 
 _STATE_LABELS = {
     input_queue.QUEUED: "待处理",
@@ -38,6 +39,100 @@ _STATE_COLORS = {   # 主题色键名；画行时经 ChatUI 的取色函数按�
 }
 
 _ROW_H = 38          # 一行的高度（有说明的行会高一些）
+_QUOTE_SHARE = 0.4   # 带引用的一行里，引用最多占的宽度比例（设计稿「消息区 · 引用收尾」）
+
+
+class _Elided(QLabel):
+    """单行，放不下末尾省略。能压到任意窄（最小宽度报 0），宽度由 _QueueText 分配。"""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._full = " ".join((text or "").split())
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+        self.setText(self._full)
+
+    def full(self) -> str:
+        return self._full
+
+    def natural_width(self) -> int:
+        return self.fontMetrics().horizontalAdvance(self._full) + 2
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.setText(self.fontMetrics().elidedText(self._full, Qt.ElideRight, max(0, self.width() - 2)))
+
+
+class _QueueText(QWidget):
+    """排队一行的文字部分。消息开头的「> 」引用和正文分开写，同气泡：一条细线 + 次要色的引用，
+    后面是正文。引用最多占这一行的四成（没写正文时占满），几段引用只写第一段 +「等 N 段」。
+    以前整段压成一行，「>」露在外面，引用和问题连成一句。
+
+    子控件自己摆（resizeEvent），不用布局：引用的宽度取决于这一行的宽度，放进 QHBoxLayout 时
+    布局先按旧约束排完、resizeEvent 里再改宽度已经晚了，正文停在旧位置和引用叠在一起。"""
+
+    _GAP = 8
+
+    def __init__(self, text: str, n_img: int, bar_color: str, parent=None):
+        super().__init__(parent)
+        quotes, body = split_leading_quotes(text or "")
+        body = input_queue.excerpt(body, QUEUE_EXCERPT_CHARS)
+        if not quotes and not body:
+            body = "（仅附件）"
+        if n_img:
+            body = (body + f"　图片 ×{n_img}").strip()
+        self.quotes = quotes
+        self.bar = None
+        self.quote_label = None
+        self.more_label = None
+        if quotes:
+            self.bar = _Bar(2, bar_color, self)
+            self.bar.setFixedHeight(14)
+            self.quote_label = _Elided(quotes[0], self)
+            self.quote_label.setObjectName("queueQuote")
+            if len(quotes) > 1:
+                self.more_label = QLabel(f"等 {len(quotes)} 段", self)
+                self.more_label.setObjectName("queueQuoteMore")
+        self.body_label = _Elided(body, self) if body else None
+        self.setToolTip(text or "")
+        self.setMinimumHeight(_ROW_H)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def minimumSizeHint(self):
+        return QSize(0, _ROW_H)
+
+    def sizeHint(self):
+        w = 0
+        for lbl in (self.quote_label, self.more_label, self.body_label):
+            if lbl is not None:
+                w += lbl.fontMetrics().horizontalAdvance(lbl.text()) + self._GAP
+        return QSize(w + (10 if self.bar is not None else 0), _ROW_H)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place()
+
+    def _place(self):
+        W, H = self.width(), self.height()
+        x = 0
+        if self.bar is not None:
+            self.bar.setGeometry(x, (H - 14) // 2, 2, 14)
+            x += 2 + self._GAP
+            cap = (W - x) if self.body_label is None else int(W * _QUOTE_SHARE)
+            qw = max(0, min(self.quote_label.natural_width(), cap))
+            self.quote_label.setGeometry(x, 0, qw, H)
+            x += qw + self._GAP
+            if self.more_label is not None:
+                mw = self.more_label.sizeHint().width()
+                self.more_label.setGeometry(x, 0, mw, H)
+                x += mw + self._GAP
+        if self.body_label is not None:
+            self.body_label.setGeometry(x, 0, max(0, W - x), H)
+
+
 _MAX_VISIBLE = 5     # 最多露出几行，再多在面板里滚动
 
 
@@ -124,6 +219,7 @@ class QueuePanel(QFrame):
             f"QLabel#queueTitle {{ font-weight: 600; }}"
             f"QLabel#queueState {{ color: {state_color}; }}"
             f"QLabel#queueNum {{ color: {c('mv_muted')}; }}"
+            f"QLabel#queueQuote, QLabel#queueQuoteMore {{ color: {c('mv_quote_text')}; font-size: 12.5px; }}"
             f"QLabel#queueNote {{ color: {c('mv_err_text')}; font-size: 12px; }}"
             f"QFrame[class=\"queueRow\"] {{ background: transparent; border: none; "
             f"border-top: 1px solid {c('mv_result_border')}; }}"
@@ -213,11 +309,8 @@ class QueuePanel(QFrame):
         num.setFixedWidth(16)
         line.addWidget(num, 0, Qt.AlignVCenter)
 
-        text = input_queue.excerpt(it.get("text"), QUEUE_EXCERPT_CHARS) or "（仅附件）"
         n_img = len(it.get("images") or [])
-        label = QLabel(text + (f"　图片 ×{n_img}" if n_img else ""))
-        label.setToolTip(it.get("text") or "")
-        label.setMinimumHeight(_ROW_H)
+        label = _QueueText(it.get("text") or "", n_img, self._color("mv_quote_bar"))
         line.addWidget(label, 1)
 
         state = it.get("state") or input_queue.QUEUED

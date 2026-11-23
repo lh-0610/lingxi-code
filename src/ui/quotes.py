@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QIcon, QPainter, QTextLayout, QTextOption
+from PySide6.QtGui import QColor, QFontMetricsF, QIcon, QPainter, QPalette, QTextLayout, QTextOption
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QPushButton, QSizePolicy, QWidget,
 )
@@ -96,10 +96,47 @@ class ClampText(QWidget):
         sp.setHeightForWidth(True)
         self.setSizePolicy(sp)
         self.setToolTip(self._text if len(self._text) <= 2000 else self._text[:2000] + "…")
-        self._cache = None        # (width, [(行文字, 是否最后一行且被截)], 实际行数)
+        self._cache = None        # (width, [行文字], [每行在全文里的起点])
+        self._expanded = False    # Ctrl+F 命中在收起的那几行：临时显示全文
+        self._highlight = None    # (起点, 长度)：Ctrl+F 命中处，画选区色
 
     def text(self) -> str:
         return self._text
+
+    # —— Ctrl+F（MessageView.find_text）——
+    def show_hit(self, pos: int, length: int):
+        """标出 [pos, pos+length)（和正文命中的 QLabel 选中同色：调色板的 Highlight）；
+        在收起看不见的部分就先展开到全文。"""
+        self._highlight = (pos, length)
+        if not self._expanded and not self._visible(pos, length):
+            self._expanded = True
+            self._cache = None
+            self.updateGeometry()
+        self.update()
+
+    def clear_hit(self):
+        """去掉标记，展开过的收回。"""
+        changed = self._expanded
+        self._highlight = None
+        self._expanded = False
+        if changed:
+            self._cache = None
+            self.updateGeometry()
+        self.update()
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def _visible(self, pos: int, length: int) -> bool:
+        """[pos, pos+length) 是否整段落在当前显示出来的字里（截掉的、被「…」顶掉的不算）。"""
+        lines = self._lines(self.width())
+        _, _, starts, truncated = self._cache
+        end = pos + length
+        for i, (line, start) in enumerate(zip(lines, starts)):
+            shown = len(line) - (1 if truncated and i == len(lines) - 1 else 0)
+            if start <= pos and end <= start + shown:
+                return True
+        return False
 
     def _lines(self, width: int):
         width = max(20, int(width))
@@ -107,8 +144,11 @@ class ClampText(QWidget):
             return self._cache[1]
         fm = QFontMetricsF(self.font())
         out = []
+        starts = []
+        limit = 10 ** 6 if self._expanded else self._max
         paras = self._text.split("\n")
         truncated = False
+        offset = 0
         for pi, para in enumerate(paras):
             layout = QTextLayout(para, self.font())
             opt = QTextOption()
@@ -126,22 +166,24 @@ class ClampText(QWidget):
             if not spans:
                 spans = [(0, 0)]
             for si, (s, n) in enumerate(spans):
-                if len(out) == self._max:
+                if len(out) == limit:
                     truncated = True
                     break
                 out.append(para[s:s + n].rstrip("\n"))
+                starts.append(offset + s)
             if truncated:
                 break
-            if len(out) == self._max and (pi < len(paras) - 1):
+            if len(out) == limit and (pi < len(paras) - 1):
                 truncated = True
                 break
+            offset += len(para) + 1
         if truncated and out:
             # 最后一行往往正好排满：从末尾去字，直到「…」放得下
             last = out[-1].rstrip()
             while last and fm.horizontalAdvance(last + "…") > width:
                 last = last[:-1]
             out[-1] = last.rstrip() + "…"
-        self._cache = (width, out)
+        self._cache = (width, out, starts, truncated)
         return out
 
     def hasHeightForWidth(self):
@@ -174,9 +216,33 @@ class ClampText(QWidget):
         p.setFont(self.font())
         fm = QFontMetricsF(self.font())
         pad = (self._line_px - fm.height()) / 2
-        for i, line in enumerate(self._lines(self.width())):
+        lines = self._lines(self.width())
+        starts = self._cache[2]
+        rects = []
+        if self._highlight is not None:
+            # 命中的那几个字：选区底色 + 选中文字色，和正文里 QLabel 被选中的样子一样
+            hs, hl = self._highlight
+            he = hs + hl
+            for i, (line, start) in enumerate(zip(lines, starts)):
+                a, b = max(hs, start), min(he, start + len(line))
+                if a >= b:
+                    continue
+                x0 = fm.horizontalAdvance(line[:a - start])
+                x1 = fm.horizontalAdvance(line[:b - start])
+                rects.append((i, QRectF(x0, i * self._line_px + pad, x1 - x0, fm.height())))
+        pal = self.palette()
+        for _, r in rects:
+            p.fillRect(r, pal.color(QPalette.Highlight))
+        for i, line in enumerate(lines):
             r = QRectF(0, i * self._line_px + pad, self.width(), fm.height())
             p.drawText(r, Qt.AlignLeft | Qt.AlignVCenter, line)
+        p.setPen(pal.color(QPalette.HighlightedText))
+        for i, hr in rects:
+            p.save()
+            p.setClipRect(hr)
+            r = QRectF(0, i * self._line_px + pad, self.width(), fm.height())
+            p.drawText(r, Qt.AlignLeft | Qt.AlignVCenter, lines[i])
+            p.restore()
         p.end()
 
 

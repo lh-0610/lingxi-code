@@ -2017,6 +2017,11 @@ def _settle_layout(widget):
     # 直接 activate 会原样返回：先由里往外 updateGeometry（清缓存、把父布局标成要重排）
     for x in chain:
         x.updateGeometry()
+        # updateGeometry 只让父控件的顶层布局失效；嵌在里面的子布局（气泡里的引用盒 _quotes_box）
+        # 还缓存着旧高度，第一遍就按旧的排（Qt 要等这一遍激活时才顺手清掉，第二遍才对）
+        lay = x.layout()
+        if lay is not None:
+            _invalidate_sublayouts(lay)
     # 列表本身也立刻改到新高度（滚动区要等下一轮事件才改）：展开时不先把下面的回答挤扁一下
     if w.widget() in chain:
         w.fit_content()
@@ -2024,6 +2029,14 @@ def _settle_layout(widget):
         lay = x.layout()
         if lay is not None:
             lay.activate()
+
+
+def _invalidate_sublayouts(lay):
+    for i in range(lay.count()):
+        sub = lay.itemAt(i).layout()
+        if sub is not None:
+            sub.invalidate()
+            _invalidate_sublayouts(sub)
 
 
 def _label_plain_text(lbl) -> str:
@@ -2173,8 +2186,11 @@ class MessageView(QScrollArea):
     def find_text(self, text, backward=False):
         """在消息流里找文字（不分大小写）：选中下一处（或上一处）并滚过去，到头绕回。
 
-        搜的是能选中的文字：用户消息、回复正文、程序提示、思考内容、工具参数。
-        命中在收起的过程 / 卡片 / 思考块里时先把它展开。返回 (第几处, 共几处)，没找到是 (0, 0)。"""
+        搜的是能选中的文字：用户消息、回复正文、程序提示、思考内容、工具参数，加上用户气泡里的
+        引用块（ClampText 自己画字，不是 QLabel）。按在消息流里出现的先后排。
+        命中在收起的过程 / 卡片 / 思考块里时先把它展开；在引用块收起的那几行里时，那一段临时
+        展开到全文（跳到别处或关掉搜索收回）。返回 (第几处, 共几处)，没找到是 (0, 0)。"""
+        from .quotes import ClampText
         needle = (text or "").strip().lower()
         hits = []
         if needle:
@@ -2182,10 +2198,14 @@ class MessageView(QScrollArea):
             for row in self._content.findChildren(ToolCallCard):
                 if row._args_needed and row._body is None and needle in row._detail.lower():
                     row.ensure_body()
-            for lbl in self._content.findChildren(QLabel):
-                if not lbl.textInteractionFlags() & Qt.TextSelectableByMouse:
+            # 一次遍历同时收 QLabel 和引用块：findChildren 是先序深度优先，顺序就是显示的先后
+            for lbl in self._content.findChildren(QWidget):
+                if isinstance(lbl, ClampText):
+                    plain = lbl.text().lower()
+                elif isinstance(lbl, QLabel) and lbl.textInteractionFlags() & Qt.TextSelectableByMouse:
+                    plain = _label_plain_text(lbl).lower()
+                else:
                     continue
-                plain = _label_plain_text(lbl).lower()
                 start = plain.find(needle)
                 while start >= 0:
                     hits.append((lbl, start, len(plain)))
@@ -2201,7 +2221,13 @@ class MessageView(QScrollArea):
         self._find_state = (needle, idx)
         lbl, pos, total = hits[idx]
         _reveal(lbl)
-        lbl.setSelection(pos, len(needle))
+        if isinstance(lbl, ClampText):
+            was = lbl.is_expanded()
+            lbl.show_hit(pos, len(needle))
+            if lbl.is_expanded() != was:
+                _settle_layout(lbl)   # 变高了：当场排版，别让下面的消息先叠一帧
+        else:
+            lbl.setSelection(pos, len(needle))
         self._find_label = lbl
         self.hold_position()
         # 展开后的新高度要等布局排完才准，下一轮事件循环再滚
@@ -2213,10 +2239,17 @@ class MessageView(QScrollArea):
         self._find_state = ("", -1)
 
     def _clear_find_selection(self):
+        from .quotes import ClampText
         lbl = getattr(self, "_find_label", None)
         self._find_label = None
         if lbl is not None and not _deleted(lbl):
-            lbl.setSelection(0, 0)
+            if isinstance(lbl, ClampText):
+                was = lbl.is_expanded()
+                lbl.clear_hit()
+                if was:
+                    _settle_layout(lbl)   # 收回三行
+            else:
+                lbl.setSelection(0, 0)
 
     def _scroll_to_hit(self, lbl, pos, total):
         """命中大致在标签里的哪一段就滚到哪：长回复里，滚到标签顶上会看不见命中。"""
