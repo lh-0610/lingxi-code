@@ -300,6 +300,7 @@ def _delta_text(before, frame, url):
     delta = _diff(before, after)
     # 导航信号取首次 after：settle 重试可能取到重试间又变化的快照，不能抹掉"已导航"
     nav_url = after.get("qtUrl") or after.get("url")
+    navigated = _changed_document(before, after, nav_url, url)
     if delta == tree.DELTA_EMPTY:
         # 异步渲染（setTimeout/rAF）可能还没落到 DOM：等一小段再重取一次
         _bridge_call("settle", ms=_DELTA_SETTLE_MS)
@@ -314,9 +315,15 @@ def _delta_text(before, frame, url):
             if retry2.get("ok"):
                 after = retry2
                 delta = _diff(before, after)
+    # 动作后的快照就是一份真快照：变化行里露出来的 ref（新弹出的按钮……）登记成可用，
+    # 模型照着点不会被拒。以前只认 snapshot / find 签发的，diff 里给了 ref 却点不了（用户实测 6 次）
+    if after.get("ok"):
+        _remember_refs(after, frame)
     nav = ""
-    if nav_url and nav_url != url:
+    if navigated:
         nav = f"\n页面已导航到 {nav_url}，旧 ref 全部失效，再操作先重新 browser_snapshot。"
+    elif nav_url and nav_url != url:
+        nav = f"\n页面地址变成了 {nav_url}（还是同一个页面文档，ref 照常可用）。"
     truncated = ((before.get("stats") or {}).get("truncated")
                  or (after.get("stats") or {}).get("truncated"))
     cut_note = ("\n（快照被截断，只比了前一截，截断区里的变化看不到；"
@@ -339,6 +346,20 @@ def _delta_text(before, frame, url):
         return f"\n页面变化: {tree.DELTA_EMPTY}{nav}"
     return ("\n页面变化:\n" + tree.fence(delta, after.get("qtUrl") or after.get("url") or url)
             + cut_note + nav)
+
+
+def _changed_document(before, after, after_url, url):
+    """动作前后是不是换了一个文档（旧 ref 全部失效）。快照带文档编号（docId）时以它为准：
+    单页应用改路由只换地址、不换文档，ref 照常可用。没有编号时退回比地址。
+
+    url 是**这次动作所在文档**的地址：在 iframe 里动作就是 frame 的地址。以前一律传顶层页面的
+    地址，而 frame 里取的快照带回的是 frame 的地址，两者永远不等——iframe 里每点一下都报
+    「页面已导航，旧 ref 全部失效」（用户实测：B 站小游戏在 iframe 里，模型每步都多查一轮）。"""
+    b_doc = before.get("docId") if isinstance(before, dict) else None
+    a_doc = after.get("docId") if isinstance(after, dict) else None
+    if b_doc and a_doc:
+        return b_doc != a_doc
+    return bool(after_url and after_url != url)
 
 
 def _navigation_started(before):
@@ -692,7 +713,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
                     + tree.fence(r.get("by") or "", frame_url))
         return _err(r, "点击")
     return (f"已点击 {_describe_for_model(info, ref)}{note}"
-            + _after_action(before, frame, url, tabs0, cur0))
+            + _after_action(before, frame, frame_url, tabs0, cur0))
 
 
 def _cursor_label(verb, info):
@@ -811,7 +832,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
         # 密码框不回显（复审 #18）：值会进模型上下文和会话历史
         state_ = "已填写" if r.get("filled") else "为空"
         return (f"已向 {target} 输入，密码框不回显内容（当前{state_}）"
-                + _after_action(before, frame, url, tabs0, cur0))
+                + _after_action(before, frame, frame_url, tabs0, cur0))
     raw = r.get("value", "")
     if raw in (text[:100], ""):
         shown_value = json.dumps(raw, ensure_ascii=False)
@@ -819,7 +840,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
         # 页面的输入处理改过值（格式化、自动补全……）：那是页面写的字，进围栏
         shown_value = "（页面改过，见下）\n" + tree.fence(raw, frame_url)
     return (f"已向 {target} 输入，当前值: {shown_value}"
-            + _after_action(before, frame, url, tabs0, cur0))
+            + _after_action(before, frame, frame_url, tabs0, cur0))
 
 
 @tool

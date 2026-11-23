@@ -1324,6 +1324,8 @@ def test_click_in_cross_origin_iframe_asks_even_when_top_trusted(browser, server
         assert "iframe:" in asked[0][0] and base_b in asked[0][0]
         assert asked[0][1]["browser_origin"] == sec.parse_origin(base_b)
         assert "已点击" in out, out
+        # iframe 里点一下不是导航（以前拿顶层地址和 frame 的地址比，永远报「页面已导航」）
+        assert "已导航" not in out and "地址变成了" not in out, out
         after = _call(browser, "lx", method="snapshot", args={"mode": "all"}, frame=fp)
         assert "新行" in after["tree"], "页面实际效果：iframe 内加了一行"
     finally:

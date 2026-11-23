@@ -292,6 +292,71 @@ class TestDelta:
         out = tb.browser_click.func("e20")
         assert "已导航到" in out and "重新 browser_snapshot" in out
 
+    # —— 用户实测：B 站小游戏放在 iframe 里，模型每点一下都被告知「页面已导航、旧 ref 全部失效」，
+    #    变化行里给出的新按钮 ref 照着点也被拒（「ref 已失效」×6）——每一步都要多查一轮 ——
+
+    _FRAME_URL = "https://toy.example.com/game/index.html"
+
+    def _in_frame(self, env, doc="d1"):
+        env.fake.set("qturl", None, {"ok": True, "url": self._FRAME_URL}, frame="f.0")
+        env.fake.set("lx", "state", {"ok": True, "url": self._FRAME_URL, "title": "游戏",
+                                     "readyState": "complete", "generation": 1, "docId": doc},
+                     frame="f.0")
+        tb._remember_refs({"tree": '- button "添加一行" [ref=e20]', "docId": doc or ""}, "f.0")
+
+    def _frame_snap(self, text, doc):
+        snap = _all_snap('- main\n  - button "添加一行" [ref=e20]' + text, url=self._FRAME_URL)
+        return dict(snap, docId=doc) if doc else snap
+
+    @pytest.mark.parametrize("doc", ["d1", None], ids=["带文档编号", "没有文档编号退回比地址"])
+    def test_action_in_iframe_is_not_reported_as_navigation(self, env, doc):
+        pm.apply(env.sess, "auto")
+        self._in_frame(env, doc)
+        env.fake.snapshots = [self._frame_snap("", doc),
+                              self._frame_snap('\n  - listitem "新行 1"', doc)]
+        out = tb.browser_click.func("e20", frame="f.0")
+        assert "已点击" in out and '+  - listitem "新行 1"' in out
+        assert "已导航" not in out and "旧 ref 全部失效" not in out, out
+        assert "地址变成了" not in out, "frame 自己的地址没变"
+        # 输入同理（文字树没变时也不能因为「已导航」跳过样式核对）
+        env.fake.snapshots = [self._frame_snap("", doc), self._frame_snap("", doc)]
+        out = tb.browser_type.func("e20", "你好", frame="f.0")
+        assert "已向" in out, out
+        assert "已导航" not in out and "地址变成了" not in out, out
+
+    def test_same_document_new_address_keeps_refs(self, env):
+        """单页应用改路由：地址变了，文档没换，ref 照常可用——不能说「全部失效」。"""
+        pm.apply(env.sess, "auto")
+        before = dict(_all_snap("- main"), docId="d1")
+        after = dict(_all_snap("- main", url=_LOCAL + "#/next"), docId="d1")
+        env.fake.snapshots = [before, after]
+        out = tb.browser_click.func("e20")
+        assert "旧 ref 全部失效" not in out and "地址变成了" in out and "ref 照常可用" in out
+
+    def test_new_document_at_the_same_address_invalidates_refs(self, env):
+        """刷新 / 重新加载：地址没变，文档换了，旧 ref 确实全失效。"""
+        pm.apply(env.sess, "auto")
+        env.fake.snapshots = [dict(_all_snap("- main"), docId="d1"),
+                              dict(_all_snap("- main"), docId="d2")]
+        out = tb.browser_click.func("e20")
+        assert "已导航到" in out and "旧 ref 全部失效" in out
+
+    def test_refs_shown_in_the_change_are_usable(self, env):
+        pm.apply(env.sess, "auto")
+        self._in_frame(env)
+        env.fake.snapshots = [
+            dict(_all_snap('- main\n  - button "添加一行" [ref=e20]', url=self._FRAME_URL), docId="d1"),
+            dict(_all_snap('- main\n  - button "添加一行" [ref=e20]\n'
+                           '  - dialog "立即充值"\n    - button "确定" [ref=e52]',
+                           url=self._FRAME_URL), docId="d1"),
+        ]
+        out = tb.browser_click.func("e20", frame="f.0")
+        assert '[ref=e52]' in out, "变化行里给了新按钮的 ref"
+        clicks = len(env.fake.args_of("lx", "click"))
+        out = tb.browser_click.func("e52", frame="f.0")
+        assert out != tb._STALE_REF and "已点击" in out, out
+        assert len(env.fake.args_of("lx", "click")) == clicks + 1, "真的点下去了"
+
 
 class TestType:
     def test_secret_blocked_on_public_before_confirm(self, env, monkeypatch):
