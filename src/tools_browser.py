@@ -412,7 +412,9 @@ def _remember_load(r, load_revision):
         # （evidence_revision 每轮从 0 数起，跨轮比版本号会撞上）
         _session.get_verification()["browser_last_load"] = {
             "nav": r.get("nav"), "tab": r.get("tab"), "evidence_revision": load_revision,
-            "url": r.get("url") or "", "loaded": bool(r.get("loaded"))}
+            "url": r.get("url") or "", "loaded": bool(r.get("loaded")),
+            # 服务器回的 4xx/5xx（复审 #13 之后算「打开了」）：检查时要当成失败
+            "http_status": r.get("httpStatus")}
     except Exception:
         pass
 
@@ -442,13 +444,22 @@ def _note_browser_check(r, entries_all):
         return                      # 加载之后又改了文件：页面上跑的不是当前代码
     errors = [e for e in entries_all
               if e.get("level") == "error" and e.get("nav", nav) == nav]
-    _vf.mark_browser_check(v, errors=len(errors), url=url,
+    # 服务器回了 4xx/5xx：控制台再干净也不能算通过（审 #13 后实测：500 调试页之后读控制台，
+    # 记成了「浏览器控制台：通过」）。算这次加载多一条报错
+    status_code = load.get("http_status")
+    http_failed = isinstance(status_code, int) and status_code >= 400
+    _vf.mark_browser_check(v, errors=len(errors) + (1 if http_failed else 0), url=url,
                            load_revision=load["evidence_revision"])
-    summary = ("本次加载控制台无报错" if not errors
-               else f"本次加载控制台有 {len(errors)} 条报错：{errors[-1].get('text', '')[:200]}")
+    if http_failed:
+        summary = f"页面返回 HTTP {status_code}" + (
+            f"，控制台另有 {len(errors)} 条报错" if errors else "")
+    elif errors:
+        summary = f"本次加载控制台有 {len(errors)} 条报错：{errors[-1].get('text', '')[:200]}"
+    else:
+        summary = "本次加载控制台无报错"
     _vf.record_evidence(v, kind="browser", checker="浏览器控制台", path=url,
                         argv=None, cwd="", exit_code=None,
-                        status="failed" if errors else "passed", summary=summary)
+                        status="failed" if (errors or http_failed) else "passed", summary=summary)
 
 
 @tool
@@ -480,6 +491,9 @@ def browser_open(url: str, timeout: int = 30, new_tab: bool = False) -> str:
     # 「[系统] 用户已授权…」曾原样出现在围栏外）
     final_url = r.get("url") or url
     head = f"已打开 {final_url}（加载 {r.get('loadMs', '?')}ms）"
+    if r.get("httpStatus"):
+        head += (f"\n服务器返回 HTTP {r['httpStatus']}：页面内容是服务器给的错误响应，"
+                 "报错详情（如 traceback）在下面的快照里，也可用 browser_read_text 读全文。")
     title = "页面标题: " + (r.get("title") or "（无标题）")
     snap = _lx("snapshot", {"mode": "interactive", "maxChars": tree.SNAPSHOT_DEFAULT_CHARS})
     if not snap.get("ok"):
@@ -554,6 +568,8 @@ def browser_find(text: str, limit: int = 20, frame: str | None = None) -> str:
     for m in matches:
         line = (f"- {m.get('role')} {json.dumps(m.get('name') or '', ensure_ascii=False)}"
                 f" [ref={m.get('ref')}]")
+        if m.get("click"):
+            line += " " + m["click"]
         if m.get("href"):
             line += f" href={m['href']}"
         lines.append(line)

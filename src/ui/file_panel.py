@@ -2,8 +2,9 @@
 
 像 Claude 桌面版那样停靠在对话区右边——不弹模态、不挡对话，看文件的同时照常能读能输入：
 
-- 一个文件一个标签页，同一个文件再点只是切过去，不会重复开；标签上有 ×，面板自己也有
-  一个关闭按钮，关到没有标签时面板自动收起（对话区恢复原来的宽度）；
+- 一个文件一个标签页，同一个文件再点只是切过去，不会重复开；标签上有 ×，面板右上的
+  「收起 ×」只隐藏面板、标签和网页都保留（再点顶栏按钮恢复）；关到没有标签时面板自动
+  收起（对话区恢复原来的宽度）；
 - 顶部一行是当前文件的完整路径，正文按行显示、带行号（新文件一侧的行号）；diff 里新增的
   行标绿、删除的行标红，hunk 头和 diff 头另给色调；代码行再做一层语法高亮（关键字、字符串、
   注释、数字、函数 / 类名分开上色，见 ui/syntax_highlight.py）——整行底色保留，颜色只叠在
@@ -165,7 +166,7 @@ class FilePanel(QFrame):
     _GRIP = 6                      # 左边缘这么宽的一条可以拖动改宽度
     DEFAULT_HINT = "此刻相对上次提交的差异（当前状态，不是哪一轮保存下来的历史）"
 
-    closed = Signal()              # 用户关掉了面板（标签都关完了 / 点了关闭按钮）
+    closed = Signal()              # 面板收起了（标签都关完了 / 点了「收起 ×」）
     browser_stop_requested = Signal()   # 浏览器状态卡「停止」→ ChatUI 停驱动浏览器的那个会话
     background_requested = Signal()     # 浏览器错误页「去后台看看」→ ChatUI 开后台标签
     width_changed = Signal(int)    # 拖完松手时发，ChatUI 记进界面偏好
@@ -188,6 +189,7 @@ class FilePanel(QFrame):
         # 浏览器：每个网页一个标签（key = lingxi:browser#<标签 id>），标签 id → (BrowserView, 标签文字)
         self._bviews: dict[int, tuple] = {}
         self._browser_last_url = ""             # 手动入口复用的上次地址
+        self._user_collapsed = False            # 用户点「收起 ×」藏的：响应式布局别自动弹回来
         self._widget_tabs: dict[str, dict] = {}  # 后台 / 调试这类常驻控件标签：key → 控件与文案
         self._build_ui()
         self.apply_theme()
@@ -305,9 +307,9 @@ class FilePanel(QFrame):
         self.close_btn.setObjectName("filePanelClose")
         self.close_btn.setFixedSize(28, 28)
         self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setToolTip("关闭右侧面板（标签都会关掉；后台命令不会停）")
+        self.close_btn.setToolTip("收起面板（标签和网页都保留；后台命令不会停）")
         self.close_btn.setAccessibleName("收起面板")
-        self.close_btn.clicked.connect(self.close_all)
+        self.close_btn.clicked.connect(self.collapse)
 
         top_lay.addWidget(self.path_label, 1)
 
@@ -491,8 +493,14 @@ class FilePanel(QFrame):
             view.flash(f"页面自己弹出的新窗口已拦截：{url}")
 
     def open_last_browser(self):
-        """用户手动开浏览器（顶栏的地球按钮，复审 14）：已开就切过去；关过就复用上次地址，没有就空白页。"""
-        self.open_browser(self._browser_last_url or "")
+        """用户手动开浏览器（顶栏的地球按钮，复审 14）：已开就切过去（不把当前标签
+        导航去旧的上次地址）；关过就复用上次地址，没有就空白页。"""
+        from ..browser import page as _bpage
+        b = _bpage._browser
+        if b is not None and b.tabs:
+            self.open_browser("")
+        else:
+            self.open_browser(self._browser_last_url or "")
 
     def open_widget_tab(self, key: str, label_text: str, widget: QWidget, *, header: str,
                         hint: str, tooltip: str = ""):
@@ -596,8 +604,19 @@ class FilePanel(QFrame):
         else:
             self._on_tab_changed(self.tabs.currentIndex())
 
+    def collapse(self):
+        """收起 ×：只隐藏面板，标签和网页都保留（页面 / cookie / 登录态不丢）。
+        真关浏览器走网页标签 ×、「更多 → 关闭浏览器」、模型 browser_close。"""
+        self._user_collapsed = True
+        self.setVisible(False)
+        self.closed.emit()
+
+    def is_user_collapsed(self) -> bool:
+        return self._user_collapsed
+
     def close_all(self):
         """关掉所有标签页并收起面板（对话区恢复原来的宽度）。"""
+        self._user_collapsed = False
         if self._bviews:
             views = [v for v, _l in self._bviews.values()]
             self._bviews.clear()
@@ -641,6 +660,7 @@ class FilePanel(QFrame):
         return ""
 
     def _show_self(self):
+        self._user_collapsed = False
         if not self.isVisible():
             self.setVisible(True)
 

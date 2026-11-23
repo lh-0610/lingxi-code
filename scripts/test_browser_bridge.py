@@ -49,6 +49,19 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"<html><body>slow</body></html>")
             return
+        if self.path.startswith("/404body") or self.path.startswith("/500body"):
+            code = 404 if self.path.startswith("/404body") else 500
+            body = (b"<html><head><title>Not Found</title></head><body>"
+                    b"<h1>Cannot GET /foo</h1></body></html>" if code == 404 else
+                    b"<html><head><title>ZeroDivisionError // Werkzeug Debugger</title></head>"
+                    b"<body><h1>ZeroDivisionError</h1>"
+                    b"<pre>Traceback: division by zero</pre></body></html>")
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/setcookie"):
             body = b"<html><body>cookie set</body></html>"
             self.send_response(200)
@@ -560,6 +573,111 @@ def test_find_folded_link_then_click_hits(browser, servers):
     r = _call(browser, "lx", method="click", args={"ref": ref_l})
     assert r["ok"] is True, r
     assert _out(browser) == "点了:链接11"
+
+
+def test_clickable_generics_get_refs(browser, servers):
+    """复审 #8：没写 role 但 cursor:pointer / tabindex 的元素进交互快照、带标记，
+    点击真生效；继承 pointer 的内容子元素不各占一个 ref；普通 div 仍不进快照。"""
+    base_a, _ = servers
+    _call(browser, "open", url=base_a + "/clickable.html", timeout=20)
+    s = _call(browser, "lx", method="snapshot", args={"mode": "interactive"})
+    t = s["tree"]
+    assert '- generic "项目 Alpha" [ref=' in t, t
+    assert "[cursor=pointer]" in t
+    assert '- listitem "买牛奶" [ref=' in t, t
+    assert '- generic "键盘可达" [ref=' in t and "[tabindex]" in t, t
+    assert "普通文字" not in t
+    assert t.count("项目 Alpha") == 1, "内容 span 继承 pointer，不该另占一个 ref"
+    ref = _ref_of(t, "项目 Alpha")
+    r = _call(browser, "lx", method="click", args={"ref": ref})
+    assert r["ok"] is True, r
+    assert _out(browser) == "点了:card"
+    # all 快照（diff 用）也带可点标记
+    sa = _call(browser, "lx", method="snapshot", args={"mode": "all"})
+    assert "[cursor=pointer]" in sa["tree"]
+
+
+def test_find_skips_screen_reader_twins_and_click_selects(browser, servers):
+    """antd 式下拉：0 宽的读屏 role=option（叶子和带子元素的两种）都不进 find / 快照，
+    可见的 pointer 选项拿 ref，点了真选中。"""
+    base_a, _ = servers
+    _call(browser, "open", url=base_a + "/clickable.html", timeout=20)
+    s = _call(browser, "lx", method="snapshot", args={"mode": "interactive"})
+    assert '- option "English"' not in s["tree"], "隐形孪生体不该进快照"
+    f = _call(browser, "lx", method="find", args={"text": "English"})
+    ms = f["matches"]
+    assert len(ms) == 1, ms
+    assert ms[0]["role"] == "generic" and ms[0]["click"] == "[cursor=pointer]", ms
+    r = _call(browser, "lx", method="click", args={"ref": ms[0]["ref"]})
+    assert r["ok"] is True, r
+    assert _out(browser) == "选了:English"
+
+
+def test_clickable_generic_named_submit_is_consequential(browser, servers):
+    """可点 div 的名字取正文（不是只取 title）：叫「确定」的 JS 绑定 div 命中关键词闸门。"""
+    base_a, _ = servers
+    _call(browser, "open", url=base_a + "/clickable.html", timeout=20)
+    f = _call(browser, "lx", method="find", args={"text": "确定"})
+    assert f["matches"], f
+    info = _call(browser, "lx", method="info", args={"ref": f["matches"][0]["ref"]})
+    assert info["ok"] is True and info["name"] == "确定", info
+    assert sec.is_consequential(info) is True
+
+
+def test_http_error_body_is_not_a_failed_open(browser, servers):
+    """复审 #13：HTTP 4xx/5xx 带内容的响应不算"连不上"——ok=True + httpStatus，
+    快照读得到错误页内容；真连不上（拒绝连接）仍报失败、没有 httpStatus。"""
+    base_a, _ = servers
+    for path, code, marker in (("/404body", 404, "Cannot GET"),
+                               ("/500body", 500, "ZeroDivisionError")):
+        r = _call(browser, "open", url=base_a + path, timeout=20)
+        assert r["ok"] is True and r["loaded"] is True, r
+        assert r.get("httpStatus") == code, r
+        assert r.get("error") in (None, ""), r
+        s = _call(browser, "lx", method="snapshot", args={"mode": "interactive"})
+        assert marker in s["tree"], s
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    r = _call(browser, "open", url=f"http://127.0.0.1:{port}/", timeout=15)
+    assert r["ok"] is False, r
+    assert not r.get("httpStatus"), r
+
+
+def test_model_open_http_error_reads_traceback(browser, servers, trusted_tools):
+    """工具层：browser_open 500 调试页不再"打开失败"，提示 HTTP 状态，正文读得到 traceback。"""
+    tb = trusted_tools
+    base_a, _ = servers
+    out = _tool(browser, tb.browser_open.func, base_a + "/500body")
+    assert "打开失败" not in out, out
+    assert "HTTP 500" in out, out
+    assert "ZeroDivisionError" in out, out
+    body = _tool(browser, tb.browser_read_text.func)
+    assert "division by zero" in body, body
+
+
+def test_http_error_page_is_a_failed_browser_check(browser, servers, trusted_tools):
+    """审 #13 时实测：500 调试页算「打开了」之后，接着读控制台被记成「浏览器控制台：通过」——
+    改了代码、服务崩了，结果卡却说检查通过。服务器回 4xx/5xx 要记成失败。"""
+    from src import session as _session
+    from src import verification as _vf
+    tb = trusted_tools
+    v = _session.get_verification()
+    _vf.mark_dirty(v, "app.py")              # 只有本轮改过文件才记检查
+
+    def checks():
+        return [(e.get("status"), e.get("summary")) for e in v.get("evidence", [])
+                if e.get("checker") == "浏览器控制台"]
+    _tool(browser, tb.browser_open.func, servers[0] + "/500body")
+    _tool(browser, tb.browser_console.func, level="all")
+    assert checks() == [("failed", "页面返回 HTTP 500")], checks()
+    assert _vf.browser_check_state(v) == "errors"
+    # 对照：正常页面照样记通过（不然上面那条可能只是什么都判失败）
+    _tool(browser, tb.browser_open.func, servers[0] + "/states.html")
+    _tool(browser, tb.browser_console.func, level="all")
+    assert checks()[-1] == ("passed", "本次加载控制台无报错"), checks()
 
 
 def test_submit_button_without_type_consequential_and_real_submit(browser, servers):

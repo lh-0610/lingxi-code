@@ -37,6 +37,10 @@ class _BrowserNotifier(QObject):
     tab_closed = Signal(int)
     current_changed = Signal(int)
     popup_blocked = Signal(str)        # 页面自己弹的新窗口被拦下（地址），面板闪一行提示
+    # 模型要打开网页（browser_open）：用户把面板收起了的话弹回来——收起期间浏览器还活着，
+    # 不会再走 browser_created；不弹回的话模型在看不见的页面上操作（真实点击退回脚本点击、
+    # 隐藏页面定时器被节流），用户也看不见它在干什么（审「收起只隐藏」时实测）
+    model_opening = Signal()
 
 
 _notifier = _BrowserNotifier()

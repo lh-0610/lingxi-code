@@ -961,6 +961,7 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 模型首次拉起浏览器 → 自动开面板标签并切过去（复审 7：用户看得见、view 不 hidden）
         from ..browser import page as _bpage
         _bpage._notifier.browser_created.connect(self._on_model_browser_created)
+        _bpage._notifier.model_opening.connect(self._on_model_browser_opening)
         # 出现 / 消失 / 变宽都会改变对话栏宽度：输入框和顶栏折叠档位要跟着重算
         self.file_panel.installEventFilter(self)
 
@@ -979,6 +980,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
     def _on_model_browser_created(self):
         self.file_panel.open_browser("")
 
+    def _on_model_browser_opening(self):
+        """模型要打开网页时面板没显示（用户点了「收起 ×」）：弹回来，和第一次拉起浏览器一样，
+        让用户看得见、页面也不处在隐藏状态。面板开着就不动（不抢用户正看的标签）。"""
+        if not self.file_panel.isVisible():
+            self.file_panel.open_browser("")
+
     def _file_panel_max_width(self):
         """拖宽上限：对话栏至少还要留 _FILE_PANEL_MIN_CHAT，别把对话挤没了。"""
         from .file_panel import FilePanel
@@ -994,7 +1001,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
     def _file_panel_reserved_width(self):
         """任务面板决定停靠还是浮层时，要给开着标签页的文件面板留的宽度（最窄一档）。"""
         panel = getattr(self, "file_panel", None)
-        return panel.MIN_WIDTH if panel is not None and panel.paths() else 0
+        if panel is None or not panel.paths() or panel.is_user_collapsed():
+            return 0
+        return panel.MIN_WIDTH
 
     def _file_panel_room(self):
         """文件面板最多能占多宽：窗口去掉侧栏、停靠的任务面板，再给对话栏留一条底线。"""
@@ -1016,6 +1025,11 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             return
         if panel.is_dragging():
             return          # 用户正拖着改宽度，别在这时候按可用空间改回去
+        if panel.is_user_collapsed():
+            # 用户点「收起 ×」藏的（标签和网页都还在）：窗口变宽也不自动弹回来
+            if panel.isVisible():
+                panel.setVisible(False)
+            return
         room = self._file_panel_room()
         if room < panel.MIN_WIDTH:
             panel.setVisible(False)

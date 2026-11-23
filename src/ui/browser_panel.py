@@ -18,6 +18,7 @@ open_browser（或第一次 browser_* 工具调用）由 page.get_browser() 创�
 
 定时回调一律带 receiver 上下文（CLAUDE.md 的 QTimer.singleShot 实测崩溃那条）。
 """
+import re
 import time
 import urllib.parse
 
@@ -570,7 +571,11 @@ class _ErrorPage(QWidget):
             body = "页面没能打开。"
         self.body.setText(body)
         self.background_btn.setVisible(local)
-        self.code.setText(error or (f"错误 {code}" if code else ""))
+        # Qt 的 errorString 可能带未替换的翻译模板（<strong>$1</strong>）：去标签、填错误码
+        clean = re.sub(r"<[^>]+>", "", error or "")
+        if code:
+            clean = clean.replace("$1", str(code))
+        self.code.setText(clean or (f"错误 {code}" if code else ""))
 
 
 # ── 面板 ───────────────────────────────────────────────────────────
@@ -955,6 +960,10 @@ class BrowserView(QWidget):
         if status == QWebEngineLoadingInfo.LoadStatus.LoadStartedStatus:
             self.failed = False
         elif status == QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus:
+            if info.errorDomain() == QWebEngineLoadingInfo.ErrorDomain.HttpStatusCodeDomain:
+                # HTTP 4xx/5xx 带内容的响应（Flask 调试页 / Cannot GET）：页面已经渲染
+                # 出来了，照常显示，不盖错误页（复审 #13）
+                return
             err = info.errorString() or ""
             if "ERR_ABORTED" in err.upper():     # 被新导航取代 / 用户停止：不算连不上
                 return

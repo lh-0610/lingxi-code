@@ -100,7 +100,7 @@
     return "generic";
   }
 
-  function nameOf(el, role) {
+  function nameOf(el, role, useText) {
     const labelledby = el.getAttribute("aria-labelledby");
     if (labelledby) {
       const parts = labelledby.split(/\s+/).map(id => {
@@ -122,7 +122,7 @@
         return clean(el.value || t, NAME_MAX);
     }
     if (tag === "IMG") return clean(el.getAttribute("alt") || "", NAME_MAX);
-    if (!FROM_CONTENT.has(role)) return clean(el.title || "", NAME_MAX);
+    if (!FROM_CONTENT.has(role) && !useText) return clean(el.title || "", NAME_MAX);
     const text = clean(el.textContent, NAME_MAX);
     if (text) return text;
     if (el.title) return clean(el.title, NAME_MAX);
@@ -147,6 +147,34 @@
     return true;
   }
 
+  // 读屏孪生体（复审 #8）：antd 这类组件库另 render 一份 0 面积的 role=option/listbox
+  // 给读屏软件，屏幕上看不见、真人点不到、脚本点了也没用。只认这两个角色——别的自定义
+  // 控件（slider/checkbox）可能只是没写样式才 0 面积，不能误杀。原生 <option>/<select>
+  // 除外（系统弹窗里显示）
+  function isA11yTwin(el, role) {
+    if (role !== "option" && role !== "listbox") return false;
+    if (el.tagName === "OPTION" || el.tagName === "SELECT") return false;
+    const r = el.getBoundingClientRect();
+    return r.width < 1 || r.height < 1;
+  }
+
+  // 没写角色但能点的元素（React/Vue 用 JS 绑定的 div/li、antd 下拉的可见选项，复审 #8）：
+  // cursor:pointer 或带 tabindex 也发 ref。cursor 会继承：只认连续 pointer 链的最外层，
+  // 选项的内容 div 也继承 pointer，不该各占一个 ref。返回要附在行尾的标记（无则空串）。
+  function clickMarker(el) {
+    let cs;
+    try { cs = getComputedStyle(el); } catch (e) { return ""; }
+    if (cs.cursor === "pointer") {
+      const p = el.parentElement;
+      if (p && p.tagName !== "BODY" && p.tagName !== "HTML") {
+        try { if (getComputedStyle(p).cursor === "pointer") return ""; } catch (e) { /* 当最外层 */ }
+      }
+      return "[cursor=pointer]";
+    }
+    if (el.hasAttribute("tabindex") && el.tabIndex >= 0) return "[tabindex]";
+    return "";
+  }
+
   function pruneRefs() {
     // 只剔除已脱离页面的元素；活着的元素保留原 ref（root_ref/diff/find 快照不得改指向）
     for (const [id, el] of Array.from(refs)) {
@@ -168,11 +196,12 @@
     return id;
   }
 
-  function lineFor(el, role, name, depth, withRef) {
+  function lineFor(el, role, name, depth, withRef, click) {
     let line = "  ".repeat(depth) + "- " + role;
     if (name) line += " " + JSON.stringify(name);
     if (/^H[1-6]$/.test(el.tagName)) line += " [level=" + el.tagName[1] + "]";
     if (withRef) line += " [ref=" + assignRef(el) + "]";
+    if (click) line += " " + click;
     if (el.disabled || el.getAttribute("aria-disabled") === "true") line += " [disabled]";
     if (role === "checkbox" || role === "radio" || role === "switch" || role === "menuitemcheckbox"
         || role === "menuitemradio") {
@@ -264,6 +293,11 @@
       if (SKIP_TAG.has(el.tagName) || !visible(el)) return false;
       const role = roleOf(el);
       if (role === "hidden" || role === "presentation") return false;
+      if (isA11yTwin(el, role)) {
+        // 自己的行不进树（不发 ref），子元素照常遍历——0 宽容器里溢出的可见内容不剪
+        for (const c of el.childNodes) if (c.nodeType === 1) walk(c, depth);
+        return false;
+      }
 
       // 页脚/横幅链接折叠：超额链接整棵跳过（链接子树通常无其它可交互元素）
       if (foldActive && role === "link") {
@@ -283,12 +317,14 @@
       try {
         let selfLine = null;
         const isInteractive = INTERACTIVE.has(role);
-        const withRef = isInteractive || LANDMARK.has(role) || role === "heading";
+        const click = (!isInteractive && !LANDMARK.has(role) && role !== "heading" && role !== "img")
+          ? clickMarker(el) : "";
+        const withRef = isInteractive || LANDMARK.has(role) || role === "heading" || !!click;
         if (mode === "interactive") {
-          if (isInteractive || LANDMARK.has(role) || role === "heading" || role === "img")
-            selfLine = lineFor(el, role, nameOf(el, role), depth, withRef);
+          if (isInteractive || LANDMARK.has(role) || role === "heading" || role === "img" || click)
+            selfLine = lineFor(el, role, nameOf(el, role, !!click), depth, withRef, click);
         } else {
-          if (role !== "generic") selfLine = lineFor(el, role, nameOf(el, role), depth, withRef);
+          if (role !== "generic" || click) selfLine = lineFor(el, role, nameOf(el, role, !!click), depth, withRef, click);
           else if (TEXT_LEAF.has(el.tagName) || (!el.children.length && el.textContent.trim())) {
             const t = clean(el.textContent, 200);
             if (t) selfLine = "  ".repeat(depth) + "- text: " + JSON.stringify(t);
@@ -325,7 +361,7 @@
           emit("  ".repeat(childDepth) + "- text: " + JSON.stringify("…还有 " + selectSkipped + " 个选项（收起，用 browser_find 查）"));
 
         if (mode === "interactive" && selfLine !== null && lines.length === before
-            && !isInteractive && role !== "heading" && role !== "img") {
+            && !isInteractive && !click && role !== "heading" && role !== "img") {
           lines.splice(lineIdx, 1);
           state.kept--;
         }
@@ -394,7 +430,7 @@
     const form = formOf(a);
     return JSON.stringify({
       tag: a.tagName, type: (a.type || a.getAttribute("type") || "").toLowerCase(),
-      role: roleOf(a), name: nameOf(a, roleOf(a)),
+      role: roleOf(a), name: nameOf(a, roleOf(a), !!clickMarker(a)),
       method: form ? (form.getAttribute("method") || "get").toLowerCase() : "",
       action: form ? (form.getAttribute("action") || "") : "",
       btnMethod: a.getAttribute ? (a.getAttribute("formmethod") || "").toLowerCase() : "",
@@ -418,7 +454,7 @@
       // el.type 是 IDL 属性：没写 type 的 <button> 默认 "submit"、<input> 默认 "text"；
       // getAttribute 会读成空串，漏判表单默认提交按钮
       type: (a.type || a.getAttribute("type") || "").toLowerCase(),
-      role, name: nameOf(a, role),
+      role, name: nameOf(a, role, !!clickMarker(a)),
       inForm: !!form,
       formMethod: form ? (form.getAttribute("method") || "get").toLowerCase() : "",
       formAction: form ? (form.getAttribute("action") || "") : "",
@@ -624,14 +660,19 @@
       if (el.shadowRoot) stack.push(...el.shadowRoot.children);
       stack.push(...el.children);
       const role = roleOf(el);
-      if (role === "generic" || role === "hidden" || role === "presentation") continue;
-      const name = nameOf(el, role);
+      if (role === "hidden" || role === "presentation") continue;
+      const click = role === "generic" ? clickMarker(el) : "";
+      if (role === "generic" && !click) continue;
+      // 读屏孪生体不进 find（和快照同一口径）：点了没用，别让它排在可见选项前面
+      if (isA11yTwin(el, role)) continue;
+      const name = nameOf(el, role, !!click);
       const hay = (name + " " + (el.getAttribute("placeholder") || "")).toLowerCase();
       if (!hay.includes(q)) continue;
       const kids = el.shadowRoot ? Array.from(el.shadowRoot.children) : Array.from(el.children);
-      if (kids.some(c => visible(c) && roleOf(c) !== "generic"
-          && nameOf(c, roleOf(c)).toLowerCase().includes(q))) continue;
+      if (kids.some(c => visible(c) && (roleOf(c) !== "generic" || clickMarker(c))
+          && nameOf(c, roleOf(c), !!clickMarker(c)).toLowerCase().includes(q))) continue;
       const m = { ref: assignRef(el), role, name, tag: el.tagName.toLowerCase() };
+      if (click) m.click = click;
       if (role === "link") {
         const href = el.getAttribute("href") || "";
         if (href) m.href = href.slice(0, 200);

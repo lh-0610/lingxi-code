@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>可点但没写角色</title>
+<style>
+  .card { cursor: pointer; padding: 4px 8px; }
+  .todo { cursor: pointer; }
+  .opt { cursor: pointer; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div id="out">-</div>
+<!-- React/Vue 式：JS 绑定点击、没写 role 的 div；内容 span 继承 pointer，不该各占一个 ref -->
+<div class="card" id="card"><span>项目 Alpha</span></div>
+<ul>
+  <li class="todo" id="todo1">买牛奶</li>
+  <li class="todo" id="todo2">写周报</li>
+</ul>
+<!-- antd 式下拉：读屏孪生体（0 宽）+ 可见选项（没写 role、cursor:pointer）。
+     孪生体两个：叶子（visible 剔）和带子元素的（find 的 0 面积过滤剔） -->
+<div id="dd">
+  <div role="listbox" style="width:0;height:0;overflow:hidden">
+    <div role="option" style="width:0;height:22px">English</div>
+    <div role="option" style="width:0;height:22px"><span>English</span></div>
+  </div>
+  <div class="opt" id="opt-ja"><div>日本語</div></div>
+  <div class="opt" id="opt-en"><div>English</div></div>
+</div>
+<div id="tabbed" tabindex="0">键盘可达</div>
+<div id="plain">普通文字</div>
+<div class="card" id="sure">确定</div>
+<script>
+  const out = document.getElementById('out');
+  document.getElementById('card').addEventListener('click', () => out.textContent = '点了:card');
+  document.getElementById('todo1').addEventListener('click', () => out.textContent = '点了:todo1');
+  document.getElementById('todo2').addEventListener('click', () => out.textContent = '点了:todo2');
+  document.getElementById('opt-ja').addEventListener('click', () => out.textContent = '选了:日本語');
+  document.getElementById('opt-en').addEventListener('click', () => out.textContent = '选了:English');
+  document.getElementById('tabbed').addEventListener('click', () => out.textContent = '点了:tabbed');
+  document.getElementById('sure').addEventListener('click', () => out.textContent = '点了:sure');
+</script>
+</body>
+</html>

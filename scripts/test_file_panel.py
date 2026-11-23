@@ -486,6 +486,16 @@ def browser_server():
                 self.end_headers()
                 self.wfile.write(b"<html><body>slow</body></html>")
                 return
+            if self.path.startswith("/500body"):
+                body = (b"<html><head><title>ZeroDivisionError // Werkzeug Debugger</title></head>"
+                        b"<body><h1>ZeroDivisionError</h1>"
+                        b"<pre>Traceback: division by zero</pre></body></html>")
+                self.send_response(500)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             super().do_GET()
 
         def log_message(self, *a):
@@ -572,6 +582,115 @@ def test_browser_tab_lifecycle(browser_ui, qapp, browser_server):
     _pump(qapp, 20)
     assert page.is_browser_open() is False
     assert not ui.file_panel.isVisible()
+
+
+def test_collapse_button_hides_panel_but_keeps_browser(browser_ui, qapp, browser_server):
+    """收起 × 只隐藏面板：浏览器 / 标签 / 页面都保留；响应式重算不自动弹回；
+    地球按钮恢复时还是原来那页，不导航去旧的上次地址。"""
+    from src.browser import page
+    from src.ui.file_panel import is_browser_key
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+    b = page.get_browser()
+    tids = list(b.tabs)
+    ui.file_panel.open_file("a.py", [(1, "ctx", "x = 1")])
+    _pump(qapp)
+    # 地址栏去另一页：上次地址（form.html）和当前页（?b）不同，恢复时不该被拽回去
+    ui.file_panel._browser_view.navigate(browser_server + "/form.html?b")
+    assert _wait_page(qapp, lambda: "?b" in b.page.url().toString())
+
+    ui.file_panel.close_btn.click()
+    _pump(qapp)
+    assert not ui.file_panel.isVisible()
+    assert page.is_browser_open() and page.get_browser() is b, "收起不销毁浏览器"
+    assert list(b.tabs) == tids, "标签保留"
+    assert "?b" in b.page.url().toString(), "页面保留"
+    assert "a.py" in ui.file_panel.paths(), "文件标签也保留"
+    assert any(is_browser_key(k) for k in ui.file_panel.paths())
+
+    ui.resize(1600, 900)
+    ui._refresh_responsive_layout()
+    _pump(qapp)
+    assert not ui.file_panel.isVisible(), "用户收起后窗口变宽也不自动弹回"
+
+    ui.browser_btn.click()
+    _pump(qapp, 10)
+    assert ui.file_panel.isVisible()
+    assert page.get_browser() is b
+    assert "?b" in b.page.url().toString(), "恢复时还是原来那页，不导航去旧的上次地址"
+    assert is_browser_key(ui.file_panel.current_path())
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+    assert page.is_browser_open() is False, "close_all 仍是真关"
+
+
+def test_collapse_keeps_file_tabs_and_open_file_restores(ui, qapp):
+    """只有文件标签时收起：标签保留、不自动弹回；再点文件恢复面板。"""
+    fp = ui.file_panel
+    fp.open_file("a.py", [(1, "ctx", "x = 1")])
+    _pump(qapp)
+    fp.close_btn.click()
+    _pump(qapp)
+    assert not fp.isVisible()
+    assert "a.py" in fp.paths()
+    ui._refresh_responsive_layout()
+    _pump(qapp)
+    assert not fp.isVisible()
+    fp.open_file("b.py", [(1, "ctx", "y = 2")])
+    _pump(qapp)
+    assert fp.isVisible(), "显式开文件要能恢复面板"
+    assert fp.has_path("a.py") and fp.has_path("b.py")
+    fp.close_all()
+    _pump(qapp)
+
+
+def test_model_new_tab_while_collapsed_shows_panel(browser_ui, qapp, browser_server):
+    """收起后模型开新标签：面板回来让用户看见（和没收起时一样）。"""
+    from src import tools_browser as tb
+    from src.browser import page
+    from src.browser import security as sec
+    from src import session as _session
+    ui = browser_ui
+    _session.current_session().browser_origin_allowlist.add(sec.parse_origin(browser_server))
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+    ui.file_panel.close_btn.click()
+    _pump(qapp)
+    assert not ui.file_panel.isVisible()
+    _fp_run(qapp, tb.browser_open.func, browser_server + "/form.html?b", new_tab=True)
+    _pump(qapp, 20)
+    assert ui.file_panel.isVisible(), "模型开新标签：面板回来"
+    assert len(page.get_browser().tabs) == 2
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_model_open_while_collapsed_brings_the_panel_back(browser_ui, qapp, browser_server):
+    """审「收起只隐藏」时实测：收起后模型在原标签里 browser_open，面板不回来——模型在
+    看不见的页面上操作（真实点击退回脚本点击、页面 visibilityState=hidden），用户也看不见。
+    模型要开网页时弹回面板，和第一次拉起浏览器一样。"""
+    from src import tools_browser as tb
+    from src.browser import page
+    from src.browser import security as sec
+    from src import session as _session
+    ui = browser_ui
+    _session.current_session().browser_origin_allowlist.add(sec.parse_origin(browser_server))
+    ui.file_panel.open_browser(browser_server + "/form.html")
+    _pump(qapp)
+    assert _wait_page(qapp, lambda: "form.html" in page.get_browser().page.url().toString())
+    ui.file_panel.close_btn.click()
+    _pump(qapp)
+    assert not ui.file_panel.isVisible() and ui.file_panel.is_user_collapsed()
+    _fp_run(qapp, tb.browser_open.func, browser_server + "/form.html?again")
+    _pump(qapp, 20)
+    assert ui.file_panel.isVisible() and not ui.file_panel.is_user_collapsed(), "面板弹回来"
+    assert page.get_browser().view.isVisible(), "网页在看得见的地方（不是隐藏页面）"
+    assert len(page.get_browser().tabs) == 1, "还是原来那个标签"
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
 
 
 def test_agent_cursor_overlay(browser_ui, qapp, browser_server, monkeypatch):
@@ -750,6 +869,31 @@ def test_connection_refused_shows_our_error_page(browser_ui, qapp):
     assert seen == [1]
     ui.file_panel.close_all()
     _pump(qapp, 20)
+
+
+def test_http_error_body_shows_the_page_not_error_page(browser_ui, qapp, browser_server):
+    """复审 #13：HTTP 500 带内容的响应照常显示页面（traceback 给人看），不盖「连不上」。"""
+    from src.browser import page
+    ui = browser_ui
+    ui.file_panel.open_browser(browser_server + "/500body")
+    assert _wait_page(qapp, lambda: "500body" in page.get_browser().page.url().toString())
+    _pump(qapp, 10)
+    view = ui.file_panel._browser_view
+    assert view.failed is False
+    assert view.content.currentWidget() is view.page_frame
+    assert view.content.currentWidget() is not view.error_page
+    ui.file_panel.close_all()
+    _pump(qapp, 20)
+
+
+def test_error_page_code_label_replaces_qt_template(qapp):
+    """Qt 的 errorString 带未替换的翻译模板（<strong>$1</strong>）：去标签、填错误码。"""
+    from src.ui.browser_panel import _ErrorPage
+    ep = _ErrorPage()
+    ep.set_error("http://127.0.0.1:9/x", "<strong>$1</strong> 目前无法处理此请求。", 503)
+    text = ep.code.text()
+    assert "$1" not in text and "<strong>" not in text, text
+    assert "503" in text, text
 
 
 def test_address_bar_typing_navigates(browser_ui, qapp, browser_server):

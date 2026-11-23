@@ -41,6 +41,7 @@ class BrowserBridge(QObject):
         self._open_started = False
         self._wired_page = None
         self._page_loading = False    # 页面有导航在途（含用户/页面自己发起的），在途时不清缓存
+        self._load_fail = None        # 本次导航 loadingChanged 报的失败信息（区分 HTTP 状态码域）
         self._pending = []            # 等回调的在途请求：关浏览器时立刻回"浏览器已关闭"，不等超时
         self._ref_seed = 0            # ref 编号跨文档单调递增的种子（换页不归零）
         self._driver = None           # 最近一次发请求的会话（worker 线程里的 current_session）
@@ -261,15 +262,32 @@ class BrowserBridge(QObject):
                 old.loadFinished.disconnect(self._on_load_finished)
             except (RuntimeError, TypeError):
                 pass
+            try:
+                old.loadingChanged.disconnect(self._on_loading_changed)
+            except (RuntimeError, TypeError):
+                pass
         page.loadStarted.connect(self._on_load_started)
         page.loadFinished.connect(self._on_load_finished)
+        page.loadingChanged.connect(self._on_loading_changed)
         self._wired_page = page
         self._page_loading = False
 
     def _on_load_started(self):
         self._page_loading = True
+        self._load_fail = None
         if self._open_req is not None:
             self._open_started = True
+
+    def _on_loading_changed(self, info):
+        from PySide6.QtWebEngineCore import QWebEngineLoadingInfo
+        if info.status() == QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus:
+            self._load_fail = {
+                "http": info.errorDomain() == QWebEngineLoadingInfo.ErrorDomain.HttpStatusCodeDomain,
+                "code": int(info.errorCode()),
+            }
+            req = self._open_req
+            if req is not None and req.get("await_fail_info"):
+                self._resolve_failed_open(req)
 
     def _on_load_finished(self, ok):
         self._page_loading = False
@@ -278,11 +296,29 @@ class BrowserBridge(QObject):
             return
         if not self._open_started:
             return                              # 上一个被停止导航的迟到 loadFinished，忽略
-        self._finish_open(req, ok=ok, loaded=True,
-                          error=None if ok else "loadFinished(false)")
+        if not ok:
+            # loadFinished(false) 比 loadingChanged(LoadFailedStatus) 先到（实测），
+            # 失败域还没记下来：等一下再判。HTTP 4xx/5xx 带内容的响应（Flask 调试页 /
+            # Express Cannot GET）页面已经渲染出来了，不算"连不上"——模型要读得到
+            # traceback（复审 #13）。域信息到了立刻判，150ms 还没到就按真失败报
+            req["await_fail_info"] = True
+            QTimer.singleShot(150, self, lambda: self._resolve_failed_open(req))
+            return
+        self._finish_open(req, ok=True, loaded=True, error=None)
+
+    def _resolve_failed_open(self, req):
+        if req is not self._open_req or req.get("cancelled") or req.get("replied"):
+            return
+        if self._load_fail and self._load_fail["http"]:
+            self._finish_open(req, ok=True, loaded=True, error=None,
+                              http_status=self._load_fail["code"])
+        else:
+            self._finish_open(req, ok=False, loaded=True, error="loadFinished(false)")
 
     def _open(self, req, args):
         from src.browser import page as page_mod
+        # 下一轮事件循环再通知界面：别在 dispatch 中途重入面板控件
+        QTimer.singleShot(0, page_mod._notifier, page_mod._notifier.model_opening.emit)
         page = self._browser.page
         self._abort_open("被新的导航取代")
         req["page"] = page
@@ -320,13 +356,13 @@ class BrowserBridge(QObject):
                           still_wanted=lambda: not (req.get("cancelled") or req.get("replied")
                                                     or self._open_req is not req))
 
-    def _finish_open(self, req, *, ok, loaded, error):
+    def _finish_open(self, req, *, ok, loaded, error, http_status=None):
         # 发起时的那一页：加载期间当前标签可能换了（页面自己开了新标签）
         page = req.get("page") or (self._browser.page if self._browser is not None else None)
         valid = page is not None and shiboken6.isValid(page)
         t0 = req.get("t0", time.perf_counter())
         self._clear_open()
-        self._reply(req, {
+        result = {
             "ok": ok, "loaded": loaded,
             "url": page.url().toString() if valid else "",
             "title": page.title() if valid else "",
@@ -334,7 +370,10 @@ class BrowserBridge(QObject):
             "error": error,
             "nav": getattr(page, "nav_seq", 0) if valid else 0,
             "tab": self._tab_of(page),
-        })
+        }
+        if http_status is not None:
+            result["httpStatus"] = http_status
+        self._reply(req, result)
 
     def _clear_open(self):
         if self._open_timer is not None:
