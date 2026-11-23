@@ -1196,27 +1196,88 @@ def test_each_page_gets_its_own_panel_tab_kept_in_sync(ui, qapp, fp_server):
     assert page_mod._browser is None
 
 
-def test_manual_open_browser_button(ui, qapp, fp_server):
-    """14：顶栏的地球按钮（原来在右侧栏标签行，挪到顶栏）开空白页；关后再点复用上次地址。"""
+def test_plus_button_opens_a_blank_web_tab(ui, qapp, fp_server):
+    """用户要的 + 按钮：紧跟在最后一个标签后面，有网页标签才出现；点了开空白网页标签并切过去，
+    开满 MAX_TABS 个就不再开。关掉所有网页后 + 跟着藏起来。"""
+    from PySide6.QtCore import QPoint
     from src.browser import page as page_mod
-    from src.ui.file_panel import BROWSER_KEY, is_browser_key
+    from src.ui.file_panel import browser_key, is_browser_key
+    fp = ui.file_panel
+    assert not fp.new_tab_btn.isVisibleTo(fp), "没开浏览器时不出 +"
+    fp.open_file("a.py", [(1, "ctx", "x = 1")])
+    _pump(qapp)
+    assert not fp.new_tab_btn.isVisibleTo(fp), "只有文件标签时也不出"
+    fp.open_browser(fp_server + "/form.html")
+    assert _wait_page(qapp, lambda: "form.html" in page_mod._browser.page.url().toString())
+    assert fp.new_tab_btn.isVisible()
+    _pump(qapp, 10)                                  # 标题加载出来标签变宽，标签条重排完再量
+    last = fp.tabs.tabRect(fp.tabs.count() - 1)
+    right = fp.tabs.mapTo(fp.tab_row, QPoint(last.right(), 0)).x()
+    assert 0 <= fp.new_tab_btn.x() - right <= 12, "+ 紧跟在最后一个标签后面，不是挤到最右边"
+    b = page_mod._browser
+    before = list(b.tabs)
+    fp.new_tab_btn.click()
+    _pump(qapp, 10)
+    new = [t for t in b.tabs if t not in before]
+    assert len(new) == 1, "开了一个新标签"
+    assert b.current_id == new[0] and fp.current_path() == browser_key(new[0]), "切到新标签"
+    assert b.page.url().toString() in ("", "about:blank"), "新标签是空白页"
+    _pump(qapp, 10)
+    # 放得下时标签条要拿到它要的宽度：不出滚动箭头、第一个标签不被挤出去（用户实测点 + 后这样）
+    assert fp.tabs.width() >= fp.tabs.sizeHint().width(), (fp.tabs.width(), fp.tabs.sizeHint().width())
+    assert fp.tabs.tabRect(0).x() >= 0, "第一个标签没被挤到左边"
+    last = fp.tabs.tabRect(fp.tabs.count() - 1)
+    right = fp.tabs.mapTo(fp.tab_row, QPoint(last.right(), 0)).x()
+    assert 0 <= fp.new_tab_btn.x() - right <= 12, "+ 仍紧跟在最后一个标签后面"
+    assert [k for k in fp.paths() if is_browser_key(k)] == [browser_key(t) for t in b.tabs]
+    while len(b.tabs) < page_mod.MAX_TABS:
+        fp.new_tab_btn.click()
+        _pump(qapp, 4)
+    fp.new_tab_btn.click()
+    _pump(qapp, 4)
+    assert len(b.tabs) == page_mod.MAX_TABS, "开满了就不再开"
+    fp.close_file(browser_key(b.current_id))
+    _pump_deletes(qapp)
+    assert fp.new_tab_btn.isVisible(), "还有网页标签，+ 还在"
+    for tid in list(b.tabs):
+        fp.close_file(browser_key(tid))
+        _pump_deletes(qapp)
+    assert not page_mod.is_browser_open()
+    assert not fp.new_tab_btn.isVisibleTo(fp), "网页都关了，+ 藏起来"
+    fp.close_all()
+    _pump(qapp, 10)
+
+
+def test_manual_open_browser_button(ui, qapp, fp_server):
+    """14：顶栏的地球按钮（原来在右侧栏标签行，挪到顶栏）开空白页。
+    点网页标签的 × 是真关：再点地球是空白新标签，不把上次那页自己开回来（用户实测：
+    以前会复用上次地址，像是没关掉）。上次那页在空白页的「最近打开」里。"""
+    import time
+    from PySide6.QtWidgets import QTabBar
+    from src.browser import page as page_mod
+    from src.ui.browser_panel import recent_pages
+    from src.ui.file_panel import is_browser_key
     assert not hasattr(ui.file_panel, "open_browser_btn"), "右侧栏标签行不再放浏览器入口"
+    fp = ui.file_panel
     ui.browser_btn.click()
     _pump(qapp, 10)
-    assert ui.file_panel.has_browser()
-    ui.file_panel.open_browser(fp_server + "/form.html")
-    _pump(qapp, 10)
-    ui.file_panel.close_file(BROWSER_KEY)
-    _pump(qapp, 10)
-    assert not ui.file_panel.has_browser()
+    assert fp.has_browser()
+    fp.open_browser(fp_server + "/form.html")
+    assert _wait_page(qapp, lambda: "form.html" in page_mod._browser.page.url().toString())
+    assert _wait_page(qapp, lambda: any("form.html" in p["url"] for p in recent_pages()))
+    idx = next(i for i in range(fp.tabs.count()) if is_browser_key(fp.tabs.tabData(i)))
+    fp.tabs.tabButton(idx, QTabBar.RightSide).click()        # 标签上的 ×
+    _pump_deletes(qapp)
+    assert not fp.has_browser() and not page_mod.is_browser_open(), "× 真关浏览器"
     ui.browser_btn.click()
     _pump(qapp, 20)
-    assert ui.file_panel.has_browser()
-    import time
-    end = time.time() + 10
-    while time.time() < end and "form.html" not in page_mod._browser.page.url().toString():
+    assert fp.has_browser()
+    end = time.time() + 1.5
+    while time.time() < end:
         qapp.processEvents()
         time.sleep(0.01)
-    assert "form.html" in page_mod._browser.page.url().toString(), "手动入口应复用上次地址"
-    ui.file_panel.close_all()
+    url = page_mod._browser.page.url().toString()
+    assert "form.html" not in url, f"关过再开是空白新标签，不复用上次地址：{url}"
+    assert any("form.html" in p["url"] for p in recent_pages()), "上次那页在「最近打开」里"
+    fp.close_all()
     _pump(qapp, 10)

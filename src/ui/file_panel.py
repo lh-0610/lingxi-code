@@ -56,6 +56,16 @@ def _norm(path: str) -> str:
     """同一个文件的两种写法（反斜杠 / 正斜杠）算同一个标签页。"""
     return (path or "").replace("\\", "/")
 
+_PLUS_GLYPH = '<path d="M8 3v10M3 8h10"/>'     # 新建网页标签按钮（view 16，同 dialogs._CLOSE_GLYPH）
+
+
+class _TabBar(QTabBar):
+    """标签条不占满整行（后面紧跟 + 按钮）时，宽度要跟着标签变。标签文字放在标签上的小控件里
+    （见 _BrowserTabLabel），它们一变 QTabBar 只重排自己、不通知外层布局，外层还按旧宽度给——
+    点 + 加了标签就被挤出滚动箭头、第一个标签被挤到左边看不见（用户实测）。"""
+    def tabLayoutChange(self):
+        super().tabLayoutChange()
+        self.updateGeometry()
 
 # 浏览器标签的哨兵 tabData（不是文件路径）：paths() 只用来判面板空不空，无持久化顾虑。
 # 每个网页一个标签：lingxi:browser#<标签 id>；单独的 BROWSER_KEY 指「当前那个网页标签」
@@ -188,7 +198,6 @@ class FilePanel(QFrame):
         self._spans: dict[str, dict] = {}       # 归一化路径 → {行下标: 高亮范围}（切主题不用重解析）
         # 浏览器：每个网页一个标签（key = lingxi:browser#<标签 id>），标签 id → (BrowserView, 标签文字)
         self._bviews: dict[int, tuple] = {}
-        self._browser_last_url = ""             # 手动入口复用的上次地址
         self._user_collapsed = False            # 用户点「收起 ×」藏的：响应式布局别自动弹回来
         self._widget_tabs: dict[str, dict] = {}  # 后台 / 调试这类常驻控件标签：key → 控件与文案
         self._build_ui()
@@ -257,6 +266,8 @@ class FilePanel(QFrame):
             "QPushButton#fileTabClose { border: none; background: transparent; border-radius: 6px;"
             " padding: 0px; margin-left: 2px; }"
             f"QPushButton#fileTabClose:hover {{ background: {self._t('dlg_hover_bg')}; }}"
+            "QPushButton#fileTabNew { border: none; background: transparent; border-radius: 6px; padding: 0px; }"
+            f"QPushButton#fileTabNew:hover {{ background: {self._t('dlg_hover_bg')}; }}"
             f"QStackedWidget#fileStack {{ background: transparent; border: none; }}"
         )
         icon = self._close_icon()
@@ -265,6 +276,8 @@ class FilePanel(QFrame):
         from PySide6.QtCore import QSize as _QSize
         self.close_btn.setIcon(self._close_icon(14))
         self.close_btn.setIconSize(_QSize(14, 14))
+        self.new_tab_btn.setIcon(self._close_icon(14, glyph=_PLUS_GLYPH))
+        self.new_tab_btn.setIconSize(_QSize(14, 14))
         for view in self._panes.values():
             view.apply_theme(self._t("mv_view_bg"), self._t("mv_text"))
             self._fill(view, self._rows.get(self._path_of(view)) or [])
@@ -317,7 +330,7 @@ class FilePanel(QFrame):
         self.hint_label.setObjectName("filePanelHint")
         self.hint_label.setText(self.DEFAULT_HINT)
 
-        self.tabs = QTabBar(tab_row)
+        self.tabs = _TabBar(tab_row)
         self.tabs.setObjectName("fileTabs")
         self.tabs.setDrawBase(False)
         self.tabs.setExpanding(False)
@@ -325,7 +338,18 @@ class FilePanel(QFrame):
         self.tabs.setUsesScrollButtons(True)
         self.tabs.setFocusPolicy(Qt.NoFocus)
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        tab_lay.addWidget(self.tabs, 1)
+        # 新建网页标签：紧跟在最后一个标签后面（像浏览器那样），有网页标签时才出现
+        self.new_tab_btn = QPushButton(tab_row)
+        self.new_tab_btn.setObjectName("fileTabNew")
+        self.new_tab_btn.setFixedSize(26, 26)
+        self.new_tab_btn.setCursor(Qt.PointingHandCursor)
+        self.new_tab_btn.setToolTip("新建网页标签")
+        self.new_tab_btn.setAccessibleName("新建网页标签")
+        self.new_tab_btn.clicked.connect(self.new_browser_tab)
+        self.new_tab_btn.setVisible(False)
+        tab_lay.addWidget(self.tabs, 0)
+        tab_lay.addWidget(self.new_tab_btn, 0, Qt.AlignVCenter)
+        tab_lay.addStretch(1)
         tab_lay.addWidget(self.close_btn, 0, Qt.AlignVCenter)
         lay.addWidget(tab_row)
 
@@ -396,8 +420,6 @@ class FilePanel(QFrame):
     def open_browser(self, url: str = ""):
         """开浏览器（已开就切到当前那个网页标签）；url 非空则在当前标签导航。
         浏览器第一次打开才创建（懒加载）；每个网页一个标签，见 _ensure_browser_view。"""
-        if url:
-            self._browser_last_url = url
         from ..browser import page as _bpage
         b = _bpage.get_browser()
         for tid in list(b.tabs):
@@ -446,6 +468,7 @@ class FilePanel(QFrame):
         # 「更多」里的关闭浏览器：整个浏览器（所有网页）
         view.close_requested.connect(lambda: self.close_file(BROWSER_KEY))
         self._refresh_browser_tab(tab_id)
+        self._sync_new_tab_btn()
         return True
 
     def _drop_browser_view(self, tab_id):
@@ -461,6 +484,7 @@ class FilePanel(QFrame):
             self.stack.removeWidget(view)
             view.detach()
             view.deleteLater()
+        self._sync_new_tab_btn()
         if self.tabs.count() == 0:
             self.close_all()
         else:
@@ -493,14 +517,10 @@ class FilePanel(QFrame):
             view.flash(f"页面自己弹出的新窗口已拦截：{url}")
 
     def open_last_browser(self):
-        """用户手动开浏览器（顶栏的地球按钮，复审 14）：已开就切过去（不把当前标签
-        导航去旧的上次地址）；关过就复用上次地址，没有就空白页。"""
-        from ..browser import page as _bpage
-        b = _bpage._browser
-        if b is not None and b.tabs:
-            self.open_browser("")
-        else:
-            self.open_browser(self._browser_last_url or "")
+        """用户手动开浏览器（顶栏的地球按钮，复审 14）：还开着（含收起只是藏着）就切过去，
+        不导航；关过就是空白新标签。以前关过会复用上次地址——用户点了网页标签的 × 再点地球，
+        上次那页又自己开回来，像是没关掉（用户实测）。想回去在空白页的「最近打开」里点。"""
+        self.open_browser("")
 
     def open_widget_tab(self, key: str, label_text: str, widget: QWidget, *, header: str,
                         hint: str, tooltip: str = ""):
@@ -627,6 +647,7 @@ class FilePanel(QFrame):
                     view.deleteLater()
             from ..browser import page as _bpage
             _bpage.close_browser()
+            self._sync_new_tab_btn()
         for key in list(self._panes):
             view = self._panes.pop(key)
             self._rows.pop(key, None)
@@ -673,12 +694,36 @@ class FilePanel(QFrame):
             _bpage.set_current_tab(browser_tab_id(key))
         self._sync_header()
 
-    def _close_icon(self, size: int = 12):
+    def _close_icon(self, size: int = 12, glyph: str = ""):
+        """标签条上的线性小图标（默认 ×；+ 按钮传 _PLUS_GLYPH），跟主题换色。"""
         from PySide6.QtGui import QIcon
         from .dialogs import _CLOSE_GLYPH, _svg_pixmap
         dpr = self.devicePixelRatioF() if self.isVisible() else 2.0
-        return QIcon(_svg_pixmap(_CLOSE_GLYPH, self._t("mv_text_sec"), size, view=16, stroke=1.8,
-                                 dpr=max(dpr, 1.0)))
+        return QIcon(_svg_pixmap(glyph or _CLOSE_GLYPH, self._t("mv_text_sec"), size, view=16,
+                                 stroke=1.8, dpr=max(dpr, 1.0)))
+
+    def new_browser_tab(self):
+        """+ 按钮：开一个空白网页标签并切过去，光标落在地址栏。开满了就在当前页上提示。"""
+        from ..browser import page as _bpage
+        b = _bpage.get_browser()
+        if len(b.tabs) >= _bpage.MAX_TABS:
+            view = self._browser_view
+            if view is not None and shiboken6.isValid(view):
+                view.flash(f"网页标签最多 {_bpage.MAX_TABS} 个，先关掉几个")
+            return
+        tab = b.new_tab(make_current=True)
+        # 面板标签由 tab_added 通知建（下一轮事件）；这里直接建好、切过去，地址栏马上能输
+        self._ensure_browser_view(tab.id)
+        index = self._tab_index(browser_key(tab.id))
+        if index >= 0:
+            self.tabs.setCurrentIndex(index)
+        entry = self._bviews.get(tab.id)
+        if entry is not None and shiboken6.isValid(entry[0]):
+            entry[0].address.setFocus()
+        self._show_self()
+
+    def _sync_new_tab_btn(self):
+        self.new_tab_btn.setVisible(bool(self._bviews))
 
     def _tab_close_button(self, tooltip: str, slot) -> QPushButton:
         """标签上的关闭按钮：线性 × 图标（跟主题换色），22px 点击区。"""
