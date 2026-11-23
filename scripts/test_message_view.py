@@ -689,3 +689,135 @@ class TestCommandChangedFiles:
         _tool(mv, "\U0001F5A5️ 执行命令", "python fix.py", "✓ 退出码 0\n")
         mv.handle("src/a.py", "tool_files")       # 卡已结束：不挂到别的卡上，也不报错
         assert mv._cur_assistant._cur_tool is None
+
+
+class TestScriptCard:
+    """设计稿「消息区 · 运行脚本的卡片」。用户截图：python - 写了两遍、脚本按 JSON 规则上色
+    （只有数字和括号有颜色）、行距 1.7 像隔行。"""
+
+    SCRIPT = ("def tiles(scene):\n"
+              "    res = set()\n"
+              "    for r in range(4):\n"
+              "        res.add(r * 4)  # 第几格\n"
+              "    return res\n"
+              "print(sorted(tiles(None)))")
+
+    def _card(self, qt_app, args, output="[0, 4, 8, 12]\n✓ 退出码 0\n"):
+        from src.streaming import describe_tool_call
+        from src.ui.message_view import ToolCallCard
+        mv = _view()
+        _round_with_reply(mv)
+        disp, detail = describe_tool_call("run_command", args)
+        _tool(mv, disp, detail, *([output] if output else []))
+        mv.show()
+        _pump(qt_app)
+        return mv, mv.findChildren(ToolCallCard)[0]
+
+    def test_head_shows_command_and_script_size(self, qt_app):
+        mv, card = self._card(qt_app, {"command": "python -", "stdin": self.SCRIPT})
+        assert card._summary.full() == "python -"
+        assert card._summary.width() > 20 and card._summary.text() == "python -", "命令看得到，不是空白"
+        assert card._script_info.isVisibleTo(card) and card._script_info.text() == "脚本 6 行"
+        assert card._script_info.x() < card.width() // 2, "「脚本 N 行」紧跟命令，不是挤到最右"
+        mv.close()
+
+    def test_body_has_script_box_and_no_repeated_command(self, qt_app):
+        from PySide6.QtWidgets import QLabel
+        mv, card = self._card(qt_app, {"command": "python -", "stdin": self.SCRIPT})
+        card.toggle()
+        _pump(qt_app)
+        assert card._script_box.isVisibleTo(card) and card._script_box.toPlainText() == self.SCRIPT
+        assert not card._args.isVisibleTo(card), "命令已经在头上了，展开区不再重复"
+        shown = [l.text() for l in card.findChildren(QLabel) if l.isVisibleTo(card)]
+        assert "脚本 · Python" in shown and "输出" in shown
+        assert not any("python -" in t for t in shown if t != "python -"), shown
+        # 和输出框同一个样式、同一个字体（行距跟着字体走，不再是 1.7 倍）
+        assert card._script_box.font() == card._out.font()
+        mv.close()
+
+    def test_script_is_colored_by_language(self, qt_app):
+        from PySide6.QtGui import QColor
+        from src.ui.theme import color
+        mv, card = self._card(qt_app, {"command": "python -", "stdin": self.SCRIPT})
+        card.toggle()
+        _pump(qt_app)
+        doc = card._script_box.document()
+
+        def color_at(block_no, col):
+            for r in doc.findBlockByNumber(block_no).layout().formats():
+                if r.start <= col < r.start + r.length:
+                    return r.format.foreground().color()
+            return None
+
+        assert color_at(0, 0) == QColor(color("syn_keyword")), "def 是关键字色"
+        assert color_at(2, 4) == QColor(color("syn_keyword")), "for 也是（JSON 着色认不出关键字）"
+        lines = self.SCRIPT.splitlines()
+        assert color_at(3, lines[3].index("#")) == QColor(color("syn_comment")), "注释"
+        assert color_at(2, lines[2].index("4")) == QColor(color("syn_number"))
+        mv.close()
+
+    def test_unknown_language_is_plain_but_still_boxed(self, qt_app):
+        mv, card = self._card(qt_app, {"command": "powershell -Command -",
+                                       "stdin": "Get-ChildItem -Recurse *.log |\n    Remove-Item -WhatIf"})
+        card.toggle()
+        _pump(qt_app)
+        assert card._script_label.text() == "脚本"
+        assert card._script_box.toPlainText().startswith("Get-ChildItem")
+        assert not doc_has_formats(card._script_box.document())
+        mv.close()
+
+    def test_language_from_command(self):
+        from src.ui.message_view import _script_language
+        assert _script_language("python -") == "python"
+        assert _script_language("python3 - --flag") == "python"
+        assert _script_language("python3.14 -") == "python", "带小版本号的解释器名"
+        assert _script_language(r'"C:\Python314\python.exe" -') == "python"
+        assert _script_language("py -3 -") == "python"
+        assert _script_language("node -") == "javascript"
+        assert _script_language("bash -s") == ""
+
+    def test_long_script_scrolls_inside_its_box(self, qt_app):
+        from PySide6.QtGui import QFontMetricsF
+        from src.ui.message_view import ToolCallCard
+        script = "\n".join(f"print({i})" for i in range(40))
+        mv, card = self._card(qt_app, {"command": "python -", "stdin": script})
+        card.toggle()
+        _pump(qt_app, 8)
+        box = card._script_box
+        line_h = QFontMetricsF(box.font()).lineSpacing()
+        assert box.height() < (ToolCallCard._OUT_MAX_LINES + 2) * line_h, "最多露出约 16 行"
+        assert box.verticalScrollBar().maximum() > 0, "多的在框里滚"
+        mv.close()
+
+    def test_output_label_only_when_both_boxes(self, qt_app):
+        mv, card = self._card(qt_app, {"command": "python -", "stdin": self.SCRIPT}, output="")
+        card.toggle()
+        _pump(qt_app)
+        assert card._script_box.isVisibleTo(card) and not card._out_label.isVisibleTo(card)
+        mv.close()
+        mv, card = self._card(qt_app, {"command": "pytest -q"}, output="3 passed\n✓ 退出码 0\n")
+        card.toggle()
+        _pump(qt_app)
+        assert not card._script_info.isVisibleTo(card)
+        assert not card._script_box.isVisibleTo(card) and not card._out_label.isVisibleTo(card), \
+            "没交脚本的命令：和原来一样，输出框上不加「输出」"
+        mv.close()
+
+    def test_find_reaches_the_script(self, qt_app):
+        mv, card = self._card(qt_app, {"command": "python -", "stdin": self.SCRIPT})
+        assert card._body is None, "还没展开过"
+        assert mv.find_text("第几格") == (1, 1), "脚本里的字也搜得到"
+        _pump(qt_app)
+        assert card.is_open() and card._script_box.textCursor().selectedText() == "第几格"
+        mv.clear_find()
+        assert not card._script_box.textCursor().hasSelection()
+        mv.close()
+
+
+def doc_has_formats(doc):
+    block = doc.begin()
+    while block.isValid():
+        if block.layout().formats():
+            return True
+        block = block.next()
+    return False

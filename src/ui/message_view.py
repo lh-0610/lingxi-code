@@ -17,7 +17,8 @@ import time
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QTextCursor, QTextDocument,
+    QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QSyntaxHighlighter, QTextCharFormat, QTextCursor,
+    QTextDocument,
 )
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
@@ -104,15 +105,18 @@ def mv_qss() -> str:
 {mv} QLabel[mv="groupFail"] {{ color:{P['bad']}; font-size:13px; }}
 {mv} QLabel[mv="groupDur"] {{ color:{P['muted2']}; font-size:13px; }}
 {mv} #toolGroupRows[framed="true"] {{ border:none; border-left:2px solid {P['card_border']}; margin-left:10px; }}
-{mv} QPlainTextEdit#toolOut {{ background:{P['result_bg']}; color:{P['text_sec']};
+{mv} QPlainTextEdit#toolOut, {mv} QPlainTextEdit#toolScript {{ background:{P['result_bg']}; color:{P['text_sec']};
     border:1px solid {P['result_border']}; border-radius:8px; padding:4px 6px; }}
-{mv} QPlainTextEdit#toolOut QScrollBar:vertical {{ background:transparent; width:6px; margin:2px 0; }}
-{mv} QPlainTextEdit#toolOut QScrollBar::handle:vertical {{ background:{P['chip_border']};
-    border-radius:3px; min-height:20px; }}
-{mv} QPlainTextEdit#toolOut QScrollBar::add-line:vertical,
-{mv} QPlainTextEdit#toolOut QScrollBar::sub-line:vertical {{ height:0; }}
-{mv} QPlainTextEdit#toolOut QScrollBar::add-page:vertical,
-{mv} QPlainTextEdit#toolOut QScrollBar::sub-page:vertical {{ background:transparent; }}
+{mv} QPlainTextEdit#toolOut QScrollBar:vertical, {mv} QPlainTextEdit#toolScript QScrollBar:vertical {{
+    background:transparent; width:6px; margin:2px 0; }}
+{mv} QPlainTextEdit#toolOut QScrollBar::handle:vertical, {mv} QPlainTextEdit#toolScript QScrollBar::handle:vertical {{
+    background:{P['chip_border']}; border-radius:3px; min-height:20px; }}
+{mv} QPlainTextEdit#toolOut QScrollBar::add-line:vertical, {mv} QPlainTextEdit#toolScript QScrollBar::add-line:vertical,
+{mv} QPlainTextEdit#toolOut QScrollBar::sub-line:vertical, {mv} QPlainTextEdit#toolScript QScrollBar::sub-line:vertical {{ height:0; }}
+{mv} QPlainTextEdit#toolOut QScrollBar::add-page:vertical, {mv} QPlainTextEdit#toolScript QScrollBar::add-page:vertical,
+{mv} QPlainTextEdit#toolOut QScrollBar::sub-page:vertical, {mv} QPlainTextEdit#toolScript QScrollBar::sub-page:vertical {{ background:transparent; }}
+{mv} QLabel[mv="toolBoxLabel"] {{ color:{P['muted']}; font-size:12px; padding-left:2px; }}
+{mv} QLabel[mv="toolScriptInfo"] {{ color:{P['muted2']}; font-size:12px; }}
 {mv} #notice {{ color:{P['text_sec']}; font-size:12px; background:{P['header_bg']};
     border-radius:8px; padding:6px 10px; }}
 {mv} QLabel[mv="stepTitle"] {{ color:{P['text']}; font-size:13px; font-weight:600; }}
@@ -289,6 +293,12 @@ class _ElidedLabel(QLabel):
         # 放不下就省略，所以能压到任意窄：最小宽度如实报 0。不报的话 QLabel 按当前文字宽度报，
         # 一条长摘要就把整张卡 / 整行顶出可视区
         return QSize(0, super().minimumSizeHint().height())
+
+    def sizeHint(self):
+        # 想要的宽度按【完整文字】报：QLabel 默认按当前（已经省略过的）文字算，按想要的宽度排的
+        # 地方（工具卡头上交了脚本的命令）会一直拿到 0 宽、只剩空白。尺寸策略是 Ignored 时不看这个
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 4,
+                     super().sizeHint().height())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -701,6 +711,52 @@ def _tool_kind(name: str) -> str:
     return "other"
 
 
+_SCRIPT_LANGS = {
+    "python": "python", "python3": "python", "py": "python", "pythonw": "python",
+    "node": "javascript", "nodejs": "javascript",
+}
+
+
+def _script_language(command: str) -> str:
+    """交了脚本的命令按解释器认语言（python / python3 / py → python，node → javascript），
+    认不出返回空串（不着色）。路径和 .exe 后缀去掉再认：C:\\Python314\\python.exe -。"""
+    first = (command or "").strip().split()
+    if not first:
+        return ""
+    exe = re.split(r"[\\/]", first[0].strip('"'))[-1].lower()
+    exe = exe[:-4] if exe.endswith(".exe") else exe
+    exe = re.sub(r"\d+(\.\d+)*$", "", exe) if exe.startswith("python") else exe
+    return _SCRIPT_LANGS.get(exe, "")
+
+
+class _ScriptHighlighter(QSyntaxHighlighter):
+    """脚本框按语言着色：范围由文件面板那套 syntax_highlight 算（tree-sitter），这里只按行上色。
+    颜色按当前主题取；认不出语言 / 没装语法库时什么都不做（等宽纯文本）。"""
+
+    _PATHS = {"python": "script.py", "javascript": "script.js"}
+
+    def __init__(self, document, text, lang):
+        super().__init__(document)
+        self._spans = {}
+        path = self._PATHS.get(lang)
+        if path:
+            from . import syntax_highlight as _sh
+            rows = [(i + 1, "ctx", line) for i, line in enumerate(text.split("\n"))]
+            self._spans = _sh.highlight_rows(rows, path)
+        if self._spans:
+            self.rehighlight()
+
+    def highlightBlock(self, text):
+        spans = self._spans.get(self.currentBlock().blockNumber())
+        if not spans:
+            return
+        from . import syntax_highlight as _sh
+        for start, end, category in spans:
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(theme_color(_sh.token_for(category))))
+            self.setFormat(start, end - start, fmt)
+
+
 def _tool_verb(name: str) -> str:
     return _TOOL_VERBS.get(name, name)
 
@@ -794,6 +850,11 @@ class ToolCallCard(QFrame):
         self._hover = False
         self._detail = ""
         self._args_needed = False
+        self._script = ""            # run_command 交进去的脚本（stdin）；没有就是空串
+        self._script_lang = ""       # 按命令认出的语言：python / javascript / ""（不着色）
+        self._script_box = None
+        self._script_label = None
+        self._out_label = None
         self._lines = deque(maxlen=self._OUT_MAX_BLOCKS)
         self._out_lines = 0
         self._chunks = 0
@@ -830,6 +891,11 @@ class ToolCallCard(QFrame):
         if self.kind == "edit":
             self._summary.setCursor(Qt.PointingHandCursor)
         h.addWidget(self._summary, 1, Qt.AlignVCenter)
+        # 交了脚本的命令：命令后面跟一句浅色的「脚本 N 行」（设计稿「消息区 · 运行脚本的卡片」）
+        self._script_info = QLabel()
+        self._script_info.setProperty("mv", "toolScriptInfo")
+        self._script_info.setVisible(False)
+        h.addWidget(self._script_info, 0, Qt.AlignVCenter)
         self._stats = QLabel()
         self._stats.setProperty("mv", "toolStats")
         self._stats.setTextFormat(Qt.RichText)
@@ -881,13 +947,38 @@ class ToolCallCard(QFrame):
 
     # ── 内容 ──
     def set_body(self, code_text: str):
-        """工具参数（tool_detail）到位：行里放一行摘要，多行参数留到展开后看。"""
-        self._detail = (code_text or "").strip()
+        """工具参数（tool_detail）到位：行里放一行摘要，多行参数留到展开后看。
+
+        交了脚本的命令（streaming.SCRIPT_MARK 隔开命令和脚本）：头上写命令 +「脚本 N 行」，
+        展开后脚本进框、按语言着色，不再把命令和脚本拼成一段按 JSON 规则上色。"""
+        from ..streaming import SCRIPT_MARK
+        detail = (code_text or "").strip()
+        cmd, mark, script = detail.partition(SCRIPT_MARK)
+        self._script = script.strip("\n") if mark else ""
+        self._detail = cmd.strip() if mark else detail
+        self._script_lang = _script_language(self._detail) if self._script else ""
         self._summary.set_full(_one_line(self._detail))
         self._args_needed = "\n" in self._detail
+        self._sync_script_info()
         if self._args is not None and self._args_needed:
             self._args.setText(highlight_json(self._detail))
+        if self._script_box is not None:
+            self._fill_script()
         self._sync()
+
+    def _sync_script_info(self):
+        has = bool(self._script)
+        n = len(self._script.splitlines()) if has else 0
+        self._script_info.setText(f"脚本 {n} 行" if has else "")
+        self._script_info.setVisible(has)
+        # 有脚本时命令按自己的宽度占位（放不下才省略），「脚本 N 行」紧跟在后面，剩下的空着
+        self._summary.setSizePolicy(QSizePolicy.Preferred if has else QSizePolicy.Ignored,
+                                    QSizePolicy.Fixed)
+        self._hlay.setStretchFactor(self._summary, 0 if has else 1)
+        self._hlay.setStretchFactor(self._script_info, 1 if has else 0)
+
+    def script_text(self) -> str:
+        return self._script
 
     def set_stats(self, text: str):
         """改文件的增删行数（tool_stat）：+N 绿、−M 红，其余（「48 行」）灰。"""
@@ -994,7 +1085,7 @@ class ToolCallCard(QFrame):
         return self._open
 
     def _expandable(self) -> bool:
-        return self._out_lines > 0 or self._args_needed
+        return self._out_lines > 0 or self._args_needed or bool(self._script)
 
     def toggle(self):
         if not self._expandable():
@@ -1039,6 +1130,18 @@ class ToolCallCard(QFrame):
         if self._args_needed:
             self._args.setText(highlight_json(self._detail))
         bl.addWidget(self._args)
+        # 交了脚本：「脚本 · Python」+ 脚本框（和输出框同一个样式、行距，最多露 16 行），
+        # 输出框上面相应标「输出」——两个框叠在一起时分得开
+        self._script_label = QLabel()
+        self._script_label.setProperty("mv", "toolBoxLabel")
+        bl.addWidget(self._script_label)
+        self._script_box = self._make_box("toolScript")
+        bl.addWidget(self._script_box)
+        self._out_label = QLabel("输出")
+        self._out_label.setProperty("mv", "toolBoxLabel")
+        bl.addWidget(self._out_label)
+        if self._script:
+            self._fill_script()
         self._out = QPlainTextEdit()
         self._out.setObjectName("toolOut")
         self._out.setReadOnly(True)
@@ -1055,12 +1158,52 @@ class ToolCallCard(QFrame):
         bl.addWidget(self._out)
         self.layout().insertWidget(1, self._body)
 
+    def _make_box(self, name):
+        box = QPlainTextEdit()
+        box.setObjectName(name)
+        box.setReadOnly(True)
+        box.setFrameShape(QFrame.NoFrame)
+        box.setFont(mono_font(12))
+        box.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        box.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        box.document().documentLayout().documentSizeChanged.connect(
+            lambda _size, b=box: self._fit_box(b))
+        box.installEventFilter(self)
+        return box
+
+    def _fill_script(self):
+        lang = {"python": "Python", "javascript": "JavaScript"}.get(self._script_lang, "")
+        self._script_label.setText(f"脚本 · {lang}" if lang else "脚本")
+        box = self._script_box
+        box.setPlainText(self._script)
+        box._hl = _ScriptHighlighter(box.document(), self._script, self._script_lang)
+
     def eventFilter(self, obj, event):
-        if obj is self._out and (event.type() == QEvent.Show or (
-                event.type() == QEvent.Resize and self._out.width() != self._fitted_width)):
+        if obj in (self._out, self._script_box) and obj is not None and (
+                event.type() == QEvent.Show or (
+                event.type() == QEvent.Resize and obj.width() != getattr(obj, "_fitted_w", -1))):
             # 等这一轮布局排完（换行按新宽度算好）再量；显示出来总要重量
-            QTimer.singleShot(0, self, self._fit_output)
+            QTimer.singleShot(0, self, lambda b=obj: self._fit_box(b))
         return super().eventFilter(obj, event)
+
+    def _fit_box(self, box):
+        if box is self._out:
+            self._fit_output()
+        elif box is not None and box is self._script_box:
+            self._fit_plain(box)
+
+    def _fit_plain(self, box):
+        """脚本框定高：同输出框（_fit_output），按换行后的行数，最多 _OUT_MAX_LINES 行，多了在框里滚。"""
+        box._fitted_w = box.width()
+        doc = box.document()
+        lines = max(1, int(round(doc.size().height())))
+        shown = min(lines, self._OUT_MAX_LINES)
+        line_h = QFontMetricsF(box.font()).lineSpacing()
+        # 余量 4 只给「全放得下」时防最后一行被切；要滚动时不留，不然框底露出下一行的上半截
+        chrome = doc.documentMargin() * 2 + 8 + 2 + (0 if lines > self._OUT_MAX_LINES else 4)
+        box.setFixedHeight((math.floor if lines > self._OUT_MAX_LINES else math.ceil)(shown * line_h + chrome))
+        box.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded if lines > self._OUT_MAX_LINES else Qt.ScrollBarAlwaysOff)
 
     def _fit_output(self):
         """输出框按【自动换行后】的行数定高，最多 _OUT_MAX_LINES 行；超过才出滚动条。
@@ -1070,14 +1213,17 @@ class ToolCallCard(QFrame):
         冒出一根矮到只剩两个箭头的滚动条；长行折行后更是直接被截。"""
         if self._out is None:
             return
-        self._fitted_width = self._out.width()
+        self._fitted_width = self._out._fitted_w = self._out.width()
         doc = self._out.document()
         lines = max(1, int(round(doc.size().height())))
         shown = min(lines, self._OUT_MAX_LINES)
         # 行高按小数算：高 DPI 下实际行高常是 14.3 这样的值，按整数乘十几行会差出几个像素
         line_h = QFontMetricsF(self._out.font()).lineSpacing()
-        chrome = doc.documentMargin() * 2 + 8 + 2 + 4         # 文档边距 + 上下内边距 + 边框 + 余量
-        self._out.setFixedHeight(math.ceil(shown * line_h + chrome))
+        # 文档边距 + 上下内边距 + 边框 + 余量；余量只给「全放得下」时防最后一行被切，要滚动时
+        # 不留——不然框底露出第 17 行的上半截
+        scrolls = lines > self._OUT_MAX_LINES
+        chrome = doc.documentMargin() * 2 + 8 + 2 + (0 if scrolls else 4)
+        self._out.setFixedHeight((math.floor if scrolls else math.ceil)(shown * line_h + chrome))
         self._out.setVerticalScrollBarPolicy(
             Qt.ScrollBarAsNeeded if lines > self._OUT_MAX_LINES else Qt.ScrollBarAlwaysOff)
         if lines <= self._OUT_MAX_LINES:
@@ -1124,7 +1270,11 @@ class ToolCallCard(QFrame):
         if self._body is not None:
             self._body.setVisible(self._open and expandable)
             self._args.setVisible(self._open and self._args_needed)
+            has_script = bool(self._script)
+            self._script_label.setVisible(self._open and has_script)
+            self._script_box.setVisible(self._open and has_script)
             self._out.setVisible(self._open and self._out_lines > 0)
+            self._out_label.setVisible(self._open and has_script and self._out_lines > 0)
         # 运行中露最新一行输出；跑完收掉（结果看右边的状态，要看全文就展开）
         self._tail.setVisible(running and self._out_lines > 0 and not self._open)
         self.setProperty("open", "true" if self._open else "false")
@@ -2187,7 +2337,8 @@ class MessageView(QScrollArea):
         """在消息流里找文字（不分大小写）：选中下一处（或上一处）并滚过去，到头绕回。
 
         搜的是能选中的文字：用户消息、回复正文、程序提示、思考内容、工具参数，加上用户气泡里的
-        引用块（ClampText 自己画字，不是 QLabel）。按在消息流里出现的先后排。
+        引用块（ClampText 自己画字，不是 QLabel）和命令交进去的脚本（脚本框，QPlainTextEdit）。
+        按在消息流里出现的先后排。
         命中在收起的过程 / 卡片 / 思考块里时先把它展开；在引用块收起的那几行里时，那一段临时
         展开到全文（跳到别处或关掉搜索收回）。返回 (第几处, 共几处)，没找到是 (0, 0)。"""
         from .quotes import ClampText
@@ -2196,12 +2347,16 @@ class MessageView(QScrollArea):
         if needle:
             # 工具参数要展开才生成（见 ToolCallCard）：参数里有要找的字、还没生成的先补建出来
             for row in self._content.findChildren(ToolCallCard):
-                if row._args_needed and row._body is None and needle in row._detail.lower():
+                if row._body is None and (
+                        (row._args_needed and needle in row._detail.lower())
+                        or needle in row.script_text().lower()):
                     row.ensure_body()
             # 一次遍历同时收 QLabel 和引用块：findChildren 是先序深度优先，顺序就是显示的先后
             for lbl in self._content.findChildren(QWidget):
                 if isinstance(lbl, ClampText):
                     plain = lbl.text().lower()
+                elif isinstance(lbl, QPlainTextEdit) and lbl.objectName() == "toolScript":
+                    plain = lbl.toPlainText().lower()
                 elif isinstance(lbl, QLabel) and lbl.textInteractionFlags() & Qt.TextSelectableByMouse:
                     plain = _label_plain_text(lbl).lower()
                 else:
@@ -2226,6 +2381,13 @@ class MessageView(QScrollArea):
             lbl.show_hit(pos, len(needle))
             if lbl.is_expanded() != was:
                 _settle_layout(lbl)   # 变高了：当场排版，别让下面的消息先叠一帧
+        elif isinstance(lbl, QPlainTextEdit):
+            # 脚本框自己会滚（长脚本只露 16 行）：选中后让框把命中滚进来
+            cur = lbl.textCursor()
+            cur.setPosition(pos)
+            cur.setPosition(pos + len(needle), QTextCursor.KeepAnchor)
+            lbl.setTextCursor(cur)
+            lbl.ensureCursorVisible()
         else:
             lbl.setSelection(pos, len(needle))
         self._find_label = lbl
@@ -2248,6 +2410,10 @@ class MessageView(QScrollArea):
                 lbl.clear_hit()
                 if was:
                     _settle_layout(lbl)   # 收回三行
+            elif isinstance(lbl, QPlainTextEdit):
+                cur = lbl.textCursor()
+                cur.clearSelection()
+                lbl.setTextCursor(cur)
             else:
                 lbl.setSelection(0, 0)
 
@@ -2256,7 +2422,11 @@ class MessageView(QScrollArea):
         if _deleted(lbl):
             return
         y = lbl.mapTo(self._content, QPoint(0, 0)).y()
-        y += int(lbl.height() * (pos / max(1, total)))
+        if isinstance(lbl, QPlainTextEdit):
+            # 框里已经滚到命中处：按命中在框里的位置算，不按全文比例
+            y += lbl.cursorRect().center().y()
+        else:
+            y += int(lbl.height() * (pos / max(1, total)))
         sb = self.verticalScrollBar()
         sb.setValue(max(0, y - self.viewport().height() // 3))
 

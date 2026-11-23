@@ -43,6 +43,11 @@ from .images import (
 )
 
 
+# run_command 交了脚本（stdin）时，工具卡参数里命令和脚本之间的分隔：换行 + U+2063（不可见分隔符，
+# 不算空白、也不算换行，strip / splitlines 都不会动它）。只在界面里用（ui/message_view 的工具卡）。
+SCRIPT_MARK = "\n\u2063"
+
+
 def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
     """工具调用在界面上的（显示名, 参数摘要）。实时执行和重绘历史共用，两边画出来一致。"""
     display_name = TOOL_DISPLAY_NAMES.get(name, f"🔧 {name}")
@@ -68,8 +73,9 @@ def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
     elif name == "run_command":
         detail = args.get("command", "")
         if str(args.get("stdin") or "").strip():
-            # 头部只露命令那一行（python -），展开看交进去的整段脚本
-            detail = f"{detail}\n{args['stdin']}"
+            # 头部只露命令（python -），展开看交进去的整段脚本。中间夹 SCRIPT_MARK：工具卡据此
+            # 分清哪段是命令、哪段是脚本（命令本身也可能多行，不能按第一个换行切）
+            detail = f"{detail}{SCRIPT_MARK}{args['stdin']}"
     elif name == "run_tests":
         # 原来走通用的参数 JSON：只给了 timeout 时头部就剩一个「900」，看不出跑的是什么
         detail = str(args.get("path") or "").strip() or "全部"
