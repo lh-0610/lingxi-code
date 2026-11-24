@@ -431,19 +431,20 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         # 重绘的是历史：回复上方不起秒表、不标当前模式
         self.chat_area.replaying = True
         try:
-            # 一口气建几百个控件：全局右键过滤器先摘掉（每个事件都进一趟 Python，见 suspended）
+            # 一口气建几百个控件：全局右键过滤器先摘掉（每个事件都进一趟 Python，见 suspended）；
+            # 各轮先藏着建，最后一起显示、只排一次版（见 MessageView.batch）
             from . import context_menus
-            with context_menus.suspended():
+            from .markdown_render import cached_paths
+            from .. import session as _session
+            with context_menus.suspended(), self.chat_area.batch(), cached_paths():
                 rendered_any = self._replay_history(list(agent.chat_history))
+                if rendered_any and not _session.get_active().is_generating:
+                    # 和实时一致：已经以回答收尾的最后一轮也收起过程（还在生成的接着重放，不收）
+                    self.chat_area.collapse_answered()
         finally:
             self.chat_area.replaying = False
         if not rendered_any:
             self._show_empty_state()
-        else:
-            from .. import session as _session
-            if not _session.get_active().is_generating:
-                # 和实时一致：已经以回答收尾的最后一轮也收起过程（还在生成的接着重放，不收）
-                self.chat_area.collapse_answered()
         self._redraw_result_card()
         # 计划面板的刷新已统一到 _reset_render_state（新建/切换/切项目三路共用漏斗），
         # 且 _load_session 调 _redraw_chat 前必先调 _reset_render_state，这里无需重复渲染。
@@ -521,10 +522,15 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 if _has_text:
                     self._msg_buffers[str(len(self._msg_buffers))] = _ai_content
                     self.chat_area.finalize_markdown(self._md_to_html(_ai_content))
-                    from PySide6.QtWidgets import QApplication
-                    self.chat_area.add_message_actions(
-                        on_copy=lambda t=_ai_content: (QApplication.clipboard().setText(t),
-                                                       self._show_toast("已复制")))
+                    if _calls:
+                        # 后面紧跟工具卡：这段是过渡回复，复制按钮挂上去马上就会被拿掉
+                        # （_drop_dangling_actions），不建——长会话里一半的回复是这种
+                        self.chat_area.retire_message_actions()
+                    else:
+                        from PySide6.QtWidgets import QApplication
+                        self.chat_area.add_message_actions(
+                            on_copy=lambda t=_ai_content: (QApplication.clipboard().setText(t),
+                                                           self._show_toast("已复制")))
 
                 # 工具调用画成和实时一样的工具卡——不管这条 AIMessage 有没有正文
                 # （MiMo 常把"短文字 + 工具调用"放在同一条里）

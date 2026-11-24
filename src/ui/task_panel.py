@@ -514,8 +514,18 @@ class TaskPanel(QFrame):
         self.plan_scroll.setWidget(self.content_widget)
         root_lay.addWidget(self.plan_scroll, 1)
 
+    _THEME_KEYS = ("sidebar_bg", "sidebar_border", "text", "text_dim", "mv_indigo", "mv_chip_border",
+                   "mv_text_sec", "mv_indigo_soft", "mv_card_bg", "mv_chip_hover", "mv_header_bg")
+
     def apply_theme(self):
-        """停靠样式：和侧栏同底色、左边一条分隔线；分段之间只用一条细线隔开。"""
+        """停靠样式：和侧栏同底色、左边一条分隔线；分段之间只用一条细线隔开。
+
+        render_session 每次都调它（切会话、计划变化）：主题和浮层状态都没变就不再重设样式表——
+        十几次 setStyleSheet 每次要让整块面板重新匹配样式，打开会话时白花约 30ms。"""
+        key = (self._overlay, tuple(self._t(k) for k in self._THEME_KEYS))
+        if key == getattr(self, "_applied_theme_key", None):
+            return
+        self._applied_theme_key = key
         bg = self._t("sidebar_bg")
         line = self._t("sidebar_border")
         text = self._t("text")

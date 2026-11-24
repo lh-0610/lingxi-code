@@ -191,3 +191,202 @@ def test_svg_icons_are_rendered_once_per_file_and_color(ui, monkeypatch):
     c = ui._svg_icon("settings_lucide.svg", "#445566")
     assert a is b and c is not a
     assert len(renders) == 2, "同一个图标同一个颜色又从磁盘读、又渲染了一遍"
+
+
+# ── 打开长会话（2026-11-24）：重画历史省下来的几份工作 ──
+
+def test_tool_icons_are_rendered_once_and_handed_out_as_copies(qt_app, monkeypatch):
+    from PySide6.QtGui import QColor, QPainter
+    from src.ui import message_view as m
+    renders = []
+    real = m._render_icon
+    monkeypatch.setattr(m, "_render_icon", lambda *a: (renders.append(a), real(*a))[1])
+    monkeypatch.setattr(m, "_ICON_CACHE", {})
+    a = m._icon(m.SVG_COPY, "#112233", 14)
+    b = m._icon(m.SVG_COPY, "#112233", 14)
+    m._icon(m.SVG_COPY, "#445566", 14)
+    assert len(renders) == 2, "同一个图标同一个颜色又解析、渲染了一遍"
+    before = b.toImage()
+    p = QPainter(a)                       # 调用方在拿到的那张上画东西：缓存里那张不能跟着变
+    p.fillRect(0, 0, 14, 14, QColor("#ff0000"))
+    p.end()
+    assert m._icon(m.SVG_COPY, "#112233", 14).toImage() == before
+
+
+def _count_polish(monkeypatch):
+    from PySide6.QtWidgets import QCommonStyle
+    seen = []
+    real = QCommonStyle.unpolish
+
+    def spy(style, w, *a):
+        seen.append(w)
+        return real(style, w, *a)
+    monkeypatch.setattr(QCommonStyle, "unpolish", spy)
+    return seen
+
+
+def test_tool_card_restyles_only_when_its_style_property_changes(qt_app, monkeypatch):
+    """每次 _sync 都对状态和行头 unpolish / polish（重画两个长会话 1830 次）：值没变就不做。"""
+    from src.ui.message_view import ToolCallCard, _ToolGroup
+    card = ToolCallCard("📖 读取文件", "a.py")
+    group = _ToolGroup()
+    group.add_row(card)
+    seen = _count_polish(monkeypatch)
+    card.append_output("第一行\n")
+    card.set_body("a.py")
+    group.refresh()
+    assert seen == [], "样式属性没变也重新套了一遍样式"
+    card.append_output("❌ 失败：找不到文件\n")
+    assert card.tone == "bad" and card._status.property("tone") == "bad"
+    assert card._status in seen, "状态变成失败：要重新套样式（变红）"
+    seen.clear()
+    card.toggle()
+    assert card.property("open") == "true" and card.header in seen, "展开：行头要换成展开的样式"
+
+
+def test_tool_card_builds_rarely_used_labels_only_when_needed(qt_app):
+    from PySide6.QtWidgets import QLabel
+    from src.ui.message_view import ToolCallCard
+    plain = ToolCallCard("📖 读取文件", "a.py")
+    plain.append_output("内容\n")
+    plain.set_stats("")                    # 没有增删行数（读文件、搜索这类）也不建
+    assert (plain._script_info, plain._stats, plain._clock, plain._tail, plain._files) == (None,) * 5
+    assert len(plain.findChildren(QLabel)) <= 6
+    assert plain.clock_text() == "" and plain.changed_files_text() == ""
+
+    card = ToolCallCard("⚡ 执行命令", "pytest -q")
+    card.set_changed_files(["src/a.py"])
+    card.start_clock()
+    card._t0 -= 5                          # 跑了 5 秒：出转圈、走秒、最新一行输出
+    card._tick_clock()
+    card.append_output("collected 3 items\n")
+    v, h = card.layout(), card._hlay
+    assert v.indexOf(card._tail) == v.indexOf(card._files) - 1, "最新一行输出在改动的文件上面"
+    assert h.indexOf(card._clock) == h.indexOf(card._chev) - 1, "走秒在箭头前面"
+    assert card._tail.isVisibleTo(card) and card._tail.full() == "collected 3 items"
+    assert card.clock_text().startswith("运行中")
+    card.append_output("3 passed\n")
+    assert card._tail.full() == "3 passed", "运行中露的是最新一行"
+    card.stop_clock()
+    assert not card._tail.isVisibleTo(card) and card.clock_text() == ""
+    assert "改动了 1 个文件" in card.changed_files_text()
+
+    edit = ToolCallCard("✏️ 编辑文件", "a.py")
+    edit.set_stats("+12 −3")
+    edit.set_body("python -\n⁣print(1)\n")   # 交了脚本（顺带测「脚本 N 行」排在增删行数前面）
+    assert h is not edit._hlay and edit._hlay.indexOf(edit._script_info) < edit._hlay.indexOf(edit._stats) \
+        < edit._hlay.indexOf(edit._status)
+
+
+def _history(*msgs):
+    from src import session
+    sess = session.get_active()
+    sess.chat_history = list(msgs)
+    return sess
+
+
+def _call(cid, path):
+    return {"name": "read_file", "args": {"path": path}, "id": cid, "type": "tool_call"}
+
+
+def test_redraw_skips_copy_buttons_that_would_be_removed_at_once(ui, monkeypatch):
+    """过渡回复（后面紧跟工具卡）挂的复制按钮马上会被拿掉：重画时不建，结果和建了再拿掉一样。"""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from PySide6.QtWidgets import QWidget
+    _history(HumanMessage(content="第一问"), AIMessage(content="第一问的回答"),
+             HumanMessage(content="第二问"),
+             AIMessage(content="我先看一下文件", tool_calls=[_call("t1", "a.py")]),
+             ToolMessage(content="内容", tool_call_id="t1"))
+    built = []
+    real = type(ui.chat_area).add_message_actions
+    monkeypatch.setattr(type(ui.chat_area), "add_message_actions",
+                        lambda self, **k: (built.append(1), real(self, **k))[1])
+    ui._redraw_chat()
+    assert built == [1], "过渡回复的复制按钮建了又拿掉"
+    rows = ui.chat_area.widget().findChildren(QWidget, "msgActions")
+    assert len(rows) == 1, "只有第一问的回答挂按钮"
+    # 第二轮停在工具上：和建了再拿掉一样，第一问的按钮不再常显，改成悬停才出现
+    assert ui.chat_area._latest_actions is None and ui.chat_area._cur_assistant.actions is None
+    btns = rows[0].findChildren(QWidget)
+    assert btns and all(b.isHidden() for b in btns)
+
+
+def test_redraw_builds_rounds_hidden_and_shows_them_once(ui, qt_app, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from src.ui.message_view import _Round
+    _history(HumanMessage(content="问"),
+             AIMessage(content="过渡", tool_calls=[_call("t1", "a.py")]),
+             ToolMessage(content="内容", tool_call_id="t1"),
+             AIMessage(content="最终回答"))
+    hidden_while_building, cache_on = [], []
+    real = type(ui)._replay_history
+
+    def spy(self, hist):
+        from PySide6.QtCore import Qt
+        from src.ui import markdown_render
+        out = real(self, hist)
+        rounds = self.chat_area.widget().findChildren(_Round)
+        # 刚加进显示着的列表、还没轮到显示的控件也算 isHidden：要看是不是被显式藏起来的
+        hidden_while_building.extend(
+            r.isHidden() and r.testAttribute(Qt.WA_WState_ExplicitShowHide)
+            for r in rounds if r.parentWidget() is not None)
+        cache_on.append(markdown_render._path_cache is not None)
+        return out
+    monkeypatch.setattr(type(ui), "_replay_history", spy)
+    ui._redraw_chat()
+    assert hidden_while_building and all(hidden_while_building), "重画期间新的轮次要藏着建"
+    assert cache_on == [True], "重画期间文件链接的路径要走缓存（cached_paths）"
+    content = ui.chat_area.widget()
+    shown = [r for r in content.findChildren(_Round) if r.isVisibleTo(content)]
+    assert len(shown) == 1, "画完一起显示"
+    turn = shown[0].assistant_turns[-1]
+    assert turn._summary is not None and turn._summary.isVisibleTo(content), "收起过程照常（藏着时收的）"
+    from src.ui.message_view import ToolCallCard
+    assert all(not c.isVisibleTo(content) for c in content.findChildren(ToolCallCard)
+               if c.window() is ui), "收起的工具卡显示出来后仍是收着的"
+
+
+def test_batch_nests_and_shows_only_at_the_outermost_end(qt_app):
+    mv = _view()
+    with mv.batch():
+        with mv.batch():
+            turn = _reply(mv)
+        assert mv._cur_round.isHidden(), "内层结束不显示"
+    assert not mv._cur_round.isHidden() and turn.isVisibleTo(mv.widget())
+    mv.close()
+
+
+def test_file_links_resolve_each_path_once_while_redrawing(tmp_path, monkeypatch):
+    from src.ui import markdown_render as mr
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x")
+    calls = []
+    real = mr.os.path.realpath
+    monkeypatch.setattr(mr.os.path, "realpath", lambda p, *a, **k: (calls.append(p), real(p, *a, **k))[1])
+    md = "看 `src/a.py` 和 `src/a.py:3`，还有 `src/b.py`"
+    root = str(tmp_path)
+    with mr.cached_paths():
+        first = mr._linkify_file_paths(md, root)
+        n = len(calls)
+        again = mr._linkify_file_paths(md, root)
+        assert len(calls) == n, "重画期间同一个路径又问了一遍文件系统"
+    assert first == again and first.count("](") == 2, "a.py 两处都成链接，不存在的 b.py 不链"
+    (tmp_path / "src" / "b.py").write_text("y")
+    assert mr._linkify_file_paths(md, root).count("](") == 3, "重画之外每次都查：新写出来的文件要认得出"
+    assert mr._path_cache is None
+
+
+def test_plan_panel_does_not_restyle_when_theme_is_unchanged(ui, monkeypatch):
+    from src import session
+    panel = ui.plan_panel
+    sets = []
+    monkeypatch.setattr(panel, "setStyleSheet", lambda qss: sets.append(qss))
+    panel.render_session(session.get_active())
+    panel.render_session(session.get_active())
+    assert sets == [], "主题没变，切会话时又把面板样式表整个重设"
+    real = panel.theme_lookup
+    monkeypatch.setattr(panel, "theme_lookup", lambda k: "#010203" if k == "sidebar_bg" else real(k))
+    panel.render_session(session.get_active())
+    assert len(sets) == 1 and "#010203" in sets[0], "换了主题要重设"
+    panel.set_overlay(not panel._overlay)
+    assert len(sets) == 2, "浮层 / 停靠切换要重设"

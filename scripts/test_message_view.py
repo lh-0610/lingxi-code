@@ -55,7 +55,7 @@ class TestToolCards:
 
         card = mv.findChildren(ToolCallCard)[0]
         assert "def login():" in card.output_text()
-        assert not card._tail.isVisibleTo(card), "跑完了不再露输出行（一行一条），要看全文就展开"
+        assert card._tail is None, "跑完了不再露输出行（一行一条），要看全文就展开；重画历史时根本不建"
         assert "超出上下文窗口" not in card.output_text(), "工具结束后的程序提示不能算进工具输出"
         notices = [n.text() for n in mv.findChildren(Notice)]
         assert any(t.startswith("超出上下文窗口") for t in notices), "提示单独成条，去掉 emoji"
@@ -77,7 +77,7 @@ class TestToolCards:
         assert card.tone == "" and not card._status.isVisibleTo(card), "退出码 0：做完了不加标记"
         card.toggle()
         _pump(qt_app)
-        assert card._out.isVisibleTo(card) and not card._tail.isVisibleTo(card)
+        assert card._out.isVisibleTo(card) and card._tail is None
         assert card._out.toPlainText().splitlines()[-1] == "✓ 退出码 0", "点开后看到全部输出"
         mv.close()
 
@@ -798,7 +798,7 @@ class TestScriptCard:
         mv, card = self._card(qt_app, {"command": "pytest -q"}, output="3 passed\n✓ 退出码 0\n")
         card.toggle()
         _pump(qt_app)
-        assert not card._script_info.isVisibleTo(card)
+        assert card._script_info is None, "没交脚本：「脚本 N 行」不建"
         assert card._script_box is None and card._out_label is None, \
             "没交脚本的命令：脚本框和「输出」标签都不建（和原来一样，点开只建输出框）"
         mv.close()

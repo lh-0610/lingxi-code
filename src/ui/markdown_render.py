@@ -14,6 +14,7 @@ self._msg_buffers / self._code_blocks
 """
 import os
 import re
+from contextlib import contextmanager
 
 from .fonts import MONO_CSS, UI_CSS
 
@@ -195,17 +196,62 @@ def parse_file_link(href: str):
     return (rest, line) if rest else None
 
 
+# 重画历史期间的路径缓存（见 cached_paths）：None = 没在重画，每次都问文件系统
+_path_cache = None
+
+
+@contextmanager
+def cached_paths():
+    """重画一整段历史时，同一个路径、同一个工作区根只问一次文件系统。
+
+    长会话里同几个文件被反复提到（两段长会话 200 多处行内代码），每处都 realpath + isfile；
+    Windows 上 realpath 每次都要打开文件问真实路径。重画是同步的一口气，期间文件不会因为
+    渲染而变，缓存只活在这一次重画里；实时回复照常每次都查（刚写出来的文件要能认出来）。"""
+    global _path_cache
+    outer = _path_cache
+    if outer is None:
+        _path_cache = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _path_cache = None
+
+
 def _link_root() -> str:
     """路径按哪个目录认：和文件面板取差异用的是同一个（当前会话的实际工作区，含 worktree）。"""
+    cache = _path_cache
+    if cache is not None and ("root",) in cache:
+        return cache[("root",)]
     try:
         from ..file_history import session_workspace
-        return session_workspace()
+        root = session_workspace()
     except Exception:
-        return ""
+        root = ""
+    if cache is not None:
+        cache[("root",)] = root
+    return root
 
 
-def _file_link_target(text: str, root: str):
-    """行内代码里的这段文字指向项目里真实存在的文件时，返回 (相对路径, 行号)，否则 None。"""
+def _real_root(root: str) -> str:
+    """root 解析符号链接后的真实路径（重画期间缓存）；解析失败返回 ""。"""
+    cache = _path_cache
+    if cache is not None and ("real", root) in cache:
+        return cache[("real", root)]
+    try:
+        real = os.path.realpath(root)
+    except (OSError, ValueError):
+        real = ""
+    if cache is not None:
+        cache[("real", root)] = real
+    return real
+
+
+def _file_link_target(text: str, root: str, real_root: str = ""):
+    """行内代码里的这段文字指向项目里真实存在的文件时，返回 (相对路径, 行号)，否则 None。
+
+    real_root 是 root 解析过符号链接的结果：一段回复里有几十处行内代码时由调用方算一次传进来
+    （realpath 在 Windows 上每次都要问一遍文件系统）。"""
     s = (text or "").strip()
     if not s or len(s) > 260 or any(ch.isspace() for ch in s):
         return None
@@ -222,16 +268,32 @@ def _file_link_target(text: str, root: str):
         return None
     if not root:
         return None
+    cache = _path_cache
+    key = ("file", root, "/".join(parts))
+    if cache is not None and key in cache:
+        hit = cache[key]
+        return (hit, line) if hit else None
+    found = _project_file(root, parts, real_root)
+    if cache is not None:
+        cache[key] = found
+    return (found, line) if found else None
+
+
+def _project_file(root: str, parts: list, real_root: str = "") -> str:
+    """parts 拼成的相对路径是 root 里真实存在的文件（解析符号链接后仍在 root 里）时返回
+    「a/b.py」，否则 ""。"""
     try:
-        real_root = os.path.realpath(root)
+        real_root = real_root or _real_root(root)
+        if not real_root:
+            return ""
         full = os.path.realpath(os.path.join(real_root, *parts))
         if os.path.commonpath([full, real_root]) != real_root:
-            return None
+            return ""
     except (OSError, ValueError):
-        return None
+        return ""
     if not os.path.isfile(full):
-        return None
-    return "/".join(parts), line
+        return ""
+    return "/".join(parts)
 
 
 def _linkify_file_paths(md_text: str, root: str) -> str:
@@ -243,11 +305,16 @@ def _linkify_file_paths(md_text: str, root: str) -> str:
     if not md_text or not root:
         return md_text
     parts = _CODE_SPAN.split(md_text)
+    real_root = ""
     for i in range(1, len(parts), 2):
         span = parts[i]
         if span.startswith(("```", "~~~")):
             continue                        # 代码块里的路径不处理
-        target = _file_link_target(span[1:-1], root)
+        if not real_root:
+            real_root = _real_root(root)
+            if not real_root:
+                return md_text
+        target = _file_link_target(span[1:-1], root, real_root)
         if target is None:
             continue
         parts[i] = f"[{span}]({file_link_href(*target)})"

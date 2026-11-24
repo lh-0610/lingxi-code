@@ -12,6 +12,7 @@
 """
 import math
 from collections import deque
+from contextlib import contextmanager
 import re
 import time
 
@@ -141,8 +142,27 @@ def mv_qss() -> str:
 """
 
 
+_ICON_CACHE: dict = {}
+_ICON_CACHE_MAX = 512
+
+
 def _icon(svg: str, color: str, size: int = 16) -> QPixmap:
-    """把内联 SVG（用 currentColor 占位描边）渲染成单色 QPixmap。"""
+    """把内联 SVG（用 currentColor 占位描边）渲染成单色 QPixmap。
+
+    按 (svg, 颜色, 尺寸) 缓存：重画长会话时每张工具卡、每个箭头都要一张，同样几种图标
+    反复解析 SVG、渲染（两个长会话 500 多次）。返回副本——QPixmap 隐式共享，复制不拷像素，
+    调用方在副本上画东西也不会改到缓存里那张。"""
+    key = (svg, color, size)
+    pm = _ICON_CACHE.get(key)
+    if pm is None:
+        pm = _render_icon(svg, color, size)
+        if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
+            _ICON_CACHE.clear()
+        _ICON_CACHE[key] = pm
+    return QPixmap(pm)
+
+
+def _render_icon(svg: str, color: str, size: int) -> QPixmap:
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     if QSvgRenderer is None:
@@ -153,6 +173,21 @@ def _icon(svg: str, color: str, size: int = 16) -> QPixmap:
     r.render(p)
     p.end()
     return pm
+
+
+def _set_prop(w, name: str, value) -> bool:
+    """设动态属性；值真的变了才返回 True（调用方据此决定要不要重新套样式）。"""
+    if w.property(name) == value:
+        return False
+    w.setProperty(name, value)
+    return True
+
+
+def _set_style_prop(w, name: str, value):
+    """设选择器里用到的动态属性，变了才 unpolish / polish 让样式表重新匹配。"""
+    if _set_prop(w, name, value):
+        w.style().unpolish(w)
+        w.style().polish(w)
 
 
 def _icon_label(svg: str, color: str, size: int = 16) -> QLabel:
@@ -917,44 +952,25 @@ class ToolCallCard(QFrame):
         self._summary.setProperty("mv", "toolTarget")
         if self.kind == "edit":
             self._summary.setCursor(Qt.PointingHandCursor)
+        self._summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         h.addWidget(self._summary, 1, Qt.AlignVCenter)
-        # 交了脚本的命令：命令后面跟一句浅色的「脚本 N 行」（设计稿「消息区 · 运行脚本的卡片」）
-        self._script_info = QLabel()
-        self._script_info.setProperty("mv", "toolScriptInfo")
-        self._script_info.setVisible(False)
-        h.addWidget(self._script_info, 0, Qt.AlignVCenter)
-        self._stats = QLabel()
-        self._stats.setProperty("mv", "toolStats")
-        self._stats.setTextFormat(Qt.RichText)
-        self._stats.setVisible(False)
-        h.addWidget(self._stats, 0, Qt.AlignVCenter)
+        # 下面几样大多数卡用不上，要用时才建（_ensure_*）：重画长会话时每张卡少建五个藏着的
+        # 控件。头上的顺序：图标 · 动作 · 对象 ·「脚本 N 行」· 增删行数 · 状态 · 走秒 · 箭头；
+        # 头下面：展开区 · 最新一行输出（运行中）· 改动的文件
+        self._script_info = None     # 交了脚本的命令：命令后面一句浅色的「脚本 N 行」
+        self._stats = None           # 改文件的增删行数
+        self._clock = None           # 运行中 N 秒（实时运行超过 CLOCK_AFTER_S 才有）
+        self._tail = None            # 运行中露最新一行输出
+        self._files = None           # 命令运行期间项目里变了的文件：点文件名在文件面板里看差异
         self._status = QLabel()
         self._status.setProperty("mv", "toolStatus")
         self._status.setVisible(False)
         h.addWidget(self._status, 0, Qt.AlignVCenter)
-        self._clock = QLabel()
-        self._clock.setProperty("mv", "toolClock")
-        self._clock.setVisible(False)
-        h.addWidget(self._clock, 0, Qt.AlignVCenter)
         self._chev = QLabel()
         self._chev.setFixedSize(12, 12)
         self._chev.setVisible(False)
         h.addWidget(self._chev, 0, Qt.AlignVCenter)
         v.addWidget(self.header)
-
-        self._tail = _ElidedLabel()
-        self._tail.setObjectName("toolTail")
-        self._tail.setVisible(False)
-        v.addWidget(self._tail)
-
-        # 命令运行期间项目里变了的文件：点文件名在文件面板里看差异
-        self._files = QLabel()
-        self._files.setObjectName("toolFiles")
-        self._files.setTextFormat(Qt.RichText)
-        self._files.setWordWrap(True)
-        self._files.linkActivated.connect(self.file_clicked)
-        self._files.setVisible(False)
-        v.addWidget(self._files)
 
         self._paint_icon()
         self.set_body(code_text)
@@ -994,16 +1010,62 @@ class ToolCallCard(QFrame):
             self._fill_script()
         self._sync()
 
+    # ── 用到才建的几样 ──
+    def _header_label(self, mv: str, before: QWidget) -> QLabel:
+        lbl = QLabel()
+        lbl.setProperty("mv", mv)
+        self._hlay.insertWidget(self._hlay.indexOf(before), lbl, 0, Qt.AlignVCenter)
+        return lbl
+
+    def _ensure_script_info(self) -> QLabel:
+        if self._script_info is None:
+            self._script_info = self._header_label("toolScriptInfo", self._stats or self._status)
+        return self._script_info
+
+    def _ensure_stats(self) -> QLabel:
+        if self._stats is None:
+            self._stats = self._header_label("toolStats", self._status)
+            self._stats.setTextFormat(Qt.RichText)
+        return self._stats
+
+    def _ensure_clock(self) -> QLabel:
+        if self._clock is None:
+            self._clock = self._header_label("toolClock", self._chev)
+        return self._clock
+
+    def _ensure_tail(self):
+        if self._tail is None:
+            self._tail = _ElidedLabel()
+            self._tail.setObjectName("toolTail")
+            lay = self.layout()
+            # 展开区（有的话）在头和它之间，改动的文件在它下面
+            lay.insertWidget(lay.indexOf(self._files) if self._files is not None else lay.count(),
+                             self._tail)
+        return self._tail
+
+    def _ensure_files(self) -> QLabel:
+        if self._files is None:
+            self._files = QLabel()
+            self._files.setObjectName("toolFiles")
+            self._files.setTextFormat(Qt.RichText)
+            self._files.setWordWrap(True)
+            self._files.linkActivated.connect(self.file_clicked)
+            self.layout().addWidget(self._files)
+        return self._files
+
     def _sync_script_info(self):
         has = bool(self._script)
+        if not has and self._script_info is None:
+            return                   # 没交脚本：对象占满剩下的宽度（建卡时就是这样摆的）
         n = len(self._script.splitlines()) if has else 0
-        self._script_info.setText(f"脚本 {n} 行" if has else "")
-        self._script_info.setVisible(has)
+        info = self._ensure_script_info()
+        info.setText(f"脚本 {n} 行" if has else "")
+        info.setVisible(has)
         # 有脚本时命令按自己的宽度占位（放不下才省略），「脚本 N 行」紧跟在后面，剩下的空着
         self._summary.setSizePolicy(QSizePolicy.Preferred if has else QSizePolicy.Ignored,
                                     QSizePolicy.Fixed)
         self._hlay.setStretchFactor(self._summary, 0 if has else 1)
-        self._hlay.setStretchFactor(self._script_info, 1 if has else 0)
+        self._hlay.setStretchFactor(info, 1 if has else 0)
 
     def script_text(self) -> str:
         return self._script
@@ -1014,8 +1076,11 @@ class ToolCallCard(QFrame):
         for tok in (text or "").split():
             color = _P["ok"] if tok.startswith("+") else _P["bad"] if tok.startswith("−") else _P["muted"]
             parts.append(f'<span style="color:{color}">{_esc(tok)}</span>')
-        self._stats.setText("&nbsp;".join(parts))
-        self._stats.setVisible(bool(parts))
+        if not parts and self._stats is None:
+            return
+        stats = self._ensure_stats()
+        stats.setText("&nbsp;".join(parts))
+        stats.setVisible(bool(parts))
 
     def append_output(self, text: str):
         """工具输出（流式命令逐行来，其余工具一次来）：存成文字；展开着就同时进输出框。"""
@@ -1040,7 +1105,6 @@ class ToolCallCard(QFrame):
         if lines:
             self._first_line = self._first_line or lines[0]
             self._last_line = lines[-1]
-        self._tail.set_full(self._last_line)
         self._sync()
         self.state_changed.emit()
 
@@ -1054,13 +1118,15 @@ class ToolCallCard(QFrame):
             f'{_esc(p.rsplit("/", 1)[-1])}</a>'
             for p in paths[:self._FILES_MAX_LINKS])
         more = f" 等 {len(paths)} 个" if len(paths) > self._FILES_MAX_LINKS else ""
-        self._files.setText(f"改动了 {len(paths)} 个文件：{links}{more}")
-        self._files.setToolTip("<p>这条命令运行期间项目里变了的文件（点文件名看差异）：<br>"
-                               + "<br>".join(_esc(p) for p in paths) + "</p>")
-        self._files.setVisible(True)
+        files = self._ensure_files()
+        files.setText(f"改动了 {len(paths)} 个文件：{links}{more}")
+        files.setToolTip("<p>这条命令运行期间项目里变了的文件（点文件名看差异）：<br>"
+                         + "<br>".join(_esc(p) for p in paths) + "</p>")
+        files.setVisible(True)
 
     def changed_files_text(self) -> str:
-        return self._files.text() if self._files.isVisibleTo(self) else ""
+        files = self._files
+        return files.text() if files is not None and files.isVisibleTo(self) else ""
 
     def output_text(self) -> str:
         return "\n".join(self._lines)
@@ -1085,7 +1151,8 @@ class ToolCallCard(QFrame):
             self._spinner.deleteLater()
             self._spinner = None
             self._icon.setVisible(True)
-        self._clock.setVisible(False)
+        if self._clock is not None:
+            self._clock.setVisible(False)
         self._sync()
         self.state_changed.emit()
 
@@ -1093,7 +1160,8 @@ class ToolCallCard(QFrame):
         return self._clock_timer is not None
 
     def clock_text(self) -> str:
-        return "" if self._clock.isHidden() else self._clock.text()
+        clock = self._clock
+        return "" if clock is None or clock.isHidden() else clock.text()
 
     def _tick_clock(self):
         secs = time.monotonic() - self._t0
@@ -1104,7 +1172,7 @@ class ToolCallCard(QFrame):
             self._spinner = LoadingSpinner(size=14, color=_P["indigo"])
             self._hlay.insertWidget(self._hlay.indexOf(self._icon), self._spinner, 0, Qt.AlignVCenter)
             self._icon.setVisible(False)
-            self._clock.setVisible(True)
+            self._ensure_clock().setVisible(True)
             self._sync()
         self._clock.setText(f"运行中 {_fmt_secs(secs)}")
 
@@ -1298,9 +1366,8 @@ class ToolCallCard(QFrame):
         self._paint_icon()
         has_status = bool(self.tone and self.status_text) and not running
         self._status.setText(self.status_text if has_status else "")
-        self._status.setProperty("tone", self.tone)
-        self._status.style().unpolish(self._status)
-        self._status.style().polish(self._status)
+        # 样式属性变了才重新套样式（unpolish / polish 不便宜：重画长会话时每张卡要 _sync 三次）
+        _set_style_prop(self._status, "tone", self.tone)
         self._status.setVisible(has_status)
         if self._body is not None:
             self._body.setVisible(self._open and expandable)
@@ -1312,10 +1379,14 @@ class ToolCallCard(QFrame):
                 self._script_box.setVisible(self._open and has_script)
                 self._out_label.setVisible(self._open and has_script and self._out_lines > 0)
         # 运行中露最新一行输出；跑完收掉（结果看右边的状态，要看全文就展开）
-        self._tail.setVisible(running and self._out_lines > 0 and not self._open)
-        self.setProperty("open", "true" if self._open else "false")
-        self.header.style().unpolish(self.header)
-        self.header.style().polish(self.header)
+        show_tail = running and self._out_lines > 0 and not self._open
+        if show_tail:
+            self._ensure_tail().set_full(self._last_line)
+        if self._tail is not None:
+            self._tail.setVisible(show_tail)
+        if _set_prop(self, "open", "true" if self._open else "false"):
+            self.header.style().unpolish(self.header)
+            self.header.style().polish(self.header)
         self._sync_chevron()
 
 
@@ -1452,10 +1523,8 @@ class _ToolGroup(QWidget):
                 secs = (self._t1 or time.monotonic()) - self._t0
             self.head.dur.setText(f"· {_fmt_secs(secs)}" if secs is not None and secs >= 1 else "")
             self.head.dur.setVisible(bool(self.head.dur.text()))
-        self.rows_box.setProperty("framed", "true" if framed else "false")
         self._rl.setContentsMargins(12 if framed else 0, 0, 0, 0)
-        self.rows_box.style().unpolish(self.rows_box)
-        self.rows_box.style().polish(self.rows_box)
+        _set_style_prop(self.rows_box, "framed", "true" if framed else "false")
         self.rows_box.setVisible((not framed) or open_)
 
 
@@ -2562,7 +2631,31 @@ class MessageView(QScrollArea):
         self._cur_round = None
         self._latest_actions = None
 
+    @contextmanager
+    def batch(self):
+        """一口气画很多轮（重画历史）：期间新加的每一轮先藏着，结束时一起显示。
+
+        直接往显示着的列表里加，每个子控件的「显示」都排进事件队列、各自触发一遍排版，
+        长会话里几千个控件逐个走一趟（还要过全局事件过滤器）。藏着建、最后一次显示出来，
+        子控件随父控件同步显示、整列只排一次版。期间只用 isVisibleTo 判断显隐（相对本轮），
+        收起过程等逻辑不受影响。可嵌套，最外层结束时才显示。"""
+        self._batch_depth = getattr(self, "_batch_depth", 0) + 1
+        if self._batch_depth == 1:
+            self._batched = []
+        try:
+            yield
+        finally:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                pending, self._batched = self._batched, []
+                for w in pending:
+                    if not _deleted(w):
+                        w.show()
+
     def _add_turn(self, w, top_gap=26):
+        if getattr(self, "_batch_depth", 0):
+            w.hide()
+            self._batched.append(w)
         if self._col.count() > 1 and top_gap and not isinstance(w, _Round):
             self._col.insertSpacing(self._col.count() - 1, top_gap)
         elif self._col.count() > 1 and top_gap:
@@ -2701,6 +2794,17 @@ class MessageView(QScrollArea):
 
     def finalize_markdown(self, html, md=None):
         self._assistant().finalize_markdown(html, md)
+
+    def retire_message_actions(self):
+        """该挂一排复制按钮、但它马上会被后面的块拿掉（重画历史时过渡回复后面紧跟工具卡）：
+        不建，只做建了再拿掉会留下的效果——上一条回答的按钮不再常显、当前回复不留按钮。"""
+        a = self._assistant()
+        a.end_body()
+        prev = self._latest_actions
+        if prev is not None:
+            prev.set_pinned(False)
+        self._latest_actions = None
+        a.actions = None
 
     def add_message_actions(self, on_copy=None, on_regen=None):
         """回复末尾的操作按钮:复制 / 重新生成(幽灵图标按钮)。"""

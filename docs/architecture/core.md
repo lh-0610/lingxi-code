@@ -17,9 +17,18 @@
 - **内容区卡顿（2026-11-23 实测，真实渲染、用户最长的会话）**：
   - **流式按段落拆块**（`AssistantTurn.append_body`）：以前整段回复塞进一个 BodyText，每来几个字 `setText` 全文、Qt 把整段富文本重排好几遍——九千字时每段 144ms，越写越卡。现在按空行拆，一段一个正文块（`_stream_parts`，块间留 `_STREAM_PARA_GAP`），只重设最后两段（文字没变不重设）；`finalize_markdown` 用 `_drop_stream_parts` 拿掉多出来的块、合回第一块写渲染好的 markdown。没走 finalize 就结束的（停止 / 报错）分段留着照样能看。「按正文块认」的逻辑（收起过程、最终回答、线上节点）都在回复结束之后才跑，那时已经合回一块
   - **BodyText 自己缓存「这个宽度多高」**（`_hfw_cache`，最多 6 个宽度）：QLabel 不缓存，布局一轮要问好几次、还按不同宽度问（实测流式时前面写完的每一段每次都被问 782 / 266 两个宽度）。`setText` / 字体 / 样式 / 内容边距变了就清。九千字每段 144ms → 14ms
-  - **切会话清旧消息**（`MessageView.clear`）：藏起来 + deleteLater，不再先 `setParent(None)`——Qt 会把每一轮临时变成顶层窗口，长会话光这一步 140ms（挪到另一个藏着的父控件下也一样慢）。删之前它们还挂在 `_content` 下：搜索、定位步骤用 `_alive` 跳过 `_gone` 里的。清掉 140ms → 8ms，删挪到下一轮事件循环（约 75ms，那时新会话已经画出来）；打开长会话 1.05s → 0.93s。剩下的大头是收起的那些轮也照样建工具卡（244 张约 0.23s），要省得改成展开时才建，没做
+  - **切会话清旧消息**（`MessageView.clear`）：藏起来 + deleteLater，不再先 `setParent(None)`——Qt 会把每一轮临时变成顶层窗口，长会话光这一步 140ms（挪到另一个藏着的父控件下也一样慢）。删之前它们还挂在 `_content` 下：搜索、定位步骤用 `_alive` 跳过 `_gone` 里的。清掉 140ms → 8ms，删挪到下一轮事件循环（约 75ms，那时新会话已经画出来）；打开长会话 1.05s → 0.93s
+  - **打开长会话（2026-11-24，同样两个最长的会话，计到排版全部结束）**：每次 1.12–1.26s → 0.68–0.73s。几处：
+    - **各轮藏着建、最后一次显示**（`MessageView.batch`，`_redraw_chat` 包着它）：往显示着的列表里加控件，每个子控件的显示都排进事件队列、各自触发排版，还要过一遍全局过滤器；藏着建，结束时 `show()`，子控件随父控件同步显示、整列只排一次版。收起最后一轮也挪进批里做（藏着收）。期间判断显隐只能用 `isVisibleTo`（相对本轮），`isVisible()` 在批里永远是假
+    - **过渡回复不建复制按钮**（`MessageView.retire_message_actions`）：重画时一条 AIMessage 有正文又有工具调用，挂上的按钮马上就被后面的工具卡拿掉（`_drop_dangling_actions`，`setParent(None)` 一次约 1ms）。不建，只做建了再拿掉会留下的效果：上一条回答的按钮不再常显
+    - **样式属性变了才 unpolish / polish**（`_set_prop` / `_set_style_prop`）：工具卡每次 `_sync` 都给状态和行头各重套一遍样式，两个会话 1830 次
+    - **工具卡上平时用不上的五样用到才建**（`_ensure_script_info` / `_ensure_stats` / `_ensure_clock` / `_ensure_tail` / `_ensure_files`）：「脚本 N 行」、增删行数、走秒、运行中最新一行、改动的文件。插入位置按固定顺序找邻居，不靠建卡时占位
+    - **`_icon` 按（SVG，颜色，尺寸）缓存**，返回副本（QPixmap 隐式共享，调用方在上面画东西不改缓存）
+    - **重画期间文件链接的路径只查一次**（`markdown_render.cached_paths`）：每处行内代码都要 realpath + isfile，Windows 上 realpath 每次都开文件；缓存只活在这一次重画里，实时回复照常每次查（刚写出的文件要认得出）。两个会话 328 次 → 80 次
+    - **任务面板主题没变不重设样式表**（`TaskPanel.apply_theme` 按主题色和浮层状态记一个键）：`render_session` 每次切会话都调它，十几次 `setStyleSheet` 约 30ms
+    - 剩下的大头是控件本身的创建和那一次排版（收起的轮也照样建工具卡）；要再省得改成展开时才建，牵涉搜索、定位步骤、线上节点，没做
   - **改窗口大小**：空白页没显示就不摆它（以前每次改大小都把推荐按钮的图标重画一遍）；`ChatUI._svg_icon` 按（文件，颜色，缩放比例）缓存，不再每次读盘渲染；`_ElidedLabel.sizeHint` 的文字宽度按（文字，字体）记着。拖窗口每步 80ms → 68ms，剩下的是整个窗口的布局和绘制，以及应用级右键菜单过滤器每个事件一次 Python 回调的固定开销
-  - 回归在 `scripts/test_content_perf.py`：不比毫秒，比「该省的那份工作真的没做」「省了之后显示照样对」
+  - 回归在 `scripts/test_content_perf.py`：不比毫秒，比「该省的那份工作真的没做」「省了之后显示照样对」；每处都做过突变检验（把优化改回去，测试要挂）
 - **`_settle_layout` 连子布局一起失效**：`updateGeometry` 只让父控件的**顶层**布局失效，嵌在里面的子布局（气泡里的引用盒 `_quotes_box`）还缓存着旧高度，第一遍按旧的排、Qt 激活时才顺手清掉，第二遍才对——引用块展开时第一次调用整列纹丝不动（实测）。所以链上每个布局的子布局先 `invalidate`（`_invalidate_sublayouts`）
 - **输出只存成文字，点开那一行才建输出框**：`ToolCallCard._lines`（最多 4000 行），展开时 `_build_body` 才建参数标签和 QPlainTextEdit；展开区和行头的底色左边对齐（`_BODY_INDENT = 0`，设计稿原是缩进 31 和动作文字对齐，展开后行头整条有底色、框缩进去一截看着像错位，用户实测后改），参数文字和框里的字对齐；最后一行输出 / 改动文件那两行小字没有框，仍缩进 31。早先每张卡都预建一个藏着的输出框，重画长会话时这一项占卡片耗时的三分之一。Ctrl+F 要搜到工具参数：`find_text` 先给参数里有关键词、还没建的行补建（`ensure_body`）。运行中的行图标换转圈、右边走秒（超过 2 秒才出，快的不闪），下面露最新一行输出；跑完行上不留用时（总用时在组头）
 - **交了脚本的命令**（设计稿「消息区 · 运行脚本的卡片」）：`run_command` 带 stdin（`python -` + 一段脚本）时，`describe_tool_call` 在命令和脚本之间夹 `streaming.SCRIPT_MARK`（换行 + U+2063 不可见分隔符：不算空白也不算换行，`strip` / `splitlines` 都不动它；命令本身也可能多行，不能按第一个换行切）。重画历史也走 `describe_tool_call`，旧会话一样认得。工具卡据此分开：头上命令 + 浅色「脚本 N 行」（命令的 `_ElidedLabel` 这时按完整文字报 `sizeHint`、不占满，「脚本 N 行」紧跟其后；以前按省略后的文字报，按想要的宽度排就拿到 0 宽）；展开区「脚本 · Python」+ 脚本框（`QPlainTextEdit#toolScript`，和输出框同一套 QSS / 字体 / 定高：最多 16 行，多的在框里滚），有脚本时输出框上标「输出」。着色走文件面板那套 `syntax_highlight.highlight_rows`（tree-sitter），按行套进 `_ScriptHighlighter`；语言按解释器名认（`_script_language`：python / python3 / python3.14 / py / 带路径和 .exe → Python，node → JavaScript，其余不着色）。以前脚本和命令拼成一段塞进参数标签：「python -」写两遍、按 JSON 规则上色（只认数字和括号）、行距 1.7 像隔行（用户截图）。Ctrl+F 也搜脚本框：没展开过的先 `ensure_body`，命中用框自己的选区 + `ensureCursorVisible`（长脚本在框里滚到命中处）。输出框 / 脚本框要滚动时定高不再留 4 像素余量（余量只防「全放得下」时最后一行被切），不然框底露出第 17 行的上半截
