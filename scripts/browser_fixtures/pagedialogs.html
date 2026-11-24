@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>网页弹框</title></head>
+<body>
+<p id="out">-</p>
+<button id="del" onclick="document.getElementById('out').textContent = confirm('确定删除用户「张三」吗？') ? 'deleted' : 'cancelled'">删除</button>
+<button id="ask" onclick="const v = prompt('新名字', '李四'); document.getElementById('out').textContent = v === null ? 'no-name' : 'name=' + v">改名</button>
+<a id="dl" href="/attachment.txt">下载报表</a>
+</body>
+</html>

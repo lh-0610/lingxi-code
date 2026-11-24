@@ -516,8 +516,8 @@ class TestRoundSeparator:
         _user(mv, "二", 2)
         mv.clear()
         _pump(qt_app)
-        assert not [f for f in self._seps(mv) if f.parentWidget() is not None
-                    and f.parentWidget().parentWidget() is not None]
+        # 清掉的轮先藏起来、下一轮事件循环再删（见 MessageView.clear）：看得见的线一条都不能剩
+        assert not [f for f in self._seps(mv) if f.isVisibleTo(mv.widget())]
         mv.close()
 
 

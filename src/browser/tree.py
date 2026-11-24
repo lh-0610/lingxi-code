@@ -78,7 +78,15 @@ def compute_delta(before: str, after: str, cap: int = DELTA_DEFAULT_CHARS, *,
             changed.extend("+" + ln for ln in after_lines[j1:j2])
     if not changed:
         return DELTA_EMPTY
-    return truncate("\n".join(changed), cap)
+    text = "\n".join(changed)
+    if len(text) <= cap:
+        return text
+    # 放不下：先列新增的行，消失的只报行数。单页应用换路由时整页都变，以前「-」行在前，
+    # 把上限占满，新页面的「+」行全被截掉——模型要看的恰恰是现在页面上有什么（复审 #12）
+    added = [ln for ln in changed if ln.startswith("+")]
+    gone = len(changed) - len(added)
+    note = f"\n（变化太多：只列了新增的行，另有 {gone} 行消失，没列出）" if gone else ""
+    return truncate("\n".join(added), max(200, cap - len(note))) + note
 
 
 def _cut(text: str) -> bool:

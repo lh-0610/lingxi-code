@@ -209,6 +209,10 @@ class FilePanel(QFrame):
         _bpage._notifier.tab_closed.connect(self._on_browser_tab_closed)
         _bpage._notifier.current_changed.connect(self._on_browser_current_changed)
         _bpage._notifier.popup_blocked.connect(self._on_popup_blocked)
+        _bpage._notifier.download_done.connect(self._on_download_done)
+        # 网页弹框 / 下载 / 登录要问用户时弹的主题卡片（复审 #16 #17）：挂在主窗口上
+        from .browser_dialogs import make_hooks
+        _bpage.set_ui_hooks(**make_hooks(lambda: self.window()))
 
     # ── 浏览器标签的兼容入口：只有一个浏览器标签时代的调用方 / 测试 ──
     @property
@@ -515,6 +519,11 @@ class FilePanel(QFrame):
         view = self._browser_view
         if view is not None and shiboken6.isValid(view):
             view.flash(f"页面自己弹出的新窗口已拦截：{url}")
+
+    def _on_download_done(self, path, ok):
+        view = self._browser_view
+        if view is not None and shiboken6.isValid(view):
+            view.show_download_done(path, ok)
 
     def open_last_browser(self):
         """用户手动开浏览器（顶栏的地球按钮，复审 14）：还开着（含收起只是藏着）就切过去，

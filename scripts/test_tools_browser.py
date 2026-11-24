@@ -550,3 +550,62 @@ def test_plan_whitelist_covers_readonly_only():
     assert {"browser_open", "browser_snapshot", "browser_find",
             "browser_read_text", "browser_console", "browser_screenshot"} <= PLAN_MODE_READONLY_TOOLS
     assert not {"browser_click", "browser_type", "browser_close"} & PLAN_MODE_READONLY_TOOLS
+
+class TestSharedBrowser:
+    """复审 #22：几个会话 / 并行子 Agent 共用一个浏览器。一个动作是「动作前快照 → 点 → 动作后快照
+    + 样式核对」一整串，交错着跑变化 diff 和样式基线就互相覆盖；换了会话还要提醒页面可能被动过。"""
+
+    def test_actions_from_two_sessions_do_not_interleave(self, env, monkeypatch):
+        import threading
+        import time as _t
+        pm.apply(env.sess, "auto")
+        inside, overlap = [], []
+
+        def slow_snapshot(fn):
+            def wrapped(*a, **k):
+                if inside:
+                    overlap.append(1)
+                inside.append(1)
+                _t.sleep(0.15)
+                inside.pop()
+                return fn(*a, **k)
+            return wrapped
+
+        monkeypatch.setattr(tb, "_snapshot_text", slow_snapshot(tb._snapshot_text))
+
+        def other_session():
+            s2 = session.Session()
+            session.bind_thread(s2)
+            try:
+                tb.browser_snapshot.func()
+            finally:
+                session.unbind_thread()
+
+        t = threading.Thread(target=other_session)
+        t.start()
+        tb.browser_snapshot.func()
+        t.join(5)
+        assert not overlap, "两个会话的浏览器动作交错着跑了"
+
+    def test_switching_sessions_says_the_page_may_have_changed(self, env):
+        pm.apply(env.sess, "auto")
+        first = tb.browser_snapshot.func()
+        again = tb.browser_snapshot.func()
+        assert not again.startswith("（注意"), "同一个会话连着用：不提醒"
+        s2 = session.Session()
+        session.bind_thread(s2)
+        try:
+            out = tb.browser_snapshot.func()
+        finally:
+            session.bind_thread(env.sess)
+        assert out.startswith("（注意：这个浏览器刚被另一个会话用过"), out
+        assert "[ref=e20]" in out and first
+
+    def test_waiting_for_the_other_session_can_be_stopped(self, env, monkeypatch):
+        tb._tool_lock.acquire()
+        try:
+            monkeypatch.setattr(state, "stop_flag", True)
+            out = tb.browser_snapshot.func()
+        finally:
+            tb._tool_lock.release()
+        assert "已停止" in out

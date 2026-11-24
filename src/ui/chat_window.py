@@ -586,7 +586,23 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
 
     def _svg_icon(self, filename, color):
-        """共用 helper：把 icons/*.svg 渲染成 QIcon（支持高 DPI）。"""
+        """共用 helper：把 icons/*.svg 渲染成 QIcon（支持高 DPI）。按（文件，颜色，缩放比例）
+        缓存：同一个图标在切主题、改窗口大小时会被反复要，每次读盘再渲染不划算。"""
+        dpr = self.devicePixelRatioF() if hasattr(self, 'devicePixelRatioF') else 1.0
+        key = (filename, color, dpr)
+        cache = ChatUI.__dict__.get("_svg_icon_cache")
+        if cache is None:
+            cache = ChatUI._svg_icon_cache = {}
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        icon = self._render_svg_icon(filename, color, dpr)
+        if len(cache) > 256:
+            cache.clear()
+        cache[key] = icon
+        return icon
+
+    def _render_svg_icon(self, filename, color, dpr):
         svg_path = os.path.join(BASE_DIR, "icons", filename)
         if not os.path.exists(svg_path):
             return QIcon()
@@ -595,7 +611,6 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             svg_tpl = f.read()
         svg_filled = svg_tpl.replace('currentColor', color)
         renderer = QSvgRenderer(svg_filled.encode('utf-8'))
-        dpr = self.devicePixelRatioF() if hasattr(self, 'devicePixelRatioF') else 1.0
         px = QPixmap(int(24 * dpr), int(24 * dpr))
         px.fill(Qt.transparent)
         painter = QPainter(px)
@@ -1860,7 +1875,10 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     def _refresh_responsive_layout(self):
         self._resize_input_container()
-        self._position_empty_state()
+        # 空白页没显示（打开着会话）就不摆它：以前每次改窗口大小都把它那些推荐按钮的图标
+        # 重画一遍（每个都从磁盘读 SVG），长会话里拖窗口白白多花十几毫秒（实测）
+        if hasattr(self, "empty_state") and self.empty_state.isVisible():
+            self._position_empty_state()
         if hasattr(self, 'scroll_bottom_btn'):
             self._position_scroll_btn()
         self._apply_task_panel_collapse()

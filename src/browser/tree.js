@@ -100,6 +100,29 @@
     return "generic";
   }
 
+  // 可编辑区旁边的表单标签：往上最多 8 层（antd 表单里编辑器到标签那一行隔着 7 层），找「不在它里面、for 没对上别的控件」的 <label>。
+  // 只在这一层恰好一个这样的标签、而且除了它自己再没有别的可见输入控件时才算——两个编辑器
+  // 共用一层时宁可不取名，也不能把标题的名字安到正文上
+  const EDITABLE_SEL = "input:not([type=hidden]),textarea,select,[contenteditable=''],[contenteditable='true']";
+  function orphanLabelFor(el) {
+    let a = el.parentElement;
+    for (let i = 0; a && a !== document.body && i < 8; i++, a = a.parentElement) {
+      const labels = Array.from(a.querySelectorAll("label")).filter(l => {
+        if (l.contains(el)) return false;
+        const target = l.htmlFor ? document.getElementById(l.htmlFor) : null;
+        return !target || target.contains(el);
+      });
+      if (!labels.length) continue;
+      if (labels.length !== 1) return "";
+      for (const c of a.querySelectorAll(EDITABLE_SEL)) {
+        if (c === el || el.contains(c) || c.contains(el)) continue;
+        if (visible(c)) return "";
+      }
+      return labels[0].textContent || "";
+    }
+    return "";
+  }
+
   function nameOf(el, role, useText) {
     const labelledby = el.getAttribute("aria-labelledby");
     if (labelledby) {
@@ -122,6 +145,16 @@
         return clean(el.value || t, NAME_MAX);
     }
     if (tag === "IMG") return clean(el.getAttribute("alt") || "", NAME_MAX);
+    if (role === "textbox" && el.isContentEditable) {
+      // 富文本框（Quill / 自己包的编辑器组件）多半没有 aria-label：表单标签写着「内容」，可它的 for
+      // 指向一个不存在的 id，读屏和快照里都只剩一个无名 textbox，模型分不清哪个是标题哪个是正文
+      // （复审 #11，实测 antd 表单里两个 Quill）。取旁边那个没对上任何控件的标签，再不行用占位文字
+      const lab = orphanLabelFor(el);
+      if (lab) return clean(lab, NAME_MAX);
+      const ph = el.getAttribute("aria-placeholder") || el.getAttribute("data-placeholder")
+        || el.getAttribute("placeholder");
+      return clean(ph || el.title || "", NAME_MAX);
+    }
     if (!FROM_CONTENT.has(role) && !useText) return clean(el.title || "", NAME_MAX);
     const text = clean(el.textContent, NAME_MAX);
     if (text) return text;
@@ -637,10 +670,23 @@
     if (opts.submit) {
       const form = el.form || el.closest("form");
       if (form && form.requestSubmit) form.requestSubmit();
-      else el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      else pressEnter(el);
     }
     if (isSecret(el)) return { ok: true, secret: true, filled: !!el.value };
     return { ok: true, value: (el.value || el.textContent || "").slice(0, 100) };
+  }
+
+  // 没有表单的回车：按真实按键的顺序发 keydown → keypress → keyup。以前只发 keydown，
+  // 监听 keyup 的（Vue @keyup.enter、很多搜索框）收不到（复审 #12）。老代码看 keyCode / which：
+  // 放在构造参数里（Chromium 认这几个旧字段）。事后在实例上 defineProperty 不行——我们在隔离
+  // 世界里，页面脚本拿到的是另一个包装对象，看不到隔离世界加的属性（实测 keyCode 仍是 0）
+  function pressEnter(el) {
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      el.dispatchEvent(new KeyboardEvent(type, {
+        key: "Enter", code: "Enter", bubbles: true, cancelable: true,
+        keyCode: 13, which: 13, charCode: type === "keypress" ? 13 : 0,
+      }));
+    }
   }
 
   function find(opts) {

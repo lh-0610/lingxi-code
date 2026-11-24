@@ -13,8 +13,10 @@ click/type 执行前先 info(ref) 做有后果结构判定（submit 按钮 / POS
 页面文字一律围 <browser-content url untrusted>（§6.3）：页面内容是外部输入，
 其中的指令不是用户指令。动作默认附 all 模式前后"变化行 diff"（§3.2，省轮次的关键）。
 """
+import functools
 import json
 import re
+import threading
 
 from langchain_core.tools import tool
 
@@ -40,6 +42,71 @@ _NO_PAGE = "还没有打开的页面：先用 browser_open(url) 打开。"
 # ref 签发登记：((标签, frame), ref) -> 签发时的 docId。换文档后旧 ref 一律报失效，
 # 配错 frame / 标签也报失效（不能点中别的 frame / 别的标签 / 新文档的同号元素）
 _issued: dict = {}
+
+
+# ── 多个会话共用一个浏览器（复审 #22）──
+# 同一时刻只跑一个浏览器动作：一个动作是「动作前快照 → 点 / 输入 → 动作后快照 + 样式核对」
+# 一整串，两个会话交错着跑，变化行 diff 和样式基线（tree.js 全局只有一份）就会互相覆盖，
+# 报给模型的「变了什么」张冠李戴。排队时每 0.2 秒看一次停止标志，停得下来。
+_tool_lock = threading.Lock()
+_LOCK_POLL_S = 0.2
+# 上一次用浏览器的会话（记 id，不拖着会话对象；会话对象用 __slots__ 没法弱引用）：换了会话就
+# 提醒一句页面可能被动过。旧会话被回收后 id 被新会话碰巧复用，结果只是少提醒一次，不会错报
+_last_user = {"id": None}
+_SHARED_NOTE = ("（注意：这个浏览器刚被另一个会话用过，当前页面 / 标签可能已经变了；"
+                "要操作先 browser_snapshot 看一眼现在的样子）\n")
+
+
+def _exclusive(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        while not _tool_lock.acquire(timeout=_LOCK_POLL_S):
+            if state.stop_flag:
+                return "已停止（在等另一个会话的浏览器操作做完）"
+        try:
+            from .browser import page as _page
+            _page.drain_model_events()          # 上一个动作没取走的不算这次的
+            me = id(_session.current_session())
+            last, _last_user["id"] = _last_user["id"], me
+            out = fn(*args, **kwargs)
+            events = _page.drain_model_events()
+            if events and isinstance(out, str):
+                out += _events_text(events)
+            from .browser import page
+            if (last is not None and last != me and fn.__name__ != "browser_open"
+                    and page._browser is not None and isinstance(out, str)):
+                out = _SHARED_NOTE + out
+            return out
+        finally:
+            _tool_lock.release()
+    return wrapper
+
+
+def _events_text(events) -> str:
+    """这次动作期间网页弹的框、要下载的文件、证书 / 登录：如实告诉模型（复审 #16 #17）。
+    网页写的字（弹框内容、文件名）进不可信围栏。以前确认框被取消只在控制台留一行，模型常以为
+    「点了没反应」再点一次。"""
+    lines = []
+    for kind, url, text in events:
+        if kind == "confirm":
+            lines.append("页面弹出确认框——已按取消处理，灵犀不替用户点同意；"
+                         "要继续的话请用户自己在面板里点。确认框的内容：\n" + tree.fence(text, url))
+        elif kind == "prompt":
+            lines.append("页面要求输入——已按取消处理；需要的话请用户自己在面板里操作。提示文字：\n"
+                         + tree.fence(text, url))
+        elif kind == "alert":
+            lines.append("页面弹出提示（已关掉）：\n" + tree.fence(text, url))
+        elif kind == "download":
+            lines.append("页面要下载文件，已拦下；需要的话请用户在面板里点。文件名：\n"
+                         + tree.fence(text, url))
+        elif kind == "cert":
+            lines.append(f"证书不受信任，没有打开 {security.fence_url(url)}；"
+                         "本机开发服务的话请用户在面板里点「仍然访问」，灵犀不替它放行。")
+        elif kind == "auth_ok":
+            lines.append("网站要求登录，用户已在弹框里登录（账号密码没有交给灵犀）。")
+        elif kind == "auth_cancel":
+            lines.append("网站要求登录，用户取消了（页面会是 401 / 未授权）。")
+    return ("\n" + "\n".join(lines)) if lines else ""
 
 
 def _cur_tab():
@@ -484,6 +551,7 @@ def _note_browser_check(r, entries_all):
 
 
 @tool
+@_exclusive
 def browser_open(url: str, timeout: int = 30, new_tab: bool = False) -> str:
     """在侧边栏浏览器打开网址（只允许 http/https），返回标题 + 首份交互快照（含可点元素的 ref）。
     本机 dev server（localhost）直接开；公网页面按权限模式可能先问用户。
@@ -525,6 +593,7 @@ def browser_open(url: str, timeout: int = 30, new_tab: bool = False) -> str:
 
 
 @tool
+@_exclusive
 def browser_snapshot(mode: str = "interactive", max_depth: int = 12,
                      max_chars: int = 12000, root_ref: str | None = None,
                      frame: str | None = None) -> str:
@@ -568,6 +637,7 @@ def _frames_note():
 
 
 @tool
+@_exclusive
 def browser_find(text: str, limit: int = 20, frame: str | None = None) -> str:
     """按可见文字/名称找页面元素，返回匹配列表（role/name/ref，链接带 href）。
     找某个按钮/输入框/链接优先用它，比全量快照省得多；拿 ref 去 click/type。"""
@@ -599,6 +669,7 @@ def browser_find(text: str, limit: int = 20, frame: str | None = None) -> str:
 
 
 @tool
+@_exclusive
 def browser_read_text(max_chars: int = 8000, frame: str | None = None) -> str:
     """读当前页面正文（main/article 优先，退 body）。看文章内容用它；
     要点按钮/填表单用 browser_snapshot 拿 ref。"""
@@ -614,6 +685,7 @@ def browser_read_text(max_chars: int = 8000, frame: str | None = None) -> str:
 
 
 @tool
+@_exclusive
 def browser_screenshot(question: str, ref: str | None = None) -> str:
     """截浏览器当前可见区域，交给图片识别模型，按 question 回答它在图上看到的。
 
@@ -662,6 +734,7 @@ def browser_screenshot(question: str, ref: str | None = None) -> str:
 
 
 @tool
+@_exclusive
 def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str:
     """点击快照/find 给出的 ref 元素。默认附动作前后的"变化行 diff"；文字树没变时改报
     操作处附近**实际计算样式**的变化（动作前后逐项比对，不按 class 名猜）。
@@ -761,6 +834,7 @@ def _press(ref, expect, frame, label=""):
 
 
 @tool
+@_exclusive
 def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
                  frame: str | None = None, delta: bool = True) -> str:
     """往 ref 指向的输入框输入文字（clear=True 先清空；submit=True 输入后回车，可能提交表单）。
@@ -844,6 +918,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
 
 
 @tool
+@_exclusive
 def browser_console(level: str = "error", clear: bool = False,
                     include_previous: bool = False) -> str:
     """读浏览器控制台通道（前端报错排查用）：页面 console.*、alert/弹窗/下载/新窗口
@@ -897,6 +972,7 @@ def _console_whose(r):
 
 
 @tool
+@_exclusive
 def browser_tabs(action: str = "list", tab_id: int | None = None) -> str:
     """浏览器标签：action=list 列出所有标签（当前的标 *）；select 切到 tab_id——之后的快照、
     点击、输入都作用于它；close 关掉 tab_id（关最后一个等于关浏览器）。
@@ -945,6 +1021,7 @@ def _tab_lines(r):
 
 
 @tool
+@_exclusive
 def browser_close() -> str:
     """关闭浏览器页面，清 cookie 和缓存。调试结束、不再需要页面时调用。"""
     r = _bridge_call("close", timeout=10)

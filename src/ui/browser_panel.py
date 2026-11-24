@@ -18,6 +18,7 @@ open_browser（或第一次 browser_* 工具调用）由 page.get_browser() 创�
 
 定时回调一律带 receiver 上下文（CLAUDE.md 的 QTimer.singleShot 实测崩溃那条）。
 """
+import os
 import re
 import time
 import urllib.parse
@@ -49,6 +50,7 @@ _ICONS = {
               '<path d="M8 2a9.3 9.3 0 0 0 0 12"/>'),
     "error": '<circle cx="8" cy="8" r="6"/><path d="M8 5v3.6"/><path d="M8 11h.01"/>',
     "plug": '<path d="M6 4.7L2.7 8 6 11.3"/><path d="M10 4.7L13.3 8 10 11.3"/><path d="M8.9 3.3l-1.8 9.4"/>',
+    "shield": '<path d="M8 1.8 2.8 3.8v4c0 3.3 2.3 5.3 5.2 6 2.9-.7 5.2-2.7 5.2-6v-4z"/><path d="M8 5.8v2.8M8 10.8h.01"/>',
 }
 _RECENT_MAX = 6
 _recent_pages: list = []        # 本次运行里打开过的页面 [{title, url}]，面板重开也还在（不落盘）
@@ -498,6 +500,8 @@ class _ErrorPage(QWidget):
 
     reload_clicked = Signal()
     background_clicked = Signal()
+    proceed_clicked = Signal()          # 证书页「仍然访问（只这次）」
+    back_clicked = Signal()             # 证书页「返回」
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -539,8 +543,24 @@ class _ErrorPage(QWidget):
         self.background_btn.setCursor(Qt.PointingHandCursor)
         self.background_btn.setFixedHeight(34)
         self.background_btn.clicked.connect(self.background_clicked)
+        # 证书不受信任（复审 #17，设计稿④）：本机的给「仍然访问（只这次）」，公网的只给「返回」
+        self.proceed_btn = QPushButton("仍然访问（只这次）", box)
+        self.proceed_btn.setObjectName("browserOpenPrimary")
+        self.proceed_btn.setCursor(Qt.PointingHandCursor)
+        self.proceed_btn.setFixedHeight(34)
+        self.proceed_btn.clicked.connect(self.proceed_clicked)
+        self.back_btn = QPushButton("返回", box)
+        self.back_btn.setObjectName("browserOpenSecondary")
+        self.back_btn.setCursor(Qt.PointingHandCursor)
+        self.back_btn.setFixedHeight(34)
+        self.back_btn.clicked.connect(self.back_clicked)
+        self.kind = "connect"
         row.addWidget(self.reload_btn)
         row.addWidget(self.background_btn)
+        row.addWidget(self.proceed_btn)
+        row.addWidget(self.back_btn)
+        self.proceed_btn.setVisible(False)
+        self.back_btn.setVisible(False)
         row.addStretch(1)
         col.addLayout(row)
         self.code = QLabel(box)
@@ -554,7 +574,27 @@ class _ErrorPage(QWidget):
         outer.addLayout(hl)
         outer.addStretch(3)
 
+    def set_cert_error(self, url: str, desc: str, local: bool, overridable: bool):
+        """证书不受信任：本机开发服务常用自签证书，可以「仍然访问」；公网网站这样可能有人冒充。"""
+        self.kind = "cert"
+        host = _host_port(url)
+        self.title.setText("这个网站的证书不受信任")
+        if local:
+            self.body.setText(f"{host} 用的是自己签发的证书。本机开发服务常这样，"
+                              "确认是你自己起的服务就可以继续。")
+        else:
+            self.body.setText("可能有人在冒充这个网站，灵犀不打开它。")
+        self.reload_btn.setVisible(False)
+        self.background_btn.setVisible(False)
+        self.proceed_btn.setVisible(bool(local and overridable))
+        self.back_btn.setVisible(True)
+        self.code.setText(desc or "")
+
     def set_error(self, url: str, error: str, code: int):
+        self.kind = "connect"
+        self.reload_btn.setVisible(True)
+        self.proceed_btn.setVisible(False)
+        self.back_btn.setVisible(False)
         host = _host_port(url)
         self.title.setText(f"连不上 {host}" if host else "页面没能打开")
         local = security.is_localhost(url) if url else False
@@ -576,6 +616,88 @@ class _ErrorPage(QWidget):
         if code:
             clean = clean.replace("$1", str(code))
         self.code.setText(clean or (f"错误 {code}" if code else ""))
+
+
+class _DownloadBar(QFrame):
+    """下载存好了：「✓ 已下载 文件名 … 打开 · 在文件夹中显示」，8 秒后自己收起（设计稿③）。"""
+
+    HIDE_MS = 8000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("browserDownloadBar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(40)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(12, 0, 8, 0)
+        h.setSpacing(10)
+        self.icon = QLabel(self)
+        self.icon.setFixedSize(15, 15)
+        self.text = QLabel(self)
+        self.text.setObjectName("browserDownloadText")
+        self.text.setTextFormat(Qt.PlainText)
+        self.open_btn = QPushButton("打开", self)
+        self.folder_btn = QPushButton("在文件夹中显示", self)
+        for b in (self.open_btn, self.folder_btn):
+            b.setObjectName("browserDownloadLink")
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFlat(True)
+        self.open_btn.clicked.connect(self._open)
+        self.folder_btn.clicked.connect(self._reveal)
+        h.addWidget(self.icon)
+        h.addWidget(self.text, 1)
+        h.addWidget(self.open_btn)
+        h.addWidget(self.folder_btn)
+        self._path = ""
+        self._ok = False
+        self._theme = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self.HIDE_MS)
+        self._timer.timeout.connect(lambda: self.setVisible(False))
+
+    def show_result(self, path: str, ok: bool):
+        self._path, self._ok = path, ok
+        name = os.path.basename(path)
+        self.text.setText(f"已下载 {name}" if ok else f"下载没完成：{name}")
+        self.open_btn.setVisible(ok)
+        self.folder_btn.setVisible(ok)
+        self._paint_icon()
+        self.setVisible(True)
+        self._timer.start()
+
+    def apply_theme(self, t):
+        self._theme = t
+        self.setStyleSheet(
+            f"QFrame#browserDownloadBar {{ background: {t('dlg_bg')}; border: none;"
+            f" border-top: 1px solid {t('dlg_border')}; }}"
+            f"QLabel#browserDownloadText {{ color: {t('dlg_title')}; font-size: 12px; }}"
+            f"QPushButton#browserDownloadLink {{ background: transparent; border: none;"
+            f" color: {t('dlg_link')}; font-size: 12px; padding: 4px 6px; }}"
+            f"QPushButton#browserDownloadLink:hover {{ text-decoration: underline; }}")
+        self._paint_icon()
+
+    def _paint_icon(self):
+        if self._theme is None:
+            return
+        t = self._theme
+        glyph = '<path d="M13 4.5 6.5 11 3 7.5"/>' if self._ok else '<path d="M8 4v5M8 11.5h.01"/>'
+        self.icon.setPixmap(_svg_pixmap(glyph, t("dlg_ok_fg" if self._ok else "dlg_warn_fg"),
+                                        15, view=16, stroke=2.0, dpr=2.0))
+
+    def _open(self):
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self._path))
+
+    def _reveal(self):
+        import subprocess
+        import sys
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(self._path)],
+                             stdin=subprocess.DEVNULL)
+        else:
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(self._path)))
 
 
 # ── 面板 ───────────────────────────────────────────────────────────
@@ -683,10 +805,16 @@ class BrowserView(QWidget):
         self.error_page = _ErrorPage(self.content)
         self.error_page.reload_clicked.connect(lambda: self._page_action("reload"))
         self.error_page.background_clicked.connect(self.background_requested)
+        self.error_page.proceed_clicked.connect(self._proceed_despite_certificate)
+        self.error_page.back_clicked.connect(self._back_from_error)
         self.content.addWidget(self.empty)
         self.content.addWidget(self.page_frame)
         self.content.addWidget(self.error_page)
         lay.addWidget(self.content, 1)
+        # 用户点的下载存好了：底部浮一条「已下载 … 打开 · 在文件夹中显示」（设计稿③）
+        self.download_bar = _DownloadBar(self)
+        self.download_bar.setVisible(False)
+        lay.addWidget(self.download_bar)
 
         # 「灵犀的鼠标」+ 操作中的柔光：浮在网页上面一层（状态卡再在它上面）
         self.overlay = _AgentOverlay(self.page_frame, self._theme)
@@ -969,8 +1097,44 @@ class BrowserView(QWidget):
                 return
             self.failed = True
             self._error = (info.url().toString(), err, int(info.errorCode()))
-            self.error_page.set_error(*self._error)
+            cert = getattr(self._wired_page, "lx_cert_error", None) if self._wired_page is not None else None
+            if (info.errorDomain() == QWebEngineLoadingInfo.ErrorDomain.CertificateErrorDomain
+                    and cert):
+                self.error_page.set_cert_error(cert["url"], cert["desc"], cert["local"],
+                                               cert["overridable"])
+            else:
+                self.error_page.set_error(*self._error)
+            self._paint_error_tile()
             self._update_mode()
+
+    def _paint_error_tile(self):
+        t = self._theme
+        cert = self.error_page.kind == "cert"
+        self.error_page.tile.setProperty("tone", "warn" if cert else "")
+        self.error_page.tile.style().unpolish(self.error_page.tile)
+        self.error_page.tile.style().polish(self.error_page.tile)
+        self.error_page.tile.setPixmap(_svg_pixmap(
+            _ICONS["shield" if cert else "plug"], t("dlg_warn_fg" if cert else "dlg_err_fg"),
+            20, view=16, stroke=1.6, dpr=2.0))
+
+    def _proceed_despite_certificate(self):
+        """证书页「仍然访问（只这次）」：这个本机 host:port 到关浏览器前放行，再打开一次。"""
+        cert = getattr(self._wired_page, "lx_cert_error", None) if self._wired_page is not None else None
+        if not cert or not cert.get("local"):
+            return
+        page.allow_certificate(cert["url"])
+        self.navigate(cert["url"])
+
+    def _back_from_error(self):
+        """证书页「返回」：有上一页就回去，没有就收起错误页（不打开那个网站）。"""
+        p = self._wired_page
+        self.failed = False
+        if p is not None and shiboken6.isValid(p) and p.history().canGoBack():
+            self._page_action("back")
+        self._update_mode()
+
+    def show_download_done(self, path: str, ok: bool):
+        self.download_bar.show_result(path, ok)
 
     # ── 导航 ────────────────────────────────────────────────────
     def navigate(self, url: str):
@@ -987,9 +1151,13 @@ class BrowserView(QWidget):
         was_loading = self._loading
         self._loading = True
         self._update_mode()
-        # 走缓存闸门：清缓存在途时排队等清完（和清理重叠的导航会卡死）；关过浏览器先清一次
+        # 走缓存闸门：清缓存在途时排队等清完（和清理重叠的导航会卡死）；关过浏览器先清一次。
+        # 本机地址先清 HTTP 缓存再开：调自己的页面时改了 app.js，地址栏重开要跑新代码
+        # （以前只有模型的 browser_open 清，用户在面板里重开拿到的是旧版，复审 #14）。
+        # 公网站点不清：静态资源大多带指纹，清了只是白白重下
         from ..browser import page as page_mod
-        page_mod.load_url(self._embedded.page(), QUrl(url), page_loading=was_loading)
+        page_mod.load_url(self._embedded.page(), QUrl(url), page_loading=was_loading,
+                          clear_first=security.is_localhost(url))
 
     def _navigate(self):
         self._user_typing = False
@@ -1013,6 +1181,7 @@ class BrowserView(QWidget):
         p = self._wired_page
         if p is None or not shiboken6.isValid(p):
             return
+        page.allow_leave(p)      # 用户点的：页面的「确定离开吗」放行（复审 #15）
         if which == "back":
             p.triggerAction(p.WebAction.Back)
         elif which == "forward":
@@ -1020,8 +1189,9 @@ class BrowserView(QWidget):
         elif which == "reload":
             self.failed = False
             from ..browser import page as page_mod      # 清缓存在途时等清完再刷新（同 navigate）
+            # 绕过缓存刷新：点「刷新」就是要看改过的代码（普通 Reload 照样用缓存里的旧 JS，复审 #14）
             page_mod.when_cache_idle(
-                lambda: shiboken6.isValid(p) and p.triggerAction(p.WebAction.Reload))
+                lambda: shiboken6.isValid(p) and p.triggerAction(p.WebAction.ReloadAndBypassCache))
 
     def _reload_or_stop(self):
         p = self._wired_page
@@ -1362,6 +1532,8 @@ class BrowserView(QWidget):
             f" background: transparent; }}"
             f"QLabel#browserErrorTile {{ background: {t('dlg_err_bg')}; border: 1px solid {t('dlg_err_border')};"
             f" border-radius: 12px; }}"
+            f"QLabel#browserErrorTile[tone=\"warn\"] {{ background: {t('dlg_warn_bg')};"
+            f" border: 1px solid {t('dlg_warn_border')}; }}"
             f"QLabel#browserErrorTitle {{ color: {text}; font-size: 17px; font-weight: 600; }}"
             f"QLabel#browserErrorBody {{ color: {sec}; font-size: 14px; }}"
             f"QLabel#browserErrorCode {{ color: {sec}; font-family: {MONO_CSS}; font-size: 11px; }}"
@@ -1374,8 +1546,8 @@ class BrowserView(QWidget):
         self.devtools_popout_btn.setIcon(_icon("popout", icon_c, 13))
         self.devtools_close_btn.setIcon(_icon("close", icon_c, 12))
         self._paint_reload_icon()
-        self.error_page.tile.setPixmap(_svg_pixmap(_ICONS["plug"], t("dlg_err_fg"), 20, view=16,
-                                                   stroke=1.6, dpr=2.0))
+        self._paint_error_tile()
+        self.download_bar.apply_theme(t)
         dot = _svg_pixmap('<circle cx="8" cy="8" r="2.4"/>', t("dlg_input_focus"), 16, view=16,
                           stroke=4.0, dpr=2.0)
         self.status_card.dot.setPixmap(dot)

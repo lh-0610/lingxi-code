@@ -296,9 +296,14 @@ class _ElidedLabel(QLabel):
 
     def sizeHint(self):
         # 想要的宽度按【完整文字】报：QLabel 默认按当前（已经省略过的）文字算，按想要的宽度排的
-        # 地方（工具卡头上交了脚本的命令）会一直拿到 0 宽、只剩空白。尺寸策略是 Ignored 时不看这个
-        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 4,
-                     super().sizeHint().height())
+        # 地方（工具卡头上交了脚本的命令）会一直拿到 0 宽、只剩空白。尺寸策略是 Ignored 时不看这个。
+        # 文字宽度记着：布局一轮要问很多遍，现量的话拖窗口时这里就占好几毫秒（实测）
+        key = (self._full, self.font().key())
+        if getattr(self, "_hint_key", None) != key:
+            self._hint_key = key
+            self._hint = QSize(self.fontMetrics().horizontalAdvance(self._full) + 4,
+                               super().sizeHint().height())
+        return self._hint
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -536,7 +541,29 @@ class BodyText(QLabel):
         # 右键菜单要知道点在哪个链接上：QLabel 不给按位置查链接，跟着悬停记下来
         self.linkHovered.connect(lambda href: self.setProperty("lx_hover_link", href or ""))
         self.linkHovered.connect(self._show_link_tip)
+        self._hfw_cache = {}
         self.setText(text)
+
+    # 「这个宽度要多高」自己记着：QLabel 不缓存，每问一次就把整段富文本重新排一遍版。布局一轮
+    # 要问好几次、还按不同宽度问（实测流式时每来一段，前面写完的每一段都被问了 782 / 266 两个
+    # 宽度），回复一长每段就要几十毫秒。文字 / 字体 / 样式一变就清
+    def setText(self, text):
+        self._hfw_cache = {}
+        super().setText(text)
+
+    def heightForWidth(self, w):
+        h = self._hfw_cache.get(w)
+        if h is None:
+            h = super().heightForWidth(w)
+            if len(self._hfw_cache) >= 6:
+                self._hfw_cache.clear()
+            self._hfw_cache[w] = h
+        return h
+
+    def changeEvent(self, event):
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange, QEvent.ContentsRectChange):
+            self._hfw_cache = {}
+        super().changeEvent(event)
 
     def _show_link_tip(self, href):
         """悬停链接：完整网址 + 点了会怎样（设计稿「回复里的链接」）。链接上只显示标题或
@@ -962,7 +989,8 @@ class ToolCallCard(QFrame):
         self._sync_script_info()
         if self._args is not None and self._args_needed:
             self._args.setText(highlight_json(self._detail))
-        if self._script_box is not None:
+        if self._body is not None and self._script:
+            self._ensure_script_widgets()
             self._fill_script()
         self._sync()
 
@@ -1130,17 +1158,8 @@ class ToolCallCard(QFrame):
         if self._args_needed:
             self._args.setText(highlight_json(self._detail))
         bl.addWidget(self._args)
-        # 交了脚本：「脚本 · Python」+ 脚本框（和输出框同一个样式、行距，最多露 16 行），
-        # 输出框上面相应标「输出」——两个框叠在一起时分得开
-        self._script_label = QLabel()
-        self._script_label.setProperty("mv", "toolBoxLabel")
-        bl.addWidget(self._script_label)
-        self._script_box = self._make_box("toolScript")
-        bl.addWidget(self._script_box)
-        self._out_label = QLabel("输出")
-        self._out_label.setProperty("mv", "toolBoxLabel")
-        bl.addWidget(self._out_label)
         if self._script:
+            self._ensure_script_widgets()
             self._fill_script()
         self._out = QPlainTextEdit()
         self._out.setObjectName("toolOut")
@@ -1170,6 +1189,22 @@ class ToolCallCard(QFrame):
             lambda _size, b=box: self._fit_box(b))
         box.installEventFilter(self)
         return box
+
+    def _ensure_script_widgets(self):
+        """交了脚本才建：「脚本 · Python」+ 脚本框（和输出框同一个样式、行距，最多露 16 行），
+        输出框上面相应标「输出」——两个框叠在一起时分得开。没交脚本的命令一个都不建
+        （重画长会话时每张卡多建几个藏着的控件，正是早先「点开才建输出框」要省掉的）。"""
+        if self._script_box is not None:
+            return
+        bl = self._body.layout()
+        at = bl.indexOf(self._args) + 1
+        self._script_label = QLabel()
+        self._script_label.setProperty("mv", "toolBoxLabel")
+        self._script_box = self._make_box("toolScript")
+        self._out_label = QLabel("输出")
+        self._out_label.setProperty("mv", "toolBoxLabel")
+        for i, w in enumerate((self._script_label, self._script_box, self._out_label)):
+            bl.insertWidget(at + i, w)
 
     def _fill_script(self):
         lang = {"python": "Python", "javascript": "JavaScript"}.get(self._script_lang, "")
@@ -1270,11 +1305,12 @@ class ToolCallCard(QFrame):
         if self._body is not None:
             self._body.setVisible(self._open and expandable)
             self._args.setVisible(self._open and self._args_needed)
-            has_script = bool(self._script)
-            self._script_label.setVisible(self._open and has_script)
-            self._script_box.setVisible(self._open and has_script)
             self._out.setVisible(self._open and self._out_lines > 0)
-            self._out_label.setVisible(self._open and has_script and self._out_lines > 0)
+            if self._script_box is not None:
+                has_script = bool(self._script)
+                self._script_label.setVisible(self._open and has_script)
+                self._script_box.setVisible(self._open and has_script)
+                self._out_label.setVisible(self._open and has_script and self._out_lines > 0)
         # 运行中露最新一行输出；跑完收掉（结果看右边的状态，要看全文就展开）
         self._tail.setVisible(running and self._out_lines > 0 and not self._open)
         self.setProperty("open", "true" if self._open else "false")
@@ -1811,6 +1847,11 @@ def _user_html(text: str) -> str:
     return "".join(parts).replace("\n", "<br>")
 
 
+# 流式时按空行拆段落（见 AssistantTurn.append_body）；拆开的段落之间留的空白约等于原来的一个空行
+_PARA_SPLIT = re.compile(r"\n[ \t]*\n+")
+_STREAM_PARA_GAP = 14
+
+
 class _Block(QWidget):
     """块外面的一层：带上方间距。收起过程时整块藏起来，间距一起走，不留空洞。"""
     def __init__(self, inner: QWidget, top_gap: int):
@@ -1842,6 +1883,7 @@ class AssistantTurn(QWidget):
         # 当前流式状态
         self._cur_body = None          # 正在流式的正文 BodyText（累加纯文本）
         self._cur_body_text = ""
+        self._stream_parts = []        # 流式时第二段起的段落各占一个 BodyText（见 append_body）
         self._cur_think = None         # 当前 ThinkingChip（流式累加）
         self._cur_think_text = ""
         self._cur_tool = None          # 当前工具行（还在接收输出）
@@ -1903,6 +1945,17 @@ class AssistantTurn(QWidget):
     def end_body(self):
         self._cur_body = None
         self._cur_body_text = ""
+        self._stream_parts = []        # 没走 finalize 就结束的（停止 / 报错）：分段留着照样能看
+
+    def _drop_stream_parts(self):
+        """流式时拆出来的段落块拿掉：正文合回第一块，换成渲染好的 markdown。"""
+        for part in self._stream_parts:
+            blk = part.parentWidget()
+            if blk is not None and not _deleted(blk):
+                self._v.removeWidget(blk)
+                blk.setParent(None)
+                blk.deleteLater()
+        self._stream_parts = []
 
     def end_tool(self):
         self.stop_tool_clock()
@@ -1928,13 +1981,28 @@ class AssistantTurn(QWidget):
         # 首尾的换行不画：模型常写「我来查一下：\n\n」再调工具，两个换行变成两行 <br>，
         # 这段过渡回复和下面那行工具之间平白空出两行（中间的换行照常保留）
         shown = self._cur_body_text.strip("\r\n")
-        self._cur_body.setText(_esc(shown).replace("\n", "<br>"))
+        # 按段落拆开，每段一个 BodyText，只改最后一段（和刚写完的那段）。以前整段回复塞进一个
+        # QLabel，每来几个字就把全文重新排版好几遍：九千字时每段要 140ms，越写越卡（实测）。
+        # 回复结束（finalize_markdown）再合回一个渲染好的 markdown 块
+        paras = _PARA_SPLIT.split(shown)
+        labels = [self._cur_body] + self._stream_parts
+        while len(labels) < len(paras):
+            part = self._add(BodyText(""), top_gap=_STREAM_PARA_GAP)
+            part.link_clicked.connect(self.file_link_clicked)
+            self._stream_parts.append(part)
+            labels.append(part)
+        for label, para in zip(labels[max(0, len(paras) - 2):len(paras)],
+                               paras[max(0, len(paras) - 2):]):
+            html = _esc(para).replace("\n", "<br>")
+            if label.text() != html:
+                label.setText(html)
 
     def finalize_markdown(self, html, md=None):
         """流式结束:把当前正文替换成渲染好的 markdown 富文本（md 是源文，右键「复制为 Markdown」用）。"""
         self._close_think()
         if self._cur_body is None:
             self._cur_body = self._new_body()
+        self._drop_stream_parts()
         self._cur_body.setText(html)
         if md:
             self._cur_body.setProperty("lx_markdown", md)
@@ -2313,7 +2381,7 @@ class MessageView(QScrollArea):
     def scroll_to_step(self, n: int, title: str = "") -> bool:
         """滚到第 n 步的步骤分段（同一步出现过多次取最近的那次；步骤名对得上的优先），
         所在的那一轮收起了就先展开，落点短暂高亮。消息流里没有这一步的分段时返回 False。"""
-        headers = [h for h in self._content.findChildren(StepHeader) if h.n == n]
+        headers = [h for h in self._content.findChildren(StepHeader) if h.n == n and self._alive(h)]
         if title:
             headers = [h for h in headers if h.title == title] or headers
         if not headers:
@@ -2347,12 +2415,17 @@ class MessageView(QScrollArea):
         if needle:
             # 工具参数要展开才生成（见 ToolCallCard）：参数里有要找的字、还没生成的先补建出来
             for row in self._content.findChildren(ToolCallCard):
+                if not self._alive(row):
+                    continue
                 if row._body is None and (
                         (row._args_needed and needle in row._detail.lower())
                         or needle in row.script_text().lower()):
                     row.ensure_body()
             # 一次遍历同时收 QLabel 和引用块：findChildren 是先序深度优先，顺序就是显示的先后
+            alive_check = bool([g for g in getattr(self, "_gone", []) if not _deleted(g)])
             for lbl in self._content.findChildren(QWidget):
+                if alive_check and not self._alive(lbl):
+                    continue
                 if isinstance(lbl, ClampText):
                     plain = lbl.text().lower()
                 elif isinstance(lbl, QPlainTextEdit) and lbl.objectName() == "toolScript":
@@ -2395,6 +2468,12 @@ class MessageView(QScrollArea):
         # 展开后的新高度要等布局排完才准，下一轮事件循环再滚
         QTimer.singleShot(0, self, lambda: self._scroll_to_hit(lbl, pos, total))
         return idx + 1, len(hits)
+
+    def _alive(self, w) -> bool:
+        """不在刚清掉、还没删完的旧会话里（见 clear）。"""
+        gone = [g for g in getattr(self, "_gone", []) if not _deleted(g)]
+        self._gone = gone
+        return not any(g is w or g.isAncestorOf(w) for g in gone)
 
     def clear_find(self):
         self._clear_find_selection()
@@ -2466,12 +2545,18 @@ class MessageView(QScrollArea):
             content.resize(width, h)
 
     def clear(self):
+        # 藏起来再延后删：立即从显示上消失，删本身挪到下一轮事件循环（那时新会话已经画出来了）。
+        # 以前先 setParent(None) 摘下来——Qt 把每一轮临时变成顶层窗口，长会话切过去光这一步就
+        # 140ms（实测，挪到另一个藏着的父控件下也一样慢）。删之前它们还挂在 _content 下面，
+        # 按类型找子控件的地方（搜索、定位步骤）用 _alive 跳过
+        self._gone = [g for g in getattr(self, "_gone", []) if not _deleted(g)]
         while self._col.count() > 1:   # 留最后的 stretch
             it = self._col.takeAt(0)
             w = it.widget()
             if w is not None:
-                w.setParent(None)        # 立即从显示移除（deleteLater 是异步的,不设会残留旧消息）
+                w.hide()
                 w.deleteLater()
+                self._gone.append(w)
         self._cur_user = None
         self._cur_assistant = None
         self._cur_round = None

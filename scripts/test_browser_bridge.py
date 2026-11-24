@@ -62,6 +62,31 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.startswith("/attachment.txt"):
+            body = "报表内容".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="report.txt"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/basic"):
+            import base64
+            good = "Basic " + base64.b64encode(b"admin:s3cret").decode()
+            if self.headers.get("Authorization") != good:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="admin area"')   # 头里只能放 latin-1
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = "<html><body><h1 id='out'>登录成功</h1></body></html>".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/setcookie"):
             body = b"<html><body>cookie set</body></html>"
             self.send_response(200)
@@ -1471,3 +1496,292 @@ def test_browser_check_counts_only_after_a_clean_reload_of_the_edited_page(brows
     assert [g for g in vf.gaps_from_state(v) if "git_diff" not in g] == []
     last = [e for e in v["evidence"] if e["kind"] == "browser"][-1]
     assert last["status"] == "passed" and last["path"].startswith(base)
+
+
+# ── 复审剩余项（2026-11-23）：#14 刷新跑旧 JS、#15 离开确认、#11 富文本框的名字、
+#    #12 blob / data 子框架与没有表单的回车 ──
+
+def _wait_for(browser, check, secs=6.0):
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        if check():
+            return True
+        browser.processEvents()
+        time.sleep(0.05)
+    return check()
+
+
+def test_panel_reload_and_address_bar_run_the_new_code(browser, editable_site):
+    """复审 #14：面板的「刷新」和地址栏重开拿到的是缓存里的旧 app.js，只有模型的 browser_open
+    清了缓存。现在刷新绕过缓存，本机地址从地址栏打开也先清缓存。"""
+    from src.ui.browser_panel import BrowserView
+    base, app_js = editable_site
+    old = time.time() - 365 * 24 * 3600
+    bv = BrowserView()
+    bv.resize(900, 700)
+    bv.show()
+    try:
+        bv.address.setText(base + "/index.html")
+        bv._navigate()
+        assert _wait_for(browser, lambda: _out(browser) == "v1"), _out(browser)
+        app_js.write_text("document.getElementById('out').textContent = 'v2';\n", encoding="utf-8")
+        os.utime(app_js, (old, old))
+        bv._page_action("reload")
+        assert _wait_for(browser, lambda: _out(browser) == "v2"), f"点刷新还在跑旧代码：{_out(browser)}"
+        # 正在加载时不清缓存（和在途导航一起清会卡住）：等这次刷新加载完再从地址栏重开
+        assert _wait_for(browser, lambda: not bv._loading)
+        app_js.write_text("document.getElementById('out').textContent = 'v3';\n", encoding="utf-8")
+        os.utime(app_js, (old, old))
+        bv.address.setText(base + "/index.html")
+        bv._navigate()
+        assert _wait_for(browser, lambda: _out(browser) == "v3"), f"地址栏重开还在跑旧代码：{_out(browser)}"
+    finally:
+        bv.close()
+        bv.deleteLater()
+
+
+def test_leaving_a_page_with_unsaved_changes(browser, servers, trusted_tools):
+    """复审 #15：页面挂了「确定离开吗」，用户在上面点过以后，离开确认走 confirm 通道被一律拒绝——
+    模型再 browser_open 就卡满超时。我们自己发起的跳转放行这一次；页面自己弹的 confirm 照旧拒绝。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/leave.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "删除"))   # 真实点击：有了用户手势
+    assert "已点击" in out, out
+    assert _out(browser) == "cancelled", "页面自己的 confirm 不替用户同意"
+    t0 = time.time()
+    out = _tool(browser, tb.browser_open.func, servers[0] + "/form.html", timeout=8)
+    assert "已打开" in out, out
+    assert time.time() - t0 < 5, "离开确认被拒的话这里要卡满超时"
+    # 刚跳过来的新页面：上一次放行不能留给它自己的 confirm
+    _tool(browser, tb.browser_open.func, servers[0] + "/leave.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    _tool(browser, tb.browser_click.func, _ref_of(snap, "删除"))
+    assert _out(browser) == "cancelled", "导航放行留到了新页面的 confirm 上"
+
+
+def test_rich_text_editors_are_named_by_their_form_labels(browser, servers, trusted_tools):
+    """复审 #11：组件库里的富文本框是 contenteditable，表单标签的 for 指向不存在的 id，
+    快照里只剩无名 textbox，模型分不清标题和正文。一个标签管两个编辑器时不取名（分不清就别猜）。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/editors.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    assert 'textbox "标题"' in snap and 'textbox "正文"' in snap, snap
+    assert '"两栏"' not in snap, "一个标签两个编辑器：不能把同一个名字安到两个框上"
+    assert '"主标签"' not in snap and '"附注"' not in snap, "两个标签一个编辑器：分不清就不猜"
+    assert snap.count("- textbox [ref=") == 3, snap
+
+
+def test_blob_and_data_subframes_are_shown(browser, servers, trusted_tools):
+    """复审 #12：页面自己在 iframe 里放的 blob: / data: 内容以前也被拦了（只放 http(s)）。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/subframes.html")
+    _call(browser, "settle", ms=800)
+    frames = _call(browser, "frames")["frames"]
+    paths = {f["url"].split(":", 1)[0]: f["path"] for f in frames}
+    assert "blob" in paths and "data" in paths, frames
+    assert "blob 里的按钮" in _tool(browser, tb.browser_snapshot.func, frame=paths["blob"])
+    assert "data 里的按钮" in _tool(browser, tb.browser_snapshot.func, frame=paths["data"])
+
+
+def test_enter_without_a_form_reaches_keyup_listeners(browser, servers, trusted_tools):
+    """复审 #12：没有表单时「输入 + 回车」只发了 keydown，听 keyup 的搜索框（Vue @keyup.enter）收不到。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/enter.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    out = _tool(browser, tb.browser_type.func, _ref_of(snap, "搜索"), "灵犀", submit=True)
+    assert "已向" in out, out
+    assert _wait_for(browser, lambda: _out(browser) == "搜索: 灵犀", 2), _out(browser)
+
+
+# ── 复审 #16 #17：网页弹框、下载、证书、登录（设计稿「侧栏浏览器 · 网页弹框、下载、证书、登录」）──
+#    浏览器工具正在跑（锁被占着）= 模型触发：不问用户、按取消、工具结果里如实说；
+#    其余时候 = 用户在面板里点的：问用户（界面层注册的同步回调，这里换成记录器）
+
+@pytest.fixture()
+def ui_hooks(monkeypatch):
+    calls = {"js": [], "download": [], "auth": []}
+    answers = {"js": (True, "", False), "download": None, "auth": None}
+
+    def js_dialog(kind, url, msg, default):
+        calls["js"].append((kind, url, msg, default))
+        return answers["js"]
+
+    def download(name, size, url):
+        calls["download"].append((name, size, url))
+        return answers["download"]
+
+    def auth(url, realm):
+        calls["auth"].append((url, realm))
+        return answers["auth"]
+
+    monkeypatch.setattr(page_mod, "_ui_hooks",
+                        {"js_dialog": js_dialog, "download": download, "auth": auth})
+    page_mod.drain_model_events()
+    return calls, answers
+
+
+def _user_click(browser, element_id):
+    """不经浏览器工具点（工具的锁没被占）= 用户在面板里点的。"""
+    _call(browser, "js", code=f"document.getElementById('{element_id}').click(); 1")
+
+
+def test_page_confirm_asks_the_user_when_they_clicked(browser, servers, trusted_tools, ui_hooks):
+    calls, answers = ui_hooks
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/pagedialogs.html")
+    _user_click(browser, "del")
+    assert _wait_for(browser, lambda: _out(browser) == "deleted"), "用户点了确定，网页收到的是同意"
+    assert calls["js"] and calls["js"][0][0] == "confirm" and "张三" in calls["js"][0][2]
+    # prompt：带网页给的默认值，用户填的字交回网页
+    answers["js"] = (True, "王五", False)
+    _user_click(browser, "ask")
+    assert _wait_for(browser, lambda: _out(browser) == "name=王五")
+    assert calls["js"][-1][:2][0] == "prompt" and calls["js"][-1][3] == "李四"
+    # 勾了「这个网页别再弹框了」：之后同一个网站的弹框直接按取消，不再问
+    answers["js"] = (False, "", True)
+    _user_click(browser, "del")
+    assert _wait_for(browser, lambda: _out(browser) == "cancelled")
+    asked = len(calls["js"])
+    _user_click(browser, "del")
+    browser.processEvents()
+    assert _wait_for(browser, lambda: _out(browser) == "cancelled")
+    assert len(calls["js"]) == asked, "勾了别再弹框还在问"
+
+
+def test_page_confirm_from_a_model_click_is_cancelled_and_reported(browser, servers, trusted_tools,
+                                                                   ui_hooks):
+    calls, _ = ui_hooks
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/pagedialogs.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "删除"))
+    assert calls["js"] == [], "模型触发的弹框不弹给用户"
+    assert _out(browser) == "cancelled", "不替用户点同意"
+    assert "页面弹出确认框" in out and "请用户自己在面板里点" in out, out
+    assert "张三" in out and "张三" not in _outside_fences(out), "确认框内容是网页写的字，进围栏"
+
+
+def test_download_asks_the_user_and_is_saved(browser, servers, trusted_tools, ui_hooks, tmp_path):
+    calls, answers = ui_hooks
+    tb = trusted_tools
+    done = []
+    page_mod._notifier.download_done.connect(lambda p, ok: done.append((p, ok)))
+    _tool(browser, tb.browser_open.func, servers[0] + "/pagedialogs.html")
+    answers["download"] = (str(tmp_path), "report.txt")
+    _user_click(browser, "dl")
+    assert _wait_for(browser, lambda: bool(done)), "下载没结束"
+    assert calls["download"] and calls["download"][0][0] == "report.txt"
+    assert done[-1] == (str(tmp_path / "report.txt"), True)
+    assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "报表内容"
+
+
+def test_download_from_a_model_click_is_blocked_and_reported(browser, servers, trusted_tools, ui_hooks):
+    calls, _ = ui_hooks
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/pagedialogs.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "下载报表"))
+    _call(browser, "settle", ms=600)
+    assert calls["download"] == [], "模型点的下载不弹给用户"
+    assert "页面要下载文件，已拦下" in out and "report.txt" in out, out
+
+
+def test_basic_auth_asks_the_user_and_keeps_the_password_from_the_model(browser, servers,
+                                                                        trusted_tools, ui_hooks):
+    calls, answers = ui_hooks
+    tb = trusted_tools
+    answers["auth"] = ("admin", "s3cret")
+    out = _tool(browser, tb.browser_open.func, servers[0] + "/basic")
+    assert calls["auth"] and calls["auth"][0][1] == "admin area"
+    assert "登录成功" in out, out
+    assert "用户已在弹框里登录" in out and "s3cret" not in out and "admin" not in out, out
+    # 用户取消：模型知道是取消了，页面是 401
+    page_mod.close_browser()
+    answers["auth"] = None
+    out = _tool(browser, tb.browser_open.func, servers[0] + "/basic?again")
+    assert "用户取消了" in out, out
+
+
+@pytest.fixture(scope="module")
+def https_server(qapp, tmp_path_factory):
+    """本机 https，自签证书（本机开发服务常这样）。"""
+    import datetime
+    import ssl
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    d = tmp_path_factory.mktemp("tls")
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    import ipaddress
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=30))
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                           critical=False)
+            .sign(key, hashes.SHA256()))
+    (d / "c.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    (d / "k.pem").write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                                serialization.PrivateFormat.TraditionalOpenSSL,
+                                                serialization.NoEncryption()))
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(d / "c.pem"), str(d / "k.pem"))
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"https://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def test_self_signed_local_certificate(browser, trusted_tools, https_server):
+    """复审 #17：本机 https 自签证书以前直接打不开。模型打开：不替它放行、如实说；
+    面板证书页点「仍然访问（只这次）」后放行这个 host:port，关浏览器就忘。"""
+    from src.ui.browser_panel import BrowserView
+    tb = trusted_tools
+    page_mod.drain_model_events()
+    out = _tool(browser, tb.browser_open.func, https_server + "/form.html", timeout=10)
+    assert "证书不受信任" in out and "仍然访问" in out, out
+    bv = BrowserView()
+    bv.resize(900, 700)
+    bv.show()
+    try:
+        bv.navigate(https_server + "/form.html")
+        assert _wait_for(browser, lambda: bv.failed and bv.error_page.kind == "cert")
+        assert bv.error_page.proceed_btn.isVisibleTo(bv.error_page), "本机地址给「仍然访问」"
+        bv.error_page.proceed_btn.click()
+        assert _wait_for(browser, lambda: not bv.failed and "设置" in (
+            _call(browser, "js", code="document.title + document.body.innerText").get("value") or ""))
+    finally:
+        bv.close()
+        bv.deleteLater()
+    page_mod.close_browser()
+    assert page_mod._cert_allowed == set(), "「只这次」：关掉浏览器就忘"
+
+
+def test_public_certificate_error_offers_no_way_through(qapp):
+    """公网网站证书不受信任可能就是有人冒充：只给「返回」，不给「仍然访问」；本机的两个都给。"""
+    from src.ui.browser_panel import _ErrorPage
+    ep = _ErrorPage()
+    ep.set_cert_error("https://bank.example.com/login", "证书颁发机构无效", local=False, overridable=True)
+    assert not ep.proceed_btn.isVisibleTo(ep) and ep.back_btn.isVisibleTo(ep)
+    assert "冒充" in ep.body.text()
+    ep.set_cert_error("https://localhost:8443/", "自签名", local=True, overridable=True)
+    assert ep.proceed_btn.isVisibleTo(ep) and "自己签发" in ep.body.text()
+    ep.set_cert_error("https://localhost:8443/", "自签名", local=True, overridable=False)
+    assert not ep.proceed_btn.isVisibleTo(ep), "Chromium 说不能跳过的就不给"
+    ep.set_error("http://localhost:1/", "net::ERR_CONNECTION_REFUSED", 0)
+    assert ep.reload_btn.isVisibleTo(ep) and not ep.back_btn.isVisibleTo(ep), "回到「连不上」的样子"
+    ep.deleteLater()
+
+
+def test_only_local_certificates_can_be_let_through():
+    page_mod._cert_allowed.clear()
+    page_mod.allow_certificate("https://bank.example.com/login")
+    assert page_mod._cert_allowed == set(), "公网网站的证书错误不给放行口子"
+    page_mod.allow_certificate("https://localhost:8443/app")
+    assert page_mod._cert_allowed == {"localhost:8443"}
+    page_mod._cert_allowed.clear()

@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>富文本表单</title></head>
+<body>
+<form>
+  <!-- 组件库常见写法：标签的 for 指向一个不存在的 id，编辑器是包了好几层的 contenteditable -->
+  <div class="item"><div class="label"><label for="title">标题</label></div>
+    <div class="control"><div class="wrap"><div class="editor"><div contenteditable="true"><p><br></p></div></div></div></div></div>
+  <div class="item"><div class="label"><label for="content">正文</label></div>
+    <div class="control"><div class="wrap"><div class="editor"><div contenteditable="true"><p><br></p></div></div></div></div></div>
+  <!-- 一个编辑器旁边两个标签：也分不清，不取名 -->
+  <div class="item"><label>主标签</label><label>附注</label><div contenteditable="true"><p>x</p></div></div>
+  <!-- 一个标签管着两个编辑器：分不清，不取名 -->
+  <div class="item"><label for="pair">两栏</label>
+    <div contenteditable="true"><p>左</p></div><div contenteditable="true"><p>右</p></div></div>
+</form>
+</body>
+</html>

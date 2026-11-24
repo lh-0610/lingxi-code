@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>子框架</title></head>
+<body>
+<iframe id="b" title="blob"></iframe>
+<iframe id="d" title="data" src="data:text/html;charset=utf-8,<button>data 里的按钮</button>"></iframe>
+<script>
+  const blob = new Blob(['<meta charset="utf-8"><button>blob 里的按钮</button>'], {type: 'text/html'});
+  document.getElementById('b').src = URL.createObjectURL(blob);
+</script>
+</body>
+</html>

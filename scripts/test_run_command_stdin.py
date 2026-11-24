@@ -145,7 +145,9 @@ def test_trusting_python_also_trusts_scripts_but_an_old_exact_entry_does_not(ses
 
 
 def test_the_tool_card_shows_the_command_then_the_script():
+    from src.streaming import SCRIPT_MARK
     _, detail = describe_tool_call("run_command", {"command": "python -", "stdin": _SCRIPT})
-    first, rest = detail.split("\n", 1)
+    # 命令和脚本之间夹 SCRIPT_MARK：工具卡据此分开（命令本身也可能多行，不能按第一个换行切）
+    first, rest = detail.split(SCRIPT_MARK, 1)
     assert first == "python -" and rest == _SCRIPT
     assert describe_tool_call("run_command", {"command": "dir"})[1] == "dir"

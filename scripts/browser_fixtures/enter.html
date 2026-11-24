@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>回车搜索</title></head>
+<body>
+<!-- 没有 form：Vue 的 @keyup.enter / 很多搜索框只听 keyup -->
+<input id="q" placeholder="搜索">
+<p id="out">-</p>
+<script>
+  document.getElementById('q').addEventListener('keyup', e => {
+    if (e.key === 'Enter' && e.keyCode === 13) document.getElementById('out').textContent = '搜索: ' + e.target.value;
+  });
+</script>
+</body>
+</html>

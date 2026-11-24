@@ -37,6 +37,7 @@ class _BrowserNotifier(QObject):
     tab_closed = Signal(int)
     current_changed = Signal(int)
     popup_blocked = Signal(str)        # 页面自己弹的新窗口被拦下（地址），面板闪一行提示
+    download_done = Signal(str, bool)  # 用户点的下载结束了（存到哪、成没成功），面板浮一条提示
     # 模型要打开网页（browser_open）：用户把面板收起了的话弹回来——收起期间浏览器还活着，
     # 不会再走 browser_created；不弹回的话模型在看不见的页面上操作（真实点击退回脚本点击、
     # 隐藏页面定时器被节流），用户也看不见它在干什么（审「收起只隐藏」时实测）
@@ -44,6 +45,54 @@ class _BrowserNotifier(QObject):
 
 
 _notifier = _BrowserNotifier()
+
+
+# ── 网页弹框 / 下载 / 证书 / 登录（复审 #16 #17，设计稿「侧栏浏览器 · 网页弹框、下载、证书、登录」）──
+#
+# 谁触发的决定问不问：浏览器工具正在跑（tools_browser 的锁被占着）算模型触发——确认框按取消、
+# 下载拦下、记进 model_events，由工具结果如实告诉模型；其余时候算用户在面板里点的，照常问用户。
+# 以前一律当没发生：用户亲手点「删除」，确认框永远取消；下载点了没反应。
+#
+# 问用户靠界面层注册的同步回调（set_ui_hooks，弹主题卡片）：页面的 confirm / 下载 / 登录都必须
+# 当场给出答案。没注册（测试、无界面）一律按取消。
+
+_ui_hooks: dict = {}
+model_events: deque = deque(maxlen=50)     # (种类, 网址, 页面给的文字)；工具每次动作后取走
+_cert_allowed: set = set()                 # 用户点过「仍然访问」的本机 host:port，关浏览器就忘
+
+
+def set_ui_hooks(**hooks):
+    """界面层注册：js_dialog(kind, url, msg, default) -> (ok, text, block_further)；
+    download(name, size, url) -> None | (目录, 文件名)；auth(url, realm) -> None | (用户名, 密码)。"""
+    _ui_hooks.update({k: v for k, v in hooks.items() if v is not None})
+
+
+def model_acting() -> bool:
+    """模型的浏览器动作正在跑：工具层对所有浏览器动作串行加锁（复审 #22），锁被占着就是它。"""
+    import sys
+    tb = sys.modules.get("src.tools_browser")
+    lock = getattr(tb, "_tool_lock", None)
+    return bool(lock is not None and lock.locked())
+
+
+def drain_model_events() -> list:
+    out = []
+    while model_events:
+        out.append(model_events.popleft())
+    return out
+
+
+def _host_key(qurl) -> str:
+    return f"{qurl.host().lower()}:{qurl.port(443 if qurl.scheme() == 'https' else 80)}"
+
+
+def allow_certificate(url: str):
+    """用户在证书错误页点了「仍然访问（只这次）」：这个本机 host:port 到关浏览器前都放行。
+    只给本机地址——公网网站证书不受信任可能就是有人冒充，不给这个口子。"""
+    from PySide6.QtCore import QUrl
+    from . import security
+    if security.is_localhost(url):
+        _cert_allowed.add(_host_key(QUrl(url)))
 
 
 def script_world() -> int:
@@ -83,12 +132,22 @@ def _console_page_class():
             self.nav_seq = 0
             # 这个页面有没有导航在途：按页记（多标签后不能只有一个全局标志）
             self.lx_loading = False
+            # 灵犀 / 用户在面板里发起的跳转刚开始：这段时间里弹出的「确定离开吗」放行一次（复审 #15）
+            self._leave_ok_until = 0.0
+            self._dialog_blocked = set()   # 用户勾了「这个网页别再弹框了」的来源（这个标签里）
+            self.lx_cert_error = None      # 最近一次证书错误（面板据此画证书页）
             self.loadStarted.connect(self._on_load_started)
+            self.certificateError.connect(self._on_certificate_error)
+            self.authenticationRequired.connect(self._on_authentication)
             self.loadFinished.connect(self._on_load_finished)
 
         def _on_load_started(self):
             self.nav_seq += 1
             self.lx_loading = True
+            # 离开确认在导航真正开始之前（被拒的话导航根本不开始）：开始加载就收回放行，
+            # 不然旧页面没挂 beforeunload 时，这次放行会留给新页面自己的 confirm()（实测：
+            # 刚打开的页面上点「删除」被当成同意）
+            self._leave_ok_until = 0.0
 
         def _on_load_finished(self, _ok):
             self.lx_loading = False
@@ -101,16 +160,92 @@ def _console_page_class():
             # 隔离世界拦不到页面的 console.*，页面 console 全由这条 Python 通道承担
             self._note(_norm_console_level(level), f"{message} @ {source}:{line}")
 
+        def _page_dialog(self, kind, url, msg, default=""):
+            """网页的 alert / confirm / prompt：模型在操作时按取消并记给模型；用户操作时问用户。
+            返回 (ok, 输入的文字)。"""
+            from . import security
+            u = url.toString()
+            origin = security.parse_origin(u) or u
+            if model_acting():
+                model_events.append((kind, u, str(msg)))
+                return False, ""
+            if origin in self._dialog_blocked:
+                self._note("info", f"{kind}（这个网页已设成别再弹框，按取消）: {msg}")
+                return False, ""
+            hook = _ui_hooks.get("js_dialog")
+            if hook is None:
+                return False, ""
+            try:
+                ok, text, block = hook(kind, u, str(msg), str(default or ""))
+            except Exception:
+                return False, ""
+            if block:
+                self._dialog_blocked.add(origin)
+            return bool(ok), str(text or "")
+
         def javaScriptAlert(self, url, msg):
-            self._note("warn", f"alert（已忽略）: {msg}")
+            self._note("warn", f"alert: {msg}")
+            self._page_dialog("alert", url, msg)
+
+        def allow_leave(self):
+            """我们自己要离开这个页面了（打开新地址 / 刷新 / 前进后退）：接下来弹出的离开确认
+            （页面的 beforeunload）放行一次。离开确认走的是 confirm 这条通道，以前一律拒绝：
+            用户在页面上点过、页面挂了「有未保存的修改」，模型再 browser_open 就卡满超时，
+            面板里后退 / 跳转没反应、刷新键停在「停止」。"""
+            self._leave_ok_until = time.monotonic() + LEAVE_CONFIRM_WINDOW_S
 
         def javaScriptConfirm(self, url, msg):
-            self._note("warn", f"confirm（已拒绝）: {msg}")
-            return False
+            if time.monotonic() < self._leave_ok_until:
+                # 只放这一次：时间窗里页面自己再弹的 confirm 照旧拒绝
+                self._leave_ok_until = 0.0
+                self._note("info", f"离开确认（我们发起的跳转，已放行）: {msg}")
+                return True
+            ok, _ = self._page_dialog("confirm", url, msg)
+            self._note("info" if ok else "warn", f"confirm（{'用户同意了' if ok else '已取消'}）: {msg}")
+            return ok
 
         def javaScriptPrompt(self, url, msg, default):
-            self._note("warn", f"prompt（已拒绝）: {msg}")
-            return (False, "")
+            ok, text = self._page_dialog("prompt", url, msg, default)
+            self._note("info" if ok else "warn", f"prompt（{'用户填了' if ok else '已取消'}）: {msg}")
+            return (ok, text if ok else "")
+
+        def _on_certificate_error(self, err):
+            """证书不受信任：用户点过「仍然访问」的本机地址放行，其余一律拒绝（面板画证书页，
+            模型那边如实告诉它，不替它放行）。"""
+            from . import security
+            u = err.url()
+            url = u.toString()
+            overridable = bool(err.isOverridable())
+            if overridable and _host_key(u) in _cert_allowed:
+                err.acceptCertificate()
+                return
+            self.lx_cert_error = {"url": url, "desc": err.description(),
+                                  "local": security.is_localhost(url), "overridable": overridable}
+            if model_acting():
+                model_events.append(("cert", url, err.description()))
+            self._note("warn", f"证书不受信任，没有打开: {url}（{err.description()}）")
+            err.rejectCertificate()
+
+        def _on_authentication(self, url, auth):
+            """网站要登录（HTTP Basic 等）：弹框请用户填（模型触发的也是——设计稿⑤，用户拍板）。
+            账号密码只交给网站，不进模型上下文：给模型的只有「登录了 / 取消了」。
+            不填就是取消，网站回 401。"""
+            u = url.toString()
+            hook = _ui_hooks.get("auth")
+            creds = None
+            if hook is not None:
+                try:
+                    creds = hook(u, auth.realm())
+                except Exception:
+                    creds = None
+            acting = model_acting()
+            if creds:
+                auth.setUser(creds[0])
+                auth.setPassword(creds[1])
+                if acting:
+                    model_events.append(("auth_ok", u, ""))
+            elif acting:
+                model_events.append(("auth_cancel", u, ""))
 
         def acceptNavigationRequest(self, url, navtype, isMainFrame):
             # 协议白名单兜底（工具层 open 已校验，这里防页面跳转/重定向到 file:// 等）
@@ -118,6 +253,10 @@ def _console_page_class():
             if scheme in ("http", "https"):
                 return True
             if url.toString() == "about:blank":
+                return True
+            if not isMainFrame and scheme in ("blob", "data"):
+                # 页面自己在 iframe 里放的 blob: / data: 内容（预览、编辑器沙箱）：子框架照常显示，
+                # 以前也一律拦了（复审 #12）。顶层页面仍然只放 http(s)
                 return True
             self._note("warn", f"已拦截非 http(s) 导航: {url.toString()}")
             return False
@@ -284,6 +423,34 @@ class Browser(QObject):
         req.openIn(tab.page)
 
     def _on_download(self, item):
+        """模型操作时触发的下载拦下、告诉模型；用户点的问存哪，存好了面板浮一条提示。
+        Qt 要求在这个信号里当场 accept / cancel，所以问用户是同步弹框。"""
+        hook = _ui_hooks.get("download")
+        name = item.downloadFileName()
+        url = item.url().toString()
+        if not model_acting() and hook is not None:
+            try:
+                target = hook(name, int(item.totalBytes()), url)
+            except Exception:
+                target = None
+            if target:
+                folder, fname = target
+                item.setDownloadDirectory(folder)
+                item.setDownloadFileName(fname)
+                path = os.path.join(folder, fname)
+
+                def _state(_st=None, it=item, p=path):
+                    from PySide6.QtWebEngineCore import QWebEngineDownloadRequest as D
+                    st = it.state()
+                    if st == D.DownloadState.DownloadCompleted:
+                        _notifier.download_done.emit(p, True)
+                    elif st in (D.DownloadState.DownloadCancelled, D.DownloadState.DownloadInterrupted):
+                        _notifier.download_done.emit(p, False)
+                item.stateChanged.connect(_state)
+                item.accept()
+                return
+        elif model_acting():
+            model_events.append(("download", url, name))
         try:
             item.cancel()
         except Exception:
@@ -297,7 +464,7 @@ class Browser(QObject):
         if tab is None:
             return
         nav = getattr(tab.page, "nav_seq", 0) if shiboken6.isValid(tab.page) else 0
-        tab.console_sink.append({"level": "warn", "text": "下载已拦截（浏览器不下载文件）",
+        tab.console_sink.append({"level": "warn", "text": f"下载已拦下: {name}",
                                  "t": time.time(), "nav": nav})
 
     def _deny_permission(self, pg, frame, feature):
@@ -428,6 +595,7 @@ def close_browser():
             # 延后清（轮询等桥空闲），但面板自己的导航、以及"刚判定空闲、模型的 open 紧跟着到"
             # 都会撞上——clearHttpCache 和导航重叠，那次导航就再也等不到 loadFinished
             mark_cache_dirty()
+            _cert_allowed.clear()           # 「仍然访问（只这次）」= 关掉浏览器就忘
         from src.browser import bridge
         bridge.notify_closed()   # 在途请求立刻回"浏览器已关闭"，不等超时
 
@@ -508,6 +676,18 @@ def when_cache_idle(callback):
         callback()
 
 
+# 发起跳转后多久内弹出的离开确认算「我们这次跳转引起的」。beforeunload 在导航一开始就同步触发，
+# 留几秒给慢页面；只放一次（见 ConsolePage.javaScriptConfirm）
+LEAVE_CONFIRM_WINDOW_S = 5.0
+
+
+def allow_leave(page):
+    """要离开 page 了：放行它接下来的那一次离开确认（页面类型不是我们的就什么都不做）。"""
+    fn = getattr(page, "allow_leave", None)
+    if fn is not None and shiboken6.isValid(page):
+        fn()
+
+
 def load_url(page, url, *, clear_first=False, page_loading=False, still_wanted=None):
     """所有导航的唯一入口（模型的 open 和面板的地址栏都走这里）。
 
@@ -523,6 +703,7 @@ def load_url(page, url, *, clear_first=False, page_loading=False, still_wanted=N
         if still_wanted is not None and not still_wanted():
             return
         if shiboken6.isValid(page):
+            allow_leave(page)
             page.load(qurl)
 
     if ((clear_first or _cache_state["dirty"]) and not page_loading

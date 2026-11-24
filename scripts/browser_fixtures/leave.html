@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>离开确认</title></head>
+<body>
+<h1>有未保存的修改</h1>
+<p id="out">-</p>
+<button id="del" onclick="document.getElementById('out').textContent = confirm('确定删除？') ? 'deleted' : 'cancelled'">删除</button>
+<script>
+  // 用户在页面上动过之后才挂离开确认（Chromium 只在有过用户手势时弹）
+  window.addEventListener('beforeunload', e => { e.preventDefault(); e.returnValue = ''; });
+</script>
+</body>
+</html>

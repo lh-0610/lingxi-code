@@ -799,8 +799,8 @@ class TestScriptCard:
         card.toggle()
         _pump(qt_app)
         assert not card._script_info.isVisibleTo(card)
-        assert not card._script_box.isVisibleTo(card) and not card._out_label.isVisibleTo(card), \
-            "没交脚本的命令：和原来一样，输出框上不加「输出」"
+        assert card._script_box is None and card._out_label is None, \
+            "没交脚本的命令：脚本框和「输出」标签都不建（和原来一样，点开只建输出框）"
         mv.close()
 
     def test_find_reaches_the_script(self, qt_app):
