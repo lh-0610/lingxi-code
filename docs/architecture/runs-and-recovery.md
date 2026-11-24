@@ -96,4 +96,4 @@
 - **来源**：继续的那一轮 `source.kind="continue"`，文本仍是最后一条真实用户消息（任务是它提的）；中断后直接发消息的那一轮仍是 `user_message`
 - **不恢复**旧确认许可、后台进程控制权、隔离区使用权——它们本来就不持久化；隔离区里跑的那一轮继续时回到主项目并明确说"旧隔离区不会被自动合并"
 - **重绘**：内部 HumanMessage（`lingxi_internal`）一律不画成"你"的气泡。早先只认视觉桥接的文字前缀，自动修复 / 完成闸门的内部提示在重开会话后会被画成用户说的话；恢复说明画成一行小字（`recovery_note` → `RecoveryNote`，见 core.md 消息流），优先用当时实时显示的那段（`lingxi_recovery.note`）
-- **测试里必须阻断真实模型与 CLI**：新建的 Session 默认模型下标可能落在 Claude Code 上（backlog 里的默认模型 fallback 问题），漏设一次模型就会真起一个 `claude` 进程——写 B04 的真进程用例时实测踩到过一次。`test_b04_recovery.py` 用 autouse 夹具把 `_create_llm` / `_claude_code_loop` 换成直接报错，子进程脚本里同样显式阻断
+- **测试里必须阻断真实模型与 CLI**：新建的 Session 默认模型下标可能落在 Claude Code 上（会话从 0 号起步；默认模型找不到时的回退已改成云模型，但测试里新建 Session 不走那条路），漏设一次模型就会真起一个 `claude` 进程——写 B04 的真进程用例时实测踩到过一次。`test_b04_recovery.py` 用 autouse 夹具把 `_create_llm` / `_claude_code_loop` 换成直接报错，子进程脚本里同样显式阻断

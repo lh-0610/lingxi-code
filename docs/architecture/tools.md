@@ -8,7 +8,7 @@
 
 | 工具 | 功能 |
 |------|------|
-| `read_file` | 读取文件（`offset`/`limit` 分页，行号前缀）。**按扩展名分派**：`.ipynb` 解析 JSON 渲染每个 cell 的源码与输出（stream/error/display_data 的 text/plain），`.pdf` 用 pypdf 逐页提取文字（可选依赖，没装明确提示 `pip install pypdf`；加密试空密码、扫描件无文字如实说明）；图片扩展名直接指向 `read_image`；其它二进制**前 8KB 嗅探到 NUL 就给清晰说明**（Office/压缩包/可执行文件/音视频…），不再 utf-8 硬解出乱码或抛 codec 错。结构化结果与纯文本共用同一套按行分页（`_paginate_lines`） |
+| `read_file` | 读取文件（`offset`/`limit` 分页，行号前缀；按需读：只把要显示的那段留在内存，后面的只按块数行数，`_read_window`）。**按扩展名分派**：`.ipynb` 解析 JSON 渲染每个 cell 的源码与输出（stream/error/display_data 的 text/plain），`.pdf` 用 pypdf 逐页提取文字（可选依赖，没装明确提示 `pip install pypdf`；加密试空密码、扫描件无文字如实说明）；图片扩展名直接指向 `read_image`；其它二进制**前 8KB 嗅探到 NUL 就给清晰说明**（Office/压缩包/可执行文件/音视频…），不再 utf-8 硬解出乱码或抛 codec 错。结构化结果与纯文本共用同一套按行分页（`_paginate_lines`） |
 | `read_files` | 一次读多个文件（最多 8 个、总共 6 万字，超出的列出不读；遥控只读模式下每个路径都过黑名单） |
 | `run_code` | 代码模式：一小段 Python 一轮里连着调好几次只读工具，只交回 print 的内容（`tools_code.py`；执行前语法树检查——不许 import / class / 生成器 / 下划线属性 / 栈帧属性 / .format，只给基本内置函数，60 秒限时；只读、可并行、Plan 放行、遥控拦）。`re` 直接可用（也可以写 `import re`），给的是只有正则函数和标志的精简版——完整模块挂着 enum / functools，顺着 `re.enum.sys` 能摸到整个运行环境；别的 import 被拒时指向 `run_command` 的 stdin（日志里 11 次 import 被拒，5 次是 re）。没有的 `tools.xxx`、`open` 报错时说清该用什么 |
 | `explore` | 派只读探索子代理弄清一个问题，只交回带 `路径:行号` 的报告（`tools_explore.py`；只读、可并行、Plan 放行、遥控拦） |

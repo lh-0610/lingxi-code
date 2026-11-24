@@ -107,10 +107,59 @@ def _read_one(path, offset, limit, max_chars=READ_FILE_MAX_CHARS):
         if b"\x00" in head:
             return _binary_note(ext)
         with open(full, "r", encoding="utf-8") as f:
-            all_lines = f.readlines()
+            window = _read_window(f, offset, limit, max_chars)
     except Exception as e:
         return f"读取失败: {e}"
-    return _paginate_lines(all_lines, offset, limit, max_chars)
+    return _paginate_lines(window, offset, limit, max_chars)
+
+
+_COUNT_CHUNK_CHARS = 1 << 18
+
+
+class _LineWindow:
+    """文件里要显示的那一段行 + 总行数，冒充一个完整的行列表交给 _paginate_lines（它只按下标取
+    [start, end) 那几行、再问一次 len）。"""
+
+    def __init__(self, lines, start, total):
+        self._lines, self._start, self._total = lines, start, total
+
+    def __len__(self):
+        return self._total
+
+    def __getitem__(self, i):
+        return self._lines[i - self._start]
+
+
+def _read_window(f, offset, limit, max_chars):
+    """按需读：只把 offset 起最多 limit 行、约 max_chars 字留在内存里，后面的只数行数不存。
+
+    以前 readlines() 整个文件读进来再切——只要前 50 行也得把几百 MB 的日志全装进内存
+    （backlog：read_file 大文件全量 readlines）。行数照旧要报（「共 N 行，还有 M 行未读」），
+    剩下的按 25.6 万字一块数换行（文本模式已把 \r\n / \r 统一成 \n，和 readlines 分行一致）。
+    收的行宁多勿少：按去掉行尾空白后的长度累计（_paginate_lines 每行还要加行号前缀，只会更早停）。"""
+    start = max(1, offset) - 1
+    want = max(1, limit)
+    lines, size, n = [], 0, 0
+    for line in f:
+        over = False
+        if n >= start:
+            # 超过字数后再多收一行：_paginate_lines 先取下一行、算长度，才决定在哪截
+            over = size > max_chars
+            lines.append(line)
+            size += len(line.rstrip())
+        n += 1
+        if n > start and (len(lines) >= want or over):
+            break
+    rest_lines, last = 0, ""
+    while True:
+        chunk = f.read(_COUNT_CHUNK_CHARS)
+        if not chunk:
+            break
+        rest_lines += chunk.count("\n")
+        last = chunk[-1]
+    if last and last != "\n":
+        rest_lines += 1                 # 最后一行没有换行符也算一行（readlines 也是）
+    return _LineWindow(lines, start, n + rest_lines)
 
 
 def _paginate_lines(all_lines, offset, limit, max_chars):
@@ -1245,29 +1294,31 @@ def search_in_file(path: str, keyword: str, offset: int = 0, limit: int = SEARCH
             return f"`{path}` 是目录、不是单个文件。跨目录搜索请用 search_files（正则、自动遍历目录、忽略噪声目录）。"
         if not os.path.isfile(full):
             return f"文件不存在: {path}"
+        # 一行一行扫，只留这一页要显示的匹配、其余只计数：以前 readlines() 整个文件读进内存
+        needle = keyword.lower()
+        shown, found = [], 0
         with open(full, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        matches = []
-        for i, line in enumerate(lines, 1):
-            at = line.lower().find(keyword.lower())
-            if at >= 0:
-                matches.append(f"  L{i}: {_clip_search_line(line.rstrip(), at)}")
-        if matches:
-            shown = matches[offset:offset + limit]
+            for i, line in enumerate(f, 1):
+                at = line.lower().find(needle)
+                if at >= 0:
+                    if offset <= found < offset + limit:
+                        shown.append(f"  L{i}: {_clip_search_line(line.rstrip(), at)}")
+                    found += 1
+        if found:
             if not shown:
                 return (
-                    f"找到 {len(matches)} 处匹配，但 offset={offset} 已超出范围。"
-                    f" 请使用 0 到 {max(0, len(matches) - 1)} 之间的 offset。"
+                    f"找到 {found} 处匹配，但 offset={offset} 已超出范围。"
+                    f" 请使用 0 到 {max(0, found - 1)} 之间的 offset。"
                 )
             next_offset = offset + len(shown)
-            remaining = max(0, len(matches) - next_offset)
+            remaining = max(0, found - next_offset)
             tail = (
-                f"\n... [本次显示 {offset + 1}-{next_offset} / {len(matches)} 处，"
+                f"\n... [本次显示 {offset + 1}-{next_offset} / {found} 处，"
                 f"还有 {remaining} 处未列出；继续查看用 offset={next_offset}]"
                 if remaining > 0 else
-                f"\n[已显示 {offset + 1}-{next_offset} / {len(matches)} 处匹配]"
+                f"\n[已显示 {offset + 1}-{next_offset} / {found} 处匹配]"
             )
-            return f"找到 {len(matches)} 处匹配:\n" + "\n".join(shown) + tail
+            return f"找到 {found} 处匹配:\n" + "\n".join(shown) + tail
         return f"未找到 '{keyword}'"
     except Exception as e:
         return f"搜索失败: {e}"

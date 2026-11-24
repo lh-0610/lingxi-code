@@ -125,11 +125,22 @@ class TestDefaultModelRef:
         monkeypatch.setattr(config, "DEFAULT_MODEL_ID", "deepseek-v4.1-flash")
         assert agent._resolve_default_model_index() == 3
 
-    def test_unknown_default_falls_back_to_first(self, model_list, monkeypatch, isolated_memory):
+    def test_unknown_default_does_not_fall_back_to_claude_code(self, model_list, monkeypatch,
+                                                               isolated_memory):
+        """backlog：默认模型名字一改错，打开就成了列表第一项 Claude Code（要本机装 CLI）。
+        现在退到能直接用的云模型；都没填 key 就第一个云模型（启动时照常提示去填）；并说一声。"""
         from src import agent, config
         monkeypatch.setattr(agent, "MODEL_LIST", model_list)
+        monkeypatch.setattr(agent, "default_model_note", "")
         monkeypatch.setattr(config, "DEFAULT_MODEL_ID", "不存在的模型")
-        assert agent._resolve_default_model_index() == 0
+        for key in ("MIMO_API_KEY", "DEEPSEEK_API_KEY", "CUSTOM_MODELS"):
+            monkeypatch.setattr(config, key, [] if key == "CUSTOM_MODELS" else "")
+        idx = agent._resolve_default_model_index()
+        assert model_list[idx][1] != "claude-code"
+        assert idx == 1, "都没填 key：第一个云模型（mimo），启动时提示去填"
+        assert "不存在的模型" in agent.default_model_note and "mimo-v2.5-pro" in agent.default_model_note
+        monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "sk-real-key-0123456789")
+        assert agent._resolve_default_model_index() == 2, "填了 DeepSeek 的 key：退到能直接用的它"
 
 
 # ── 设置窗口：图片识别模型下拉回显 / 保存 ──
@@ -221,3 +232,18 @@ class TestVisionPickerInSettings:
             assert saved["vision_model_id"] == ""
         finally:
             dlg.deleteLater()
+
+
+def test_fallback_note_is_shown_once_at_startup(monkeypatch):
+    from types import SimpleNamespace
+    from src import agent
+    from src.ui.chat_window import ChatUI
+    monkeypatch.setattr(agent, "default_model_note", "设置里的默认模型「x」不在模型列表里，先用「y」。")
+    monkeypatch.setattr(agent, "get_model_config_issues", lambda *a: [])
+    shown, toasts = [], []
+    fake = SimpleNamespace(show_message=lambda t, tag: shown.append(t),
+                           _show_toast=lambda t, duration=0: toasts.append(t))
+    ChatUI._show_current_model_config_warning(fake)
+    ChatUI._show_current_model_config_warning(fake)
+    assert len(toasts) == 1 and "先用「y」" in toasts[0], "说一次，不重复"
+    assert any("不在模型列表里" in t for t in shown)

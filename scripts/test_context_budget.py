@@ -70,6 +70,8 @@ def _use_real_models(monkeypatch):
     from src import streaming
 
     monkeypatch.setattr(streaming, "MODEL_LIST", _REAL_MODEL_LIST)
+    # 这里测的是窗口 / 上限公式本身；工具定义那份开销单独测（test_tool_overhead_*）
+    monkeypatch.setattr(streaming, "_tools_overhead_tokens", lambda: 0)
 
 
 def _find_model(substring: str) -> tuple[int, tuple]:
@@ -153,3 +155,32 @@ def test_claude_200k_budget(_use_real_models):
         assert streaming._current_history_budget() == expected
     finally:
         streaming.state.current_model_index = orig_idx
+
+
+
+# ── 工具定义占的那份（真实用量拟合：每轮固定约 1.36 万，就是它）──
+
+def test_tool_overhead_is_counted_and_taken_out_of_the_budget(monkeypatch):
+    from src import models, streaming
+    from src.limits import MAX_HISTORY_BUDGET
+    monkeypatch.setattr(models, "context_window_for", lambda *a: 1_048_576)
+    monkeypatch.setattr(models, "_max_tokens_for", lambda *a: 16_384)
+    overhead = streaming._tools_overhead_tokens()
+    assert 5_000 < overhead < 30_000, f"内置工具定义大约一万出头 token：{overhead}"
+    monkeypatch.setattr(streaming, "_context_trim_tokens", lambda: MAX_HISTORY_BUDGET)
+    budget = streaming._current_history_budget()
+    assert budget <= MAX_HISTORY_BUDGET - overhead, "历史预算要把工具定义让出来"
+    high, low = streaming._trim_watermarks(budget)
+    assert high == MAX_HISTORY_BUDGET - overhead and low == high // 2, "回收线指整个请求：扣掉工具定义"
+    # 回收线设得比预算低（设置里填 10 万）：同样按整个请求算，扣掉工具定义
+    monkeypatch.setattr(streaming, "_context_trim_tokens", lambda: 100_000)
+    assert streaming._trim_watermarks(streaming._current_history_budget())[0] == 100_000 - overhead
+
+
+def test_tool_overhead_follows_the_bound_tools(monkeypatch):
+    """知识库模式只绑 search_knowledge：开销小得多，不能按全量工具扣。"""
+    from src import session, streaming
+    full = streaming._tools_overhead_tokens()
+    sess = session.current_session()
+    monkeypatch.setattr(sess, "rag_mode", True)
+    assert 0 < streaming._tools_overhead_tokens() < full / 5

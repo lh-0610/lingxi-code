@@ -454,16 +454,53 @@ def _stream_chunks_with_retry(llm_with_tools, messages, ui=None):
 _CJK_CHARS = re.compile(r"[　-鿿가-힯＀-￯]")
 
 
+# 系数来自真实用量（2026-11-24）：8 次运行、120 多轮，服务商报的输入 token 对会话文件重建出的
+# 每轮历史拟合，得中日韩 0.91 token / 字、其余 0.242 token / 字符（约 4.1 字符一个）、每轮固定
+# 约 1.36 万（就是工具定义，见 _tools_overhead_tokens），误差 ±8%。都往偏多的方向留一点。
+_CJK_TOKENS_PER_CHAR = 0.95
+_OTHER_TOKENS_PER_CHAR = 0.26
+
+
 def _text_tokens(text: str) -> float:
-    """中日韩字符 ≈ 0.8 token / 字，其余（代码、英文、空白）≈ 0.3 token / 字符（约 3.3 字符一个）。
+    """中日韩字符 ≈ 0.95 token / 字，其余（代码、英文、空白）≈ 0.26 token / 字符。
 
     以前统一按 0.7 算：中文合适，代码却高估两倍多——读了几个源文件，实际十万出头的上下文就被
     当成超了 20 万的预算，旧的读文件结果被回收成存根，模型只好一遍遍重读同一个文件（评测 011
-    里 models.py 一次任务读了 19 遍）。两种都往偏多的方向取，宁可早一点回收也不撑爆窗口。"""
+    里 models.py 一次任务读了 19 遍）。后来改成 0.8 / 0.3，真实用量一对仍是代码估高约四分之一、
+    中文估低约一成；按拟合值改，两种都往偏多的方向留一点，宁可早一点回收也不撑爆窗口。"""
     if not text:
         return 0.0
     cjk = len(_CJK_CHARS.findall(text))
-    return cjk * 0.8 + (len(text) - cjk) * 0.3
+    return cjk * _CJK_TOKENS_PER_CHAR + (len(text) - cjk) * _OTHER_TOKENS_PER_CHAR
+
+
+_TOOLS_OVERHEAD = {"key": None, "tokens": 0}
+
+
+def _tools_overhead_tokens() -> int:
+    """每次请求都带着的工具定义（function schema）有多少 token：消息估算里不含它，可它占窗口、
+    算钱。实测内置 53 个工具约 1.1 万，加上 MCP 工具，和拟合出的「每轮固定约 1.36 万」对得上。
+    按当前会话实际绑定的那份算（知识库模式 / 只读子代理绑的少），按工具名缓存。算不出来返回 0。"""
+    try:
+        import json
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+        from . import session as _session
+        from .tools import build_all_tools, build_rag_tools
+        sess = _session.current_session()
+        if getattr(sess, "rag_mode", False):
+            tools = build_rag_tools()
+        else:
+            tools = build_all_tools()
+            allowed = getattr(sess, "allowed_tools", None)
+            if allowed:
+                tools = [t for t in tools if t.name in allowed]
+        key = tuple(sorted(t.name for t in tools))
+        if key != _TOOLS_OVERHEAD["key"]:
+            schema = json.dumps([convert_to_openai_tool(t) for t in tools], ensure_ascii=False)
+            _TOOLS_OVERHEAD.update(key=key, tokens=int(_text_tokens(schema)))
+        return _TOOLS_OVERHEAD["tokens"]
+    except Exception:
+        return 0
 
 
 def _estimate_tokens(messages) -> int:
@@ -601,6 +638,9 @@ def _trim_watermarks(budget: int) -> tuple[int, int]:
     高水位 = 用户设的回收线，但不超过历史预算——窗口小的模型预算本来就不到这条线，
     设成 0（不提前回收）也一样，都是到预算才回收。"""
     line = _context_trim_tokens()
+    if line > 0:
+        # 回收线是用户在设置里填的「上下文多长」，指整个请求（服务商算的那个数）：工具定义那份要扣掉
+        line = max(1, line - _tools_overhead_tokens())
     high = min(line, budget) if line > 0 else budget
     return high, high // 2
 
@@ -952,6 +992,9 @@ def _current_history_budget() -> int:
         max_out = _max_tokens_for(mtype, model_id)
         budget = cwin - max_out - HISTORY_SAFETY_MARGIN
         budget = min(budget, max(MAX_HISTORY_BUDGET, _context_trim_tokens()))
+        # 工具定义每次请求都带着、占同一个窗口：历史能用的要把它让出来。以前不算，按 20 万预算
+        # 回收时真实上下文其实才 15 万出头（真实用量拟合，见 _text_tokens）
+        budget -= _tools_overhead_tokens()
     except Exception:
         budget = HISTORY_TOKEN_BUDGET
     # provider 报过上下文溢出 → 说明上面这套估算（窗口大小 / token 估算系数）对当前模型
@@ -1062,8 +1105,12 @@ def _prepare_stream_history(ui):
         _est_before = _estimate_tokens(_trim_tool_results(
             _unfolded, _recorded[:len(_recorded) - _evicted], high=float("inf"), low=0)[0])
         _est_after = _estimate_tokens(history_for_send)
+        # 提示里说的是整个上下文多长（和设置里的回收线同一口径）：工具定义那份也算上
+        _tools_tok = _tools_overhead_tokens()
+        _est_before += _tools_tok
+        _est_after += _tools_tok
         logger.info(
-            f"工具结果回收：上下文估算 {_est_before} 超过水位 {_high}，本轮把 {_evicted} 条旧的大工具结果"
+            f"工具结果回收：上下文估算 {_est_before} 超过水位 {_high + _tools_tok}，本轮把 {_evicted} 条旧的大工具结果"
             f"折成存根，降到 {_est_after}（会话累计已回收 {len(_recorded)} 条）"
         )
         try:

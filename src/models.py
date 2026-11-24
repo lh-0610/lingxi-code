@@ -272,6 +272,19 @@ def has_usable_model() -> bool:
     return False
 
 
+def fallback_model_index() -> int:
+    """默认模型在列表里找不到时退到哪：第一个填好 key、能直接用的云模型；都没填就第一个云模型
+    （启动时照常提示去设置里填 key）；连云模型都没有才是列表第一项。
+
+    以前直接退到列表第一项——那是 Claude Code（要本机装 claude CLI），默认模型名字一改错，
+    打开就莫名其妙成了 Claude（backlog：默认模型 fallback 落到 Claude Code）。"""
+    keyed = [i for i, (_, mtype, _, _) in enumerate(MODEL_LIST) if mtype in _KEYED_MODEL_TYPES]
+    for i in keyed:
+        if not get_model_config_issues(i):
+            return i
+    return keyed[0] if keyed else 0
+
+
 def model_ready(model_index) -> bool:
     """这个模型现在能不能直接用：填好 key 的云模型，或不需要 key 的本地 / CLI 模型。
 

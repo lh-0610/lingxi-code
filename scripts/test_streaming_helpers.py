@@ -34,15 +34,16 @@ class TestHistorySizing:
             AIMessage(content="", tool_calls=[{"name": "x", "args": {"a": "bc"}, "id": "1"}]),
         ]
 
-        expected = 10 * 0.3 + 1000 + len(str({"a": "bc"})) * 0.3
+        expected = 10 * 0.26 + 1000 + len(str({"a": "bc"})) * 0.26
         assert streaming._estimate_tokens(history) == int(expected)
 
     def test_estimate_counts_chinese_heavier_than_code(self):
-        """中文 ≈ 0.8 / 字，代码 ≈ 0.3 / 字符：同样长度，代码估得少得多（以前统一 0.7，代码被高估两倍多）。"""
+        """中文 ≈ 0.95 / 字，代码 ≈ 0.26 / 字符（真实用量拟合，见 _text_tokens）：同样长度，代码估得
+        少得多（以前统一 0.7，代码被高估两倍多）。"""
         code = HumanMessage(content="def f(x):\n    return x + 1\n" * 100)
         chinese = HumanMessage(content="灵犀启动时创建模型客户端失败" * 20)
-        assert streaming._estimate_tokens([code]) == int(len(code.content) * 0.3)
-        assert streaming._estimate_tokens([chinese]) == int(len(chinese.content) * 0.8)
+        assert streaming._estimate_tokens([code]) == int(len(code.content) * 0.26)
+        assert streaming._estimate_tokens([chinese]) == int(len(chinese.content) * 0.95)
 
     def test_trim_keeps_system_placeholder_and_recent_messages(self):
         history = [

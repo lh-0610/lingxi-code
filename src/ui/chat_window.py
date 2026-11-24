@@ -285,6 +285,12 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
             self._search_widget = None
 
     def _show_current_model_config_warning(self):
+        # 默认模型没找到、换成了别的：说一声（只说一次），不然用户只会觉得「怎么不是我设的那个」
+        note = getattr(agent, "default_model_note", "")
+        if note and not getattr(self, "_default_model_note_shown", False):
+            self._default_model_note_shown = True
+            self.show_message("\n" + note + "\n", "tool_result")
+            self._show_toast(note, duration=6000)
         issues = agent.get_model_config_issues()
         if not issues:
             return

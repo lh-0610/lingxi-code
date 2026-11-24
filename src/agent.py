@@ -190,15 +190,25 @@ def set_reasoning_effort(effort):
 #    再按 config 的 default_model_id（默认 mimo-v2.5-pro）。
 #    按名字匹配而非写死 index——BUILTIN 顺序随 config 变，写死 index 不稳；
 #    名字可以是 model_id 也可以是显示名（显示名优先，见 models.resolve_model_ref）。
-#    都找不到时退回列表第一个。
+#    都找不到时退到能直接用的模型（models.fallback_model_index），并记一句说明给界面提示。
+default_model_note = ""
+
+
 def _resolve_default_model_index():
+    global default_model_note
     from .config import DEFAULT_MODEL_ID
-    from .models import last_model_index, resolve_model_ref
+    from .models import fallback_model_index, last_model_index, resolve_model_ref
     last = last_model_index()
     if last is not None:
         return last
     idx = resolve_model_ref(DEFAULT_MODEL_ID, model_list=MODEL_LIST)
-    return idx if idx >= 0 else 0
+    if idx >= 0:
+        return idx
+    idx = fallback_model_index()
+    default_model_note = (f"设置里的默认模型「{DEFAULT_MODEL_ID}」不在模型列表里，"
+                          f"先用「{MODEL_LIST[idx][0]}」。可以在 设置 → 模型 里改。")
+    logger.warning(default_model_note)
+    return idx
 
 
 state.current_model_index = _resolve_default_model_index()

@@ -270,6 +270,7 @@ def _set_line(monkeypatch, value):
 def test_watermarks_follow_setting_and_budget(monkeypatch):
     """回收线是设置项（context_trim_tokens）：涨过它触发，折到它的一半。"""
     from src.limits import CONTEXT_TRIM_TOKENS_DEFAULT
+    monkeypatch.setattr(streaming, "_tools_overhead_tokens", lambda: 0)
     assert _trim_watermarks(200_000) == (CONTEXT_TRIM_TOKENS_DEFAULT, CONTEXT_TRIM_TOKENS_DEFAULT // 2)
     _set_line(monkeypatch, 100_000)
     assert _trim_watermarks(200_000) == (100_000, 50_000)
@@ -284,6 +285,7 @@ def test_line_above_default_cap_raises_history_budget(monkeypatch):
     """回收线设得比 20 万高（100 万窗口的模型）：历史预算跟着抬上去，不然 20 万就开始压缩、那条线永远到不了。"""
     from src import models
     from src.limits import MAX_HISTORY_BUDGET
+    monkeypatch.setattr(streaming, "_tools_overhead_tokens", lambda: 0)
     monkeypatch.setattr(models, "context_window_for", lambda *a: 1_048_576)
     monkeypatch.setattr(models, "_max_tokens_for", lambda *a: 16_384)
     assert streaming._current_history_budget() == MAX_HISTORY_BUDGET

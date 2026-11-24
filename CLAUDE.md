@@ -103,4 +103,4 @@ python scripts/replay_sessions.py
 - **C2** `_project_cwd` 改公开别名：纯改名无价值。
 
 ### 待办 backlog（真问题，按优先级排期）
-来自 `docs/glm_code_review_2026-06-19.md`（该文件本地可见、未入库）的剩余项：默认模型 fallback 落到 Claude Code（`agent.py`）；`read_file` 大文件全量 `readlines()`（`tools.py`）；token 估算 `×0.7` 对英文高估（`streaming.py`）。流式错误分类和补丁写入失败回滚已实现，边界分别见 `docs/architecture/core.md`（主循环边界与错误恢复）和 `docs/architecture/tools.md`（apply_patch）。
+`docs/glm_code_review_2026-06-19.md`（该文件本地可见、未入库）里的项已全部处理：默认模型找不到时退到能直接用的云模型（`models.fallback_model_index`）；`read_file` / `search_in_file` 按需读（`tools._read_window`）；token 估算按真实用量重新拟合并计入工具定义（`streaming._text_tokens` / `_tools_overhead_tokens`，见 `docs/architecture/core.md` 上下文长度一节）。流式错误分类和补丁写入失败回滚的边界分别见 `docs/architecture/core.md`（主循环边界与错误恢复）和 `docs/architecture/tools.md`（apply_patch）。
