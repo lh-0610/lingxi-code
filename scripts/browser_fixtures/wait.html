@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>等待页</title></head>
+<body style="margin:0;font:14px sans-serif">
+<p id="out">-</p>
+<button id="go" onclick="start()">开始加载</button>
+<button id="maskbtn" onclick="showMask()">显示遮罩</button>
+<button id="tickbtn" onclick="tick()">开始变动</button>
+<p id="tick">tick 0</p>
+<button id="del" onclick="document.getElementById('out').textContent = confirm('确定删除吗') ? 'deleted' : 'cancelled'">删除</button>
+<div id="mask" role="region" aria-label="加载遮罩"
+     style="display:none;position:fixed;left:0;top:0;right:0;bottom:0;background:#eee">遮罩：2 秒后消失</div>
+<script>
+  function start() {
+    setTimeout(() => {
+      const p = document.createElement('p');
+      p.id = 'late'; p.textContent = '异步结果出来了';
+      document.body.appendChild(p);
+    }, 1500);
+  }
+  // 内容连续变 8 次（每 200ms 一次）：等「页面安静」要等它停下来
+  function tick() {
+    let n = 0;
+    const t = setInterval(() => {
+      document.getElementById('tick').textContent = 'tick ' + (++n);
+      if (n >= 8) clearInterval(t);
+    }, 200);
+  }
+  function showMask() {
+    const m = document.getElementById('mask');
+    m.style.display = 'block';
+    setTimeout(() => { m.style.display = 'none'; }, 2000);
+  }
+</script>
+</body>
+</html>

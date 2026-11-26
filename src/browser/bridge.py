@@ -132,13 +132,16 @@ class BrowserBridge(QObject):
     _ACTIVITY_LABELS = {"open": "打开页面", "js": "执行脚本", "frames": "列框架",
                         "settle": "等待页面", "close": "关闭浏览器",
                         "qturl": "读地址", "console": "读控制台", "grab": "截图",
-                        "mouse": "点击", "tabs": "列标签", "tab_select": "切换标签",
+                        "mouse": "点击", "wheel": "滚动", "tabs": "列标签", "tab_select": "切换标签",
                         "tab_close": "关闭标签", "tab_new": "新建标签"}
     _LX_LABELS = {"snapshot": "快照", "find": "查找", "click": "点击", "type": "输入",
                   "readText": "读正文", "console": "控制台", "info": "查元素", "state": "读状态",
                   "watchPrepare": "准备操作", "watchBaseline": "记样式", "watchReport": "核对样式",
                   "reveal": "滚到元素", "watchSettling": "等过渡结束",
-                  "pointOf": "定位点击点", "pointArrived": "确认点击送达", "anchorOf": "定位输入框"}
+                  "pointOf": "定位点击点", "pointArrived": "确认点击送达", "anchorOf": "定位输入框",
+                  "describeAt": "看坐标落点", "scrollInfo": "定位滚动容器", "scrollState": "核对滚动位置",
+                  "scrollSet": "滚到头", "hoverWatch": "准备悬停", "hoverArrived": "确认悬停送达",
+                  "hasRef": "确认元素还在"}
 
     def _activity_label(self, req):
         op = req["op"]
@@ -197,6 +200,8 @@ class BrowserBridge(QObject):
                 self._grab(req, args)
             elif op == "mouse":
                 self._mouse(req, args)
+            elif op == "wheel":
+                self._wheel(req, args)
             elif op == "key":
                 self._key(req, args)
             elif op == "drag":
@@ -432,7 +437,7 @@ class BrowserBridge(QObject):
             target.runJavaScript(code, cb)   # 旧签名兜底
 
     def _lx(self, req, method, lxargs, frame):
-        if method in ("snapshot", "find"):
+        if method in ("snapshot", "find", "describeAt"):
             lxargs = dict(lxargs, __seed=self._ref_seed)
         # try/catch：页面脚本抛异常时给模型可读错误，而不是"JS 返回非字符串/JSON 解析失败"
         code = (f"JSON.stringify((()=>{{try{{return window.__lx ? window.__lx.{method}("
@@ -504,6 +509,15 @@ class BrowserBridge(QObject):
         pt = QPoint(int(args["x"] * zoom), int(args["y"] * zoom))
         if not target.rect().contains(pt):
             self._reply(req, {"ok": False, "error": "点击点不在可见区域里"})
+            return
+        if args.get("move_only"):
+            # 悬停：只移动，不按下。真实的鼠标移动不改键盘焦点，这里也不碰
+            QApplication.sendEvent(target, QMouseEvent(
+                QEvent.Type.MouseMove, QPointF(pt), QPointF(target.mapToGlobal(pt)),
+                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+            self.cursor_event.emit(self._browser.current_id, pt.x() / zoom, pt.y() / zoom,
+                                   "move", str(args.get("label") or ""))
+            self._reply(req, {"ok": True})
             return
         typing_in = QApplication.focusWidget() if page_mod.user_typing_recently() else None
         if typing_in is None:
@@ -619,6 +633,34 @@ class BrowserBridge(QObject):
 
         QTimer.singleShot(16, self, step)
 
+    def _wheel(self, req, args):
+        """往页面发一次真实滚轮事件（滚动加载 / 虚拟列表 / 轮播常听 wheel，scrollBy 触发不了）。
+        dx / dy 是想让内容滚动的像素（正 = 向右 / 向下），落点是页面 CSS 坐标（顶层视口），
+        同 _mouse 按缩放换算、不动系统鼠标、不碰键盘焦点。"""
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        from PySide6.QtWidgets import QApplication
+        target = self._input_target(req)
+        if target is None:
+            return
+        zoom = self._browser.page.zoomFactor() or 1.0
+        pt = QPoint(int(args["x"] * zoom), int(args["y"] * zoom))
+        if not target.rect().contains(pt):
+            self._reply(req, {"ok": False, "error": "滚动落点不在可见区域里"})
+            return
+        dx, dy = float(args.get("dx") or 0), float(args.get("dy") or 0)
+        # 实测（offscreen QtWebEngine）：ScrollUpdate 相位的事件根本到不了页面，要用
+        # NoScrollPhase；页面收到的 deltaY = -angleDelta.y / 2（pixelDelta 被忽略），
+        # 所以想让内容滚 N 像素就发 angleDelta = -2N。Qt 的正方向是「内容向上 / 向左滚」
+        angle = QPoint(round(-2 * dx), round(-2 * dy))
+        QApplication.sendEvent(target, QWheelEvent(
+            QPointF(pt), QPointF(target.mapToGlobal(pt)), QPoint(0, 0), angle,
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False))
+        self.cursor_event.emit(self._browser.current_id, pt.x() / zoom, pt.y() / zoom,
+                               "move", str(args.get("label") or ""))
+        self._reply(req, {"ok": True})
+
     def _grab(self, req, args):
         """截页面当前可见区域（view.grab），PNG base64。宽度超过 max_width 等比缩小。
         view 不显示（面板收起 / 尺寸为零）时截出来是空白，直接说清楚，不交一张白图去识别。"""
@@ -637,16 +679,22 @@ class BrowserBridge(QObject):
         max_w = int(args.get("max_width") or 1280)
         img = pix.toImage()
         crop = args.get("crop")
+        # 图上像素 → 页面 CSS 坐标的换算（locate 用）：记下这张图左上角对应的页面坐标
+        # 和它覆盖的 CSS 宽度，缩放 / 裁剪都算进去
+        zoom = self._browser.page.zoomFactor() or 1.0
+        css_x = css_y = 0.0
+        css_w = pix.deviceIndependentSize().width() / zoom
         if crop:
             # 只截一块（局部截图）：crop 是页面 CSS 像素，换成图上的物理像素；小块放大一些，
             # 识别模型看小字更清楚
             from PySide6.QtCore import QRect
-            scale = (self._browser.page.zoomFactor() or 1.0) * (pix.devicePixelRatio() or 1.0)
+            scale = zoom * (pix.devicePixelRatio() or 1.0)
             rect = QRect(int(crop["x"] * scale), int(crop["y"] * scale),
                          int(crop["w"] * scale), int(crop["h"] * scale)).intersected(img.rect())
             if rect.width() < 8 or rect.height() < 8:
                 self._reply(req, {"ok": False, "error": "要截的那块不在可见区域里"})
                 return
+            css_x, css_y, css_w = rect.left() / scale, rect.top() / scale, rect.width() / scale
             img = img.copy(rect)
             if img.width() < 640:
                 img = img.scaledToWidth(min(img.width() * 3, 960),
@@ -660,6 +708,7 @@ class BrowserBridge(QObject):
         buf.close()
         self._reply(req, {"ok": True, "png": base64.b64encode(bytes(data)).decode("ascii"),
                           "width": img.width(), "height": img.height(),
+                          "cssX": css_x, "cssY": css_y, "cssPerPx": css_w / img.width(),
                           "url": self._browser.page.url().toString()})
 
     def _qturl(self, req, frame):

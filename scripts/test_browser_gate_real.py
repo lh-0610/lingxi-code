@@ -125,6 +125,16 @@ window.__lx = Object.assign({}, real, {state: () => ({ok: true, url: "__TOP__/x"
 <article><h2>第一篇</h2><p>甲甲甲</p></article>
 <article><h2>第二篇</h2><p>乙乙乙</p></article>
 <article><h2>第三篇</h2><p>丙丙丙</p></article>""",
+    "/canvas_pub.html": """<!doctype html><meta charset=utf-8><title>pubcanvas</title>
+<body style="margin:0"><canvas id="c" width="300" height="200" style="display:block;background:#eee"></canvas>
+<script>
+const x = document.getElementById('c').getContext('2d');
+x.fillStyle = '#e33'; x.beginPath(); x.arc(80, 80, 24, 0, 7); x.fill();
+document.getElementById('c').addEventListener('pointerdown', e => {
+  if (e.isTrusted) document.title = 'pubhit';
+});
+</script>""",
+    "/canvas_top.html": '<!doctype html><meta charset=utf-8><title>canvastop</title><body style="margin:0"><iframe src="__PUB__/canvas_pub.html" style="width:320px;height:220px;border:0;display:block"></iframe>',
 }
 # 超 24000 字的页面：变化落在截断区，diff 不能裸报"无可见变化"（复审 6c）
 PAGES["/big.html"] = (
@@ -177,7 +187,7 @@ def servers(qapp):
     srv_p = http.server.ThreadingHTTPServer(("127.0.0.2", 0), H)
     local = f"http://127.0.0.1:{srv_l.server_address[1]}"
     public = f"http://127.0.0.2:{srv_p.server_address[1]}"
-    for k in ("/top.html", "/top_evil.html", "/inner_evil.html"):
+    for k in ("/top.html", "/top_evil.html", "/inner_evil.html", "/canvas_top.html"):
         PAGES[k] = PAGES[k].replace("__PUB__", public).replace("__TOP__", local)
     threading.Thread(target=srv_l.serve_forever, daemon=True).start()
     threading.Thread(target=srv_p.serve_forever, daemon=True).start()
@@ -413,6 +423,34 @@ def test_wrong_frame_ref_goes_to_its_own_frame_and_its_gate(env):
     assert "已点击" in r2 and "顶层页面签发" in r2, r2
     assert len(env.ui.asked) == asked + 1, "顶层（信任的本机来源）的点击不用问"
     assert _js(env.app, "document.title") == "顶层点了", "点到的是 ref 指的那个元素"
+
+
+def test_click_at_in_a_public_iframe_asks_by_its_origin(env):
+    """坐标点击落在公网 iframe 上：自动换算进那个 iframe，闸门按 iframe 的公网来源问——
+    顶层是信任的本机也不能放行（同 test_wrong_frame_ref 的口径）。"""
+    pm.apply(env.sess, "manual")
+    env.sess.browser_origin_allowlist.add(sec.parse_origin(env.local))
+    _run(env.app, tb.browser_open.func, env.local + "/canvas_top.html")
+    _pump(env.app, 1.2)
+    v = page_mod.get_browser().view
+    v.resize(800, 600)
+    v.show()
+    v.activateWindow()
+    v.setFocus()
+    end = time.time() + 3
+    while time.time() < end:
+        if _js(env.app, "document.visibilityState + '/' + document.hasFocus()") == "visible/true":
+            break
+        v.activateWindow()
+        v.setFocus()
+        _pump(env.app, 0.05)
+    asked = len(env.ui.asked)
+    r = _run(env.app, tb.browser_click_at.func, 80, 80)
+    assert "已换算成它视口里的坐标" in r and "f.0" in r, r
+    cards = env.ui.asked[asked:]
+    assert cards and env.public.split("//")[1] in cards[-1], "公网 iframe 里的坐标点击要按公网来源问"
+    st = _run(env.app, bridge_mod.get_bridge().call, "lx", method="state", frame="f.0")
+    assert st.get("title") == "pubhit", f"iframe 里的圆没被点中：{st}"
 
 
 def test_img_in_submit_button_asks_ancestor(env):

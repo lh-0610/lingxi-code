@@ -42,6 +42,14 @@ def _pinned_system_prompt(monkeypatch):
     monkeypatch.setattr(roles, "get_system_prompt", lambda *a, **k: "固定系统提示（回放测试钉住）")
 
 
+@pytest.fixture(autouse=True)
+def _pinned_tool_overhead(monkeypatch):
+    """工具定义占的 token 也钉住（理由同上面的 system）：回收线扣掉的是整份请求里的工具定义，
+    每加一个工具回收点就往前挪。2026-11-26 浏览器加了 4 个工具（+1.2K），两次回收的间隔从
+    8 轮缩到 7 轮，夹具红——这里守的是回收机制，不是工具清单有多长。"""
+    monkeypatch.setattr(streaming, "_tools_overhead_tokens", lambda: 12_000)
+
+
 @pytest.fixture()
 def trim_line(monkeypatch):
     """回收线设到 3 万：60 轮里能触发几次，又不至于每轮都触发。"""

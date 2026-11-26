@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>滚动页</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  #box { height: 150px; overflow-y: auto; border: 1px solid #999; }
+  #carousel { display: flex; overflow-x: auto; white-space: nowrap; width: 300px; }
+  #carousel div { flex: 0 0 120px; height: 60px; background: #def; margin-right: 8px; }
+</style></head>
+<body>
+<div id="box" role="region" aria-label="长内容盒子"></div>
+<div id="carousel" role="region" aria-label="横向轮播"></div>
+<ul id="list"></ul>
+<!-- 能滚但页面自己拦了滚轮（不在头上）：要说「可能被页面拦了」，不能说成「到头了」 -->
+<div id="locked" role="region" aria-label="锁住的盒子" style="height:80px;overflow-y:auto;border:1px solid #c99"></div>
+<script>
+  const box = document.getElementById('box');
+  box.insertAdjacentHTML('beforeend', '<button id="inbox">盒子里的按钮</button>');
+  for (let i = 0; i < 40; i++) {
+    const p = document.createElement('p'); p.textContent = '盒子项' + i; box.appendChild(p);
+  }
+  const locked = document.getElementById('locked');
+  for (let i = 0; i < 20; i++) {
+    const p = document.createElement('p'); p.textContent = '锁住项' + i; locked.appendChild(p);
+  }
+  locked.addEventListener('wheel', e => e.preventDefault(), { passive: false });
+  const car = document.getElementById('carousel');
+  for (let i = 0; i < 12; i++) {
+    const d = document.createElement('div'); d.textContent = '卡片' + i; car.appendChild(d);
+  }
+  // 横向轮播听 wheel：竖滚轮转成横滚（横滚 deltaX 交给浏览器默认行为）
+  car.addEventListener('wheel', e => {
+    if (e.deltaY) { car.scrollLeft += e.deltaY; e.preventDefault(); }
+  }, { passive: false });
+  const list = document.getElementById('list');
+  let n = 0;
+  function addBatch() {
+    for (let i = 0; i < 30; i++) {
+      const li = document.createElement('li'); li.textContent = '条目' + (n++); list.appendChild(li);
+    }
+  }
+  addBatch();
+  // 无限加载只监听 wheel：scrollBy 触发不了
+  document.addEventListener('wheel', () => {
+    if (innerHeight + scrollY >= document.body.scrollHeight - 120) addBatch();
+  });
+</script>
+</body>
+</html>

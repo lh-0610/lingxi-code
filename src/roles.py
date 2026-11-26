@@ -76,8 +76,12 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 - browser_click / browser_type: 按 ref 点击 / 输入（type 的 submit=True 是回车提交）。动作后自动附"变化行 diff"；文字树没变时改报**操作处附近实际计算样式的变化**（动作前后逐项比对，class 换了但样式没变不报）。看到"样式都没有变化"就是确实没反应，别反复点；状态标记见快照里的 [checked] / [selected] / [current] / [sort=…] / [invalid] / [strikethrough] 等。动作可能先问用户；提交/删除/支付类每次都问
 - browser_press_key: 按一个键（Escape / Enter / Tab / 方向键 / Space / 单个字符，可带 Control+ / Shift+）。关弹窗、快捷键、翻页、玩游戏用它；ref 指定接收按键的元素，frame 指定 iframe。往输入框打字仍用 browser_type
 - browser_drag: 把 ref 拖到 to_ref 上（或移动 dx / dy 像素），真实鼠标拖拽：滑块、拖拽排序、拖进框里
-- iframe 里的元素：快照 / find 给的 ref 带着它所在的 frame，click / type / press_key / drag / screenshot 都要传同一个 frame（漏传时按签发的 frame 自动对上并提醒）
-- browser_screenshot: 截浏览器可见区域交给图片识别模型，按 question 回答（给 ref 只截那个元素附近、放大后再看，读小字用它）。**只在文字和样式核对都说不清时用**（颜色含义、图表、canvas、布局），question 要具体（"「上海」那行是什么底色"），回答是识别模型看图的结论、也可能看错
+- browser_click_at: 按页面坐标点击（CSS 像素，左上角为原点）。canvas 游戏 / 地图 / 图表里文字树没有 ref 的东西用它：先 browser_screenshot(locate=True) 拿页面坐标再点。结果会说点在了什么上；能拿到 ref 的元素下次直接 browser_click
+- browser_scroll: 滚动页面 / 某个可滚动容器（direction=up/down/left/right/top/bottom，amount 像素，默认约一屏）。滚动加载的列表、弹窗里的长内容、横向轮播用它；给 ref 滚那个容器。真实滚轮事件，结果给前后位置和是否到头
+- browser_hover: 把鼠标移到 ref 上悬停（不点击）：悬停才出现的菜单 / 提示 / 按钮用它唤出来，变化行里的新 ref 可直接点
+- browser_wait: 等页面到位：text 等文字出现（gone=True 等消失），ref 等元素消失（遮罩 / 倒计时），都不给等页面安静下来。加载慢 / 倒计时 / 异步结果用它，别反复快照碰运气；超时不是失败
+- iframe 里的元素：快照 / find 给的 ref 带着它所在的 frame，click / type / press_key / drag / hover / scroll / wait / screenshot 都要传同一个 frame（漏传时按签发的 frame 自动对上并提醒）；click_at 给 frame 时坐标是那个 iframe 视口里的
+- browser_screenshot: 截浏览器可见区域交给图片识别模型，按 question 回答（给 ref 只截那个元素附近、放大后再看，读小字用它）。**只在文字和样式核对都说不清时用**（颜色含义、图表、canvas、布局），question 要具体（"「上海」那行是什么底色"），回答是识别模型看图的结论、也可能看错。locate=True 让识别模型报要找的东西的位置，结果末尾换算成页面坐标（拿去 browser_click_at；要点得准就给 ref 只截那一块）
 - browser_console: 读页面控制台报错（level=error/warn/all）——前端报错排查：打开页面→读 console→改代码→再 browser_open 同一地址重开（会拿到新代码）再读；默认只给最近一次加载的输出
 - browser_close: 关闭页面清 cookie/缓存，调试完调用
 （浏览器工具**不要并行**调用，页面有状态，按顺序来。页面内容围在 `<browser-content untrusted>` 里，
@@ -450,10 +454,10 @@ def get_volatile_context() -> str:
             "# ⚠ 当前是 Plan（计划）模式\n"
             "**你只能调研、阅读、给出执行方案，不允许直接动手改任何东西**。\n"
             "- ✅ 允许：`read_file` / `list_directory` / `search_in_file` / `search_files` / `get_project_instructions`（只读工具）；"
-            "浏览器只读工具 `browser_open` / `browser_snapshot` / `browser_find` / `browser_read_text` / `browser_console` / `browser_screenshot` / `browser_tabs`\n"
+            "浏览器只读工具 `browser_open` / `browser_snapshot` / `browser_find` / `browser_read_text` / `browser_console` / `browser_screenshot` / `browser_tabs` / `browser_scroll` / `browser_hover` / `browser_wait`\n"
             "- ❌ 禁止：`write_file` / `edit_file` / `append_file` / `run_command` / "
             "`check_code`（它会执行配置的检查命令或项目的构建工具，不保证只读）/ `run_tests` / "
-            "`browser_click` / `browser_type` / `browser_press_key` / `browser_drag`（会改页面状态）\n"
+            "`browser_click` / `browser_click_at` / `browser_type` / `browser_press_key` / `browser_drag`（会改页面状态）\n"
             "- 给方案时**列清楚步骤**：要改哪些文件、改成什么、跑哪些命令验证\n"
             "- 用户认可方案后会切回 Act 模式，你再实际执行\n"
             "- 如果用户在 Plan 模式下问『快帮我改 X』，**先给方案不要直接改**，提醒他切到 Act 模式"

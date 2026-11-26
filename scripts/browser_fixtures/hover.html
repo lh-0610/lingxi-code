@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>悬停页</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  #wrap { position: relative; display: inline-block; margin: 40px; }
+  #menu { display: none; position: absolute; left: 0; top: 100%; background: #fff; border: 1px solid #999; padding: 4px; }
+  #wrap:hover #menu { display: block; }
+  #tip { display: none; position: absolute; left: 120px; top: 0; background: #ffe; padding: 4px; border: 1px solid #cc9; }
+  #host:hover + #tip { display: block; }
+</style></head>
+<body>
+<!-- 菜单靠悬停保持：触发点和菜单在同一块悬停区域里（常见写法） -->
+<div id="wrap">
+  <button id="trigger" onclick="document.getElementById('out').textContent='点了触发'">更多操作</button>
+  <div id="menu">
+    <button id="mi1" onclick="document.getElementById('out').textContent='点了菜单甲'">菜单甲</button>
+    <button id="mi2">菜单乙</button>
+  </div>
+</div>
+<div style="position:relative;margin:40px">
+  <span id="host" tabindex="0">查看提示</span><span id="tip">这是自定义提示框</span>
+</div>
+<p id="out">-</p>
+</body>
+</html>

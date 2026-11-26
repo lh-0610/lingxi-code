@@ -750,7 +750,8 @@ def browser_read_text(max_chars: int = 8000, frame: str | None = None) -> str:
 
 @tool
 @_exclusive
-def browser_screenshot(question: str, ref: str | None = None, frame: str | None = None) -> str:
+def browser_screenshot(question: str, ref: str | None = None, frame: str | None = None,
+                       locate: bool = False) -> str:
     """截浏览器当前可见区域，交给图片识别模型，按 question 回答它在图上看到的。
 
     核对"看起来对不对"用它：颜色 / 高亮 / 图标 / 图表 / canvas / 布局——文字树和
@@ -758,6 +759,10 @@ def browser_screenshot(question: str, ref: str | None = None, frame: str | None 
     「"买牛奶"那一行有没有删除线」「日历里 11 月 3 日是什么底色」；别问"页面对不对"。
     ref：只截这个元素附近那一块（放大后交给识别模型，看小字、看局部更准）；frame：ref 所在的
     iframe（漏写时按签发 ref 的 frame 自动对上）。不给 ref 截整个可见区域。
+    locate=True：要求识别模型把要找的东西的位置用 [x, y] 报出来，结果末尾换算成页面坐标
+    列出来——canvas 游戏 / 图表里文字树没有 ref 的东西，拿这些坐标去 browser_click_at。
+    要点得准就给 ref（比如 canvas 本身）只截那一块：实测整屏报的位置偏 5–45 像素，
+    局部放大后偏 5–11 像素。
     返回的是识别模型的文字回答，不是原图；它也可能看错，关键结论能用文字树 / 正文核对的就再核对。
     需要先在「设置 → 图片识别模型」配好能看图的模型。"""
     question = (question or "").strip()
@@ -771,6 +776,7 @@ def browser_screenshot(question: str, ref: str | None = None, frame: str | None 
         return ("截图失败: 没有可用的图片识别模型。请在「设置 → 图片识别模型」里选一个"
                 "能看图的模型（如 GPT-4o / Claude / Gemini / Qwen-VL）。")
     crop, scope_note, part = None, "", ""
+    crop_off = (0.0, 0.0)
     if ref:
         url, err = _page_url()
         if err:
@@ -790,6 +796,7 @@ def browser_screenshot(question: str, ref: str | None = None, frame: str | None 
             pad = 40
             crop = {"x": max(0.0, rect["x"] + off[0] - pad), "y": max(0.0, rect["y"] + off[1] - pad),
                     "w": rect["w"] + 2 * pad, "h": rect["h"] + 2 * pad}
+            crop_off = off
             part = "里这个元素附近的一块（已放大）"
     shot = _bridge_call("grab", crop=crop) if crop else _bridge_call("grab")
     if not shot.get("ok"):
@@ -800,6 +807,10 @@ def browser_screenshot(question: str, ref: str | None = None, frame: str | None 
               "只回答问题本身，不用描述页面的其它部分：\n"
               f"{question}\n"
               "只说图上能看到的；看不清、图上没有的就直说看不清 / 没有，不要猜。")
+    if locate:
+        prompt += (f"\n另外：把问题里要找的每个东西的位置用 [x, y] 报出来——这张图的像素坐标，"
+                   f"左上角是 [0, 0]，x 向右、y 向下，图宽 {shot.get('width')} 像素、"
+                   f"高 {shot.get('height')} 像素。报东西的中心点，有几个报几个。")
     try:
         with _page.model_waiting():     # 等识别模型的十几秒里，用户点出来的框归用户
             vision_name, desc = describe_images_with_vision(
@@ -808,9 +819,37 @@ def browser_screenshot(question: str, ref: str | None = None, frame: str | None 
         return f"截图失败: 图片识别模型出错（{e}）"
     if not desc:
         return f"截图完成，但识别模型（{vision_name}）没返回内容"
+    coords = ""
+    if locate:
+        coords = _located_points(desc, shot, frame if crop else None, crop_off)
     return (f"[浏览器截图{'（局部放大）' if crop else ''} · {shot.get('width')}×{shot.get('height')}"
             f" · 识别模型 {vision_name}]{scope_note}\n"
-            f"{desc}\n（这是识别模型看图的回答，不是原图；它也可能看错）")
+            f"{desc}\n（这是识别模型看图的回答，不是原图；它也可能看错）" + coords)
+
+
+def _located_points(desc, shot, frame, crop_off):
+    """识别模型报的 [x, y]（图片像素）→ 页面 CSS 坐标。换算用截图时记下的比例和偏移
+    （grab 的 cssX / cssY / cssPerPx，裁剪、放大、缩小都算在内）；局部截图截的是 iframe 里的
+    元素时，再减掉 iframe 偏移，给的是那个 frame 视口里的坐标（调 click_at 要带 frame）。"""
+    per = shot.get("cssPerPx")
+    if not per:
+        return ""
+    pts = []
+    for m in re.finditer(r"\[\s*(\d+(?:\.\d+)?)\s*[,，]\s*(\d+(?:\.\d+)?)\s*\]", desc):
+        ix, iy = float(m.group(1)), float(m.group(2))
+        if not (0 <= ix <= shot.get("width", 0) and 0 <= iy <= shot.get("height", 0)):
+            continue                    # 报到图外的坐标是识别模型看错了，不给
+        x = shot.get("cssX", 0.0) + ix * per - crop_off[0]
+        y = shot.get("cssY", 0.0) + iy * per - crop_off[1]
+        pts.append(f"({x:.0f}, {y:.0f})")
+        if len(pts) >= 8:
+            break
+    if not pts:
+        return "\n（识别模型没有报出 [x, y] 坐标，没法给页面坐标）"
+    where = f"frame=\"{frame}\" 视口里的" if frame else "页面"
+    return (f"\n{where}坐标（已按截图比例换算，可直接调 browser_click_at"
+            + (f"，带 frame=\"{frame}\"" if frame else "") + "）：" + "、".join(pts)
+            + "\n（坐标是识别模型报的位置换算的，可能有偏差；点完看变化核对）")
 
 
 @tool
@@ -920,6 +959,130 @@ def _press(ref, expect, frame, label=""):
         _bridge_call("settle", ms=30)
     # 没确认到：多半是鼠标移上去时页面把这个元素换掉了。不再补一次脚本点击（可能点两次）
     return {"ok": True}, "（鼠标点击已发出，但没确认送到这个元素，可能被页面换掉了；看下面的变化核对）"
+
+
+def _frame_at_point(x, y, frame):
+    """坐标落在 iframe 上时换算进那个 frame：返回 (frame, 局部 x, 局部 y, 说明)。
+    按外层 frameBoxes 的位置 / 大小和 Qt 那边的 frame 对上号（同 _frame_offset 的口径）；
+    对不上号返回 (None, …, 错误文案)——不能拿着顶层来源的闸门去点 iframe 里的东西。"""
+    boxes = _lx("frameBoxes", {}, frame)
+    if not boxes.get("ok"):
+        return None, x, y, _err(boxes, "读 iframe 位置")
+    fr = _bridge_call("frames")
+    if not fr.get("ok"):
+        return None, x, y, _err(fr, "列框架")
+    prefix = (frame + ".") if frame else "f."
+    depth = len(prefix.split("."))
+    cands = [f for f in fr.get("frames") or []
+             if (f.get("path") or "").startswith(prefix)
+             and len((f.get("path") or "").split(".")) == depth]
+    for box in boxes.get("frames") or []:
+        if not (box["x"] <= x < box["x"] + box["w"] and box["y"] <= y < box["y"] + box["h"]):
+            continue
+        match = [f for f in cands
+                 if abs((f.get("w") or 0) - box["w"]) <= 2 and abs((f.get("h") or 0) - box["h"]) <= 2]
+        if len(match) > 1:
+            match = [f for f in match if f.get("url") == box.get("src")]
+        if len(match) != 1:
+            return None, x, y, ("点击失败: 这一点落在 iframe 里，但对不上是哪一个"
+                                "（页面里尺寸相同的 iframe 不止一个）。用 browser_snapshot 列出 frame，"
+                                "带 frame 参数和相对那个 iframe 的坐标再点。")
+        path = match[0]["path"]
+        note = f"\n（坐标落在 iframe {path} 里，已换算成它视口里的坐标 ({x - box['x']:.0f}, {y - box['y']:.0f}) 操作）"
+        return path, x - box["x"], y - box["y"], note
+    return None, x, y, "点击失败: 坐标落在 iframe 上，但算不出它的位置，点不了。"
+
+
+@tool
+@_exclusive
+def browser_click_at(x: float, y: float, frame: str | None = None, delta: bool = True) -> str:
+    """按页面坐标点击（真实鼠标事件）：canvas 画出来的游戏 / 地图 / 图表里的东西在文字树里
+    没有 ref，用 browser_screenshot(locate=True) 拿到页面坐标后点它。
+    坐标是页面 CSS 像素（顶层视口，左上角为原点）；给 frame 时是那个 iframe 视口里的坐标。
+    落在 iframe 上会自动换算进那个 iframe。结果会说点在了什么元素上；那一点能拿到 ref 的
+    会给出 ref，下次直接 browser_click。默认附"变化行 diff"。
+    可能先问用户；落在提交/删除/支付这类按钮上照样每次都问。"""
+    try:
+        x, y = float(x), float(y)
+    except (TypeError, ValueError):
+        return "点击失败: x / y 要是数字（页面 CSS 像素）。"
+    url, err = _page_url()
+    if err:
+        return err
+    if _view_hidden():
+        return "点击失败: 浏览器面板没显示，Chromium 收不到鼠标事件。打开右侧的浏览器面板再试。"
+    frame_url = url
+    if frame:
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+    off = _frame_offset(frame)
+    if off is None:
+        return "点击失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个），点不了。"
+    ox, oy = off
+    scope_note = ""
+    d = _lx("describeAt", {"x": x, "y": y}, frame)
+    for _ in range(4):                  # 嵌套 iframe 一层层进去
+        if not d.get("ok"):
+            return _err(d, "按坐标点击")
+        if d.get("iframe") is None:
+            break
+        frame, x, y, note = _frame_at_point(x, y, frame)
+        if frame is None:
+            return note
+        scope_note += note
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+        off = _frame_offset(frame)
+        if off is None:
+            return "点击失败: 算不出这个 iframe 在页面里的位置，点不了。"
+        ox, oy = off
+        d = _lx("describeAt", {"x": x, "y": y}, frame)
+    else:
+        return "点击失败: iframe 嵌套太深，按坐标点不了。"
+    info, ref = d.get("info") or {}, d.get("ref")
+    origin = _origin_for(_session.current_session(), "interact", url,
+                         frame_url if frame else None)
+    cons = security.is_consequential(info, origin=origin)
+    card = f"将在浏览器按坐标点击 ({x:g}, {y:g})，落在 {d.get('desc') or '未知元素'}\n页面: {url}"
+    if frame:
+        card += f"\niframe: {frame_url}"
+    if cons:
+        card += "\n⚠ 此动作可能有后果（提交/删除/支付等），请仔细核对。"
+    refusal = _gate("interact", url, consequential=cons, card=card,
+                    extra_url=frame_url if frame else None, origin=origin)
+    if refusal:
+        return refusal
+    _issued[(_fk(frame), ref)] = d.get("docId") or ""
+    # 等确认卡的时候页面可能自己变了：再看一眼那一点，变成了有后果的动作就拒绝
+    d2 = _lx("describeAt", {"x": x, "y": y}, frame)
+    if d2.get("ok") and d2.get("iframe") is None:
+        info2 = d2.get("info") or {}
+        if info2.get("fp") != info.get("fp"):
+            if not cons and security.is_consequential(info2, origin=origin):
+                return ("已停止：等确认的时候这一点上的元素变了，现在看起来是有后果的动作"
+                        "（提交 / 删除等），和批准时不一样。重新 browser_screenshot 看清楚再点。")
+            d, info, ref = d2, info2, d2.get("ref")
+            _issued[(_fk(frame), ref)] = d2.get("docId") or ""
+    tabs0, cur0 = _tab_ids(), _cur_tab()
+    before = _plain_before(frame) if delta else None
+    m = _bridge_call("mouse", x=x + ox, y=y + oy, label=_cursor_label("点击", info))
+    if not m.get("ok"):
+        return _err(m, "按坐标点击")
+    note = ""
+    for _ in range(_PRESS_CONFIRM_TRIES):
+        a = _lx("pointArrived", frame=frame)
+        if a.get("down") or a.get("click"):
+            break
+        _bridge_call("settle", ms=30)
+    else:
+        note = "（鼠标点击已发出，但没确认送到那一点的元素，可能被页面换掉了；看下面的变化核对）"
+    head = f"已在坐标 ({x:g}, {y:g}) 点击，落在 {_safe_role(info)}（ref={ref}）"
+    if d.get("interactive"):
+        head += f"；这个元素有 ref，下次可直接 browser_click(ref=\"{ref}\")"
+    head += "。落点元素（页面内容）：\n" + tree.fence(d.get("desc") or "", frame_url)
+    return head + note + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
 
 
 @tool
@@ -1182,6 +1345,263 @@ def browser_drag(ref: str, to_ref: str | None = None, dx: float = 0, dy: float =
     return (f"已把 {_describe_for_model(info, ref)} 拖到 "
             + (_describe_for_model(to_info, to_ref) if to_info else f"偏移 ({dx:g}, {dy:g}) 处")
             + note + scope_note + _after_action(before, frame, frame_url, tabs0, cur0))
+
+
+_SCROLL_DIRS = ("up", "down", "left", "right", "top", "bottom")
+
+
+def _scroll_stable(frame, ref, tries=8):
+    """滚轮滚动常带平滑动画：读到位置连续两次一样才算停（最多 tries 次，每次隔 100ms）。"""
+    last = None
+    for _ in range(tries):
+        _bridge_call("settle", ms=100)
+        st = _lx("scrollState", {"ref": ref} if ref else {}, frame)
+        if not st.get("ok"):
+            return st
+        if last is not None and (st["x"], st["y"]) == (last["x"], last["y"]):
+            return st
+        last = st
+    return last
+
+
+@tool
+@_exclusive
+def browser_scroll(direction: str = "down", amount: float | None = None,
+                   ref: str | None = None, frame: str | None = None, delta: bool = True) -> str:
+    """滚动页面或某个可滚动容器（真实滚轮事件，滚动加载 / 虚拟列表 / 轮播都听得到）。
+    direction: up / down / left / right / top / bottom（top / bottom 直接到顶 / 到底）。
+    amount 是像素，默认约一屏的 80%。给 ref 滚那个容器（ref 本身不能滚就找最近的可滚动祖先），
+    不给滚页面；给 frame 滚那个 iframe。结果给滚动前后的位置、是否到头，附"变化行 diff"
+    （新露出来的内容）。只读操作，不改页面数据。"""
+    direction = (direction or "").strip().lower()
+    if direction not in _SCROLL_DIRS:
+        return f"direction 只能是 {' / '.join(_SCROLL_DIRS)}，收到: {direction}"
+    url, err = _page_url()
+    if err:
+        return err
+    frame, scope_note = _ref_scope(ref, frame)
+    frame_url = url
+    if frame:
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+    if ref:
+        _doc, err = _checked_ref(ref, frame)
+        if err:
+            return err
+    horizontal = direction in ("left", "right")
+    if amount is not None:
+        try:
+            amount = abs(float(amount))
+        except (TypeError, ValueError):
+            return "amount 要是数字（像素）。"
+    if direction in ("top", "bottom"):
+        # 直接设位置（到头 / 到底不需要滚轮）；面板没显示也能做，位置照样核对
+        st0 = _lx("scrollState", {"ref": ref} if ref else {}, frame)
+        if not st0.get("ok"):
+            return _err(st0, "滚动")
+        tabs0, cur0 = _tab_ids(), _cur_tab()
+        before = _plain_before(frame) if delta else None
+        st = _lx("scrollSet", {"ref": ref, "dir": direction}, frame)
+        if not st.get("ok"):
+            return _err(st, "滚动")
+        pos, max_pos = st["y"], st["maxY"]
+        head = (f"已滚到{'顶' if direction == 'top' else '底'}：纵向位置 {st0['y']:.0f} → {pos:.0f}"
+                + ("（已到头）" if (pos <= 1 if direction == "top" else pos >= max_pos - 1) else ""))
+        return head + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
+    if _view_hidden():
+        return ("滚动失败: 浏览器面板没显示，收不到滚轮事件（滚动加载 / 虚拟列表要真实 wheel）。"
+                "打开右侧的浏览器面板再试；到顶 / 到底可以用 direction=top / bottom。")
+    si = _lx("scrollInfo", {"ref": ref} if ref else {}, frame)
+    if not si.get("ok"):
+        return _err(si, "滚动")
+    off = _frame_offset(frame)
+    if off is None:
+        return "滚动失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个），滚不了。"
+    ox, oy = off
+    if amount is None:
+        amount = (si["cw"] if horizontal else si["ch"]) * 0.8
+    sign = -1 if direction in ("up", "left") else 1
+    dx = sign * amount if horizontal else 0.0
+    dy = sign * amount if not horizontal else 0.0
+    tabs0, cur0 = _tab_ids(), _cur_tab()
+    before = _plain_before(frame) if delta else None
+    fallback = ""
+    if si.get("clean", True):
+        w = _bridge_call("wheel", x=si["px"] + ox, y=si["py"] + oy, dx=dx, dy=dy,
+                         label=f"滚动 {direction}")
+        if not w.get("ok"):
+            return _err(w, "滚动")
+    else:
+        # 可见部分处处压着别的滚动区域：滚轮发下去会滚那个区域（或被它拦掉），直接改位置
+        w = _lx("scrollByPx", dict({"ref": ref} if ref else {}, dx=dx, dy=dy), frame)
+        if not w.get("ok"):
+            return _err(w, "滚动")
+        fallback = ("\n（可见部分处处压着页面里别的滚动区域，滚轮会落到它们身上，改成直接设位置；"
+                    "靠滚轮触发的滚动加载这次不会被触发）")
+    st = _scroll_stable(frame, ref)
+    if not st or not st.get("ok"):
+        return "已发出滚轮事件，但读不到滚动后的位置；用 browser_snapshot 看现状。"
+    axis = "横向" if horizontal else "纵向"
+    p0, p1 = (si["x"], st["x"]) if horizontal else (si["y"], st["y"])
+    max_pos = st["maxX"] if horizontal else st["maxY"]
+    moved = abs(p1 - p0)
+    head = f"已滚动 {direction} {amount:.0f}px：{axis}位置 {p0:.0f} → {p1:.0f}"
+    if moved < 1:
+        at_end = p0 >= max_pos - 1 if sign > 0 else p0 <= 1
+        head += ("（位置没变：" + ("已经到头了，滚不动" if at_end else
+                 "可能被页面拦了（有的页面禁止滚动）；是否可见用 browser_screenshot 核对") + "）")
+    elif sign > 0 and p1 >= max_pos - 1:
+        head += "（已到底）"
+    elif sign < 0 and p1 <= 1:
+        head += "（已到顶）"
+    return head + fallback + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
+
+
+@tool
+@_exclusive
+def browser_hover(ref: str, frame: str | None = None, delta: bool = True) -> str:
+    """把鼠标移到 ref 元素上悬停（真实鼠标移动，不点击）：悬停才出现的菜单 / 提示框 / 按钮
+    用它唤出来，结果附"变化行 diff"——新出现的菜单项带着 ref，可直接 browser_click。
+    元素被挡住时报"被挡住"。悬停后鼠标停在那里；点别处时会先移走，靠悬停保持的菜单
+    可能收起（菜单和触发点在同一块悬停区域里的不受影响）。只读操作，不改页面数据。"""
+    url, err = _page_url()
+    if err:
+        return err
+    frame, scope_note = _ref_scope(ref, frame)
+    frame_url = url
+    if frame:
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+    if _view_hidden():
+        return "悬停失败: 浏览器面板没显示，收不到鼠标事件。打开右侧的浏览器面板再试。"
+    cur_doc, err = _checked_ref(ref, frame)
+    if err:
+        return err
+    info, err = _element_info(ref, frame)
+    if err:
+        return err
+    off = _frame_offset(frame)
+    if off is None:
+        return "悬停失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个）。"
+    ox, oy = off
+    tabs0, cur0 = _tab_ids(), _cur_tab()
+    # 滚到可见是我们自己的副作用，要在动作前快照之前做完（同 click 的 watchPrepare）；
+    # 不聚焦——真实的悬停不改键盘焦点
+    _lx("reveal", {"ref": ref}, frame)
+    before = _plain_before(frame) if delta else None
+    p = _lx("pointOf", {"ref": ref, "expect": {"doc": cur_doc, "fp": info.get("fp")}}, frame)
+    if not p.get("ok"):
+        if p.get("occluded"):
+            if p.get("x") is not None:
+                _bridge_call("cursor", kind="blocked", x=p["x"] + ox, y=p["y"] + oy, label="被挡住了")
+            return ("悬停失败：这个元素被别的东西挡住了，鼠标移过去也落在挡它的东西上。"
+                    "先处理挡在上面的东西：\n" + tree.fence(p.get("by") or "", frame_url))
+        return _err(p, "定位元素")
+    if p.get("synthetic"):
+        return "悬停失败: 这个元素没有可见的大小，或不在可见区域里。"
+    _lx("hoverWatch", {"ref": ref}, frame)
+    m = _bridge_call("mouse", x=p["x"] + ox, y=p["y"] + oy, move_only=True,
+                     label=_cursor_label("悬停", info))
+    if not m.get("ok"):
+        return _err(m, "悬停")
+    arrived = False
+    for _ in range(_PRESS_CONFIRM_TRIES):
+        if _lx("hoverArrived", {}, frame).get("over"):
+            arrived = True
+            break
+        _bridge_call("settle", ms=30)
+    # 悬停菜单 / 提示框常有出现动画，settle 一下再算变化（_delta_text 空 diff 还会再补）
+    _bridge_call("settle", ms=200)
+    note = "" if arrived else "（鼠标已移过去，但没确认悬停送到这个元素；看下面的变化核对）"
+    return (f"已悬停 {_describe_for_model(info, ref)}{note}{scope_note}"
+            + _after_action(before, frame, frame_url, tabs0, cur0))
+
+
+_WAIT_POLL_MS = 250
+
+
+@tool
+@_exclusive
+def browser_wait(text: str | None = None, ref: str | None = None, gone: bool = False,
+                 timeout: float = 10, frame: str | None = None) -> str:
+    """等页面到位，别反复快照碰运气：给 text 等这段文字出现（gone=True 等它消失）；
+    给 ref 等那个元素消失（加载遮罩、倒计时弹层）；都不给就等页面安静下来
+    （没有导航在途、文字树连续两次不变）。每 250ms 查一次，最多 timeout 秒（上限 60）。
+    结果说等到了（用了多少秒）还是超时（超时不是失败，如实说），附这段时间的变化行 diff。
+    动作之后页面要加载 / 有倒计时 / 异步结果时用。只读操作。"""
+    from .browser import page as _page
+    if _page._browser is None:
+        return _NO_PAGE
+    text = (text or "").strip() or None
+    try:
+        timeout = max(1.0, min(float(timeout), 60.0))
+    except (TypeError, ValueError):
+        timeout = 10.0
+    url, err = _page_url()
+    if err:
+        return err
+    frame, scope_note = _ref_scope(ref, frame)
+    frame_url = url
+    if frame:
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+    if ref:
+        _doc, err = _checked_ref(ref, frame)
+        if err:
+            return err
+    import time as _t
+    t0 = _t.monotonic()
+    before = _plain_before(frame)
+    prev_tree = None
+    ok, stopped = False, False
+    with _page.model_waiting():         # 等的这段时间用户在网页上点出来的框归用户
+        while True:
+            if state.stop_flag:
+                stopped = True
+                break
+            if ref:
+                # 元素还在不在（脱离页面 / 隐藏 / 换了文档都算消失）
+                if not _lx("hasRef", {"ref": ref}, frame).get("present"):
+                    ok = True
+                    break
+            elif text:
+                snap = _lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
+                body = _lx("readText", {"maxChars": tree.READ_TEXT_DEFAULT_CHARS}, frame)
+                hay = (snap.get("tree") or "") + "\n" + (body.get("text") or "")
+                if (text in hay) != gone:
+                    ok = True
+                    break
+            else:
+                q = _bridge_call("qturl")
+                snap = _lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
+                cur = (snap.get("docId"), snap.get("tree"))
+                if q.get("ok") and not q.get("loading") and snap.get("ok") \
+                        and prev_tree is not None and cur == prev_tree:
+                    ok = True
+                    break
+                prev_tree = cur
+            if _t.monotonic() - t0 >= timeout:
+                break
+            r = _bridge_call("settle", ms=_WAIT_POLL_MS)
+            if not r.get("ok") and "已停止" in (r.get("error") or ""):
+                stopped = True
+                break
+    secs = _t.monotonic() - t0
+    if stopped:
+        return "已停止（等待中用户停止了生成）。"
+    if ok:
+        what = (f"元素 {ref} 消失" if ref else
+                (f"文字「{text}」{'消失' if gone else '出现'}" if text else "页面安静下来"))
+        head = f"等到了：{what}（用了 {secs:.1f} 秒）"
+    else:
+        what = (f"元素 {ref} 还在页面上" if ref else
+                (f"没看到文字「{text}」" if not gone else f"文字「{text}」还在") if text else
+                "页面一直没安静下来（还在加载或内容一直在变）")
+        head = f"等了 {secs:.1f} 秒超时：{what}。超时不是失败，下面是这段时间页面实际的变化。"
+    return head + scope_note + _delta_text(before, frame, frame_url)
 
 
 @tool

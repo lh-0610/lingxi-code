@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>canvas 小游戏</title>
+<style>body { margin: 0; font: 14px sans-serif; }</style></head>
+<body>
+<canvas id="pad" width="380" height="240" tabindex="0" aria-label="游戏画布" style="display:block;background:#f4f4f4"></canvas>
+<p id="out">-</p>
+<form method="post" action="/posted/canvas" onsubmit="return false">
+  <button id="send" type="submit">提交分数</button>
+</form>
+<script>
+  const circles = [
+    { x: 80, y: 80, r: 24, color: '#e33', name: 'red' },
+    { x: 240, y: 150, r: 30, color: '#36c', name: 'blue' },
+  ];
+  const pad = document.getElementById('pad');
+  const ctx = pad.getContext('2d');
+  for (const c of circles) {
+    ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = c.color; ctx.fill();
+  }
+  // 只认真实的按下（isTrusted 的 pointerdown）：脚本模拟的点击记不了分
+  pad.addEventListener('pointerdown', e => {
+    if (!e.isTrusted) return;
+    const r = pad.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const hit = circles.find(c => (x - c.x) ** 2 + (y - c.y) ** 2 <= c.r * c.r);
+    document.getElementById('out').textContent = hit ? hit.name : 'miss';
+  });
+</script>
+</body>
+</html>

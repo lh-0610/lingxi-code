@@ -203,6 +203,7 @@ PLAN_MODE_READONLY_TOOLS = {
     "browser_open", "browser_snapshot", "browser_find", "browser_read_text", "browser_console",
     "browser_screenshot",  # 截图交识别模型：只读页面（滚动到 ref 不改页面数据），网络外发同 read_image
     "browser_tabs",  # 列 / 切 / 关标签：不改页面数据（关标签同关浏览器，只清本地浏览状态）
+    "browser_scroll", "browser_hover", "browser_wait",  # 滚动 / 悬停 / 等待：只读，不改页面数据
 }
 
 
@@ -222,6 +223,10 @@ _PLAN_REJECT_NOTES = {
         "Plan 模式只调研：浏览器点击会改页面状态（可能提交表单/触发写操作）。"
         "可以用 browser_open / browser_snapshot / browser_find / browser_read_text 看页面，"
         "把要点什么、预期什么结果写进方案，由用户切到 Act 后再操作。"
+    ),
+    "browser_click_at": (
+        "Plan 模式只调研：按坐标点击和 browser_click 一样会改页面状态（可能提交表单/触发写操作）。"
+        "可以用 browser_screenshot(locate=True) 看位置、把要点哪里写进方案，由用户切到 Act 后再操作。"
     ),
     "browser_type": (
         "Plan 模式只调研：浏览器输入会改页面状态（回车还可能提交表单）。"

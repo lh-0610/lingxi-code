@@ -484,12 +484,16 @@
   function info(opts) {
     const r = resolve(opts && opts.ref);
     if (!r.ok) return r;
-    const el = r.el;
+    return { ok: true, ref: opts.ref, ...infoOf(r.el) };
+  }
+
+  // 结构信息的本体（info 按 ref 取，describeAt 按坐标取，共用一份口径）
+  function infoOf(el) {
     const a = activatable(el);
     const role = roleOf(a);
     const form = formOf(a);
     return {
-      ok: true, ref: opts.ref, docId, fp: fingerprint(el),
+      docId, fp: fingerprint(el),
       selfTag: el.tagName.toLowerCase(),
       tag: a.tagName.toLowerCase(),
       // el.type 是 IDL 属性：没写 type 的 <button> 默认 "submit"、<input> 默认 "text"；
@@ -608,6 +612,31 @@
 
   function pointArrived() {
     return { ok: true, down: arrival.down, click: arrival.click };
+  }
+
+  // 按坐标看那一点上是什么（canvas 游戏 / 图表里的东西没有 ref，模型从截图拿坐标来点）。
+  // 不滚动、不做遮挡判定——坐标点就是要点的地方，落在谁身上就点谁；登记送达目标，
+  // 工具层发完真实点击后用 pointArrived 确认。落在 iframe 上时只报 iframe 的序号，
+  // 由工具层换算进那个 frame 再来一次（跨域的里面这里看不到）。
+  function describeAt(opts) {
+    opts = opts || {};
+    pruneRefs();
+    if (opts.__seed) refSeq = Math.max(refSeq, opts.__seed);
+    const x = Number(opts.x), y = Number(opts.y);
+    if (!isFinite(x) || !isFinite(y) || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight)
+      return { ok: false, error: "坐标不在可见区域里（本视口 " + innerWidth + "×" + innerHeight + "）" };
+    const hit = hitAt(x, y);
+    if (!hit) return { ok: false, error: "这一点上没有元素" };
+    if (hit.tagName === "IFRAME" || hit.tagName === "FRAME") {
+      const all = Array.from(document.querySelectorAll("iframe, frame"));
+      return { ok: true, iframe: all.indexOf(hit), docId };
+    }
+    arrival.el = hit; arrival.down = false; arrival.click = false;
+    const ref = assignRef(hit);
+    const role = roleOf(hit);
+    return { ok: true, x, y, ref, docId, nextSeq: refSeq,
+             desc: describe(hit), info: infoOf(hit),
+             interactive: INTERACTIVE.has(role) || !!clickMarker(hit) };
   }
 
   function click(opts) {
@@ -1074,11 +1103,116 @@
     return { ok: true };
   }
 
+  // ── 滚动（真实滚轮事件的落点 / 位置读数；wheel 本身由工具层发给 view）──────────
+  // 给 ref 滚那个可滚动容器：ref 本身不能滚就往上找最近的可滚动祖先；不给滚页面。
+  function scrollableAncestor(el) {
+    for (let n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (/(auto|scroll|overlay)/.test(cs.overflowY + " " + cs.overflowX)
+          && (n.scrollHeight > n.clientHeight + 1 || n.scrollWidth > n.clientWidth + 1)) return n;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  function scrollTarget(opts) {
+    if (opts && opts.ref) {
+      const r = resolve(opts.ref);
+      if (!r.ok) return r;
+      return { ok: true, el: scrollableAncestor(r.el) };
+    }
+    return { ok: true, el: document.scrollingElement || document.documentElement };
+  }
+
+  function scrollMetrics(el) {
+    return { x: el.scrollLeft, y: el.scrollTop,
+             maxX: Math.max(0, el.scrollWidth - el.clientWidth),
+             maxY: Math.max(0, el.scrollHeight - el.clientHeight) };
+  }
+
+  // 滚动前：把容器滚进视野（我们自己的副作用，要在动作前快照之前做完），给出滚轮落点
+  // （容器可见部分的中心，页面 CSS 坐标）和当前位置。
+  function scrollInfo(opts) {
+    const t = scrollTarget(opts);
+    if (!t.ok) return t;
+    const el = t.el;
+    const doc = el === document.scrollingElement || el === document.documentElement || el === document.body;
+    if (!doc) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const r = doc ? { left: 0, top: 0, right: innerWidth, bottom: innerHeight }
+                  : el.getBoundingClientRect();
+    const l = Math.max(r.left, 0), tp = Math.max(r.top, 0);
+    const rr = Math.min(r.right, innerWidth), bb = Math.min(r.bottom, innerHeight);
+    if (rr - l < 4 || bb - tp < 4) return { ok: false, error: "要滚的容器不在可见区域里" };
+    // 落点要落在「滚的就是目标」的地方：中心可能压着嵌套的可滚动容器（页面里的盒子、
+    // 弹层），wheel 会滚那个容器而不是目标——试几个候选点，命中检测确认
+    // 先试中间和几个常见位置，再按 5×5 网格扫一遍；都压在别的滚动区域上就报 clean=false，
+    // 工具层改用直接设位置（滚轮落到别的容器上会滚错地方，或被那个容器拦掉）
+    let px = (l + rr) / 2, py = (tp + bb) / 2, clean = false;
+    const tries = [[.5, .5], [.5, .8], [.5, .2], [.8, .5], [.2, .5], [.8, .8], [.2, .2]];
+    for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) tries.push([.1 + .2 * i, .1 + .2 * j]);
+    for (const [fx, fy] of tries) {
+      const x = l + (rr - l) * fx, y = tp + (bb - tp) * fy;
+      const hit = hitAt(x, y);
+      if (hit && scrollableAncestor(hit) === el) { px = x; py = y; clean = true; break; }
+    }
+    return { ok: true, doc, clean, ...scrollMetrics(el), px, py,
+             cw: doc ? innerWidth : el.clientWidth, ch: doc ? innerHeight : el.clientHeight,
+             vw: innerWidth, vh: innerHeight };
+  }
+
+  // 滚动后核对位置真的变了没有（到底了 / 被页面拦了都要如实说）
+  function scrollState(opts) {
+    const t = scrollTarget(opts);
+    if (!t.ok) return t;
+    return { ok: true, ...scrollMetrics(t.el) };
+  }
+
+  // 滚轮落不到目标上时的退路：直接按像素改位置（滚动加载靠 wheel 的页面不会触发加载）
+  function scrollByPx(opts) {
+    const t = scrollTarget(opts);
+    if (!t.ok) return t;
+    t.el.scrollLeft += Number(opts.dx) || 0;
+    t.el.scrollTop += Number(opts.dy) || 0;
+    return { ok: true, ...scrollMetrics(t.el) };
+  }
+
+  // top / bottom：直接设滚动位置（规范允许；位置照样核对）
+  function scrollSet(opts) {
+    const t = scrollTarget(opts);
+    if (!t.ok) return t;
+    const el = t.el;
+    if (opts && opts.dir === "top") el.scrollTop = 0;
+    else el.scrollTop = el.scrollHeight;
+    return { ok: true, ...scrollMetrics(el) };
+  }
+
+  // ── 悬停送达确认：真实 MouseMove 到了目标没有（isTrusted 的 pointerover / mouseover）──
+  const hoverArrival = { el: null, over: false };
+  for (const t of ["pointerover", "mouseover", "pointerenter"])
+    window.addEventListener(t, e => {
+      const el = hoverArrival.el;
+      if (!el || !e.isTrusted) return;
+      if (within(e.target, el) || within(el, e.target)) hoverArrival.over = true;
+    }, true);
+  function hoverWatch(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    hoverArrival.el = r.el; hoverArrival.over = false;
+    return { ok: true };
+  }
+  function hoverArrived() { return { ok: true, over: hoverArrival.over }; }
+
+  // 元素还在不在页面上（等遮罩 / 弹层消失用）：脱离 DOM 或不可见（display:none 等）都算不在
+  function hasRef(opts) {
+    const r = resolve(opts && opts.ref);
+    return { ok: true, present: !!(r.ok && visible(r.el)) };
+  }
+
   window.__lx = {
     snapshot, find, click, type, act, readText, info, watchPrepare, watchSettling, watchBaseline,
     watchReport,
-    reveal, pointOf, pointArrived, anchorOf,
+    reveal, pointOf, pointArrived, anchorOf, describeAt,
     frameBoxes, revealFrame, rectOf, focusRef, focusWindow, keyWatch, keyArrived,
+    scrollInfo, scrollState, scrollSet, scrollByPx, hoverWatch, hoverArrived, hasRef,
     console: (opts) => { const out = consoleBuf.slice(); if (opts && opts.clear) consoleBuf.length = 0; return { ok: true, entries: out, url: location.href, docId }; },
     state: () => ({ ok: true, url: location.href, title: document.title, readyState: document.readyState, generation, docId }),
   };

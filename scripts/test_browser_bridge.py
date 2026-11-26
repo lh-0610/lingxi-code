@@ -2072,3 +2072,458 @@ def test_transcode_only_direct_media_files():
     assert not media.wants_transcode(QUrl("blob:https://a.com/123"))
     u = media.media_url("https://a.com/v.mp4?x=1&y=2", "https://a.com/page")
     assert media._parse(u) == ("https://a.com/v.mp4?x=1&y=2", "https://a.com/page")
+
+
+# ── 2026-11-26 补四个能力：坐标点击 / 滚动 / 悬停 / 等待（docs/prompt_browser_tier1_2026-11-26.md）──
+
+def _frame_text(browser, tb, frame="f.0"):
+    return _tool(browser, tb.browser_read_text.func, frame=frame)
+
+
+def test_click_at_scores_a_canvas_circle(browser, servers, trusted_tools):
+    """canvas 上的圆在文字树里没有 ref：按坐标发真实点击，页面记分（只认 isTrusted 的 pointerdown）。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/canvas_inner.html")
+    out = _tool(browser, tb.browser_click_at.func, 80, 80)
+    assert out.startswith("已在坐标 (80, 80) 点击"), out
+    assert "没确认" not in out and "<browser-content" in out, out
+    assert _js_value(browser, "document.getElementById('out').textContent") == "red"
+    out = _tool(browser, tb.browser_click_at.func, 240, 150)
+    assert _js_value(browser, "document.getElementById('out').textContent") == "blue", out
+    out = _tool(browser, tb.browser_click_at.func, 350, 20)
+    assert _js_value(browser, "document.getElementById('out').textContent") == "miss", out
+    assert "坐标不在可见区域" in _tool(browser, tb.browser_click_at.func, 5000, 5000)
+
+
+def test_click_at_inside_an_iframe_counts_the_offset(browser, servers, trusted_tools):
+    """iframe 里的坐标需要加边框 / 内边距 / 外边距的偏移：不加的话点到的是 iframe 里别的地方。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/canvas_game.html")
+    out = _tool(browser, tb.browser_click_at.func, 80, 80, frame="f.0")
+    assert out.startswith("已在坐标 (80, 80) 点击"), out
+    assert "red" in _frame_text(browser, tb), "iframe 里的圆没被点中（偏移没算对）"
+
+
+def test_click_at_on_an_iframe_descends_into_it(browser, servers, trusted_tools):
+    """不带 frame 点在 iframe 上：自动换算进那个 iframe（闸门也按它的来源判），并说明。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/canvas_game.html")
+    off = _js_frame_offset(browser, tb)
+    assert off is not None
+    out = _tool(browser, tb.browser_click_at.func, off[0] + 80, off[1] + 80)
+    assert "已换算成它视口里的坐标" in out and "f.0" in out, out
+    assert "red" in _frame_text(browser, tb), out
+
+
+def test_click_at_on_a_submit_button_asks_every_time(browser, servers, monkeypatch):
+    """坐标落在提交按钮上：按那一点元素的结构判有后果，信任的本机来源也每次都问。"""
+    from src import permission_modes as pm
+    from src import session as _session
+    from src import tools_browser as tb
+    sess = _session.current_session()
+    old_mode = pm.current(sess)
+    old_allow = set(sess.browser_origin_allowlist)
+    pm.apply(sess, "manual")
+    sess.browser_origin_allowlist.add(sec.parse_origin(servers[0]))
+    cards = []
+
+    class _UI:
+        def confirm_command(self, text, **kw):
+            cards.append((text, kw.get("browser_consequential")))
+            return True, ""
+
+    monkeypatch.setattr(state, "ui_ref", _UI())
+    try:
+        _open_visual(browser, servers, tb, path="/canvas_inner.html")
+        rect = _js_value(browser, "JSON.stringify(document.getElementById('send').getBoundingClientRect())")
+        import json as _json
+        r = _json.loads(rect)
+        cx, cy = r["left"] + r["width"] / 2, r["top"] + r["height"] / 2
+        for _ in range(2):
+            out = _tool(browser, tb.browser_click_at.func, cx, cy)
+            assert out.startswith("已在坐标"), out
+        assert len(cards) == 2 and all(c[1] is True for c in cards), cards
+        assert "提交分数" in cards[0][0], "确认卡要写点在了什么上"
+        # 对照：落在 canvas 上按普通 interact，信任来源不问
+        _tool(browser, tb.browser_click_at.func, 80, 80)
+        assert len(cards) == 2, cards
+    finally:
+        pm.apply(sess, old_mode)
+        sess.browser_origin_allowlist.clear()
+        sess.browser_origin_allowlist.update(old_allow)
+
+
+def test_click_at_hidden_panel_says_so(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/canvas_inner.html")
+    out = _tool(browser, tb.browser_click_at.func, 80, 80)
+    assert "面板没显示" in out, out
+    assert _js_value(browser, "document.getElementById('out').textContent") == "-"
+
+
+def test_screenshot_locate_converts_image_pixels_to_page_coords(browser, servers, trusted_tools,
+                                                                monkeypatch):
+    """locate：识别模型报图片像素 [x, y]，按截图比例换算成页面 CSS 坐标，click_at 拿去点中。
+    视口 1600 宽、截图缩到 1280：比例 1.25，[64, 64] 应换算成页面 (80, 80)。"""
+    from src import models
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/canvas_inner.html")
+    page_mod.get_browser().view.resize(1600, 1200)
+    browser.processEvents()
+
+    def fake_vision(prompt, images, **kw):
+        assert "[x, y]" in prompt and "1280" in prompt, prompt
+        return "识别模型", "红圆在 [64, 64]，蓝圆在 [192, 120]"
+
+    monkeypatch.setattr(models, "describe_images_with_vision", fake_vision)
+    monkeypatch.setattr(models, "get_vision_model_index", lambda: 0)
+    out = _tool(browser, tb.browser_screenshot.func, "两个圆各在哪里？", locate=True)
+    assert "(80, 80)" in out and "(240, 150)" in out, out
+    assert "browser_click_at" in out, out
+    _tool(browser, tb.browser_click_at.func, 80, 80)
+    assert _js_value(browser, "document.getElementById('out').textContent") == "red"
+
+
+def test_screenshot_locate_on_a_crop_subtracts_crop_and_frame_offsets(browser, servers, trusted_tools,
+                                                                      monkeypatch):
+    """局部截图截的是 iframe 里的元素：换算要减 crop 偏移和 iframe 偏移，给的是那个 frame
+    视口里的坐标（结果里注明 frame）。crop (2, 32) 460×320 放大到 960 宽：图上 [250, 250]
+    对应 frame 里的 (80, 80)——红圆的圆心。"""
+    from src import models
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, path="/canvas_game.html")
+    fsnap = _tool(browser, tb.browser_snapshot.func, frame="f.0", mode="all")
+    ref = _ref_of(fsnap, "游戏画布")
+    assert ref, fsnap
+
+    def fake_vision(prompt, images, **kw):
+        return "识别模型", "红圆在 [250, 250]"
+
+    monkeypatch.setattr(models, "describe_images_with_vision", fake_vision)
+    monkeypatch.setattr(models, "get_vision_model_index", lambda: 0)
+    out = _tool(browser, tb.browser_screenshot.func, "红圆在哪里？", ref=ref, locate=True)
+    assert 'frame="f.0"' in out and "(80, 80)" in out, out
+    _tool(browser, tb.browser_click_at.func, 80, 80, frame="f.0")
+    assert "red" in _frame_text(browser, tb), out
+
+
+def test_scroll_down_loads_more_via_real_wheel(browser, servers, trusted_tools):
+    """无限加载只监听 wheel：到底后再滚一下要追加一批（scrollBy 触发不了监听器）。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/scroll.html")
+    out = _tool(browser, tb.browser_scroll.func, direction="bottom")
+    assert "已滚到底" in out and "已到头" in out, out
+    out = _tool(browser, tb.browser_scroll.func, direction="down")
+    assert "条目30" in out, f"到底后的滚轮没触发无限加载：{out}"
+    assert _js_value(browser, "document.getElementById('list').children.length") == 60
+
+
+def test_scroll_a_container_by_ref(browser, servers, trusted_tools):
+    """给 ref 滚那个容器（不是页面）：位置精确到像素，页面本身不动。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/scroll.html")
+    found = _tool(browser, tb.browser_find.func, "长内容盒子")
+    ref = _ref_of(found, "长内容盒子")
+    assert ref, found
+    out = _tool(browser, tb.browser_scroll.func, amount=300, ref=ref)
+    assert "已滚动 down 300px" in out and "0 → 300" in out, out
+    assert _js_value(browser, "document.getElementById('box').scrollTop") == 300
+    assert _js_value(browser, "scrollY") == 0, "滚容器不该动页面"
+    out = _tool(browser, tb.browser_scroll.func, direction="up", amount=100, ref=ref)
+    assert "300 → 200" in out, out
+    # ref 给的是盒子里的一个按钮（自己不能滚）：滚的是盒子
+    item = _ref_of(_tool(browser, tb.browser_find.func, "盒子里的按钮"), "盒子里的按钮")
+    assert item, "盒子里的按钮要能拿到 ref"
+    out = _tool(browser, tb.browser_scroll.func, amount=50, ref=item)
+    assert "200 → 250" in out, out
+    assert _js_value(browser, "document.getElementById('box').scrollTop") == 250
+
+
+def test_scroll_horizontal_carousel(browser, servers, trusted_tools):
+    """横向轮播：right 走 deltaX；down 落在轮播上被页面转成横滚（听 wheel 的组件）。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/scroll.html")
+    ref = _ref_of(_tool(browser, tb.browser_find.func, "横向轮播"), "横向轮播")
+    assert ref
+    out = _tool(browser, tb.browser_scroll.func, direction="right", amount=200, ref=ref)
+    assert "横向位置 0 → 200" in out, out
+    assert _js_value(browser, "document.getElementById('carousel').scrollLeft") == 200
+    out = _tool(browser, tb.browser_scroll.func, direction="down", amount=150, ref=ref)
+    assert _js_value(browser, "document.getElementById('carousel').scrollLeft") == 350, out
+
+
+def test_scroll_top_and_bottom(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/scroll.html")
+    out = _tool(browser, tb.browser_scroll.func, direction="bottom")
+    assert "已滚到底" in out, out
+    assert _js_value(browser, "scrollY") == _js_value(
+        browser, "document.scrollingElement.scrollHeight - innerHeight")
+    out = _tool(browser, tb.browser_scroll.func, direction="top")
+    assert "已滚到顶" in out and "已到头" in out, out
+    assert _js_value(browser, "scrollY") == 0
+
+
+def test_scroll_reports_when_it_cannot_move(browser, servers, trusted_tools):
+    """在顶部往上滚：位置没变要如实说已经到头，不说成滚了。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/scroll.html")
+    out = _tool(browser, tb.browser_scroll.func, direction="up")
+    assert "位置没变" in out and "已经到头" in out, out
+    # 没到头、是页面自己拦了滚轮：不能说成到头了
+    ref = _ref_of(_tool(browser, tb.browser_find.func, "锁住的盒子"), "锁住的盒子")
+    out = _tool(browser, tb.browser_scroll.func, ref=ref, amount=50)
+    assert "位置没变" in out and "被页面拦了" in out and "已经到头" not in out, out
+
+
+def test_scroll_inside_an_iframe(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/scroll_frame.html")
+    _call(browser, "settle", ms=800)
+    out = _tool(browser, tb.browser_scroll.func, amount=200, frame="f.0")
+    assert "已滚动 down 200px" in out, out
+    st = _call(browser, "lx", method="scrollState", args={}, frame="f.0")
+    assert st.get("ok") and abs(st["y"] - 200) <= 2, st
+    assert _js_value(browser, "scrollY") == 0, "滚的是 iframe，不是外层页面"
+
+
+def test_scroll_hidden_panel_says_so_but_top_bottom_work(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/scroll.html")
+    out = _tool(browser, tb.browser_scroll.func, direction="down")
+    assert "面板没显示" in out, out
+    out = _tool(browser, tb.browser_scroll.func, direction="bottom")
+    assert "已滚到底" in out, out
+
+
+def test_hover_reveals_menu_and_new_refs_are_clickable(browser, servers, trusted_tools):
+    """悬停才出现的菜单：diff 要报出来、新 ref 可直接点；点菜单项时菜单不收起
+    （触发点和菜单在同一块悬停区域里，点击直接移到菜单项上）。"""
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, path="/hover.html")
+    assert "菜单甲" not in snap, "菜单一开始不该可见"
+    out = _tool(browser, tb.browser_hover.func, _ref_of(snap, "更多操作"))
+    assert out.startswith("已悬停 button（ref=") and "没确认" not in out, out
+    assert "菜单甲" in out and "菜单乙" in out, out
+    assert _js_value(browser, "document.getElementById('out').textContent") == "-", \
+        "悬停不能按下鼠标（触发点自己的 click 不该触发）"
+    assert _js_value(browser, "getComputedStyle(document.getElementById('menu')).display") == "block"
+    ref = _ref_of(out, "菜单甲")
+    assert ref, f"diff 里的菜单项要带可用的 ref：{out}"
+    clicked = _tool(browser, tb.browser_click.func, ref)
+    assert clicked.startswith("已点击"), clicked
+    assert _js_value(browser, "document.getElementById('out').textContent") == "点了菜单甲"
+
+
+def test_hover_reveals_a_custom_tooltip(browser, servers, trusted_tools):
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, path="/hover.html")
+    out = _tool(browser, tb.browser_hover.func, _ref_of(snap, "查看提示"))
+    assert "已悬停" in out and "这是自定义提示框" in out, out
+
+
+def test_hover_on_an_occluded_element_reports_the_blocker(browser, servers, trusted_tools):
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, path="/hover.html")
+    _call(browser, "js", code="document.body.insertAdjacentHTML('beforeend', "
+                              "\"<div style='position:fixed;left:0;top:0;right:0;bottom:0;background:#fff'>全屏遮罩</div>\"); true")
+    out = _tool(browser, tb.browser_hover.func, _ref_of(snap, "更多操作"))
+    assert out.startswith("悬停失败") and "挡住" in out and "全屏遮罩" in out, out
+
+
+def test_hover_hidden_panel_says_so(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/hover.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    out = _tool(browser, tb.browser_hover.func, _ref_of(snap, "更多操作"))
+    assert "面板没显示" in out, out
+
+
+def test_wait_for_late_text(browser, servers, trusted_tools):
+    """几秒后才出现的文字：等到了（用了多少秒），附这段时间的变化行 diff。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/wait.html")
+    _call(browser, "js", code="document.getElementById('go').click(); 1")
+    t0 = time.time()
+    out = _tool(browser, tb.browser_wait.func, text="异步结果出来了", timeout=6)
+    assert "等到了" in out and "异步结果出来了" in out and "秒" in out, out
+    assert 1.0 < time.time() - t0 < 5.0
+    assert "页面变化" in out, "要附等待期间的变化行 diff"
+
+
+def test_wait_for_a_mask_to_disappear(browser, servers, trusted_tools):
+    """倒计时遮罩（display:none 隐藏、还在 DOM 里）：给 ref 等它消失。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/wait.html")
+    _call(browser, "js", code="document.getElementById('maskbtn').click(); 1")
+    found = _tool(browser, tb.browser_find.func, "加载遮罩")
+    ref = _ref_of(found, "加载遮罩")
+    assert ref, found
+    out = _tool(browser, tb.browser_wait.func, ref=ref, timeout=6)
+    assert "等到了" in out and "消失" in out, out
+    assert _js_value(browser, "getComputedStyle(document.getElementById('mask')).display") == "none"
+
+
+def test_wait_for_text_to_disappear(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/wait.html")
+    _call(browser, "js", code="document.getElementById('maskbtn').click(); 1")
+    out = _tool(browser, tb.browser_wait.func, text="遮罩：2 秒后消失", gone=True, timeout=6)
+    assert "等到了" in out and "消失" in out, out
+    secs = float(re.search(r"用了 ([\d.]+) 秒", out).group(1))
+    assert secs >= 1.0, f"文字还在就说消失了：{out}"
+    assert _js_value(browser, "getComputedStyle(document.getElementById('mask')).display") == "none"
+
+
+def test_wait_timeout_is_honest(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/wait.html")
+    out = _tool(browser, tb.browser_wait.func, text="绝不出现的文字", timeout=1)
+    assert "超时" in out and "没看到文字" in out and "超时不是失败" in out, out
+    assert "等到了" not in out, out
+
+
+def test_wait_for_the_page_to_settle(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/wait.html")
+    _call(browser, "js", code="document.getElementById('tickbtn').click(); 1")
+    out = _tool(browser, tb.browser_wait.func, timeout=5)
+    assert "等到了" in out and "安静" in out, out
+    assert _js_value(browser, "document.getElementById('tick').textContent") == "tick 8", \
+        f"内容还在变就说安静了：{out}"
+
+
+def test_wait_stops_immediately(browser, servers, trusted_tools):
+    """用户点停止：等待要马上停，不傻等满 timeout。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/wait.html")
+    box = {}
+
+    def _wait():
+        box["r"] = tb.browser_wait.func(text="绝不出现的文字", timeout=30)
+
+    t = threading.Thread(target=_wait, daemon=True)
+    t.start()
+    deadline = time.time() + 0.5
+    while time.time() < deadline:
+        browser.processEvents()
+        time.sleep(0.01)
+    state.stop_flag = True
+    t0 = time.time()
+    while t.is_alive() and time.time() - t0 < 5:
+        browser.processEvents()
+        time.sleep(0.01)
+    t.join(timeout=2)
+    state.stop_flag = False
+    assert "已停止" in (box.get("r") or ""), box
+    assert time.time() - t0 < 3
+
+
+def test_dialogs_the_user_opens_while_waiting_are_the_users(browser, servers, trusted_tools, ui_hooks):
+    """等待期间（占着浏览器锁）用户在网页上点出来的确认框归用户：照常问，不算模型的。"""
+    calls, answers = ui_hooks
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/wait.html")
+    box = {}
+
+    def _wait():
+        box["r"] = tb.browser_wait.func(text="绝不出现的文字", timeout=4)
+
+    t = threading.Thread(target=_wait, daemon=True)
+    t.start()
+    deadline = time.time() + 0.6
+    while time.time() < deadline:
+        browser.processEvents()
+        time.sleep(0.01)
+    assert not page_mod.model_acting(), "等待期间不算模型在操作"
+    _user_click(browser, "del")
+    assert _wait_for(browser, lambda: _out(browser) == "deleted"), _out(browser)
+    while t.is_alive():
+        browser.processEvents()
+        time.sleep(0.01)
+    t.join(timeout=2)
+    assert calls["js"] and calls["js"][0][0] == "confirm", "等待时用户点出来的确认框没问用户"
+    assert "页面弹出确认框" not in (box.get("r") or ""), box
+
+
+def test_plan_mode_blocks_click_at_but_allows_scroll_hover_wait(browser, servers, trusted_tools):
+    from src import permission_modes as pm
+    from src import session as _session
+    from src.streaming import PLAN_MODE_READONLY_TOOLS, _PLAN_REJECT_NOTES
+    tb = trusted_tools
+    for name in ("browser_scroll", "browser_hover", "browser_wait"):
+        assert name in PLAN_MODE_READONLY_TOOLS, name
+    assert "browser_click_at" not in PLAN_MODE_READONLY_TOOLS
+    assert "browser_click_at" in _PLAN_REJECT_NOTES
+    sess = _session.current_session()
+    old_mode = pm.current(sess)
+    pm.apply(sess, "plan")
+    try:
+        _open_visual(browser, servers, tb, path="/canvas_inner.html")
+        out = _tool(browser, tb.browser_click_at.func, 80, 80)
+        assert "Plan" in out and "只读" in out, out
+        assert _js_value(browser, "document.getElementById('out').textContent") == "-"
+        assert "已滚" in _tool(browser, tb.browser_scroll.func, direction="bottom")
+        snap = _tool(browser, tb.browser_snapshot.func)
+        assert "已悬停" in _tool(browser, tb.browser_hover.func, _ref_of(snap, "提交分数"))
+        assert "等到了" in _tool(browser, tb.browser_wait.func, timeout=3)
+    finally:
+        pm.apply(sess, old_mode)
+
+
+
+def _drop_bridge_op(monkeypatch, op, **when):
+    """模拟事件发出去了却没送到（页面那一刻把元素换掉了之类）：这个 op 回 ok、实际什么都不发。"""
+    from src import tools_browser as tbm
+    real = tbm._bridge_call
+
+    def fake(o, timeout=30, **args):
+        if o == op and all(args.get(k) == v for k, v in when.items()):
+            return {"ok": True}
+        return real(o, timeout=timeout, **args)
+    monkeypatch.setattr(tbm, "_bridge_call", fake)
+
+
+def test_click_at_says_when_the_click_was_not_confirmed(browser, servers, trusted_tools, monkeypatch):
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/canvas_inner.html")
+    _drop_bridge_op(monkeypatch, "mouse")
+    out = _tool(browser, tb.browser_click_at.func, 80, 80)
+    assert "没确认送到" in out, f"点击没送到却没说：{out}"
+
+
+def test_hover_says_when_the_hover_was_not_confirmed(browser, servers, trusted_tools, monkeypatch):
+    tb = trusted_tools
+    snap = _open_visual(browser, servers, tb, path="/hover.html")
+    _drop_bridge_op(monkeypatch, "mouse", move_only=True)
+    out = _tool(browser, tb.browser_hover.func, _ref_of(snap, "更多操作"))
+    assert "没确认悬停送到" in out, f"悬停没送到却没说：{out}"
+
+
+def test_screenshot_locate_drops_points_outside_the_image(browser, servers, trusted_tools, monkeypatch):
+    """识别模型报到图外的坐标是看错了：不换算、不给模型拿去点。"""
+    from src import models
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/canvas_inner.html")
+    monkeypatch.setattr(models, "get_vision_model_index", lambda: 0)
+    monkeypatch.setattr(models, "describe_images_with_vision",
+                        lambda prompt, images, **kw: ("识别模型", "红圆在 [5000, 6000]"))
+    out = _tool(browser, tb.browser_screenshot.func, "红圆在哪", locate=True)
+    assert "没有报出 [x, y] 坐标" in out and "browser_click_at" not in out.split("（这是识别模型")[-1], out
+
+
+
+def test_scroll_page_when_a_nested_box_covers_the_viewport(browser, servers, trusted_tools):
+    """可见部分处处压着别的滚动区域：滚轮会滚那个区域（或被它拦掉）。改成直接设页面位置，
+    并说明这次不会触发靠滚轮的加载——以前滚轮落到盒子上，页面纹丝不动。"""
+    tb = trusted_tools
+    _open_visual(browser, servers, tb, path="/scroll.html")
+    _call(browser, "js", code=(
+        "const d = document.createElement('div'); d.id = 'cover';"
+        "d.style.cssText = 'height:100vh;overflow-y:auto;background:#eef';"
+        "for (let i = 0; i < 60; i++) { const p = document.createElement('p'); p.textContent = '盖住项' + i; d.appendChild(p); }"
+        "document.body.prepend(d); 1"))
+    out = _tool(browser, tb.browser_scroll.func, amount=200)
+    assert "改成直接设位置" in out and "0 → 200" in out, out
+    assert _js_value(browser, "scrollY") == 200
+    assert _js_value(browser, "document.getElementById('cover').scrollTop") == 0
