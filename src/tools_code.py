@@ -210,27 +210,16 @@ def run_program(code: str, time_limit: float = _TIME_LIMIT_S) -> str:
     return (text.strip() or "（程序没有打印任何东西：用 print 把要的结果打出来）") + "\n" + summary
 
 
-@tool
+@tool(parse_docstring=True)
 def run_code(code: str, description: str = "") -> str:
-    """写一小段 Python，**一轮里**连着调好几次读 / 搜工具，只把 print 出来的交回——
-    要看好几个文件、搜好几个词、或者要在结果里挑东西时用它，比一轮调一个工具快得多。
+    """写一小段 Python，一轮里连着调好几次读 / 搜工具，只交回 print 出来的内容——要看好几个文件、搜好几个词、或要在结果里挑东西时用它。
+    用 `tools.工具名(参数)` 调：read_file、read_files、search_files、search_in_file、list_directory、find_definition、find_references、code_map、related_files、find_tests、git_diff、git_log、git_status、get_project_instructions。只读。
+    限制：除了 re 不能 import，不能定义 class，不能用下划线开头的名字；最多跑 60 秒、交回 3 万字。要用别的库或写文件，用 run_command(command="python -", stdin=代码)。
 
-    程序里用 `tools.工具名(参数)` 调工具，参数和直接调用时一样，返回工具的文本结果：
-    tools.read_file / read_files / search_files / search_in_file / list_directory / find_definition /
-    find_references / code_map / related_files / find_tests / git_diff / git_log / git_status /
-    get_project_instructions。只读：改文件、跑命令请直接调对应工具。
-
-    例：
-        for p in ["src/a.py", "src/b.py"]:
-            print(tools.read_file(p, limit=400))
-        hits = tools.search_files(regex="def send", path="src", context=0)
-        print("\\n".join(l for l in hits.splitlines() if "ui/" in l))
-
-    限制：除了 `re`（直接用，或写 import re）不能 import、不能定义 class、不能用下划线开头的名字或属性；
-    内置函数只有基本的那些（len / range / sorted / str / dict …），文件只能经 tools 读；最多跑 60 秒；
-    最多交回 3 万字。要用别的库、读写文件、起子进程：run_command(command="python -", stdin=代码)。
-    code: 程序（可以在顶层 return 一个结果）
-    description: 一句话说明这段程序做什么（显示在界面上）"""
+    Args:
+        code: 程序（可以在顶层 return 一个结果），例：`for p in ["a.py", "b.py"]: print(tools.read_file(p, limit=400))`。
+        description: 一句话说明这段程序做什么（显示在界面上）。
+    """
     try:
         return run_program(code)
     except CodeRejected as e:

@@ -16,12 +16,14 @@ from .tools_common import (
 )
 
 
-@tool
+@tool(parse_docstring=True)
 def code_map(path: str = "", max_chars: int = 8000) -> str:
-    """列出项目（或指定子目录）每个源码文件的类/函数清单（带行号），用于快速定位
-    "某功能/类在哪个文件"，省去逐个 read_file 摸索。各种语言都认（Java、Go、Rust、C/C++、C#、
-    Kotlin、PHP、Ruby、Swift、Vue……）。
-    path: 相对项目根的子目录，空 = 整个项目；给单个文件就只列这个文件。只读、安全。"""
+    """列出项目（或子目录 / 单个文件）里每个源码文件的类和函数（带行号），动手前摸结构、找「某功能在哪个文件」。各种语言都认。
+
+    Args:
+        path: 子目录或文件，留空为整个项目。
+        max_chars: 最多返回多少字。
+    """
     from . import code_graph, codeintel
 
     # ── 路径起点 ──
@@ -337,13 +339,15 @@ def _score_test_candidate(
 # ══════════════════════════════════════
 
 
-@tool
+@tool(parse_docstring=True)
 def find_tests(path: str = "", symbol: str = "", max_results: int = 20) -> str:
-    """根据源码文件路径和可选符号名，返回最可能相关的测试文件 / 测试用例候选。
-    path: 源码文件或目录，相对项目根或绝对路径。留空 = 项目根。
-    symbol: 可选函数 / 类 / 方法名。
-    max_results: 最多返回条数，范围 1-50。
-    返回匹配的测试文件、命中原因和推荐 run_tests 命令。"""
+    """按源码文件（和可选的符号名）找最可能相关的测试文件 / 用例，附命中原因和推荐的 run_tests 命令。
+
+    Args:
+        path: 源码文件或目录，留空为项目根。
+        symbol: 函数 / 类 / 方法名。
+        max_results: 最多返回多少条（1–50）。
+    """
     max_results = max(1, min(50, max_results))
     root = _project_cwd()
 
@@ -425,12 +429,14 @@ def find_tests(path: str = "", symbol: str = "", max_results: int = 20) -> str:
     return "\n".join(lines)
 
 
-@tool
+@tool(parse_docstring=True)
 def related_files(path: str, max_results: int = 30) -> str:
-    """给定一个源码文件，返回修改它前应关注的相关文件。
-    path: 源码文件路径（相对项目根或绝对路径）。
-    max_results: 最多返回条数，范围 1-100。
-    输出分组：目标文件、它导入的项目内文件、导入它的项目内文件、相关测试候选、建议下一步。"""
+    """给一个源码文件，列出改它之前该看的文件：它导入的、导入它的、相关测试。
+
+    Args:
+        path: 源码文件路径。
+        max_results: 最多返回多少条（1–100）。
+    """
     max_results = max(1, min(100, max_results))
     root = _project_cwd()
 

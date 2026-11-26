@@ -79,13 +79,12 @@ def _undo_note(prep, ok: bool, why: str) -> str:
     return "" if ok else f"\n⚠️ 本次改动不可撤销（{why}）"
 
 
-@tool
+@tool(parse_docstring=True)
 def delete_path(path: str) -> str:
-    """删除一个文件，或一个**空**目录。path: 要删除的路径（绝对或相对项目根）。
+    """删除一个文件或一个空目录。会弹确认卡；删的文件可以撤销。不递归：目录不空就拒绝，先逐个删里面的文件。
 
-    每次都会弹确认卡给用户看删的是什么；删除文件后可以用顶栏"撤销"原样恢复。
-    **不递归**：目录里还有东西就拒绝——要清空目录，先逐个 delete_path 里面的文件。
-    只是想改内容用 edit_file / write_file，不要删了重建。
+    Args:
+        path: 要删除的路径。
     """
     try:
         full = _resolve_path(path)
@@ -139,12 +138,13 @@ def delete_path(path: str) -> str:
         return f"删除失败: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def move_path(source: str, destination: str) -> str:
-    """移动 / 重命名一个文件或目录。source: 现在的路径, destination: 新路径。
+    """移动 / 重命名一个文件或目录。目标已存在就拒绝（不覆盖），目标目录不存在会自动建。会弹确认卡；移动文件可以撤销。
 
-    目标已存在就拒绝（不覆盖）；目标所在目录不存在会自动建。每次都会弹确认卡；
-    移动**文件**后可以用顶栏"撤销"挪回原处（移动目录不跟踪撤销）。
+    Args:
+        source: 现在的路径。
+        destination: 新路径。
     """
     try:
         src, dst, reject = _both_paths(source, destination)
@@ -200,12 +200,13 @@ def move_path(source: str, destination: str) -> str:
         return f"移动失败: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def copy_path(source: str, destination: str) -> str:
-    """复制一个文件到新路径。source: 源文件, destination: 新文件路径。
+    """复制一个文件到新路径（不复制目录）。目标已存在就拒绝（不覆盖），目标目录不存在会自动建。
 
-    目标已存在就拒绝（不覆盖）；目标所在目录不存在会自动建。只复制文件，不复制目录。
-    复制出来的新文件可以用顶栏"撤销"删掉。
+    Args:
+        source: 源文件。
+        destination: 新文件路径。
     """
     try:
         src, dst, reject = _both_paths(source, destination)
@@ -245,13 +246,12 @@ def copy_path(source: str, destination: str) -> str:
         return f"复制失败: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def make_directory(path: str) -> str:
-    """新建目录（父目录一起建，已存在则什么都不做）。path: 目录路径（相对项目根，须在项目内）。
+    """新建目录（父目录一起建，已存在就什么都不做）。只能建在项目里；不弹确认卡。
 
-    只建空目录、不动任何已有文件，所以项目内不弹确认卡（不像删除/移动有数据丢失风险，
-    建错了随时删掉即可）；但仍守两道闸：只能在项目根内建，无确认界面时默认拒绝。
-    同名的**文件**已存在时拒绝。
+    Args:
+        path: 目录路径（相对项目根）。
     """
     try:
         full = _resolve_path(path)

@@ -397,12 +397,15 @@ def _mark_range_if_fully_reviewed(cwd: str, path: str) -> None:
         pass
 
 
-@tool
+@tool(parse_docstring=True)
 def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str:
-    """查看 git 改动（默认未暂存的工作区改动）。path: 限定文件/目录（相对项目根，空=全部）。
-    staged=True 看已暂存（git add 过）的改动。只读、调研用。
-    不指到单个文件时一次最多交回 8000 字（max_chars 调大也一样），放不下的文件会列出名字和改动量；
-    要看全某个文件的改动，path 指到那个文件。"""
+    """看改动（默认是未暂存的工作区改动）。不指到单个文件时最多返回 8000 字，放不下的文件只列名字和改动量；要看全某个文件就把 path 指到它。
+
+    Args:
+        path: 限定文件或目录，留空看全部。
+        staged: True 时看已暂存的改动。
+        max_chars: 最多返回多少字。
+    """
     try:
         import shutil as _shutil
         max_chars, single = _diff_char_limit(path, max_chars)
@@ -553,10 +556,14 @@ def git_diff(path: str = "", staged: bool = False, max_chars: int = 8000) -> str
         return f"git diff 执行异常: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def git_log(path: str = "", limit: int = 15) -> str:
-    """查看最近 git 提交历史（短 hash + 日期 + 提交信息 + 改动文件）。
-    path: 限定某文件/目录（相对项目根）。limit: 条数。只读。"""
+    """看最近的提交历史（短 hash、日期、提交信息、改动的文件）。
+
+    Args:
+        path: 限定文件或目录。
+        limit: 条数。
+    """
     try:
         import shutil as _shutil
         if not _shutil.which("git"):
@@ -909,9 +916,13 @@ def _validate_git_paths(paths, root: str) -> tuple[list[str] | None, str]:
     return rel_paths, ""
 
 
-@tool
+@tool(parse_docstring=True)
 def git_status(max_chars: int = 12000) -> str:
-    """查看当前仓库状态，包含分支、ahead/behind、暂存/未暂存/未跟踪文件。只读。"""
+    """看仓库状态：分支、ahead / behind、暂存 / 未暂存 / 未跟踪的文件。
+
+    Args:
+        max_chars: 最多返回多少字。
+    """
     try:
         if not _git_available():
             return "git 未安装或不在 PATH 中。"
@@ -974,9 +985,13 @@ def git_status(max_chars: int = 12000) -> str:
         return f"git status 执行异常: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def git_stage(paths: list[str]) -> str:
-    """暂存指定路径。只接受明确路径列表，不接受空列表、通配符或 '.'。"""
+    """暂存指定的文件。只接受明确的路径，不接受空列表、通配符或 "."。
+
+    Args:
+        paths: 要暂存的路径列表。
+    """
     try:
         if not _git_available():
             return "git 未安装或不在 PATH 中。"
@@ -1021,9 +1036,13 @@ def git_stage(paths: list[str]) -> str:
         return f"git stage 执行异常: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def git_unstage(paths: list[str]) -> str:
-    """取消暂存指定路径，不修改工作区内容。"""
+    """取消暂存指定的文件，不改工作区内容。
+
+    Args:
+        paths: 要取消暂存的路径列表。
+    """
     try:
         if not _git_available():
             return "git 未安装或不在 PATH 中。"
@@ -1079,9 +1098,13 @@ def git_unstage(paths: list[str]) -> str:
         return f"git unstage 执行异常: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def git_commit(message: str) -> str:
-    """基于当前暂存区创建本地提交。不会自动暂存文件，不会 push。"""
+    """用当前暂存区创建一个本地提交。不会自动暂存、不会 push。提交前先 git_stage 只暂存相关文件，再 git_diff(staged=True) 看一遍。
+
+    Args:
+        message: 提交信息。
+    """
     try:
         if not _git_available():
             return "git 未安装或不在 PATH 中。"

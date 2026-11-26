@@ -279,15 +279,14 @@ def _fetch_text(url: str, max_chars: int = 8000) -> tuple[bool, str]:
         result += "\n... [已截断]"
     return True, result
 
-@tool
+@tool(parse_docstring=True)
 def fetch_url(url: str, max_chars: int = 8000) -> str:
-    """抓取网页正文，用于查文档/报错信息/API 参考。
+    """抓一个网址的正文（文档、报错信息、API 参考），HTML 转成可读文本。只允许 http / https。
 
-    url: 要抓取的网址（必须是 http:// 或 https://）
-    max_chars: 最大返回字符数，默认 8000
-
-    只允许 http/https 协议；按 Content-Type 处理内容类型；
-    HTML 自动去标签转为可读纯文本。只读、不弹确认。"""
+    Args:
+        url: 网址。
+        max_chars: 最多返回多少字，默认 8000。
+    """
     return _fetch_page(url, max_chars)[1]
 
 
@@ -605,23 +604,19 @@ def _deep_read(query, results):
     return read
 
 
-@tool
+@tool(parse_docstring=True)
 def web_search(query: str, max_results: int = 5, topic: str = "general", time_range: str = "",
                depth: str = "basic") -> str:
-    """搜索网络，返回一句直接答案（有的话）和每条结果的标题、链接、发布时间，
-    以及每个网页里和问题最相关的几段原文。
+    """联网搜索，返回直接答案（有的话）和每条结果的标题、链接、发布时间、最相关的几段原文。
+    一次把问题问全，先看结果够不够，通常 1–3 次就够；需要原文细节就 fetch_url 抓那一篇。
 
-    一次把问题问全（比如"S16 瑞士轮第四轮 对阵 比分"），先看直接答案和这次的结果够不够，
-    够了就答；通常 1~3 次就够，不要一场比赛、一个名字各搜一次。
-
-    query: 搜索关键词
-    max_results: 最大返回结果数，默认 5，最多 10
-    topic: "general" 普通搜索（默认）；"news" 新闻——查赛事、时事、最新动态时用
-    time_range: 只要最近一段时间的结果："day" / "week" / "month" / "year"；留空不限
-    depth: "basic"（默认，先用它）；"advanced" 段落挑得更准，但每次多花一份额度——
-           只在 basic 的结果里确实缺关键细节时再用，或改用 fetch_url 抓那篇原文
-
-    用 DeepSeek（模型的 key）/ Tavily / 博查，见设置 → 高级 → 网络搜索。只读、不弹确认。"""
+    Args:
+        query: 搜索内容。
+        max_results: 结果条数，默认 5，最多 10。
+        topic: "general"（默认）或 "news"（赛事、时事、最新动态）。
+        time_range: 只要最近的结果："day" / "week" / "month" / "year"，留空不限。
+        depth: "basic"（默认，先用它）或 "advanced"（段落更准，但多花一份额度，basic 缺关键细节时才用）。
+    """
     from . import config
 
     order = _search_order(query)

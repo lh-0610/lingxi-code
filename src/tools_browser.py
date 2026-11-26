@@ -614,12 +614,16 @@ def _note_browser_check(r, entries_all):
                         status="failed" if (errors or http_failed) else "passed", summary=summary)
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_open(url: str, timeout: int = 30, new_tab: bool = False) -> str:
-    """在侧边栏浏览器打开网址（只允许 http/https），返回标题 + 首份交互快照（含可点元素的 ref）。
-    本机 dev server（localhost）直接开；公网页面按权限模式可能先问用户。
-    打开后按快照里的 ref 点击/输入；页面变了 ref 会失效，重新 browser_snapshot。"""
+    """在侧栏浏览器打开网址（只允许 http / https），返回标题和首份快照（可交互元素带 ref）。本机 dev server 直接开；公网页面可能先问用户。
+
+    Args:
+        url: 网址。
+        timeout: 加载超时秒数。
+        new_tab: True 时在新标签打开。
+    """
     err = security.validate_url(url)
     if err:
         return err
@@ -656,14 +660,20 @@ def browser_open(url: str, timeout: int = 30, new_tab: bool = False) -> str:
     return head + "\n" + _snapshot_text(snap, tree.SNAPSHOT_DEFAULT_CHARS, title=title) + _tabs_note()
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_snapshot(mode: str = "interactive", max_depth: int = 12,
                      max_chars: int = 12000, root_ref: str | None = None,
                      frame: str | None = None) -> str:
-    """取当前页面的可访问性文字树：- role "name" [ref=eN] [状态]，缩进表嵌套。
-    mode=interactive 只含可交互元素/地标/标题（默认，省 token）；mode=all 连正文文本一起给。
-    点击/输入后页面结构变了就重新取一次——旧 ref 失效。root_ref 取某容器子树，frame 取 iframe。"""
+    """取当前页面的可访问性文字树（`- role "name" [ref=eN] [状态]`），点击 / 输入要用树里的 ref。页面变了旧 ref 就失效，重新取。
+
+    Args:
+        mode: "interactive"（默认）只含可交互元素、地标、标题；"all" 连正文一起给。
+        max_depth: 最大嵌套深度。
+        max_chars: 最多返回多少字。
+        root_ref: 只取这个容器的子树。
+        frame: 取某个 iframe（快照里的 frame 路径，如 "f.0"）。
+    """
     if mode not in ("interactive", "all"):
         return f"mode 只能是 interactive 或 all，收到: {mode}"
     cap = tree.effective_cap(max_chars, tree.SNAPSHOT_DEFAULT_CHARS)
@@ -700,11 +710,16 @@ def _frames_note():
             + tree.fence("\n".join(lines), top or ""))
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_find(text: str, limit: int = 20, frame: str | None = None) -> str:
-    """按可见文字/名称找页面元素，返回匹配列表（role/name/ref，链接带 href）。
-    找某个按钮/输入框/链接优先用它，比全量快照省得多；拿 ref 去 click/type。"""
+    """按可见文字找页面元素，返回匹配的 role / name / ref（链接带 href）。找某个按钮、输入框、链接优先用它，比全量快照省。
+
+    Args:
+        text: 要找的文字。
+        limit: 最多返回多少个。
+        frame: 在某个 iframe 里找。
+    """
     if not text or not text.strip():
         return "text 不能为空。"
     try:
@@ -732,11 +747,15 @@ def browser_find(text: str, limit: int = 20, frame: str | None = None) -> str:
             + tree.fence("\n".join(lines), r.get("qtUrl") or r.get("url", "")))
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_read_text(max_chars: int = 8000, frame: str | None = None) -> str:
-    """读当前页面正文（main/article 优先，退 body）。看文章内容用它；
-    要点按钮/填表单用 browser_snapshot 拿 ref。"""
+    """读当前页面的正文（看文章内容用它；要点按钮、填表用 browser_snapshot 拿 ref）。
+
+    Args:
+        max_chars: 最多返回多少字。
+        frame: 读某个 iframe。
+    """
     cap = tree.effective_cap(max_chars, tree.READ_TEXT_DEFAULT_CHARS)
     r = _lx("readText", {"maxChars": cap}, frame)
     if not r.get("ok"):
@@ -748,23 +767,18 @@ def browser_read_text(max_chars: int = 8000, frame: str | None = None) -> str:
     return body
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_screenshot(question: str, ref: str | None = None, frame: str | None = None,
                        locate: bool = False) -> str:
-    """截浏览器当前可见区域，交给图片识别模型，按 question 回答它在图上看到的。
+    """截浏览器可见区域交给图片识别模型，按 question 回答。只在文字树和样式核对都说不清时用（颜色含义、图表、canvas、布局）；返回的是识别模型的结论，不是原图，也可能看错。需要在「设置 → 图片识别模型」配好模型。
 
-    核对"看起来对不对"用它：颜色 / 高亮 / 图标 / 图表 / canvas / 布局——文字树和
-    动作后的样式核对都说不清的东西。question 要具体，只问图上看得出来的事，例如
-    「"买牛奶"那一行有没有删除线」「日历里 11 月 3 日是什么底色」；别问"页面对不对"。
-    ref：只截这个元素附近那一块（放大后交给识别模型，看小字、看局部更准）；frame：ref 所在的
-    iframe（漏写时按签发 ref 的 frame 自动对上）。不给 ref 截整个可见区域。
-    locate=True：要求识别模型把要找的东西的位置用 [x, y] 报出来，结果末尾换算成页面坐标
-    列出来——canvas 游戏 / 图表里文字树没有 ref 的东西，拿这些坐标去 browser_click_at。
-    要点得准就给 ref（比如 canvas 本身）只截那一块：实测整屏报的位置偏 5–45 像素，
-    局部放大后偏 5–11 像素。
-    返回的是识别模型的文字回答，不是原图；它也可能看错，关键结论能用文字树 / 正文核对的就再核对。
-    需要先在「设置 → 图片识别模型」配好能看图的模型。"""
+    Args:
+        question: 要从图上确认什么，要具体，如「"上海"那一行是什么底色」。
+        ref: 只截这个元素附近一块并放大（读小字、看局部更准）。
+        frame: ref 所在的 iframe。
+        locate: True 时让识别模型报要找的东西的位置，结果末尾换算成页面坐标，拿去 browser_click_at；要点得准就同时给 ref。
+    """
     question = (question or "").strip()
     if not question:
         return "截图失败: 要给 question（想从图上确认什么），不然识别模型不知道该看哪里"
@@ -852,14 +866,17 @@ def _located_points(desc, shot, frame, crop_off):
             + "\n（坐标是识别模型报的位置换算的，可能有偏差；点完看变化核对）")
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str:
-    """点击快照/find 给出的 ref 元素。默认附动作前后的"变化行 diff"；文字树没变时改报
-    操作处附近**实际计算样式**的变化（动作前后逐项比对，不按 class 名猜）。
-    "样式都没有变化"就是确实没反应，别反复点；颜色含义 / 图表要核对用 browser_screenshot。
-    点击是真实的鼠标事件：元素被弹窗 / 遮罩挡住时会报"被挡住"并给出挡在上面的东西，先处理它。
-    可能先问用户；提交/删除/支付这类有后果的动作每次都问。"""
+    """点击 ref 元素（真实鼠标点击）。结果附「页面变化」；文字树没变时报操作处的样式变化——「样式都没有变化」就是确实没反应，别反复点。
+    被弹窗 / 遮罩挡住时报「被挡住」和挡在上面的东西，先处理它。会先问用户；提交 / 删除 / 支付这类每次都问。
+
+    Args:
+        ref: 快照或 browser_find 给出的 ref。
+        frame: ref 所在的 iframe（如 "f.0"）；漏写时按签发 ref 的 frame 自动对上。
+        delta: 是否附页面变化，默认 True。
+    """
     url, err = _page_url()
     if err:
         return err
@@ -993,15 +1010,17 @@ def _frame_at_point(x, y, frame):
     return None, x, y, "点击失败: 坐标落在 iframe 上，但算不出它的位置，点不了。"
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_click_at(x: float, y: float, frame: str | None = None, delta: bool = True) -> str:
-    """按页面坐标点击（真实鼠标事件）：canvas 画出来的游戏 / 地图 / 图表里的东西在文字树里
-    没有 ref，用 browser_screenshot(locate=True) 拿到页面坐标后点它。
-    坐标是页面 CSS 像素（顶层视口，左上角为原点）；给 frame 时是那个 iframe 视口里的坐标。
-    落在 iframe 上会自动换算进那个 iframe。结果会说点在了什么元素上；那一点能拿到 ref 的
-    会给出 ref，下次直接 browser_click。默认附"变化行 diff"。
-    可能先问用户；落在提交/删除/支付这类按钮上照样每次都问。"""
+    """按页面坐标点击（真实鼠标）：canvas 游戏、地图、图表里文字树没有 ref 的东西用它，坐标从 browser_screenshot(locate=True) 拿。结果会说点在了什么上；那一点有 ref 的下次直接 browser_click。会先问用户；落在提交 / 删除 / 支付这类按钮上每次都问。
+
+    Args:
+        x: 横坐标，页面 CSS 像素，左上角为原点。
+        y: 纵坐标，页面 CSS 像素。
+        frame: 给了就是这个 iframe 视口里的坐标；落在 iframe 上也会自动换算进去。
+        delta: 是否附页面变化，默认 True。
+    """
     try:
         x, y = float(x), float(y)
     except (TypeError, ValueError):
@@ -1085,13 +1104,20 @@ def browser_click_at(x: float, y: float, frame: str | None = None, delta: bool =
     return head + note + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
                  frame: str | None = None, delta: bool = True) -> str:
-    """往 ref 指向的输入框输入文字（clear=True 先清空；submit=True 输入后回车，可能提交表单）。
-    默认附"变化行 diff"。可能先问用户；回车提交/有后果的输入每次都问。
-    别把密钥/令牌填进公网页面——会被直接拒绝。"""
+    """往 ref 指向的输入框输入文字。会先问用户；回车提交这类每次都问。别把密钥 / 令牌填进公网页面（会被拒绝）。
+
+    Args:
+        ref: 输入框的 ref。
+        text: 要输入的文字。
+        clear: True（默认）先清空原内容。
+        submit: True 时输入后按回车（可能提交表单）。
+        frame: ref 所在的 iframe。
+        delta: 是否附页面变化，默认 True。
+    """
     url, err = _page_url()
     if err:
         return err
@@ -1190,17 +1216,18 @@ def _plain_before(frame):
     return before
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_press_key(key: str, ref: str | None = None, frame: str | None = None,
                       delta: bool = True) -> str:
-    """按一个键（真实键盘事件）：Escape、Enter、Tab、ArrowUp / ArrowDown / ArrowLeft / ArrowRight、
-    Space、Backspace、Delete、Home、End、PageUp、PageDown、F1–F12、单个字符，可带修饰键
-    （Control+a、Shift+Tab）。名字照网页的 KeyboardEvent.key。
-    ref：先把焦点交给这个元素再按（按键送给有焦点的地方）；不给 ref 时送给当前焦点，
-    给 frame 时先把焦点交给那个 iframe（游戏、编辑器在 iframe 里时用）。
-    往输入框里打字用 browser_type；这个工具用来按快捷键、关弹窗（Escape）、移动选择、翻页、玩游戏。
-    默认附"变化行 diff"。可能先问用户；Enter 可能提交表单，按「回车提交」的规矩每次都问。"""
+    """按一个键（真实键盘事件）：关弹窗（Escape）、快捷键、移动选择、翻页、玩游戏用它；往输入框里打字用 browser_type。回车可能提交表单，每次都问。
+
+    Args:
+        key: 键名照网页的 KeyboardEvent.key：Escape、Enter、Tab、ArrowDown、Space、Backspace、PageDown、F5、单个字符，可带修饰键如 Control+a、Shift+Tab。
+        ref: 先把焦点交给这个元素再按；不给就送给当前焦点。
+        frame: 在某个 iframe 里按（游戏、编辑器在 iframe 里时用）。
+        delta: 是否附页面变化，默认 True。
+    """
     from .browser import page as _page
     key = (key or "").strip()
     if _page.parse_key(key) is None:
@@ -1269,14 +1296,20 @@ def browser_press_key(key: str, ref: str | None = None, frame: str | None = None
     return head + note + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_drag(ref: str, to_ref: str | None = None, dx: float = 0, dy: float = 0,
                  frame: str | None = None, delta: bool = True) -> str:
-    """把 ref 元素拖到 to_ref 元素上（或从它出发移动 dx / dy 像素）：真实鼠标按下 → 分几步移动
-    → 抬起。拖滑块、拖拽排序、把东西拖进框里、拖拽类小游戏用它。两个 ref 要在同一个 frame
-    里、都在可见区域。浏览器原生的 HTML5 拖放（draggable=true）可能不响应，那种页面多半另有
-    按钮可点。默认附"变化行 diff"。可能先问用户。"""
+    """把一个元素拖到另一个元素上，或拖动一段距离（真实鼠标：按下、分几步移动、抬起）：滑块、拖拽排序、把东西拖进框里。两个元素要在同一个 frame、都在可见区域；浏览器原生的 HTML5 拖放可能不响应。
+
+    Args:
+        ref: 要拖的元素。
+        to_ref: 拖到哪个元素上。
+        dx: 不给 to_ref 时横向移动多少像素。
+        dy: 不给 to_ref 时纵向移动多少像素。
+        frame: 两个元素所在的 iframe。
+        delta: 是否附页面变化，默认 True。
+    """
     url, err = _page_url()
     if err:
         return err
@@ -1364,15 +1397,19 @@ def _scroll_stable(frame, ref, tries=8):
     return last
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_scroll(direction: str = "down", amount: float | None = None,
                    ref: str | None = None, frame: str | None = None, delta: bool = True) -> str:
-    """滚动页面或某个可滚动容器（真实滚轮事件，滚动加载 / 虚拟列表 / 轮播都听得到）。
-    direction: up / down / left / right / top / bottom（top / bottom 直接到顶 / 到底）。
-    amount 是像素，默认约一屏的 80%。给 ref 滚那个容器（ref 本身不能滚就找最近的可滚动祖先），
-    不给滚页面；给 frame 滚那个 iframe。结果给滚动前后的位置、是否到头，附"变化行 diff"
-    （新露出来的内容）。只读操作，不改页面数据。"""
+    """滚动页面或某个可滚动容器（真实滚轮事件，滚动加载、虚拟列表、轮播都听得到）。结果给滚动前后的位置、是否到头，附新露出来的内容。
+
+    Args:
+        direction: up / down / left / right / top / bottom（top / bottom 直接到顶 / 到底）。
+        amount: 滚多少像素，默认约一屏。
+        ref: 滚这个容器（它自己不能滚就滚最近的可滚动祖先）；不给滚整个页面。
+        frame: 滚某个 iframe。
+        delta: 是否附页面变化，默认 True。
+    """
     direction = (direction or "").strip().lower()
     if direction not in _SCROLL_DIRS:
         return f"direction 只能是 {' / '.join(_SCROLL_DIRS)}，收到: {direction}"
@@ -1458,13 +1495,16 @@ def browser_scroll(direction: str = "down", amount: float | None = None,
     return head + fallback + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_hover(ref: str, frame: str | None = None, delta: bool = True) -> str:
-    """把鼠标移到 ref 元素上悬停（真实鼠标移动，不点击）：悬停才出现的菜单 / 提示框 / 按钮
-    用它唤出来，结果附"变化行 diff"——新出现的菜单项带着 ref，可直接 browser_click。
-    元素被挡住时报"被挡住"。悬停后鼠标停在那里；点别处时会先移走，靠悬停保持的菜单
-    可能收起（菜单和触发点在同一块悬停区域里的不受影响）。只读操作，不改页面数据。"""
+    """把鼠标移到元素上悬停（不点击），唤出悬停才出现的菜单、提示、按钮；结果里新出现的菜单项带 ref，可以直接点。
+
+    Args:
+        ref: 要悬停的元素。
+        frame: ref 所在的 iframe。
+        delta: 是否附页面变化，默认 True。
+    """
     url, err = _page_url()
     if err:
         return err
@@ -1522,15 +1562,19 @@ def browser_hover(ref: str, frame: str | None = None, delta: bool = True) -> str
 _WAIT_POLL_MS = 250
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_wait(text: str | None = None, ref: str | None = None, gone: bool = False,
                  timeout: float = 10, frame: str | None = None) -> str:
-    """等页面到位，别反复快照碰运气：给 text 等这段文字出现（gone=True 等它消失）；
-    给 ref 等那个元素消失（加载遮罩、倒计时弹层）；都不给就等页面安静下来
-    （没有导航在途、文字树连续两次不变）。每 250ms 查一次，最多 timeout 秒（上限 60）。
-    结果说等到了（用了多少秒）还是超时（超时不是失败，如实说），附这段时间的变化行 diff。
-    动作之后页面要加载 / 有倒计时 / 异步结果时用。只读操作。"""
+    """等页面到位：加载慢、有倒计时、要等异步结果时用，别反复快照碰运气。超时不是失败，会说清楚等了多久、看到的是什么。
+
+    Args:
+        text: 等这段文字出现（gone=True 时等它消失）。
+        ref: 等这个元素消失（加载遮罩、倒计时弹层）。
+        gone: 配合 text 用，True 时等文字消失。
+        timeout: 最多等多少秒，默认 10，上限 60。都不给 text / ref 时等页面安静下来。
+        frame: 在某个 iframe 里等。
+    """
     from .browser import page as _page
     if _page._browser is None:
         return _NO_PAGE
@@ -1604,15 +1648,17 @@ def browser_wait(text: str | None = None, ref: str | None = None, gone: bool = F
     return head + scope_note + _delta_text(before, frame, frame_url)
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_console(level: str = "error", clear: bool = False,
                     include_previous: bool = False) -> str:
-    """读浏览器控制台通道（前端报错排查用）：页面 console.*、alert/弹窗/下载/新窗口
-    拦截通知、资源加载失败（记 URL，无状态码）。level=error（默认）/warn/all
-    （all 含 info，即页面 console.log）；默认只给最近一次页面加载的输出（改完代码重开
-    页面后看到的就是新代码的结果），include_previous=True 连之前几次加载的一起列；
-    clear=True 读后清空缓冲。"""
+    """读页面控制台（console 报错 / 警告、被拦下的弹窗和下载、资源加载失败）。前端排查：打开页面 → 读控制台 → 改代码 → browser_open 同一地址重开（会拿到新代码）→ 再读。
+
+    Args:
+        level: "error"（默认）/ "warn" / "all"（含 console.log）。
+        clear: 读完清空。
+        include_previous: True 时连之前几次加载的一起列（默认只给最近一次加载的）。
+    """
     if level not in ("error", "warn", "all"):
         return "level 只能是 error / warn / all。"
     from .browser import page
@@ -1658,12 +1704,15 @@ def _console_whose(r):
     return f"[标签 #{r.get('tab')} · {fence_url(r.get('url') or '')}] "
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_tabs(action: str = "list", tab_id: int | None = None) -> str:
-    """浏览器标签：action=list 列出所有标签（当前的标 *）；select 切到 tab_id——之后的快照、
-    点击、输入都作用于它；close 关掉 tab_id（关最后一个等于关浏览器）。
-    点开「在新标签打开」的链接会自动开新标签并切过去；想自己开一个用 browser_open(url, new_tab=True)。"""
+    """管理浏览器标签。点开「在新标签打开」的链接会自动开新标签并切过去；之后的操作都作用于当前标签。
+
+    Args:
+        action: "list" 列出所有标签（当前的标 *）；"select" 切到 tab_id；"close" 关掉 tab_id（关最后一个等于关浏览器）。
+        tab_id: 标签编号。
+    """
     from .browser import page
     if page._browser is None:
         return _NO_PAGE
@@ -1707,10 +1756,10 @@ def _tab_lines(r):
             + tree.fence("\n".join(lines), (next((t for t in tabs if t.get("id") == cur), {}) or {}).get("url", "")))
 
 
-@tool
+@tool(parse_docstring=True)
 @_exclusive
 def browser_close() -> str:
-    """关闭浏览器页面，清 cookie 和缓存。调试结束、不再需要页面时调用。"""
+    """关闭浏览器，清 cookie 和缓存。调试完、不再需要页面时调用。"""
     r = _bridge_call("close", timeout=10)
     if not r.get("ok"):
         return _err(r, "关闭浏览器")

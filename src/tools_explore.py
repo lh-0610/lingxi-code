@@ -73,18 +73,15 @@ def _last_report(child) -> str:
     return ""
 
 
-@tool
+@tool(parse_docstring=True)
 def explore(question: str, thoroughness: str = "medium") -> str:
-    """派一个只读的探索子代理去弄清代码库里的一个问题（"X 是怎么工作的""Y 在哪里处理""改 Z 会影响哪些地方"），
-    它在自己的上下文里搜、读代码，只交回一份带 `路径:行号` 的报告，不占你的上下文。
+    """派一个只读子代理去弄清代码库里的一个问题（「X 怎么工作」「Y 在哪处理」「改 Z 影响哪些地方」），它在自己的上下文里搜、读，只交回带 `路径:行号` 的报告。
+    要读 3 个以上文件才弄得清的问题先派它；几个互不相关的问题同一轮各派一个，会并行跑。它看不到你的对话。
 
-    要读 3 个以上文件才能弄清的问题，先派它，别自己一个个读；几个互不相关的问题在同一轮里各派一个，会并行跑。
-    子代理看不到你的对话：question 里写清要查什么、已经知道什么、最后要拿来干嘛。
-    只读：不改文件、不跑命令。
-
-    question: 要查清的问题，写完整
-    thoroughness: "quick"（几轮内给出最可能的位置）/ "medium"（默认，把主要调用链走通）/
-                  "thorough"（相关入口、分支、测试都找全，慢）"""
+    Args:
+        question: 要查清的问题：查什么、已经知道什么、拿来干嘛，写完整。
+        thoroughness: "quick" 几轮内给出最可能的位置；"medium"（默认）把主要调用链走通；"thorough" 入口、分支、测试都找全（慢）。
+    """
     from .agent import agent_loop
     from .roles import get_explore_system_prompt
     from .subagent import HeadlessUI

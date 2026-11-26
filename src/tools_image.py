@@ -26,16 +26,13 @@ _IMAGE_EXTS = frozenset({
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024   # 防把超大文件整份塞进 base64 请求
 
 
-@tool
+@tool(parse_docstring=True)
 def read_image(path: str, question: str = "") -> str:
-    """读取一张图片，用视觉模型识别成文字交回（截图里的报错、UI 设计稿、图表、照片中的文字等）。
+    """读一张图片，用图片识别模型转成文字交回（截图里的报错、设计稿、图表、照片里的文字）。返回的是识别结果，不是原图；需要先在「设置 → 图片识别模型」配好模型。
 
-    参数：
-      path: 图片路径（绝对或相对项目根），支持 png/jpg/jpeg/gif/bmp/webp/tiff。
-      question: 可选，想让识别侧重什么（如"读出完整的报错信息和行号"）。
-
-    返回的是**视觉模型的识别 / OCR 文本，不是原图**。需要先在「设置 → 图片识别模型」
-    选一个能看图的模型；没配会明确提示。读普通文本 / PDF / notebook 用 read_file。
+    Args:
+        path: 图片路径（png / jpg / gif / bmp / webp / tiff）。
+        question: 想让识别侧重什么，如「读出完整的报错和行号」。
     """
     try:
         full = _resolve_path(path)

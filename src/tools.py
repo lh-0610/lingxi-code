@@ -38,33 +38,28 @@ _READ_MANY_MAX_FILES = 8
 _READ_MANY_MAX_CHARS = 60_000   # 一次批量读的总字数上限（约 1.8 万 token 的代码）
 
 
-@tool
+@tool(parse_docstring=True)
 def read_file(path: str, offset: int = 1, limit: int = READ_FILE_DEFAULT_LIMIT) -> str:
-    """读取文件内容，按行返回（带行号前缀，方便后续 edit_file 定位）。
+    """读一个文件，按行返回（带行号，方便 edit_file 定位）。PDF 自动逐页提取文字，.ipynb 渲染 cell 源码和输出；图片用 read_image。
+    大文件先用 search_files / code_map 找到行号再读那一段；看好几个文件用 read_files 一次读完。
 
-    参数：
-      path: 文件路径（绝对或相对项目根）
-      offset: 起始行号（**从 1 开始**），默认 1
-      limit: 最多读取的行数，默认 2000；文件更长时末尾会提示用 offset 接着读。
-        一次最多返回约 3 万字，超出的同样提示用 offset 接着读——大文件先用 search_files
-        或代码地图找到行号，再读那一段
-
-    返回格式（类 `cat -n`）：
-        1: import os
-        2: import sys
-        ...
-        [显示第 1-50 行 / 共 200 行]
-
-    要看好几个文件时用 read_files 一次读完。
+    Args:
+        path: 文件路径（绝对或相对项目根）。
+        offset: 起始行号，从 1 开始。
+        limit: 最多读多少行，默认 2000；一次最多返回约 3 万字，没读完会提示用 offset 接着读。
     """
     return _read_one(path, offset, limit)
 
 
-@tool
+@tool(parse_docstring=True)
 def read_files(paths: list[str], offset: int = 1, limit: int = READ_FILE_DEFAULT_LIMIT) -> str:
-    """一次读多个文件（最多 8 个），每个都按 offset / limit 读，格式同 read_file，每个文件一段、
-    以 `### 路径` 开头。已经知道要看哪几个文件时用它一次拿全，比一轮读一个快得多。
-    总字数超过 6 万时，剩下的文件只列出来不读（单独读，或缩小 limit）。"""
+    """一次读多个文件（最多 8 个），格式同 read_file，每个文件一段、以 `### 路径` 开头。已经知道要看哪几个文件时用它，别一轮读一个。总字数超过 6 万时，剩下的只列出不读。
+
+    Args:
+        paths: 文件路径列表。
+        offset: 每个文件的起始行号，从 1 开始。
+        limit: 每个文件最多读多少行，默认 2000。
+    """
     return _read_many(paths, offset, limit)
 
 
@@ -454,9 +449,14 @@ def _locked_write(tool_name: str, full: str, pre_raw, new_text: str, action: str
         return True, _undo_note(prep, expected)
 
 
-@tool
+@tool(parse_docstring=True)
 def write_file(path: str, content: str) -> str:
-    """写入内容到文件（覆盖）。path: 文件路径, content: 要写入的内容"""
+    """新建文件，或整体重写一个文件（覆盖原内容）。改已有文件的一部分用 edit_file / apply_patch。
+
+    Args:
+        path: 文件路径。
+        content: 完整的文件内容。
+    """
     try:
         full = _resolve_path(path)
         reject = _subagent_path_rejection(full, "文件")
@@ -486,9 +486,14 @@ def write_file(path: str, content: str) -> str:
         return f"写入失败: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def append_file(path: str, content: str) -> str:
-    """追加内容到文件末尾。path: 文件路径, content: 要追加的内容"""
+    """在文件末尾追加内容。
+
+    Args:
+        path: 文件路径。
+        content: 要追加的内容。
+    """
     try:
         full = _resolve_path(path)
         reject = _subagent_path_rejection(full, "文件")
@@ -748,20 +753,16 @@ def _locate_edit(content: str, old: str, new_string: str, replace_all: bool):
     return "none", [], [], (desc, None)
 
 
-@tool
+@tool(parse_docstring=True)
 def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-    """在文件中精确替换字符串（适合改大文件的局部，比 write_file 全量重写更安全更省 token）。
+    """在文件里把一段原文精确替换成新文本。改已有代码的首选（比 write_file 整体重写安全，不会丢没看到的内容）；一个文件多处或跨多个文件的协调改动用 apply_patch。
+    改完会自动跑静态检查，返回里有「⚠️ 自动校验发现问题」就接着修。
 
-    - `old_string` 必须**完整**包含要被替换的那段（保留缩进、换行、标点）；
-    - 默认要求 `old_string` 在文件中**只出现一次**——出现多次或没找到都会报错；
-    - 想替换所有出现请显式传 `replace_all=True`；
-    - 用这个工具比 write_file 安全：write_file 是全文覆盖容易丢内容，edit_file 只动指定那段。
-
-    参数：
-      path: 文件路径（绝对或相对项目根）
-      old_string: 要被替换的旧文本（必须与文件中的原文一字不差，含空白）
-      new_string: 替换成的新文本
-      replace_all: True 时替换全部出现；False（默认）时要求只出现一次
+    Args:
+        path: 文件路径（绝对或相对项目根）。
+        old_string: 要替换的原文，必须和文件里一字不差（含缩进、换行），且只出现一次；不唯一就多带两三行上下文。
+        new_string: 替换成的新文本。
+        replace_all: True 时替换所有出现。
     """
     if not old_string:
         return "失败：old_string 不能为空"
@@ -870,9 +871,13 @@ def _edit_echo(new_content: str, spans, new_texts) -> str:
     return f"\n改完这一段现在是{more}：\n" + "\n".join(out)
 
 
-@tool
+@tool(parse_docstring=True)
 def list_directory(path: str = ".") -> str:
-    """列出目录下的文件和文件夹。path: 目录路径，默认当前项目根（无项目时为进程目录）"""
+    """列出目录下的文件和文件夹。
+
+    Args:
+        path: 目录路径，默认项目根。
+    """
     try:
         full = _resolve_path(path)
         reject = _subagent_path_rejection(full, "目录")
@@ -957,23 +962,19 @@ def _command_env():
     return env
 
 
-@tool
+@tool(parse_docstring=True)
 def run_command(command: str, timeout: int | None = None, background: bool = False,
                 stdin: str = "") -> str:
-    """执行系统命令并**流式**返回输出（边跑边显示，不必等命令结束）。
+    """执行一条命令，流式显示输出；返回第一行是「退出码: N」，非 0 先查原因再往下走。执行前会弹确认卡。
+    看文件、搜内容、找文件用 read_file / search_files，别用命令；删 / 挪 / 复制 / 建目录用对应的文件工具（确认卡上看得到动的是哪个文件，也能撤销）。
+    运行环境是 Windows cmd.exe（不是 bash）：设环境变量写 `set "X=1" && 命令`（不加引号，&& 前的空格会算进值里）。默认在项目根执行。
+    stdin 是一次性喂入的固定文本，不支持交互式应答：等待输入的命令（REPL、密码提示）会拿到 EOF 或卡住，改用非交互参数。
 
-    命令耗时 > 几秒时（pytest / npm test / build / 长 curl 等），UI 上能实时
-    看到 stdout/stderr 进度；AI 拿到的工具结果仍是完整输出（超过 5000 字会截断）。
-    默认 5 分钟超时；传 timeout 参数（秒）可覆盖（如跑大测试套件传 600）。
-    随时可点停止按钮中断；执行前会弹用户确认卡片；危险命令需用户允许。
-
-    background=True 时命令在后台运行（适用于 dev server / watch / 长服务），
-    立即返回 bg_id；用 read_background_output 看输出，stop_background_command 停止。
-
-    stdin：交给命令标准输入的文本。要跑一段多行脚本（试库的用法、一次性的检查）就用它，
-    不用拼 `python -c "..."`，也不要在项目里写临时脚本：command="python -"，把整段代码放进
-    stdin（Node 用 "node -"）。工作目录和别的命令一样（默认项目根），能直接 import 项目里的模块。
-    不能和 background 一起用。
+    Args:
+        command: 要执行的命令。跑多行脚本写 "python -"（或 "node -"），代码放进 stdin——别拼 python -c，也别在项目里写临时脚本。
+        timeout: 超时秒数，默认 300，最多 600。
+        background: True 时转后台运行（dev server、watch 等长服务），立即返回 bg_id，用 read_background_output / stop_background_command 管理。不能和 stdin 一起用。
+        stdin: 交给命令标准输入的文本。
     """
     from .workspace_changes import track_workspace_changes
     root = _project_cwd()
@@ -1276,11 +1277,16 @@ def _clip_search_line(line: str, at: int = 0) -> str:
     return f"{'…' if start else ''}{piece}…[这一行共 {len(line)} 字，只显示匹配附近]"
 
 
-@tool
+@tool(parse_docstring=True)
 def search_in_file(path: str, keyword: str, offset: int = 0, limit: int = SEARCH_IN_FILE_DEFAULT_LIMIT) -> str:
-    """在单个文件中搜索关键词，返回匹配的行。
-    path: 文件路径, keyword: 搜索关键词, offset: 从第几处匹配开始显示（0-based）, limit: 本次最多显示多少处。
-    跨文件 / 跨目录搜索请用 `search_files`。"""
+    """在单个文件里按关键词（子串）搜，返回匹配的行。跨文件搜用 search_files。
+
+    Args:
+        path: 文件路径。
+        keyword: 关键词。
+        offset: 从第几处匹配开始显示（0 起）。
+        limit: 本次最多显示多少处。
+    """
     try:
         offset = max(0, int(offset or 0))
         limit = max(1, min(SEARCH_IN_FILE_MAX_LIMIT, int(limit or SEARCH_IN_FILE_DEFAULT_LIMIT)))
@@ -1324,27 +1330,20 @@ def search_in_file(path: str, keyword: str, offset: int = 0, limit: int = SEARCH
         return f"搜索失败: {e}"
 
 
-@tool
+@tool(parse_docstring=True)
 def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_results: int = SEARCH_FILES_MAX_RESULTS,
                  context: int = 2, include_ignored: bool = False) -> str:
-    """跨文件 / 跨目录用**正则**搜索（ripgrep 风格）。结果按文件分组，每处匹配带前后几行：
-    匹配行是 `行号: 内容`，上下文行是 `行号- 内容`——多数时候看结果就够，不用再 read_file。
+    """跨文件 / 跨目录正则搜索，按文件分组返回匹配行和前后几行（多数时候不用再 read_file）。
+    找字符串 / TODO / 文本内容用它；找函数、类的定义或调用优先用 find_definition / find_references。
+    默认遵守 .gitignore（包含未跟踪的新文件）；一次最多返回约 8000 字，超出会说还有多少处。
 
-    用法：
-      - `regex`：Python 正则，例如 `def\\s+\\w+\\(` / `TODO|FIXME` / `class \\w+\\(BaseModel\\)`
-      - `path`：搜索的目录，或者单个文件（只在这一个文件里搜），相对/绝对路径（默认 `.` 即项目根）
-      - `file_pattern`：glob 过滤文件名，例如 `*.py` / `*.{ts,tsx}` / `test_*.py`
-      - `max_results`：截断阈值（默认 50，超过会提示 "还有 N 处未列出"）
-      - `context`：每处匹配前后带几行（默认 2，0 = 只要匹配行）；匹配超过 20 处时自动只给匹配行
-      - `include_ignored`：默认 False，遵守 Git 忽略规则；要跨目录查被忽略的日志、会话或生成文件时传 True
-
-    Git 项目与 code_map 共用文件清单：包含未跟踪的新文件，排除被忽略的文件；非 Git 项目退回遍历。
-    include_ignored=True 直接遍历，但仍跳过 .git / node_modules / __pycache__ / .venv / build / dist 等噪声目录。
-    path 点名单文件时不受忽略规则、file_pattern 和大小上限限制；点名的子目录如果整个被忽略
-    （目录内 .gitignore 写 `*`、根 .gitignore 写 `build/*` 或 `logs/` 都算）就遍历它、连里面被忽略的
-    文件一起搜；普通子目录照旧遵守忽略规则（里面的 .log / .env.local 不会被搜出来）。
-    目录搜索跳过大于 1MB 的文件；Git 枚举不递归子模块 / 嵌套仓库，要搜其中内容可明确指定 path。
-    一次最多交回 8000 字（超了会说明还有多少处没列），单行超过 300 字只显示匹配附近的一段。
+    Args:
+        regex: Python 正则，如 `def\\s+\\w+\\(`、`TODO|FIXME`。
+        path: 搜索的目录或单个文件，默认项目根。点名单个文件时不受忽略规则限制。
+        file_pattern: 文件名 glob，如 `*.py`、`*.{ts,tsx}`、`test_*.py`。
+        max_results: 最多列多少处，默认 50。
+        context: 每处匹配前后带几行，默认 2；匹配超过 20 处时只给匹配行。
+        include_ignored: True 时连被 .gitignore 忽略的文件（日志、会话、生成文件）一起搜，仍跳过 node_modules 等。
     """
     import re as _re
 
@@ -1470,13 +1469,12 @@ def search_files(regex: str, path: str = ".", file_pattern: str = "*", max_resul
 # ══════════════════════════════════════
 
 
-@tool
+@tool(parse_docstring=True)
 def remember(fact: str) -> str:
-    """存一条关于用户的长期记忆。
+    """存一条关于用户的长期记忆（身份背景、偏好习惯、项目约定、对你做法的纠正）。
 
-    当用户透露了值得长期记住的个人信息、偏好、项目约定时调用。
-    fact 应该是简洁的一句话陈述，不要太长。
-    示例：用户说"我习惯用 pytest 测试"，存为 "用户用 pytest 做测试"
+    Args:
+        fact: 一句话写清一个事实，如「用户用 pytest 做测试」。
     """
     from .memory_store import add_memory
     result = add_memory(fact)
@@ -1485,12 +1483,12 @@ def remember(fact: str) -> str:
     return "该记忆已存在，无需重复保存"
 
 
-@tool
+@tool(parse_docstring=True)
 def forget(query: str) -> str:
-    """按关键词删除长期记忆。
+    """按关键词删除长期记忆，返回删了哪些。
 
-    列出匹配项并删除，返回删除了哪些记忆。
-    示例：forget("pytest") 会删除包含 "pytest" 的记忆
+    Args:
+        query: 关键词，删除包含它的记忆。
     """
     from .memory_store import search_memories, delete_memory
     matches = search_memories(query)
@@ -1507,21 +1505,19 @@ def forget(query: str) -> str:
     return "删除失败，请稍后重试"
 
 
-@tool
+@tool(parse_docstring=True)
 def get_project_instructions(path: str = ".", source: str = "",
                              offset: int = 0, limit: int = 0,
                              toc: bool = False) -> str:
-    """读取目标路径适用的 AI 编码规则（CLAUDE.md / AGENTS.md / .lingxirules）。
+    """读取路径适用的项目规则文件（CLAUDE.md / AGENTS.md / .lingxirules）。改子目录里的文件前读一次。
+    不带 source 返回概览：规则不长就是全文；太长会标明「尚未完整读取」并列出省略的范围——看到省略标记就按给出的 source / offset / limit 补读那一段，别拿节选当全部。
 
-    不带 source 时返回**概览**：规则不长就是完整原文；过长则给出来源清单、目录、
-    原文节选，并标明省略了哪些范围、怎么补读（概览永远标注自己是否完整）。
-    带 source 时按**原文**分页返回该来源的指定区间。
-
-    path:   当前项目内的文件或目录，决定适用哪几层规则（不传只读项目根）。
-    source: 概览里列出的来源相对路径，如 "CLAUDE.md"、"pkg/.lingxirules"。
-    offset: 原文起始字符（Unicode 字符数，0 基）；toc=True 时是标题条数。
-    limit:  本页字符数，默认 6000、上限 12000；toc=True 时是标题条数，默认 120、上限 400。
-    toc:    只取该来源的标题目录（概览里目录被截断时用它翻完整目录）。
+    Args:
+        path: 项目里的文件或目录，决定适用哪几层规则；不传读项目根。
+        source: 概览里列出的来源路径，如 "CLAUDE.md"，按原文分页读它。
+        offset: 原文起始字符（0 起）；toc=True 时是标题条数。
+        limit: 本页字数，默认 6000、上限 12000；toc=True 时是标题条数。
+        toc: 只取该来源的标题目录（概览里目录被截断时用）。
     """
     from . import roles as _roles
     root = _project_cwd()
@@ -1588,12 +1584,14 @@ def get_project_instructions(path: str = ".", source: str = "",
     return head + page["text"] + tail
 
 
-@tool
+@tool(parse_docstring=True)
 def notify_user(title: str, message: str, level: str = "info") -> str:
-    """主动向用户手机推送 Telegram 通知。
+    """给用户手机推一条 Telegram 通知（长任务的关键节点、需要用户处理的事）。没配 Telegram 或被节流时会如实返回没发出——别当成已送达。
 
-    用于 AI 判断需要提醒用户的场景（如长时间任务的关键节点、需要用户注意的事项）。
-    level: info / done / action_needed / error（默认 info）
+    Args:
+        title: 标题。
+        message: 内容。
+        level: info / done / action_needed / error。
     """
     from .notify import notify
     ok = notify(level, title, message, f"ai_notify_{level}")
@@ -1602,11 +1600,13 @@ def notify_user(title: str, message: str, level: str = "info") -> str:
     return "通知未发送（Telegram 未配置或被节流）"
 
 
-@tool
+@tool(parse_docstring=True)
 def spawn_agents(tasks: list[str]) -> str:
-    """把多个【相互独立】的子任务派给并行子 Agent，各自在隔离 worktree 改代码，跑完自动
-    合并回主项目并汇总。仅用于真正独立、可并行的多任务（分别改不相干模块）；有依赖/会改
-    同一文件的别用（那是 update_plan 顺序做的事）。"""
+    """把几个相互独立、改不同文件的子任务派给并行子 Agent，各自在隔离的 worktree 里改，跑完自动合并回项目并汇总。有依赖或会改同一文件的任务别用，按计划顺序做。
+
+    Args:
+        tasks: 子任务列表，每条写清楚要做什么、改哪些文件、怎么算做完。
+    """
     from . import session as _session
     cur = _session.current_session()
     if getattr(cur, "is_subagent", False):
@@ -1670,18 +1670,15 @@ def _auto_advance_plan(plan: list) -> None:
             break
 
 
-@tool
+@tool(parse_docstring=True)
 def update_plan(plan: str, explanation: str = "", new_task: bool = False) -> str:
-    """创建计划；已有计划默认只允许按原文、原顺序推进状态。
+    """创建任务计划（3 步以上或要改多个文件的任务，动手前先列）。之后推进进度用 set_step_status 改单步，不要重发整份计划。
+    已有计划只能按原文、原顺序推进；改名、增删、重排、清空、开始新任务或回退进度要填 explanation，没有原因的结构变更会被拒绝。
 
-    任务需要 3 步以上、或要改多个文件时，动手前先调一次列出全部步骤。
-    **之后推进进度用 `set_step_status(步号, 状态)` 改单步，不要反复重发整份计划。**
-    改名、增删、重排、清空、开始新任务或回退进度时，必须填写 explanation 说明具体原因。
-    没有原因的结构变更会被拒绝，原计划保持不变；不要为润色措辞重列计划。
-
-    plan: 多行文本，每行一个步骤，行首标记：[ ] 未开始  [~] 进行中  [x] 已完成
-    explanation: 调整原因（例如需求变化、发现新依赖、用户取消某项或开始新任务）；不是向用户申请确认。
-    new_task: 是否明确开始一个新任务（默认为 False）。当用户提出完全不相干的新目标时设为 True。
+    Args:
+        plan: 多行文本，每行一个步骤，行首标记 [ ] 未开始、[~] 进行中、[x] 已完成。
+        explanation: 调整原因（需求变化、发现新依赖、用户取消某项……），不是向用户申请确认。
+        new_task: 用户提出了完全不相干的新目标时设为 True。
     """
     from . import state
     from . import task_state as _ts
@@ -1804,14 +1801,14 @@ def _plan_status_regresses(old: str, new: str) -> bool:
     return rank[new] < rank[old]
 
 
-@tool
+@tool(parse_docstring=True)
 def set_step_status(step: int, status: str, explanation: str = "") -> str:
-    """更新计划中【某一步】的状态（增量更新，**不用重发整份计划**）。
+    """改计划里某一步的状态。和这一步的第一个动作放在同一轮发。
 
-    step: 步号（1 基，就是计划面板上看到的第几行）。
-    status: 完成 / 进行中 / 待办（也接受 done / in_progress / pending / x / ~）。
-    用法：开头用 update_plan 列全计划，之后每开始或完成一步就调本工具改那一步。
-    explanation: 仅回退进度时必填，例如测试发现问题需要返工；正常推进不需要。
+    Args:
+        step: 步号（1 起，计划面板上的第几行）。
+        status: 完成 / 进行中 / 待办（也认 done / in_progress / pending）。
+        explanation: 只在回退进度时填（比如测试发现问题要返工）。
     """
     from . import state
     plan = [dict(it) for it in (getattr(state, "current_plan", None) or [])]
@@ -1853,10 +1850,14 @@ def set_step_status(step: int, status: str, explanation: str = "") -> str:
 # ══════════════════════════════════════
 
 
-@tool
+@tool(parse_docstring=True)
 def read_background_output(bg_id: str, tail: int = 50) -> str:
-    """读本会话后台命令的输出（最后 tail 行/段）。tail<=0 读全部缓冲，
-    每次返回仍有字符上限；丢弃与本次节选会明确标注。"""
+    """读一个后台命令最近的输出。
+
+    Args:
+        bg_id: run_command(background=True) 返回的 bg_id。
+        tail: 读最后多少行，≤0 读全部缓冲（仍有字数上限）。
+    """
     snap = _bg.get_snapshot(bg_id, owner_id=_session.current_session().background_owner_id)
     if snap is None:
         return f"未找到后台命令 '{bg_id}'。可用 list_background_commands() 查看所有。"
@@ -1906,9 +1907,9 @@ def _background_status(snap):
     return f"已退出(码 {snap['exit_code']})"
 
 
-@tool
+@tool(parse_docstring=True)
 def list_background_commands() -> str:
-    """列出本会话后台命令：bg_id / 状态 / 归属 / 耗时。已退出记录有限保留。"""
+    """列出本会话的后台命令：bg_id、状态、耗时。"""
     snaps = _bg.list_snapshots(owner_id=_session.current_session().background_owner_id)
     if not snaps:
         return "没有后台命令在运行。"
@@ -1924,11 +1925,13 @@ def list_background_commands() -> str:
     return "后台命令列表:\n" + "\n".join(rows)
 
 
-@tool
+@tool(parse_docstring=True)
 def stop_background_command(bg_id: str) -> str:
-    """停止一个后台命令（taskkill 杀进程树）。记录保留供查看；结果如实报告：
-    确认退出才算停止，超时/失败可重试。Windows 下杀整棵进程树，但"确认"仅覆盖
-    主进程的退出状态，不逐一核实树中其余成员。"""
+    """停止一个后台命令（连同它起的子进程）。确认退出才算停止；超时或失败会如实说，可以重试。
+
+    Args:
+        bg_id: 要停的后台命令。
+    """
     result = _bg.stop(bg_id, owner_id=_session.current_session().background_owner_id)
     if not result.get("found"):
         return f"未找到后台命令 '{bg_id}'。"
@@ -2022,14 +2025,15 @@ def _non_python_nav_hint(path: str, what: str) -> str:
             f"clangd / jdtls）可获得精准导航；否则用 search_files 正则搜{what}。")
 
 
-@tool
+@tool(parse_docstring=True)
 def find_definition(name: str, path: str = "", line: int = 0) -> str:
-    """跳到符号（函数/类/变量）的定义位置。比 search_files 正则准——LSP / jedi 懂作用域/import/继承。
-    name: 符号名，如 "agent_loop" / "Session"。
-    path: 指定某文件（相对项目根）里该符号的引用点去跟踪定义；留空则在整个项目搜该符号的定义。
-    line: 符号所在行号（1-based，配合 path 用，提高 LSP 精度；留空则自动扫描文件找 name）。
-    LSP 多语言（Python/TS/JS/Go/Rust/C-C++/Java），按文件扩展名选服务器；未装对应服务器时
-    Python 降级到 jedi，其它语言给安装提示。jedi 也未装则提示改用 search_files。"""
+    """找符号（函数 / 类 / 变量）的定义位置。比 search_files 准：按语言服务器（LSP / jedi）认作用域、import、继承；都不可用时会提示改用 search_files。
+
+    Args:
+        name: 符号名，如 "agent_loop"、"Session"。
+        path: 从这个文件里的引用点去跟踪定义；留空在整个项目找。
+        line: 符号所在行号（1 起，配合 path 更准）。
+    """
     proj_dir = _project_cwd()
 
     # ── 优先尝试 LSP ──
@@ -2101,13 +2105,15 @@ def find_definition(name: str, path: str = "", line: int = 0) -> str:
     return f"`{name}` 的定义（jedi）：\n" + "\n".join(_fmt_jedi_name(n, root) for n in names[:10])
 
 
-@tool
+@tool(parse_docstring=True)
 def find_references(name: str, path: str = "", line: int = 0) -> str:
-    """找符号的所有引用/调用处（谁用了它）。比 search_files 准——按真实绑定找、不误匹配同名。
-    name: 符号名。path: 该符号出现的文件（相对项目根）；留空则先在项目里定位其定义再找引用。
-    line: 符号所在行号（1-based，配合 path 用，提高 LSP 精度；留空则自动扫描文件找 name）。
-    LSP 多语言（Python/TS/JS/Go/Rust/C-C++/Java），按文件扩展名选服务器；未装对应服务器时
-    Python 降级到 jedi，其它语言给安装提示。jedi 也未装则提示改用 search_files。"""
+    """找符号的所有引用 / 调用处（谁用了它）。按真实绑定找，不误匹配同名。
+
+    Args:
+        name: 符号名。
+        path: 符号所在文件；留空先定位定义再找引用。
+        line: 符号所在行号（1 起，配合 path 更准）。
+    """
     proj_dir = _project_cwd()
 
     # ── 优先尝试 LSP ──
@@ -2456,15 +2462,15 @@ def _tests_stopped(checker, argv, cwd, started, t0) -> str:
             "别马上重跑同一批测试，先说明情况、问用户下一步。")
 
 
-@tool
+@tool(parse_docstring=True)
 def run_tests(path: str = "", k: str = "", timeout: int = 300) -> str:
-    """跑项目的测试，返回精炼结果：通过/失败 + 失败的位置和摘要。
-    自动认测试工具：Python 用 pytest；package.json 里有 test 脚本用 npm / pnpm / yarn test；
-    pom.xml / build.gradle 用 Maven / Gradle（优先项目自带的 mvnw / gradlew）；go.mod 用 go test；
-    Cargo.toml 用 cargo test；.sln / .csproj 用 dotnet test。
-    path: 测试路径/文件（相对项目根，空 = 跑全部）；多个用空格隔开。k: 按名字筛用例
-    （pytest -k / jest·vitest -t / mvn -Dtest / gradle --tests / go test -run / cargo test 过滤 / dotnet --filter）。
-    认不出的项目用 run_command 跑它自己的测试命令——常见测试命令的结果同样算数。"""
+    """跑项目测试，返回通过 / 失败数和失败的位置、摘要。自动认测试工具（pytest、npm / pnpm / yarn test、Maven / Gradle、go test、cargo test、dotnet test）；认不出的项目用 run_command 跑它自己的测试命令。
+
+    Args:
+        path: 测试文件或目录（相对项目根），多个用空格隔开；留空跑全部。
+        k: 按名字筛用例（pytest -k / jest -t / go test -run 等）。
+        timeout: 超时秒数。
+    """
     from . import test_runners as _tr
     run_cwd = _shell_cwd()
     reject = _subagent_command_rejection("pytest", run_cwd)
@@ -3020,14 +3026,11 @@ def _parse_patch(content: str):
     return operations, errors
 
 
-@tool
+@tool(parse_docstring=True)
 def apply_patch(patch: str) -> str:
-    """批量文件补丁工具：先完整校验，再写入多个文件；写入失败时回滚并报告。
+    """一次改多个文件、或一个文件多处（可同时新建 / 修改 / 删除）。先整体校验再写入；任何一处定位失败或路径非法就整个中止、不改任何文件；写入失败会回滚并报告。改完自动跑静态检查。
 
-    不承诺进程崩溃时的跨文件原子性；回滚受阻时保留备份并明确提示人工恢复。
-
-    Patch 格式（类似 git diff，但靠上下文定位、不用行号）：
-
+    格式（靠上下文定位，不用行号）：
     *** Begin Patch
     *** Update File: src/utils.py
     @@
@@ -3040,17 +3043,13 @@ def apply_patch(patch: str) -> str:
     *** Delete File: src/old.py
     *** End Patch
 
-    规则（务必照做，否则文件内容会错）：
-    - 每个文件块以 *** Update File / Add File / Delete File: <相对路径> 开头
-    - Update 用 @@ 起一个 hunk；行首第一个字符是标记：空格=上下文、- =删除、+ =新增
-    - **标记后【紧跟】内容，标记和内容之间不要再加空格**：写 `+def x():` / `+    return 1`，
-      别写 `+ def x():`——那个空格会变成文件内容，导致缩进 / 语法错。缩进是内容自身的缩进。
-    - 上下文行写文件里【真实存在且连续】的行，**不能跳过中间的空行或其它行**
-      （定位靠精确匹配，不够精确会判失败、让你补全上下文重试，绝不模糊猜测）
-    - Add File：每行都是 +<内容>；目标已存在 → 失败
-    - Delete File：无 hunk；目标不存在 → 失败
-    - 路径不能用 ../ 逃出项目；任何 hunk 定位失败或路径非法 → 整个 patch 中止、不改任何文件
-    - 改完自动跑代码检查（lint/语法），有问题会一并提示
+    规则：
+    - 行首第一个字符是标记（空格 = 上下文、- = 删除、+ = 新增），标记后紧跟内容，不要多加空格：写 `+    return 1`，别写 `+ def x():`（那个空格会进文件）。
+    - 上下文行要写文件里真实存在且连续的行，不能跳过中间的行（包括空行）。
+    - Add File 的每行都是 +内容，目标已存在会失败；Delete File 没有 hunk，目标不存在会失败。路径不能用 ../ 出项目。
+
+    Args:
+        patch: 补丁全文，从 *** Begin Patch 到 *** End Patch。
     """
     # ── Phase 1: 解析 ──
     operations, parse_errors = _parse_patch(patch)
@@ -3253,17 +3252,13 @@ def apply_patch(patch: str) -> str:
     return "\n".join(parts)
 
 
-@tool
+@tool(parse_docstring=True)
 def check_code(path: str) -> str:
-    """静态检查代码文件（lint/语法/类型/编译），返回问题列表。Python 用 ruff（F/E9 正确性）
-    + mypy 类型检查（抓参数数量/签名/未定义名等"用错 API"的错;没装则相应跳过）；
-    TypeScript 用项目的 tsc --noEmit（Vue 用 vue-tsc），Go 用 go vet，Rust 用 cargo check，
-    Java / Kotlin 用 Maven / Gradle 编译，C# 用 dotnet build，JS / PHP / Ruby 查语法；
-    config 里配了 check_command（{file} 占位）就用它。编译类检查查整个项目，只有这次改过的
-    文件里的错误算没通过。
-    path: 要检查的文件（相对项目根）。改完 TS / Go / Rust / Java / C# 后调一次：编辑后的
-    自动校验只查语法，类型错误、调用签名不对要靠这一步（JS 测试框架不做类型检查，TS 的类型错误
-    跑测试也发现不了）。"""
+    """对一个文件做静态检查（语法 / lint / 类型 / 编译），返回问题列表。改完 TS / Go / Rust / Java / C# 后调一次：编辑后的自动校验只查语法，类型错误、调用签名不对要靠这一步。
+
+    Args:
+        path: 要检查的文件（相对项目根）。
+    """
     if not path:
         return "请指定要检查的文件 path。"
     resolved = _resolve_path(path)
