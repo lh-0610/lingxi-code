@@ -9,7 +9,9 @@
 - ``WM_NCHITTEST`` 自己判：四边四角 → 改大小；顶部 56px 里不是按钮 / 输入框 / 标签页的空白处
   → ``HTCAPTION``（拖动、双击最大化、右键系统菜单都是系统的）；我们的最大化按钮 →
   ``HTMAXBUTTON``，这样 Win11 鼠标停在上面会弹分屏布局；它的点击和悬停在
-  ``WM_NCLBUTTONDOWN / UP`` 和命中测试里自己处理（这时 Qt 收不到鼠标事件）。
+  ``WM_NCLBUTTONDOWN / UP`` 和命中测试里自己处理（这时 Qt 收不到鼠标事件）；
+- 最大化 / 还原用 ``ShowWindow``、状态问 ``IsZoomed``，不用 Qt 的 showMaximized / showNormal
+  （见 ``is_maximized``）。
 
 窗口按钮（最小化 / 最大化或还原 / 关闭）是顶栏这一行的最后一项（header._build_header 放进去）。
 顶栏一整行横跨对话区和右侧面板（参照 Claude 桌面版），右侧面板自己的标签行和关闭按钮在顶栏下面，
@@ -51,6 +53,29 @@ WS_THICKFRAME, WS_CAPTION, WS_SYSMENU = 0x00040000, 0x00C00000, 0x00080000
 WS_MINIMIZEBOX, WS_MAXIMIZEBOX = 0x00020000, 0x00010000
 SWP_FLAGS = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020   # NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
 ABM_GETSTATE, ABS_AUTOHIDE = 0x00000004, 0x0000001
+WM_SIZE = 0x0005
+SW_MAXIMIZE, SW_RESTORE = 3, 9
+
+
+def _native_hwnd(window: QWidget) -> int:
+    """Windows 平台插件下窗口已有的原生句柄；没有（offscreen 测试、还没建出来）返回 0。"""
+    if sys.platform != "win32" or QGuiApplication.platformName() != "windows":
+        return 0
+    try:
+        return int(window.internalWinId() or 0)
+    except Exception:
+        return 0
+
+
+def is_maximized(window: QWidget) -> bool:
+    """窗口是不是最大化了：以系统为准（IsZoomed），没有原生句柄才问 Qt。
+    Qt 对无边框窗口的最大化状态不可靠：从系统那边最大化（双击标题栏、拖到屏幕顶、Win+↑）后
+    Qt 的 showNormal() 什么都不做；Qt 自己的 showMaximized() 又只是把窗口摆成屏幕大小、系统
+    并不认为它最大化了（拖标题栏不会缩小）。"""
+    hwnd = _native_hwnd(window)
+    if hwnd:
+        return bool(ctypes.windll.user32.IsZoomed(hwnd))
+    return window.isMaximized()
 
 
 def enabled() -> bool:
@@ -149,11 +174,17 @@ class WindowButtons(QWidget):
         self.setFixedSize(3 * BUTTON_W, BUTTON_H)
 
     def toggle_maximized(self):
+        """最大化 / 还原交给系统（ShowWindow），Qt 的窗口状态会跟着 WM_SIZE 更新。
+        不能用 Qt 的 showMaximized / showNormal，见 is_maximized 的说明。"""
         w = self._window
-        w.showNormal() if w.isMaximized() else w.showMaximized()
+        hwnd = _native_hwnd(w)
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE if is_maximized(w) else SW_MAXIMIZE)
+        else:
+            w.showNormal() if w.isMaximized() else w.showMaximized()
 
     def sync_state(self):
-        self.max_btn.maximized = self._window.isMaximized()
+        self.max_btn.maximized = is_maximized(self._window)
         self.max_btn.setToolTip("还原" if self.max_btn.maximized else "最大化")
         self.max_btn.setAccessibleName(self.max_btn.toolTip())
         self.max_btn.update()
@@ -338,7 +369,7 @@ class FramelessController:
             return True, 0
         if m == WM_NCHITTEST:
             local = win.mapFromGlobal(QCursor.pos())
-            ht = hit_test(win, local, maximized=win.isMaximized(), buttons=self.buttons)
+            ht = hit_test(win, local, maximized=is_maximized(win), buttons=self.buttons)
             mb = self.buttons.max_btn
             hover = ht == HTMAXBUTTON
             if mb.nc_hover != hover:
@@ -360,6 +391,11 @@ class FramelessController:
             if pressed:
                 self.buttons.toggle_maximized()
             return True, 0
+        if m == WM_SIZE:
+            # 最大化 / 还原（含拖标题栏还原、贴边）都会来这条；按钮图标以系统状态为准跟上，
+            # 不只靠 Qt 的 WindowStateChange（Qt 状态可能没跟上）
+            self.buttons.sync_state()
+            return None
         if m == WM_NCMOUSELEAVE:
             mb = self.buttons.max_btn
             if mb.nc_hover or mb.nc_pressed:

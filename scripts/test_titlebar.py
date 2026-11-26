@@ -5,6 +5,8 @@ Win32 那一半（NCCALCSIZE / 窗框样式 / DWM 阴影 / 贴边分屏）只能
 """
 import gc
 import os
+import subprocess
+import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -118,6 +120,20 @@ def test_maximize_button_reflects_state(ui, qapp):
     qapp.processEvents()
     btns.sync_state()
     assert not btns.max_btn.maximized and btns.max_btn.toolTip() == "最大化"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 最大化只在 Windows 上有")
+def test_maximize_goes_through_the_system_on_a_real_window():
+    """按钮最大化要让系统也认为最大化了（Qt 的 showMaximized 对无边框窗口只是摆成屏幕大小，
+    拖标题栏不会缩小）；系统那边最大化后按钮要能还原（Qt 的 showNormal 这时什么都不做）。
+    离屏走不到 Win32，起子进程开真窗口跑 scripts/titlebar_native_check.py。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    r = subprocess.run([sys.executable, os.path.join(here, "titlebar_native_check.py")],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env=env, timeout=120, stdin=subprocess.DEVNULL)
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    assert lines and lines[-1] == "OK", f"{r.stdout[-1500:]}\n{r.stderr[-1500:]}"
 
 
 def test_settings_offers_native_title_bar_fallback(qapp, tmp_path, monkeypatch):
