@@ -509,6 +509,10 @@ def _agent_loop_body(ui):
             state.chat_history.append(_build_ai_message(gathered, clean_text, []))
             if clean_text:
                 ui.render_final_markdown(clean_text)
+            # 最终回答已进历史 → 清 render_log（同中间轮）。不清的话收尾（存盘、写运行记录）
+            # 期间切回来，历史画一遍、重放 render_log 又画一遍，回答显示两次
+            from . import session as _session
+            _session.seal_render_log()
             logger.info(f"回复完成: {clean_text[:100]}...")
             break
 
@@ -601,6 +605,8 @@ def _check_round_limit(ui, round_i):
     logger.warning(f"agent_loop 触顶 {_max_rounds} 轮，强制停止（{'重复调用' if _repeat else '未见重复'}）")
     state.chat_history.append(AIMessage(content=_msg))
     ui.show_message(f"\n{_msg}\n", "tool_result")
+    from . import session as _session
+    _session.seal_render_log()          # 已进历史：切回时只由历史画一次
     return AgentResult("limit_reached", _msg)
 
 

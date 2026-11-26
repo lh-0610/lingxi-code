@@ -394,20 +394,25 @@ def test_stale_ref_after_open_refused(env):
     assert not any("transfer" in p[1] for p in POSTED)
 
 
-def test_wrong_frame_ref_refused(env):
-    """配错 frame 参数不能点中别的 frame 的元素。"""
-    pm.apply(env.sess, "auto")
-    env.sess.browser_origin_allowlist.add(sec.parse_origin(env.local))
-    env.sess.browser_origin_allowlist.add(sec.parse_origin(env.public))
+def test_wrong_frame_ref_goes_to_its_own_frame_and_its_gate(env):
+    """配错 / 漏写 frame：ref 只在一个 frame 里签发过时按签发它的 frame 操作（以前报「页面已换
+    文档」，模型以为页面一直在刷新）。要守住的是**闸门按真正的 frame 判来源**：顶层是本机、
+    iframe 是公网，漏写 frame 点 iframe 里的按钮不能按本机放行。"""
+    pm.apply(env.sess, "manual")         # 手动模式：信任的本机来源点击不问，公网要问
+    env.sess.browser_origin_allowlist.add(sec.parse_origin(env.local))      # 公网那个不在白名单
     _run(env.app, tb.browser_open.func, env.local + "/top.html")
     _pump(env.app, 1.2)
     top = _run(env.app, tb.browser_snapshot.func)
     inner = _run(env.app, tb.browser_snapshot.func, frame="f.0")
+    asked = len(env.ui.asked)
     r1 = _run(env.app, tb.browser_click.func, _ref_of(inner, "内嵌按钮"))
-    assert "失效" in r1, r1
+    assert "已点击" in r1 and 'frame="f.0"' in r1, r1
+    cards = env.ui.asked[asked:]
+    assert cards and env.public.split("//")[1] in cards[-1], "公网 iframe 里的动作要按公网来源问"
     r2 = _run(env.app, tb.browser_click.func, _ref_of(top, "顶层按钮"), frame="f.0")
-    assert "失效" in r2, r2
-    assert _js(env.app, "document.title") != "顶层点了"
+    assert "已点击" in r2 and "顶层页面签发" in r2, r2
+    assert len(env.ui.asked) == asked + 1, "顶层（信任的本机来源）的点击不用问"
+    assert _js(env.app, "document.title") == "顶层点了", "点到的是 ref 指的那个元素"
 
 
 def test_img_in_submit_button_asks_ancestor(env):

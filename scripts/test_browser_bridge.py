@@ -1117,7 +1117,7 @@ def fake_vision(monkeypatch):
     from src import models
     seen = []
 
-    def describe(prompt, images):
+    def describe(prompt, images, **kw):
         seen.append((prompt, images))
         return "假识别模型", "看到了：上海那一行是浅蓝底色"
 
@@ -1785,3 +1785,290 @@ def test_only_local_certificates_can_be_let_through():
     page_mod.allow_certificate("https://localhost:8443/app")
     assert page_mod._cert_allowed == {"localhost:8443"}
     page_mod._cert_allowed.clear()
+
+
+# ── 2026-11-24 排查（docs/bug_review_2026-11-24.md B1–B5）──
+
+def test_page_confirm_is_asked_even_right_after_we_allowed_a_leave(browser, servers, trusted_tools,
+                                                                    ui_hooks):
+    """B1：单页应用里后退 / 只改 #hash 是同文档导航，没有 loadStarted 收回「离开确认放行」窗口；
+    以前 5 秒内页面自己的 confirm（「确定删除吗」）不问用户、直接当同意。放行只认离开确认本身。"""
+    calls, answers = ui_hooks
+    answers["js"] = (False, "", False)           # 用户看到会点「取消」
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/pagedialogs.html")
+    page_mod.allow_leave(page_mod.get_browser().page)    # 面板后退 / 前进 / 地址栏回车都会先放行
+    _user_click(browser, "del")
+    assert _wait_for(browser, lambda: _out(browser) == "cancelled"), _out(browser)
+    assert calls["js"] and calls["js"][0][0] == "confirm", "页面自己的 confirm 被当成离开确认放行了"
+
+
+def test_leave_prompt_is_told_apart_from_page_confirms():
+    assert page_mod.is_leave_prompt(
+        "Are you sure you want to leave this page? Changes that you made may not be saved.")
+    assert not page_mod.is_leave_prompt("确定删除用户「张三」吗？")
+    assert not page_mod.is_leave_prompt("")
+
+
+def test_open_while_the_page_is_still_loading(browser, servers, trusted_tools):
+    """B2：用户在面板里点的链接还在加载时模型 browser_open：Qt 不再发新的 loadStarted，
+    唯一那个 loadFinished 以前被当成上一个导航的迟到信号丢掉，卡满超时报「打开失败」。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/form.html")
+    pg = page_mod.get_browser().page
+    from PySide6.QtCore import QUrl
+    pg.load(QUrl(servers[0] + "/slow"))          # 慢页面：服务器 8 秒才回
+    assert _wait_for(browser, lambda: pg.lx_loading, 3), "慢页面没开始加载"
+    t0 = time.time()
+    out = _tool(browser, tb.browser_open.func, servers[0] + "/form.html?again", timeout=6)
+    assert "已打开" in out and "form.html?again" in out, out
+    assert time.time() - t0 < 4, "等满了超时才回"
+
+
+def test_open_a_url_that_differs_only_in_the_hash(browser, servers, trusted_tools):
+    """B3：只差 #hash（hash 路由的单页应用）或带 # 原样重开：同文档导航不发开始 / 完成信号，
+    以前卡满超时、页面也不重新加载（改完代码重开还跑旧的）。现在整页重新加载。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/form.html#/a")
+    for target in ("/form.html#/b", "/form.html#/b"):          # 换 hash；再原样重开一次
+        assert _call(browser, "js", code="window.__lx_mark = 1; 1").get("ok")
+        t0 = time.time()
+        out = _tool(browser, tb.browser_open.func, servers[0] + target, timeout=6)
+        assert "已打开" in out, out
+        assert time.time() - t0 < 4, "等满了超时才回"
+        assert _js_value(browser, "location.hash") == "#/b"
+        assert _js_value(browser, "String(window.__lx_mark)") == "undefined", "页面没有重新加载"
+
+
+def test_dialogs_the_user_opens_while_a_card_is_open_are_the_users(browser, servers, trusted_tools,
+                                                                   ui_hooks):
+    """B4：模型的工具在等确认卡（占着浏览器锁）时，用户自己在网页上点出来的确认框以前按「模型
+    在操作」处理：静默取消，还写进模型的工具结果。等卡片、等识别模型的这段时间归用户。"""
+    calls, answers = ui_hooks
+    tb = trusted_tools
+    from src import state as _state
+    _tool(browser, tb.browser_open.func, servers[1] + "/pagedialogs.html")    # servers[1] 不在白名单：点击要问
+
+    class _CardUI:
+        def confirm_command(self, text, **kw):
+            if "点击" in text:
+                bridge_mod.get_bridge().call("js", code="document.getElementById('del').click(); 1")
+                time.sleep(0.5)
+                return False, ""
+            return True, ""
+
+    _state.ui_ref = _CardUI()
+    snap = _tool(browser, tb.browser_snapshot.func)
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "改名"))
+    assert calls["js"] and calls["js"][0][0] == "confirm", "卡片开着时用户点出来的确认框没问用户"
+    assert _out(browser) == "deleted", "用户点了确定，网页收到的是同意"
+    assert "页面弹出确认框" not in out, f"用户的确认框被算成了模型的：{out}"
+    assert not page_mod.model_acting()
+
+
+def test_enter_in_a_methodless_form_is_judged_by_its_send_button(browser, servers, trusted_tools):
+    """B5：不写 method 的表单（onSubmit + fetch POST）用「输入 + 回车」提交时以前不问——
+    只看输入框自己的名字；同一个表单点「发送」却每次都问。"""
+    tb = trusted_tools
+    _tool(browser, tb.browser_open.func, servers[0] + "/methodless.html")
+    snap = _tool(browser, tb.browser_snapshot.func)
+    info = _call(browser, "lx", method="info", args={"ref": _ref_of(snap, "评论内容")})
+    assert info.get("submitName") == "发送" and info.get("formMethodSet") is False, info
+    assert sec.is_consequential(info, submit=True, origin=sec.ORIGIN_TRUSTED), \
+        "回车 = 点「发送」：信任的本机来源也要问"
+    info = _call(browser, "lx", method="info", args={"ref": _ref_of(snap, "站内搜索")})
+    assert info.get("submitName") == "" and info.get("formMethodSet") is False, info
+    assert not sec.is_consequential(info, submit=True, origin=sec.ORIGIN_TRUSTED)
+    assert sec.is_consequential(info, submit=True, origin=sec.ORIGIN_PUBLIC), \
+        "没写 method 的表单在公网上回车：同「回车即发送」，要问"
+
+
+# ── 2026-11-24 玩网页小游戏卡住的几处：按键、iframe 里的真实点击、拖拽、漏写 frame、局部截图 ──
+
+def _open_game(browser, servers, tb):
+    _open_visual(browser, servers, tb, path="/game.html")
+    snap = _tool(browser, tb.browser_snapshot.func, frame="f.0", mode="all")
+    assert "关闭广告" in snap, snap
+    return snap
+
+
+def test_parse_key_names():
+    from PySide6.QtCore import Qt
+    pk = page_mod.parse_key
+    assert pk("Escape")[0] == Qt.Key.Key_Escape and pk("esc")[0] == Qt.Key.Key_Escape
+    assert pk("Enter")[0] == Qt.Key.Key_Return and pk("Enter")[2] == "\r"
+    assert pk("ArrowDown")[0] == Qt.Key.Key_Down and pk("Tab")[2] == "\t"
+    key, mods, text = pk("Control+a")
+    assert key == Qt.Key.Key_A and mods & Qt.KeyboardModifier.ControlModifier and text == ""
+    key, mods, text = pk("Shift+a")
+    assert text == "A" and mods & Qt.KeyboardModifier.ShiftModifier
+    assert pk("F5")[0] == Qt.Key.Key_F5
+    assert pk("Control+Enter")[2] == "", "带 Ctrl 的回车不该再带 \r 文字（页面会当成普通回车）"
+    assert pk("Hyper+x") is None and pk("Escapee") is None and pk("") is None
+
+
+def test_click_inside_an_iframe_is_a_real_pointer_event(browser, servers, trusted_tools):
+    """以前 iframe 里一律退回脚本 el.click()：靠 pointerdown 的交互（会躲开鼠标的关闭按钮）触发不了。"""
+    tb = trusted_tools
+    snap = _open_game(browser, servers, tb)
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "关闭广告"), frame="f.0")
+    assert "已点击" in out, out
+    text = _tool(browser, tb.browser_read_text.func, frame="f.0")
+    assert "pointer" in text, f"iframe 里的点击没发真实鼠标事件：{text}"
+
+
+def test_ref_from_an_iframe_works_without_frame_and_says_so(browser, servers, trusted_tools):
+    """漏写 frame：以前报「ref 已失效：页面已换文档」，模型以为页面一直在刷新。"""
+    tb = trusted_tools
+    snap = _open_game(browser, servers, tb)
+    out = _tool(browser, tb.browser_click.func, _ref_of(snap, "关闭广告"))
+    assert "已点击" in out and 'frame="f.0"' in out, out
+    assert "页面已换文档" not in out
+
+
+def test_frame_offset_counts_border_and_padding(browser, servers, trusted_tools):
+    tb = trusted_tools
+    _open_game(browser, servers, tb)
+    off = _js_frame_offset(browser, tb)
+    # 外层 p 高 40（默认外边距被 body margin:0 抵不掉，按实际量）；iframe margin 20/30 + 边框 5 + 内边距 7
+    top = _call(browser, "js", code=(
+        "(() => { const f = document.getElementById('g'); const r = f.getBoundingClientRect();"
+        " return [r.left + 5 + 7, r.top + 5 + 7].join(','); })()")).get("value")
+    want = tuple(float(v) for v in top.split(","))
+    assert off is not None and abs(off[0] - want[0]) < 1 and abs(off[1] - want[1]) < 1, (off, want)
+
+
+def _js_frame_offset(browser, tb):
+    box = {}
+
+    def w():
+        box["r"] = tb._frame_offset("f.0")
+    t = threading.Thread(target=w, daemon=True)
+    t.start()
+    while t.is_alive():
+        browser.processEvents()
+        time.sleep(0.005)
+    return box.get("r")
+
+
+def test_press_escape_inside_an_iframe_game(browser, servers, trusted_tools):
+    """这局游戏真正的出口是 Esc：以前没有按键工具，模型说「我这边没有键盘事件可发」。"""
+    tb = trusted_tools
+    _open_game(browser, servers, tb)
+    out = _tool(browser, tb.browser_press_key.func, "Escape", frame="f.0")
+    assert out.startswith("已按 Escape") and "没确认送到" not in out, out
+    text = _tool(browser, tb.browser_read_text.func, frame="f.0")
+    assert "esc" in text and "Escape;" in text, text
+    out = _tool(browser, tb.browser_press_key.func, "Control+a", frame="f.0")
+    assert "a(ctrl);" in _tool(browser, tb.browser_read_text.func, frame="f.0"), out
+    assert "不认识的按键" in _tool(browser, tb.browser_press_key.func, "Escapee")
+    # 焦点在 iframe 里时不带 frame 按：顶层收不到，如实说没确认送到（不说成按到了）
+    out = _tool(browser, tb.browser_press_key.func, "ArrowDown")
+    assert "没确认送到顶层页面" in out, out
+
+
+def test_press_enter_without_a_target_asks_on_untrusted_pages(browser, servers, monkeypatch):
+    """回车可能提交：没给元素时同「表单外回车即发送」——不信任的来源每次都问，卡片标有后果。"""
+    from src import permission_modes as pm
+    from src import session as _session
+    from src import tools_browser as tb
+    sess = _session.current_session()
+    pm.apply(sess, "manual")
+    cards = []
+
+    class _UI:
+        def confirm_command(self, text, **kw):
+            cards.append((text, kw.get("browser_consequential")))
+            return True, ""
+
+    monkeypatch.setattr(state, "ui_ref", _UI())
+    _tool(browser, tb.browser_open.func, servers[1] + "/form.html")
+    _tool(browser, tb.browser_press_key.func, "Enter")
+    key_cards = [c for c in cards if "按键" in c[0]]
+    assert key_cards and key_cards[-1][1] is True, cards
+    _tool(browser, tb.browser_press_key.func, "ArrowDown")
+    assert [c for c in cards if "按键 ArrowDown" in c[0]][-1][1] is False
+
+
+def test_drag_food_into_the_mouth(browser, servers, trusted_tools):
+    """退出验证要把食物拖进嘴里：以前没有拖拽，iframe 里也只有脚本点击。"""
+    tb = trusted_tools
+    snap = _open_game(browser, servers, tb)
+    out = _tool(browser, tb.browser_drag.func, _ref_of(snap, "草莓"), to_ref=_ref_of(snap, "嘴巴"),
+                frame="f.0")
+    assert out.startswith("已把") and "没确认" not in out, out
+    text = _tool(browser, tb.browser_read_text.func, frame="f.0")
+    assert "fed" in text, f"拖拽没把食物放进嘴里：{text}"
+    out = _tool(browser, tb.browser_drag.func, _ref_of(snap, "草莓"))
+    assert "要给 to_ref" in out
+
+
+def test_screenshot_of_a_ref_asks_the_question_and_sends_a_close_up(browser, servers, trusted_tools,
+                                                                    monkeypatch):
+    """截图以前套「只做识别、不回答问题」的通用说明，识别模型把整页从头描述一遍；
+    iframe 里的 ref 也用不了（截图没有 frame）。现在只截那一块、放大、直接问。"""
+    tb = trusted_tools
+    from src import models
+    seen = {}
+
+    def fake_vision(prompt, images, **kw):
+        import base64
+        from PySide6.QtGui import QImage
+        img = QImage.fromData(base64.b64decode(images[0][1]))
+        seen.update(prompt=prompt, kw=kw, w=img.width(), h=img.height())
+        return "识别模型", "草莓是红色的"
+
+    monkeypatch.setattr(models, "describe_images_with_vision", fake_vision)
+    monkeypatch.setattr(models, "get_vision_model_index", lambda: 0)
+    snap = _open_game(browser, servers, tb)
+    full = _tool(browser, tb.browser_screenshot.func, "页面上有什么")
+    full_w = seen["w"]
+    out = _tool(browser, tb.browser_screenshot.func, "草莓是什么颜色", ref=_ref_of(snap, "草莓"))
+    assert "草莓是红色的" in out and "局部放大" in out and 'frame="f.0"' in out, out
+    assert seen["kw"].get("as_question") is True
+    assert "草莓是什么颜色" in seen["prompt"] and "只回答问题本身" in seen["prompt"]
+    assert "OCR" not in seen["prompt"]
+    # 40×40 的元素四周各留 40：120 宽左右，放大到 3 倍；比整屏小，但比原来那一块大
+    assert seen["w"] < full_w and seen["w"] >= 300, (seen, full_w, full)
+
+
+
+# ── H.264 / AAC 视频转码成 WebM 再放（QtWebEngine 不带专有编解码器，见 browser/media.py）──
+
+def _video_state(browser, servers, tb):
+    _open_visual(browser, servers, tb, path="/video.html")
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        out = _js_value(browser, "document.getElementById('out').textContent")
+        if out != "-":
+            return out
+        browser.processEvents()
+        time.sleep(0.05)
+    return "timeout"
+
+
+def test_h264_video_plays_after_transcoding(browser, servers, trusted_tools):
+    """网页小游戏实测：mp4 广告一直「暂时没接通」，模型对着它反复点播放。"""
+    from src.browser import media
+    if not media.ffmpeg_exe():
+        pytest.skip("没装 imageio-ffmpeg")
+    assert _video_state(browser, servers, trusted_tools) == "playing"
+
+
+def test_h264_video_fails_without_the_transcoder(browser, servers, trusted_tools, monkeypatch):
+    """对照：不转码时这段 mp4 确实放不了——上面那条测的是转码，不是碰巧能放。"""
+    from src.browser import media
+    monkeypatch.setattr(media, "ffmpeg_exe", lambda: "")
+    state_ = _video_state(browser, servers, trusted_tools)
+    assert state_.startswith("error") or state_.startswith("play-rejected"), state_
+
+
+def test_transcode_only_direct_media_files():
+    from PySide6.QtCore import QUrl
+    from src.browser import media
+    assert media.wants_transcode(QUrl("https://a.com/videos/ad-1.mp4"))
+    assert media.wants_transcode(QUrl("http://a.com/x.MOV?v=2"))
+    assert not media.wants_transcode(QUrl("https://a.com/x.webm"))
+    assert not media.wants_transcode(QUrl("blob:https://a.com/123"))
+    u = media.media_url("https://a.com/v.mp4?x=1&y=2", "https://a.com/page")
+    assert media._parse(u) == ("https://a.com/v.mp4?x=1&y=2", "https://a.com/page")

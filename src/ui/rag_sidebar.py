@@ -398,7 +398,7 @@ class RagSidebarMixin:
         except Exception:
             pass
         if len(sess.chat_history) > 1:
-            self._redraw_chat()
+            self._redraw_chat_live(sess)      # 正在生成的连同本轮还没进历史的部分一起画
             self._scroll_to_bottom()
         else:
             self._show_empty_state()

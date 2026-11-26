@@ -131,7 +131,7 @@ class Session:
         "active_run_id", "inflight_lock", "worker_token",
         "last_worker", "resume_pending", "model_user_choice",
         "last_run_save_failed",
-        "background_owner_id",
+        "background_owner_id", "replay_pending",
     )
 
     # 旧的布尔开关保留为派生视图（不是存储字段）：读 = 档位不是 off；写 = 开→high、关→off。
@@ -174,6 +174,10 @@ class Session:
         # append（worker 线程写）与切回时读快照（主线程）。
         self.render_log = []
         self.render_lock = threading.Lock()
+        # 界面正在重画这个会话（切回来 / 切主题）：这期间的渲染事件只记进 render_log、不发给
+        # 界面，重画完在 render_lock 里取走 log 并关掉它（见 ChatUI._redraw_chat_live）。
+        # 不这样的话重画那零点几秒里到的事件既在 log 里被重放、又经信号再画一遍
+        self.replay_pending = False
         # 进度快照锁：保护"计划 + 台账"这组会一起被读走存盘的状态。
         # 保存时要在同一瞬间取走它们，否则可能拍到"计划已更新、台账还没更新"的半截状态。
         # **锁序固定为 memory._LOCK → snapshot_lock**，反向获取会死锁。
@@ -302,6 +306,15 @@ def current_project():
     切了项目，让正在后台跑的会话串到别的项目。
     """
     return project_of(current_session())
+
+
+def renders_live(sess, active=None) -> bool:
+    """sess 的渲染事件现在直接发给界面：它是前台会话、而且界面不在重画它。
+    调用方持有 sess.render_lock（重画结束时也在这把锁里取 log、关 replay_pending）；
+    active 由调用方在拿锁之前取好（get_active 要拿注册表的锁，别嵌套）。"""
+    if active is None:
+        active = get_active()
+    return sess is active and not sess.replay_pending
 
 
 def seal_render_log() -> None:

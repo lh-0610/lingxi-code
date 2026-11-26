@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>游戏本体</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  #mouth { position: absolute; left: 20px; top: 120px; width: 90px; height: 90px; background: #fc9; }
+  #food { position: absolute; left: 280px; top: 140px; width: 40px; height: 40px; background: #e33; touch-action: none; }
+</style></head>
+<body>
+<p id="out">-</p>
+<p id="keys"></p>
+<!-- 只认真实的按下（pointerdown），脚本 el.click() 触发不了：会躲开鼠标的关闭按钮就是这样 -->
+<button id="close" aria-label="关闭广告">关闭</button>
+<div id="mouth" role="button" aria-label="嘴巴"></div>
+<div id="food" role="button" aria-label="草莓" tabindex="0"></div>
+<script>
+  const out = document.getElementById('out');
+  document.getElementById('close').addEventListener('pointerdown', e => {
+    if (e.isTrusted) out.textContent = 'pointer';
+  });
+  document.addEventListener('keydown', e => {
+    if (!e.isTrusted) return;
+    document.getElementById('keys').textContent += e.key + (e.ctrlKey ? '(ctrl)' : '') + ';';
+    if (e.key === 'Escape') out.textContent = 'esc';
+  });
+  // 拖拽：pointerdown 记起点，pointermove 跟着走，pointerup 时落在嘴巴里就算喂到了
+  const food = document.getElementById('food'), mouth = document.getElementById('mouth');
+  let drag = null;
+  food.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, l: food.offsetLeft, t: food.offsetTop, moves: 0 }; });
+  window.addEventListener('pointermove', e => {
+    if (!drag) return;
+    drag.moves++;
+    food.style.left = (drag.l + e.clientX - drag.x) + 'px';
+    food.style.top = (drag.t + e.clientY - drag.y) + 'px';
+  });
+  window.addEventListener('pointerup', e => {
+    if (!drag) return;
+    const m = mouth.getBoundingClientRect();
+    const inside = e.clientX >= m.left && e.clientX <= m.right && e.clientY >= m.top && e.clientY <= m.bottom;
+    out.textContent = inside && drag.moves > 2 ? 'fed' : 'missed';
+    drag = null;
+  });
+</script>
+</body>
+</html>

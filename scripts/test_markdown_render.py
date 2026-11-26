@@ -127,3 +127,74 @@ def test_list_fix_leaves_code_blocks_and_single_stars_alone():
     from src.ui.markdown_render import _blank_line_before_lists
     fenced = "说明：\n```\n- a\n```"
     assert _blank_line_before_lists(fenced) == fenced
+
+
+# ── 2026-11-24 排查（docs/bug_review_2026-11-24.md R3 R4 R6）──
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture()
+def qt_app_md(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+def _plain(html):
+    from PySide6.QtGui import QTextDocument
+    d = QTextDocument()
+    d.setHtml(html)
+    return d.toPlainText()
+
+
+def test_code_blocks_are_split_like_python_markdown_splits_them(qt_app_md):
+    """R3：以前用非贪婪的 ```.*?``` 从任意位置配对，代码里出现 ``` 就切错位，后半段代码被当成正文。"""
+    from src.ui.markdown_render import _split_code, _split_fences
+    cases = {
+        '```python\nif s.startswith("```"):\n    y = a*b\n```\n': ["a*b"],
+        "````markdown\n```python\nx = a*b\n```\n````\n": ["a*b"],                # 四反引号包三反引号
+        "用 `` ``` `` 包住代码，例如：\n\n```py\nx = c*d\n```\n": ["c*d"],          # 行内代码里有 ```
+    }
+    for md, inside in cases.items():
+        for split in (_split_fences, _split_code):
+            parts = split(md)
+            assert "".join(parts) == md, "切完拼回去要和原文一模一样"
+        text = _plain(render(md))
+        for s in inside:
+            assert s in text and "\\*" not in text, f"代码里的 * 被转义了：{text!r}"
+    # 没有结尾的围栏不算代码块（Python-Markdown 也不认）；行内代码按同样长的一串反引号配对
+    assert _split_fences("```\n没有结尾 *x*") == ["```\n没有结尾 *x*"]
+    assert _split_code("a `x` b ``c`d`` e")[1::2] == ["`x`", "``c`d``"]
+
+
+def test_code_block_text_is_not_rewritten(qt_app_md, tmp_path, monkeypatch):
+    """R3：代码里的 `src/app.py` 不改写成链接、列表前不插空行。"""
+    from src.ui import markdown_render as mr
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n")
+    monkeypatch.setattr(mr, "_link_root", lambda: str(tmp_path))
+    md = '```python\nFENCE = "```"\nprint("`src/app.py`")\nHELP = """用法\n- a\n"""\n```\n'
+    text = _plain(render(md))
+    assert "lingxi-file:" not in text and "用法\n- a" in text, repr(text)
+    # 代码块外面的照常变链接
+    assert "lingxi-file:src/app.py" in render(md + "\n见 `src/app.py`")
+
+
+def test_table_right_under_a_line_of_text_is_a_table(qt_app_md):
+    """R6：「对比如下：」下一行紧跟表格（不空行），以前原样显示竖线和 |---|。"""
+    html = render("对比如下：\n| 方案 | 耗时 |\n|---|:--:|\n| A | 1s |\n")
+    assert "<table" in html and "|---|" not in _plain(html)
+    # 上面那行正文自己带竖线（「用 a | b 表示」）也照样补
+    html = render("用 a | b 表示：\n| x | y |\n|---|---|\n| 1 | 2 |\n")
+    assert "<table" in html and "|---|" not in _plain(html), _plain(html)
+    # 代码块里的不动
+    md = "```\n说明\n| a | b |\n|---|---|\n```\n"
+    assert "说明\n| a | b |" in _plain(render(md))
+
+
+def test_copy_button_keeps_the_code_exactly(qt_app_md):
+    """R4 附带：以前先换 &amp; 再换 &lt;，代码里本来写着 &lt;div&gt; 的被还原成 <div>。"""
+    host = _Host()
+    MarkdownRenderMixin._md_to_html(host, "```html\n&lt;div&gt; <p>a & b</p>\n```\n")
+    assert host._code_blocks == {"0": "&lt;div&gt; <p>a & b</p>\n"}

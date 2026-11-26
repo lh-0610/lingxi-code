@@ -17,6 +17,7 @@ import os
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 
 import shiboken6
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -67,12 +68,81 @@ def set_ui_hooks(**hooks):
     _ui_hooks.update({k: v for k, v in hooks.items() if v is not None})
 
 
+_waiting = {"depth": 0}
+_waiting_lock = threading.Lock()
+
+
+@contextmanager
+def model_waiting():
+    """模型的工具占着浏览器锁、但这段时间在等别人（等用户点确认卡、等识别模型看截图）：
+    期间页面上弹的框、要下载的文件是用户自己点出来的，照常问用户，不算模型的。
+    以前整段都按「模型在操作」：用户的确认框被静默取消，还写进模型的工具结果。"""
+    with _waiting_lock:
+        _waiting["depth"] += 1
+    try:
+        yield
+    finally:
+        with _waiting_lock:
+            _waiting["depth"] -= 1
+
+
 def model_acting() -> bool:
-    """模型的浏览器动作正在跑：工具层对所有浏览器动作串行加锁（复审 #22），锁被占着就是它。"""
+    """模型的浏览器动作正在跑：工具层对所有浏览器动作串行加锁（复审 #22），锁被占着、
+    而且不是在等人 / 等识别模型（model_waiting）就是它。"""
     import sys
     tb = sys.modules.get("src.tools_browser")
     lock = getattr(tb, "_tool_lock", None)
-    return bool(lock is not None and lock.locked())
+    return bool(lock is not None and lock.locked() and _waiting["depth"] == 0)
+
+
+_KEY_ALIASES = {
+    "escape": "Escape", "esc": "Escape", "enter": "Return", "return": "Return", "tab": "Tab",
+    "space": "Space", "spacebar": "Space", "backspace": "Backspace", "delete": "Delete", "del": "Delete",
+    "insert": "Insert", "home": "Home", "end": "End", "pageup": "PageUp", "pagedown": "PageDown",
+    "arrowup": "Up", "up": "Up", "arrowdown": "Down", "down": "Down",
+    "arrowleft": "Left", "left": "Left", "arrowright": "Right", "right": "Right",
+}
+_KEY_TEXT = {"Return": "\r", "Tab": "\t", "Space": " ", "Backspace": "\b", "Escape": "\x1b"}
+_MODIFIER_NAMES = {"control": "ControlModifier", "ctrl": "ControlModifier", "shift": "ShiftModifier",
+                   "alt": "AltModifier", "meta": "MetaModifier", "cmd": "MetaModifier"}
+
+
+def parse_key(spec: str):
+    """「Escape」「Enter」「ArrowDown」「Tab」「a」「Control+a」「Shift+Tab」→ (Qt 键, 修饰键, 文字)；
+    认不出返回 None。名字照网页的 KeyboardEvent.key（大小写不敏感），也认 Esc / Up 这类简写。"""
+    from PySide6.QtCore import Qt
+    parts = [p.strip() for p in (spec or "").replace(" + ", "+").split("+")]
+    if not parts or not parts[-1]:
+        if spec.strip() == "+":
+            parts = ["+"]
+        else:
+            return None
+    *mod_names, name = parts
+    mods = Qt.KeyboardModifier.NoModifier
+    for m in mod_names:
+        attr = _MODIFIER_NAMES.get(m.lower())
+        if attr is None:
+            return None
+        mods |= getattr(Qt.KeyboardModifier, attr)
+    canon = _KEY_ALIASES.get(name.lower())
+    if canon is None and len(name) >= 2 and name[0] in "fF" and name[1:].isdigit() \
+            and 1 <= int(name[1:]) <= 12:
+        canon = "F" + name[1:]
+    if canon is not None:
+        key = getattr(Qt.Key, f"Key_{canon}")
+        text = _KEY_TEXT.get(canon, "")
+        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+                   | Qt.KeyboardModifier.MetaModifier):
+            text = ""
+        return key, mods, text
+    if len(name) != 1:
+        return None
+    ch = name
+    key = Qt.Key(ord(ch.upper())) if ch.isascii() and ch.isprintable() else Qt.Key.Key_unknown
+    text = "" if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+                         | Qt.KeyboardModifier.MetaModifier) else \
+        (ch.upper() if mods & Qt.KeyboardModifier.ShiftModifier else ch)
+    return key, mods, text
 
 
 def drain_model_events() -> list:
@@ -195,8 +265,10 @@ def _console_page_class():
             self._leave_ok_until = time.monotonic() + LEAVE_CONFIRM_WINDOW_S
 
         def javaScriptConfirm(self, url, msg):
-            if time.monotonic() < self._leave_ok_until:
-                # 只放这一次：时间窗里页面自己再弹的 confirm 照旧拒绝
+            if time.monotonic() < self._leave_ok_until and is_leave_prompt(msg):
+                # 只放这一次，而且只放离开确认本身：页面自己的 confirm()（「确定删除吗」）不管
+                # 什么时候都照常问。以前时间窗里来的 confirm 一律放行——单页应用里后退 / 只改
+                # #hash 是同文档导航，没有 loadStarted 收回窗口，5 秒内点「删除」直接被当成同意
                 self._leave_ok_until = 0.0
                 self._note("info", f"离开确认（我们发起的跳转，已放行）: {msg}")
                 return True
@@ -268,11 +340,16 @@ def _console_page_class():
     return _page_cls
 
 
+_media_parts: list = []
+
+
 def _get_profile():
     """首次使用时构造常驻 profile（主线程）。注入脚本只插一次，重开浏览器复用。"""
     global _profile
     if _profile is None:
         from PySide6.QtWebEngineCore import (QWebEngineProfile, QWebEngineScript)
+        from . import media
+        media.register_scheme()          # 启动时已在 main.py 登记过就是空操作
         # 不传 storageName → off-the-record，不落盘；不设 parent → 模块持有、常驻
         profile = QWebEngineProfile()
         profile.setPersistentCookiesPolicy(
@@ -288,6 +365,8 @@ def _get_profile():
         script.setRunsOnSubFrames(True)
         profile.scripts().insert(script)
         profile.clearHttpCacheCompleted.connect(_cache_cleared)
+        # H.264 / AAC 视频转码成 WebM 再交给页面（QtWebEngine 不带专有编解码器，见 media.py）
+        _media_parts[:] = media.install(profile)   # 模块持有，别被回收
         _profile = profile
     return _profile
 
@@ -680,6 +759,15 @@ def when_cache_idle(callback):
 # 留几秒给慢页面；只放一次（见 ConsolePage.javaScriptConfirm）
 LEAVE_CONFIRM_WINDOW_S = 5.0
 
+# beforeunload 走 javaScriptConfirm 时 Qt 给的固定文字（页面在 returnValue 里写的字被浏览器忽略，
+# 实测 Qt 6 一律是这一句；应用没装 Qt 翻译）。凭它把离开确认和页面自己调的 confirm() 分开
+_LEAVE_PROMPT = "Are you sure you want to leave this page? Changes that you made may not be saved."
+
+
+def is_leave_prompt(msg) -> bool:
+    """这是浏览器替页面弹的「确定离开吗」（beforeunload），不是页面脚本自己调的 confirm()。"""
+    return str(msg or "").strip() == _LEAVE_PROMPT
+
 
 def allow_leave(page):
     """要离开 page 了：放行它接下来的那一次离开确认（页面类型不是我们的就什么都不做）。"""
@@ -688,13 +776,30 @@ def allow_leave(page):
         fn()
 
 
-def load_url(page, url, *, clear_first=False, page_loading=False, still_wanted=None):
+def _same_document(current, target) -> bool:
+    """target 和当前页只差 #hash（或完全相同、带 #）：Chromium 会当成同文档导航——不重新加载，
+    也不发 loadStarted / loadFinished（实测完全相同的带 # 地址连 urlChanged 都没有）。"""
+    from PySide6.QtCore import QUrl
+    if not target.hasFragment() or current.isEmpty() or current.scheme() not in ("http", "https"):
+        return False
+    a, b = QUrl(current), QUrl(target)
+    a.setFragment("")
+    b.setFragment("")
+    return a == b
+
+
+def load_url(page, url, *, clear_first=False, page_loading=False, still_wanted=None, on_go=None):
     """所有导航的唯一入口（模型的 open 和面板的地址栏都走这里）。
 
     clear_first：先清 HTTP 缓存再导航（模型重开改过的页面要跑新代码，评测 012）。
     缓存被标脏（关过浏览器）时也先清。page_loading（页面正在加载）时不清、脏标记留着——
     在途导航会被清理卡死，新导航直接接替它。still_wanted：排队期间请求可能被取代 / 取消，
-    回调前再问一次。
+    回调前再问一次。on_go(was_loading)：真正发出导航时调，告诉调用方那一刻页面是不是正在
+    加载——顶替在途导航时 Qt 不再发新的 loadStarted，只来一个 loadFinished（实测）。
+
+    只差 #hash 的地址（hash 路由的单页应用）：在页面里先跳到这个地址、再整页重新加载。
+    「打开」的意思是再打开一次（改完代码要跑新的），而同文档导航既不重新加载、也不发
+    开始 / 完成信号，模型的 open 会卡满超时、面板刷新键停在「停止」。
     """
     from PySide6.QtCore import QUrl
     qurl = url if isinstance(url, QUrl) else QUrl(url)
@@ -704,7 +809,15 @@ def load_url(page, url, *, clear_first=False, page_loading=False, still_wanted=N
             return
         if shiboken6.isValid(page):
             allow_leave(page)
-            page.load(qurl)
+            was_loading = bool(getattr(page, "lx_loading", False))
+            if _same_document(page.url(), qurl):
+                import json
+                target = json.dumps(qurl.toString(QUrl.ComponentFormattingOption.FullyEncoded))
+                page.runJavaScript(f"location.href = {target}; location.reload();", script_world())
+            else:
+                page.load(qurl)
+            if on_go is not None:
+                on_go(was_loading)
 
     if ((clear_first or _cache_state["dirty"]) and not page_loading
             and not _cache_state["clearing"]):

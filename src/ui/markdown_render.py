@@ -18,13 +18,65 @@ from contextlib import contextmanager
 
 from .fonts import MONO_CSS, UI_CSS
 
-# 代码块（``` / ~~~ 围栏）和行内代码。split 用捕获组，偶数下标是代码以外的文字。
-_CODE_SPAN = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", re.DOTALL)
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _BOLD_OPEN = "\x01B\x02"     # 控制字符做占位，不会和正常文本冲突
 _BOLD_CLOSE = "\x01E\x02"
-_FENCE = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
-_INLINE_CODE = re.compile(r"`[^`\n]*`")
+
+# ── 代码块 / 行内代码的切分（预处理只动代码以外的文字）──────────────
+# 规则照抄最后真正渲染的 Python-Markdown：围栏代码块（fenced_code）开头那行在行首、
+# 可跟语言名或 {属性}，结尾是**一模一样**的围栏单独成行，没有结尾的不算代码块；行内代码
+# （BACKTICK_RE）是一串反引号配同样长的一串，不跨行。以前用非贪婪的 ```.*?``` 从任意位置
+# 配对，代码里出现 ```（字符串里、四反引号包三反引号的示例、行内代码 `` ``` ``）就切错位：
+# 后半段代码被当成正文——单个 * 被转义成 \*、路径被改写成链接原文、被插空行
+_FENCE_OPEN_LINE = re.compile(
+    r"(`{3,}|~{3,})[ ]*(?:\{[^\n]*\}|\.?[\w#.+-]*[ ]*(?:hl_lines=(\"|').*?\2[ ]*)?)")
+_INLINE_CODE = re.compile(r"(?<!\\)(`+)(.+?)(?<!`)\1(?!`)")
+
+
+def _split_fences(text: str) -> list:
+    """[正文, 代码块, 正文, 代码块, …, 正文]：奇数下标是整个围栏代码块（含开头结尾两行，
+    不含结尾那行的换行），拼回去和原文一模一样。"""
+    lines = text.split("\n")
+    offs, pos = [], 0
+    for ln in lines:
+        offs.append(pos)
+        pos += len(ln) + 1
+    parts, last, i = [], 0, 0
+    while i < len(lines):
+        m = _FENCE_OPEN_LINE.fullmatch(lines[i].rstrip("\r"))
+        if m:
+            fence = m.group(1)
+            j = next((k for k in range(i + 1, len(lines))
+                      if lines[k].rstrip("\r").rstrip(" ") == fence), None)
+            if j is not None:
+                start, end = offs[i], offs[j] + len(lines[j])
+                parts += [text[last:start], text[start:end]]
+                last, i = end, j + 1
+                continue
+        i += 1
+    parts.append(text[last:])
+    return parts
+
+
+def _split_code(text: str) -> list:
+    """同 _split_fences，奇数下标再加上行内代码（`x` / `` a`b ``）。"""
+    out = [""]
+    for i, chunk in enumerate(_split_fences(text)):
+        if i % 2:
+            out += [chunk, ""]
+            continue
+        pos = 0
+        for m in _INLINE_CODE.finditer(chunk):
+            out[-1] += chunk[pos:m.start()]
+            out += [m.group(0), ""]
+            pos = m.end()
+        out[-1] += chunk[pos:]
+    return out
+
+
+def _code_inner(span: str) -> str:
+    """行内代码去掉两边的反引号（`` `x` `` 这种两边各一个空格也去掉）。"""
+    return span.strip("`").strip()
 _CODE_MARK = re.compile(r"\x01C(\d+)\x02")    # 行内代码的占位：\x01C<序号>\x02
 # 列表项：- / + / 1. / 1)（* 开头的不算：单个 * 在正文里一律是字面量，见 _protect_literal_asterisks）
 _LIST_ITEM = re.compile(r"^ {0,3}(?:[-+]|\d{1,3}[.)])\s+\S")
@@ -56,13 +108,13 @@ def _linkify_localhost(md_text: str) -> str:
     """
     if not md_text:
         return md_text
-    parts = _CODE_SPAN.split(md_text)
+    parts = _split_code(md_text)
     for i in range(len(parts)):
         seg = parts[i]
         if i % 2 == 1:
             if seg.startswith(("```", "~~~")):
                 continue
-            m = _LOCALHOST_URL.fullmatch(seg[1:-1].strip())
+            m = _LOCALHOST_URL.fullmatch(_code_inner(seg))
             if m:
                 parts[i] = f"[{seg}]({m.group(0)})"
         else:
@@ -304,7 +356,7 @@ def _linkify_file_paths(md_text: str, root: str) -> str:
     """
     if not md_text or not root:
         return md_text
-    parts = _CODE_SPAN.split(md_text)
+    parts = _split_code(md_text)
     real_root = ""
     for i in range(1, len(parts), 2):
         span = parts[i]
@@ -314,7 +366,7 @@ def _linkify_file_paths(md_text: str, root: str) -> str:
             real_root = _real_root(root)
             if not real_root:
                 return md_text
-        target = _file_link_target(span[1:-1], root, real_root)
+        target = _file_link_target(_code_inner(span), root, real_root)
         if target is None:
             continue
         parts[i] = f"[{span}]({file_link_href(*target)})"
@@ -331,7 +383,7 @@ def _protect_literal_asterisks(md_text):
     （**`src/x.py`**，DeepSeek 常这么写）开头和结尾的 `**` 落在两段里配不上对，
     就被当成字面星号原样露出来。代码块仍按段隔开，不让加粗跨过整块代码去配对。
     """
-    chunks = _FENCE.split(md_text)
+    chunks = _split_fences(md_text)
     for i in range(0, len(chunks), 2):      # 奇数位是代码块，原样不动
         codes = []
 
@@ -394,7 +446,7 @@ def _blank_line_before_lists(md_text):
     DeepSeek 常写"……如下：\\n- 第一项\\n- 第二项"，原样渲染出来每行开头都是一个 "- "。
     前一行本身是列表项、或是缩进的续行时不补（那是同一个列表）；代码块里不动。
     """
-    chunks = _FENCE.split(md_text)
+    chunks = _split_fences(md_text)
     for i in range(0, len(chunks), 2):
         out, prev = [], ""
         for line in chunks[i].split("\n"):
@@ -403,6 +455,29 @@ def _blank_line_before_lists(md_text):
                 out.append("")
             out.append(line)
             prev = line
+        chunks[i] = "\n".join(out)
+    return "".join(chunks)
+
+
+# 表格的分隔行：| --- | :--: | ---: |（两边的竖线可省）
+_TABLE_SEP = re.compile(r"^ {0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$")
+
+
+def _blank_line_before_tables(md_text):
+    """表格紧跟在一行文字下面（中间没空行）时补一个空行，否则 markdown 把表头那行并进上面的
+    段落，整张表原样显示成竖线和 |---|。模型常写「对比如下：\\n| 方案 | 耗时 |」。
+    认表格看「这一行带竖线、下一行是分隔行」（表头前面那行不可能属于同一张表，带不带竖线都补，
+    「用 a | b 表示：」这种正文也一样）；代码块里不动。"""
+    chunks = _split_fences(md_text)
+    for i in range(0, len(chunks), 2):
+        lines = chunks[i].split("\n")
+        out = []
+        for j, line in enumerate(lines):
+            prev = lines[j - 1] if j else ""
+            nxt = lines[j + 1] if j + 1 < len(lines) else ""
+            if "|" in line and _TABLE_SEP.match(nxt) and prev.strip():
+                out.append("")
+            out.append(line)
         chunks[i] = "\n".join(out)
     return "".join(chunks)
 
@@ -418,10 +493,13 @@ class MarkdownRenderMixin:
         # 记本轮渲染事件供"切走→切回"重放；后台会话不实时渲染（切回时统一重放）
         from .. import session as _session
         _sess = _session.current_session()
+        active = _session.get_active()
         with _sess.render_lock:
             _sess.render_log.append(("md", md_text))
-        if _sess is not _session.get_active():
-            _sess.needs_redraw = True
+            live = _session.renders_live(_sess, active)
+        if not live:
+            if _sess is not active:
+                _sess.needs_redraw = True
             return
         self.bridge.render_md.emit(md_text)
 
@@ -436,6 +514,7 @@ class MarkdownRenderMixin:
         # 段落间距交给下面的 <p style="margin:6px 0"> 处理即可。
 
         md_text = _blank_line_before_lists(md_text)
+        md_text = _blank_line_before_tables(md_text)
         md_text = _protect_literal_asterisks(md_text)
         # 行内代码里的项目文件路径 → 可点链接（代码块里的不处理，只认真实存在的文件）
         md_text = _linkify_file_paths(md_text, _link_root())
@@ -486,8 +565,9 @@ class MarkdownRenderMixin:
             block = match.group(0)
             code_match = _re.search(r'<code[^>]*>(.*?)</code>', block, _re.DOTALL)
             raw_code = code_match.group(1) if code_match else block
-            raw_code = (raw_code.replace('&amp;', '&').replace('&lt;', '<')
-                        .replace('&gt;', '>').replace('&nbsp;', ' ').replace('&quot;', '"'))
+            # 一次反转义（以前先换 &amp; 再换 &lt;：代码里本来写着 &lt;div&gt; 的被还原成 <div>）
+            import html as _html
+            raw_code = _html.unescape(raw_code).replace("\xa0", " ")
             idx = len(self._code_blocks)
             self._code_blocks[str(idx)] = raw_code
             copy_icon = self._inline_svg_img("copy_lucide.svg", copy_text, 14, "Copy")

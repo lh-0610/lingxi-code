@@ -390,3 +390,147 @@ def test_plan_panel_does_not_restyle_when_theme_is_unchanged(ui, monkeypatch):
     assert len(sets) == 1 and "#010203" in sets[0], "换了主题要重设"
     panel.set_overlay(not panel._overlay)
     assert len(sets) == 2, "浮层 / 停靠切换要重设"
+
+
+# ── 2026-11-24 排查（docs/bug_review_2026-11-24.md C1–C4 R1 R4 R5）──
+
+def _shown_bodies(turn):
+    return [b.text() for b in _bodies(turn)]
+
+
+def test_a_chunk_with_several_paragraphs_fills_every_one(qt_app):
+    """C1：Claude Code 模式整块送来、普通流式一个片段跨两段时，以前只改最后两段，第一段一直空着。"""
+    mv = _view()
+    turn = _reply(mv)
+    mv.handle("第一段介绍。\n\n第二段细节。\n\n第三段结论。", "ai_msg")
+    assert _shown_bodies(turn) == ["第一段介绍。", "第二段细节。", "第三段结论。"]
+    mv.handle("补一句。\n\n第四段。", "ai_msg")
+    assert _shown_bodies(turn) == ["第一段介绍。", "第二段细节。", "第三段结论。补一句。", "第四段。"]
+    mv.close()
+
+
+def test_stopping_keeps_the_whole_unfinished_reply_visible(qt_app):
+    """C2：停止 / 报错不走 finalize，以前分段留着：收起过程时只认最后一块是回答，前几段被收进
+    「展开过程」，回答节点画在最后一段上。现在收尾时合回一块。"""
+    from src.ui.message_view import BodyText
+    mv = _view()
+    _reply(mv)
+    mv.handle("\n读取文件", "tool_tag")
+    mv.handle("  a.py\n", "tool_detail")
+    mv.handle("内容\n", "tool_result")
+    mv.handle("", "reset_ai_reply")
+    for chunk in ("结论第一段：", "有问题。\n\n", "第二段：原因。\n\n", "第三段：建议"):
+        mv.handle(chunk, "ai_msg")
+    turn = mv._cur_assistant
+    mv.end_run()
+    shown = [b.text() for b in turn.findChildren(BodyText) if b.isVisibleTo(turn)]
+    assert len(shown) == 1 and all(s in shown[0] for s in ("第一段", "第二段", "第三段")), shown
+    assert "第一段" in mv._cur_round.answer_body().text(), "回答节点要画在回答开头"
+    mv.close()
+
+
+def _gen_session(ui, msgs):
+    from src import session
+    sess = session.get_active()
+    sess.chat_history = list(msgs)
+    return sess
+
+
+def _cards(ui):
+    from src.ui.message_view import ToolCallCard
+    content = ui.chat_area.widget()
+    return [c._summary.full() for c in content.findChildren(ToolCallCard)
+            if c.isVisibleTo(content) or c.parentWidget().isVisibleTo(content)]
+
+
+def test_switching_back_mid_tool_draws_each_call_once(ui, qt_app):
+    """C3：工具运行中切回：以前历史里那条 AIMessage 的每个调用都画成卡，再按 render_log 重放
+    正在跑的那个——同一次调用两张卡，还没开始的也提前画出来。"""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    calls = [{"name": "read_file", "args": {"path": p}, "id": p, "type": "tool_call"}
+             for p in ("a.py", "b.py", "c.py")]
+    sess = _gen_session(ui, [SystemMessage(content="s"), HumanMessage(content="看看"),
+                             AIMessage(content="", tool_calls=calls),
+                             ToolMessage(content="内容 a", tool_call_id="a.py")])
+    sess.is_generating = True
+    sess.render_log[:] = [("msg", "\n📖 读取文件", "tool_tag"), ("msg", "  b.py\n", "tool_detail")]
+    try:
+        ui._redraw_chat_live()
+        _pump(qt_app)
+        assert [c.rsplit(" ", 1)[-1] for c in _cards(ui)] == ["a.py", "b.py"], _cards(ui)
+    finally:
+        sess.is_generating = False
+        sess.render_log.clear()
+
+
+def test_theme_toggle_while_generating_keeps_the_live_part(ui, qt_app, monkeypatch):
+    """C4：生成中切主题，以前只重画历史：正在写的回复和运行中的工具卡整片消失。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    monkeypatch.setattr("src.ui.chat_window.save_theme_choice", lambda *_: None)
+    sess = _gen_session(ui, [SystemMessage(content="s"), HumanMessage(content="写")])
+    sess.is_generating = True
+    sess.render_log[:] = [("msg", "deepseek\n", "ai_label"), ("msg", "我先写第一部分。", "ai_msg")]
+    try:
+        ui._toggle_theme()
+        _pump(qt_app)
+        turn = ui.chat_area._cur_assistant
+        assert turn is not None and _shown_bodies(turn) == ["我先写第一部分。"]
+    finally:
+        ui._toggle_theme()
+        sess.is_generating = False
+        sess.render_log.clear()
+
+
+def test_events_during_a_redraw_are_drawn_once(ui, qt_app, monkeypatch):
+    """R1：重画（长会话 0.7s）期间 worker 到的片段以前既进 render_log 被重放、又经信号再画一遍。
+    现在重画期间只记 log，重画完在同一把锁里取走 log、关掉标志。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    import threading
+    from src import session
+    sess = _gen_session(ui, [SystemMessage(content="s"), HumanMessage(content="写")])
+    sess.is_generating = True
+    sess.render_log[:] = [("msg", "deepseek\n", "ai_label"), ("msg", "开头。", "ai_msg")]
+    real = type(ui)._redraw_chat
+
+    def slow_redraw(self):
+        real(self)
+        t = threading.Thread(target=lambda: (session.bind_thread(sess),
+                                             self.show_message("重画期间到的XYZ", "ai_msg")))
+        t.start()
+        t.join()
+    monkeypatch.setattr(type(ui), "_redraw_chat", slow_redraw)
+    try:
+        ui._redraw_chat_live()
+        _pump(qt_app)
+        text = "".join(_shown_bodies(ui.chat_area._cur_assistant))
+        assert text.count("XYZ") == 1, text
+        assert not sess.replay_pending, "重画完要关掉，之后的事件照常实时显示"
+        assert session.renders_live(sess)
+    finally:
+        sess.is_generating = False
+        sess.render_log.clear()
+
+
+def test_redraw_shows_only_what_the_user_typed(ui, qt_app):
+    """R5：发给模型的消息里追加了提示（@ 引用要先读文件、上传图片的本地路径），以前重画后
+    整段画进了用户气泡。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from src.ui.message_view import UserTurn
+    _gen_session(ui, [SystemMessage(content="s"), HumanMessage(
+        content="看看 @app.py 这个文件\n\n[用户用 @ 引用了以下文件/目录，请【务必先调用对应工具读取其内容】]：\n  - app.py")])
+    ui._redraw_chat()
+    _pump(qt_app)
+    bubbles = [u._text for u in ui.chat_area.widget().findChildren(UserTurn)]
+    assert bubbles and "务必" not in bubbles[-1] and "看看 @app.py 这个文件" in bubbles[-1], bubbles
+
+
+def test_code_copy_button_copies(ui, qt_app):
+    """R4：代码块右上角的复制按钮以前点了没反应（_on_file_link_clicked 不认 action:）。"""
+    from PySide6.QtWidgets import QApplication
+    from src.ui.message_view import BodyText
+    ui._render_markdown("看这段：\n\n```python\nprint('hi')\n```\n")
+    QApplication.clipboard().setText("原来的")
+    body = [b for b in ui.chat_area.widget().findChildren(BodyText) if "copy_code" in b.text()][-1]
+    href = body.text().split('href="action:copy_code:', 1)[1].split('"', 1)[0]
+    body.linkActivated.emit(f"action:copy_code:{href}")
+    assert QApplication.clipboard().text() == "print('hi')\n"

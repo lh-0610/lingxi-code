@@ -863,6 +863,18 @@ class SidebarMixin:
             # B09a：离开当前会话，挂待启动请求的消息不跟着走（也不发给新会话）——
             # 明确取消，输入保留在输入框。
             self._cancel_pending_run(_prev, "已切换到其它会话，待发送的消息已取消（输入保留在输入框）")
+        # 先挂上「正在重画」：设成前台之后、重画完之前 worker 到的事件只记 log，重画完一起重放
+        # （_redraw_chat_live 收尾时关掉；中途出异常也由下面的 finally 关掉，不会一直不实时显示）
+        with target.render_lock:
+            target.replay_pending = True
+        try:
+            self._switch_to_session(target, session_id)
+        finally:
+            with target.render_lock:
+                target.replay_pending = False
+
+    def _switch_to_session(self, target, session_id):
+        from .. import session as _session
         _session.set_active(target)
         target.needs_redraw = False  # 切过去查看了 → 清"完成未读"标记（侧栏绿点消失）
         self._sync_header_from_session()  # 顶栏 model/Plan-Act/思考 同步到该会话
@@ -894,20 +906,12 @@ class SidebarMixin:
         if state.chat_history and isinstance(state.chat_history[0], SystemMessage):
             state.chat_history[0] = SystemMessage(content=get_system_prompt())
 
-        # 重绘目标会话（state.chat_history 已代理到新 active=target）
+        # 重绘目标会话（state.chat_history 已代理到新 active=target）；正在后台跑的连同本轮
+        # "还没固化到 chat_history"的渲染一起重放（render_log：当前流式 / 工具显示部分）。
+        # _redraw_chat 画的是已固化的历史，render_log 是其后的当前部分，两者不重叠（每次
+        # append chat_history 都会同步清空 render_log）。
         self._reset_render_state()
-        self._redraw_chat()
-        # 切到的会话正在后台跑 → 重放它本轮"还没固化到 chat_history"的渲染（当前流式/工具
-        # 显示部分，切走期间被丢弃的）。_redraw_chat 画的是已固化的历史，render_log 是其后
-        # 的当前部分，两者不重叠（每次 append chat_history 都会同步清空 render_log）。
-        if target.is_generating:
-            with target.render_lock:
-                _log = list(target.render_log)
-            for _ev in _log:
-                if _ev[0] == "msg":
-                    self._append_html(_ev[1], _ev[2])
-                elif _ev[0] == "md":
-                    self._render_markdown(_ev[1])
+        self._redraw_chat_live(target)
         self._scroll_to_bottom()
         self._refresh_session_list()
         # 始终刷新指示条（项目可能没变，但会话的隔离状态可能不同）

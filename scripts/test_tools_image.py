@@ -418,3 +418,34 @@ def test_describe_tool_call_read_image():
     name, detail = streaming.describe_tool_call("read_image", {"path": "a.png", "question": "读报错"})
     assert name == "🖼 读取图片"
     assert "a.png" in detail and "读报错" in detail
+
+
+
+# ── 浏览器截图：直接问问题，不套「只做识别」的通用说明（2026-11-24）──
+
+def _vision_text(monkeypatch, **kw):
+    from src import models
+    sent = []
+
+    class _LLM:
+        def invoke(self, messages):
+            sent.append(messages[0].content)
+
+            class R:
+                content = "回答"
+            return R()
+
+    monkeypatch.setattr(models, "get_vision_model_index", lambda: 0)
+    monkeypatch.setattr(models, "_create_llm", lambda **k: _LLM())
+    models.describe_images_with_vision("草莓是什么颜色", [("a.png", "aGVsbG8=")], **kw)
+    return [b["text"] for b in sent[0] if isinstance(b, dict) and b.get("type") == "text"][0]
+
+
+def test_vision_bridge_wraps_user_images_with_the_ocr_brief(monkeypatch):
+    text = _vision_text(monkeypatch)
+    assert "OCR" in text and "不要直接解决用户问题" in text and "草莓是什么颜色" in text
+
+
+def test_vision_bridge_asks_the_question_as_is_for_screenshots(monkeypatch):
+    """两段要求打架时（「只做识别、不回答」+「请回答：…」）识别模型会把整页从头描述一遍。"""
+    assert _vision_text(monkeypatch, as_question=True) == "草莓是什么颜色"

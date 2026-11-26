@@ -3373,7 +3373,7 @@ from .tools_image import read_image, _IMAGE_EXTS  # noqa: E402  _IMAGE_EXTS 供 
 from .tools_browser import (  # noqa: E402
     browser_open, browser_snapshot, browser_find, browser_read_text,
     browser_click, browser_type, browser_console, browser_close, browser_screenshot,
-    browser_tabs,
+    browser_tabs, browser_press_key, browser_drag,
 )
 
 # 导出
@@ -3402,7 +3402,7 @@ ALL_TOOLS = [
     search_knowledge,
     browser_open, browser_snapshot, browser_find, browser_read_text,
     browser_click, browser_type, browser_console, browser_close, browser_screenshot,
-    browser_tabs,
+    browser_tabs, browser_press_key, browser_drag,
 ]
 
 
@@ -3491,6 +3491,8 @@ TOOL_DISPLAY_NAMES = {
     "browser_read_text": "🌐 浏览器读正文",
     "browser_click": "🌐 浏览器点击",
     "browser_type": "🌐 浏览器输入",
+    "browser_press_key": "🌐 浏览器按键",
+    "browser_drag": "🌐 浏览器拖拽",
     "browser_console": "🌐 浏览器控制台",
     "browser_screenshot": "🌐 浏览器截图",
     "browser_tabs": "🌐 浏览器标签",

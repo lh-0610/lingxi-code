@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>评论</title></head>
+<body>
+<!-- React / Vue 常见写法：表单不写 method，onSubmit 里自己 fetch POST -->
+<form id="f" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'sent:' + document.getElementById('c').value">
+  <input id="c" aria-label="评论内容">
+  <button>发送</button>
+</form>
+<form id="g" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'searched'">
+  <input id="q" aria-label="站内搜索">
+</form>
+<p id="out">-</p>
+</body>
+</html>

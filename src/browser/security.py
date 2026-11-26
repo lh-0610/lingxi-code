@@ -121,6 +121,19 @@ def is_consequential(info: dict, *, submit: bool = False, origin: str | None = N
             return True
     if submit and not in_form:
         return origin != ORIGIN_TRUSTED
+    if submit and in_form:
+        # 表单内回车 = 浏览器替用户点默认提交按钮：按那个按钮的名字判（「发送」「发布」……）。
+        # 以前只看输入框自己的名字，同一个表单点「发送」每次都问、回车就直接发出去了
+        if _has_keyword((info.get("submitName") or "").lower()):
+            return True
+        # 没写 method 的表单（onSubmit + fetch POST 多是这样）：同「表单外回车即发送」——
+        # 信任的本机来源不问，其余宁可多问。明写 method="get" 的仍按普通 GET 表单
+        if not info.get("formMethodSet", True):
+            return origin != ORIGIN_TRUSTED
+    return _has_keyword(name)
+
+
+def _has_keyword(name: str) -> bool:
     return any(k in name for k in CONSEQUENCE_KEYWORDS) or bool(CONSEQUENCE_WORDS.search(name))
 
 

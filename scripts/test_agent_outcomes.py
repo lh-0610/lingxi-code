@@ -359,3 +359,44 @@ def test_merge_cleanup_failure_invalidates_parent_validation(runtime, repo, monk
     assert parent.verification["dirty_files"] == ["app.py"]
     assert parent.verification["tests_passed"] is None
     assert not parent.verification["diff_reviewed"]
+
+
+
+# ── 进了历史就清 render_log（切回会话时历史画一遍、重放 log 又画一遍，同一段显示两次）──
+
+def _logging_ui():
+    """和 ChatUI 一样把渲染事件记进当前会话的 render_log（HeadlessUI 不记）。"""
+    from src import session, subagent
+
+    class UI(subagent.HeadlessUI):
+        def show_message(self, text, tag="ai_msg"):
+            s = session.current_session()
+            with s.render_lock:
+                s.render_log.append(("msg", text, tag))
+            super().show_message(text, tag)
+
+        def render_final_markdown(self, markdown_text, speak=True):
+            s = session.current_session()
+            with s.render_lock:
+                s.render_log.append(("md", markdown_text))
+            super().render_final_markdown(markdown_text, speak)
+    return UI()
+
+
+def test_final_answer_seals_the_render_log(runtime, monkeypatch):
+    agent, parent, _ = runtime
+    model_stream(monkeypatch, agent, [[AIMessageChunk(content="最终回答：改好了")]])
+    assert agent.agent_loop(_logging_ui()).status == "completed"
+    assert any("最终回答" in str(m.content) for m in parent.chat_history)
+    assert [e for e in parent.render_log if "最终回答" in str(e)] == [],         "最终回答已进历史，render_log 里还留着它：收尾期间切回会显示两次"
+
+
+def test_round_limit_notice_seals_the_render_log(runtime, monkeypatch):
+    agent, parent, _ = runtime
+    parent.max_rounds = 1
+    read = AIMessageChunk(content="", tool_calls=[{
+        "name": "read_file", "args": {"path": "missing.txt"}, "id": "r1"}])
+    model_stream(monkeypatch, agent, [[read], [read]])
+    result = agent.agent_loop(_logging_ui())
+    assert result.status == "limit_reached"
+    assert [e for e in parent.render_log if "轮次上限" in str(e) or "卡住了" in str(e)] == [],         "触顶提示已进历史，render_log 里还留着它"

@@ -23,6 +23,18 @@ _EDIT_HINT_MARKERS = (
 )
 
 
+def strip_injected_hints(text: str) -> str:
+    """剥掉发送时程序追加给模型的提示（@ 引用要先读文件、上传图片的本地路径），只留用户
+    自己打的字。编辑消息和重画历史里的用户气泡都用它——气泡里只该是用户的原话。"""
+    text = text or ""
+    cut = len(text)
+    for marker in _EDIT_HINT_MARKERS:
+        i = text.find(marker)
+        if i != -1:
+            cut = min(cut, i)
+    return text[:cut].rstrip()
+
+
 class TimelineMixin:
     def _human_at(self, index):
         """chat_history[index] 若是真实用户消息则返回它，否则 None（越界 / 不是用户消息 / 内部桥接）。"""
@@ -46,12 +58,7 @@ class TimelineMixin:
             text = "\n".join(t for t in (block_text(b) for b in content) if t)
         else:
             text = ""
-        cut = len(text)
-        for marker in _EDIT_HINT_MARKERS:
-            i = text.find(marker)
-            if i != -1:
-                cut = min(cut, i)
-        return text[:cut].rstrip()
+        return strip_injected_hints(text)
 
     @staticmethod
     def _message_has_images(msg):

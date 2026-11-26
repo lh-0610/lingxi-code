@@ -38,6 +38,9 @@ pip install pypdf
 # MCP 客户端（可选；没装则 MCP 功能静默跳过）
 pip install mcp
 
+# 侧栏浏览器放 H.264 / AAC 视频（可选；自带 ffmpeg，把网页里直接给文件的 mp4 转成 WebM 再放，见 browser/media.py）
+pip install imageio-ffmpeg
+
 # 代码导航（可选；多语言 LSP 最准：Python/TS/JS/Go/Rust/C-C++/Java 按扩展名选服务器 →
 # Python 没有服务器退 jedi，其它语言给安装提示 → 都不可用退回 search_files）
 pip install jedi python-lsp-server   # 或 pip install pyright（需 Node）；其它语言装对应服务器：typescript-language-server / gopls / rust-analyzer / clangd / jdtls

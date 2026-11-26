@@ -457,6 +457,14 @@
     return el.form || (el.closest ? el.closest("form") : null);
   }
 
+  // 表单的默认提交按钮（表单内回车时浏览器替用户点的那个）的名字：回车提交按它判有没有后果
+  function defaultSubmitName(form) {
+    const els = Array.from((form && form.elements) || []);
+    const b = els.find(e => (e.tagName === "BUTTON" && (e.type || "submit") === "submit")
+      || (e.tagName === "INPUT" && (e.type === "submit" || e.type === "image")));
+    return b ? nameOf(b, roleOf(b), true) : "";
+  }
+
   // 结构指纹：批准（info）与执行（click/type）之间元素被页面改过就拒绝
   function fingerprint(el) {
     const a = activatable(el);
@@ -490,6 +498,9 @@
       role, name: nameOf(a, role, !!clickMarker(a)),
       inForm: !!form,
       formMethod: form ? (form.getAttribute("method") || "get").toLowerCase() : "",
+      // 没写 method：React / Vue 的「onSubmit + fetch POST」大多这样，结构上看不出是 GET 还是写操作
+      formMethodSet: form ? form.hasAttribute("method") : false,
+      submitName: form ? defaultSubmitName(form) : "",
       formAction: form ? (form.getAttribute("action") || "") : "",
       // 提交按钮自己的 formmethod / formaction 盖过表单的（复审 #20）
       btnFormMethod: (a.getAttribute("formmethod") || "").toLowerCase(),
@@ -1001,6 +1012,60 @@
              busy: busyCount, elsewhere };
   }
 
+  // ── iframe 换算 / 按键 / 拖拽 / 局部截图 ──────────────────────
+  // 本文档里各个 iframe 内容区（去掉边框和内边距）在本视口里的位置：iframe 里的坐标加上它
+  // 才是外层的坐标。工具层按 Qt 那边的 frame 尺寸把 iframe 对上号（跨域的 iframe 里拿不到
+  // frameElement，只能从外层量）
+  function frameBoxes() {
+    const out = [];
+    document.querySelectorAll("iframe, frame").forEach((f, index) => {
+      const r = f.getBoundingClientRect();
+      const cs = getComputedStyle(f);
+      const pl = parseFloat(cs.paddingLeft) || 0, pt = parseFloat(cs.paddingTop) || 0;
+      const pr = parseFloat(cs.paddingRight) || 0, pb = parseFloat(cs.paddingBottom) || 0;
+      out.push({ index, src: f.src || "", x: r.left + f.clientLeft + pl, y: r.top + f.clientTop + pt,
+                 w: f.clientWidth - pl - pr, h: f.clientHeight - pt - pb });
+    });
+    return { ok: true, frames: out, vw: innerWidth, vh: innerHeight };
+  }
+
+  function revealFrame(opts) {
+    const f = document.querySelectorAll("iframe, frame")[opts && opts.index];
+    if (!f) return { ok: false, error: "iframe 不在了" };
+    f.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return { ok: true };
+  }
+
+  // 元素在本视口里的矩形（不滚动；拖拽的落点、局部截图用）
+  function rectOf(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    const b = r.el.getBoundingClientRect();
+    return { ok: true, x: b.left, y: b.top, w: b.width, h: b.height, vw: innerWidth, vh: innerHeight };
+  }
+
+  // 按键前把焦点交给这个元素 / 这个 frame（键盘事件送给有焦点的地方）
+  function focusRef(opts) {
+    const r = resolve(opts && opts.ref);
+    if (!r.ok) return r;
+    const bad = checkExpect(opts, r.el);
+    if (bad) return bad;
+    r.el.scrollIntoView({ block: "center", inline: "center" });
+    if (r.el.focus) r.el.focus();
+    return { ok: true };
+  }
+
+  function focusWindow() {
+    window.focus();
+    return { ok: true };
+  }
+
+  // 按键真的送到了这个文档没有（真实键盘事件 isTrusted）
+  const keyArrival = { key: null };
+  window.addEventListener("keydown", e => { if (e.isTrusted) keyArrival.key = e.key; }, true);
+  function keyWatch() { keyArrival.key = null; return { ok: true }; }
+  function keyArrived() { return { ok: true, key: keyArrival.key }; }
+
   // 截图前把 ref 滚到可见（以前主世界按 data-lxref 属性查，现在 ref 不进 DOM）
   function reveal(opts) {
     const r = resolve(opts && opts.ref);
@@ -1013,6 +1078,7 @@
     snapshot, find, click, type, act, readText, info, watchPrepare, watchSettling, watchBaseline,
     watchReport,
     reveal, pointOf, pointArrived, anchorOf,
+    frameBoxes, revealFrame, rectOf, focusRef, focusWindow, keyWatch, keyArrived,
     console: (opts) => { const out = consoleBuf.slice(); if (opts && opts.clear) consoleBuf.length = 0; return { ok: true, entries: out, url: location.href, docId }; },
     state: () => ({ ok: true, url: location.href, title: document.title, readyState: document.readyState, generation, docId }),
   };

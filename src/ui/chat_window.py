@@ -151,11 +151,13 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
 
     def _toggle_theme(self):
         """白天 ↔ 夜间。刷新全局样式和各处 chrome，再重绘消息流——
-        消息块是构造时取的色，不重绘的话已经显示的内容会停在旧主题。"""
+        消息块是构造时取的色，不重绘的话已经显示的内容会停在旧主题。
+        正在生成时连同本轮还没进历史的部分一起重画（以前只画历史：正在写的回复、运行中的
+        工具卡整片消失，之后的输出也落不回去）。"""
         self.theme = "light" if self.theme == "dark" else "dark"
         save_theme_choice(self.theme)
         self._apply_theme()
-        self._redraw_chat()
+        self._redraw_chat_live()
         self._refresh_queue_panel()
         self._render_plan_panel()   # 面板里的状态行和证据也是按旧主题取的色
 
@@ -426,6 +428,32 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self._img_seq = getattr(self, "_img_seq", 0) + 1
         return f"hist_img_{self._img_seq}"
 
+    def _redraw_chat_live(self, sess=None):
+        """重画前台会话：已进历史的部分（_redraw_chat），加上正在生成时本轮还没进历史的部分
+        （重放 render_log）。切回会话、切主题都走这里。
+
+        重画期间 replay_pending 开着：worker 这时到的事件只记 log、不发信号；画完在
+        render_lock 里取走 log、关掉标志，之后的事件照常实时发。以前重画（长会话 0.7s）期间
+        到的片段既被重放、又经信号再画一遍，显示两次。切会话时调用方在 set_active 之前就
+        打开标志（sess 传进来），免得这中间到的事件也走两条路。"""
+        from .. import session as _session
+        sess = sess or _session.get_active()
+        with sess.render_lock:
+            sess.replay_pending = True
+        log = []
+        try:
+            self._redraw_chat()
+        finally:
+            with sess.render_lock:
+                if sess.is_generating:
+                    log = list(sess.render_log)
+                sess.replay_pending = False
+        for ev in log:
+            if ev[0] == "msg":
+                self._append_html(ev[1], ev[2])
+            elif ev[0] == "md":
+                self._render_markdown(ev[1])
+
     def _redraw_chat(self):
         self.chat_area.clear()
         # 重绘的是历史：回复上方不起秒表、不标当前模式
@@ -458,6 +486,14 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         from .message_view import replay_plan_change
         results = {m.tool_call_id: str(m.content or "") for m in history_snapshot
                    if isinstance(m, ToolMessage)}
+        # 正在生成：最后那条 AIMessage 里还没有结果的工具调用不画——正在跑的那个由 render_log
+        # 重放画，还没轮到的等它开始时实时画。以前这里先画一遍，重放又画一遍正在跑的那个，
+        # 还没开始的也提前画出来，像是跑过了、没有结果
+        from .. import session as _session
+        live_ai = None
+        if _session.get_active().is_generating:
+            live_ai = next((i for i in range(len(history_snapshot) - 1, -1, -1)
+                            if history_snapshot[i].__class__.__name__ == "AIMessage"), None)
         role_name = agent.get_current_role_name()
         rendered_any = False
         labeled = False      # 这一轮的回复已经起过头（实时也是一轮只标一次模型名）
@@ -476,26 +512,31 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 rendered_any = True
                 labeled = False
                 self._append_html("你\n", "user_label")
-                # 多模态消息
+                # 气泡里只画用户的原话：发送时追加给模型的提示（@ 引用要先读文件、上传图片的
+                # 本地路径）剥掉，和实时发送时一样（以前重画后气泡里多出一大段方括号）；
+                # 缩略图和实时一样 480 宽
+                from .timeline import strip_injected_hints
                 if isinstance(msg.content, list):
                     for part in msg.content:
                         if isinstance(part, dict) and part.get("type") == "text":
-                            self._append_html(part["text"] + "\n", "user_msg")
+                            shown = strip_injected_hints(part["text"])
+                            if shown:
+                                self._append_html(shown + "\n", "user_msg")
                         elif isinstance(part, dict) and part.get("type") == "image_url":
                             url = part["image_url"]["url"]
                             if url.startswith("data:image"):
                                 img = QImage()
                                 img.loadFromData(base64.b64decode(url.split(",", 1)[1]))
-                                self.chat_area.add_image(img)
+                                self.chat_area.add_image(img, max_w=480)
                         elif isinstance(part, dict) and part.get("type") == "image":
                             source = part.get("source", {})
                             if source.get("type") == "base64" and source.get("data"):
                                 img = QImage()
                                 img.loadFromData(base64.b64decode(source["data"]))
-                                self.chat_area.add_image(img)
+                                self.chat_area.add_image(img, max_w=480)
                     self._append_html("\n", "spacer")
                 else:
-                    self._append_html(msg.content + "\n\n", "user_msg")
+                    self._append_html(strip_injected_hints(msg.content) + "\n\n", "user_msg")
                 # 用户气泡下挂时间轴操作（编辑/回退/分叉），idx 是绝对历史下标
                 self.chat_area.add_user_actions(idx)
             elif hasattr(msg, 'content') and msg.__class__.__name__ == "AIMessage":
@@ -535,6 +576,8 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
                 # 工具调用画成和实时一样的工具卡——不管这条 AIMessage 有没有正文
                 # （MiMo 常把"短文字 + 工具调用"放在同一条里）
                 for tc in _calls:
+                    if idx == live_ai and tc.get("id") not in results:
+                        continue
                     name = tc.get("name") or "?"
                     args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
                     display_name, detail = describe_tool_call(name, args)
@@ -907,9 +950,18 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         - 文件链接（`lingxi-file:src/ui/task_panel.py:835`）：和任务面板「改动的文件」一样走
           文件面板，带行号的打开后滚到那一行；
         - 本机地址（localhost）：在侧栏浏览器面板打开（§7.4），调试时模型也看得到这一页；
-        - 公网网址：按设置（config.LINK_OPEN_MODE），默认系统浏览器。以前公网链接点了没反应。
+        - 公网网址：按设置（config.LINK_OPEN_MODE），默认系统浏览器。以前公网链接点了没反应；
+        - 代码块右上角的复制（`action:copy_code:N`）：把那块代码放进剪贴板。以前这里不认它，
+          按钮点了没有任何反应。
         """
         from ..browser import security
+        if (href or "").startswith("action:copy_code:"):
+            code = self._code_blocks.get(href.rsplit(":", 1)[-1])
+            if code is not None:
+                from PySide6.QtWidgets import QApplication
+                QApplication.clipboard().setText(code)
+                self._show_toast("已复制代码")
+            return
         if (href or "").startswith(("http://", "https://")):
             from .. import config as _cfg
             if security.is_localhost(href) or _cfg.LINK_OPEN_MODE == "panel":
@@ -2739,13 +2791,18 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """线程安全：从 agent 线程发送信号到 UI 线程"""
         from .. import session as _session
         _sess = _session.current_session()
-        # 记本轮渲染事件供"切走→切回"重放（thinking_indicator 是临时计时器、不留痕，不记）
-        if tag != "thinking_indicator":
-            with _sess.render_lock:
+        active = _session.get_active()
+        # 记本轮渲染事件供"切走→切回"重放（thinking_indicator 是临时计时器、不留痕，不记）；
+        # 记和「发不发给界面」在同一把锁里定，重画时取 log 也在这把锁里（见 _redraw_chat_live）
+        with _sess.render_lock:
+            if tag != "thinking_indicator":
                 _sess.render_log.append(("msg", text, tag))
-        # 后台会话：不实时渲染（切回时统一 _redraw_chat + 重放 render_log）
-        if _sess is not _session.get_active():
-            _sess.needs_redraw = True
+            live = _session.renders_live(_sess, active)
+        if not live:
+            # 后台会话：不实时渲染（切回时统一 _redraw_chat + 重放 render_log）；
+            # 前台但正在重画：已在 log 里，重画完一起重放
+            if _sess is not active:
+                _sess.needs_redraw = True
             return
         self.bridge.append_signal.emit(text, tag)
 
@@ -2906,11 +2963,14 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         """线程安全：显示错误信息和重试按钮"""
         from .. import session as _session
         _sess = _session.current_session()
+        active = _session.get_active()
         # 记进 render_log：后台会话报错时，切回去才看得到（否则报错静默消失、像没回复就停了）
         with _sess.render_lock:
             _sess.render_log.append(("msg", f"\n{error_msg}\n", "ai_msg"))
-        if _sess is not _session.get_active():
-            _sess.needs_redraw = True
+            live = _session.renders_live(_sess, active)
+        if not live:
+            if _sess is not active:
+                _sess.needs_redraw = True
             return
         self.bridge.show_retry.emit(error_msg)
 

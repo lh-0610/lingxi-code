@@ -175,7 +175,7 @@ class BrowserBridge(QObject):
             self._reply(req, {"ok": False, "error": "browser closed"})
             return
         args = req["args"]
-        if op == "mouse" or (op == "lx" and args.get("method") in ("click", "type", "act")):
+        if op in ("mouse", "key", "drag") or (op == "lx" and args.get("method") in ("click", "type", "act")):
             # 模型的点击 / 输入：之后不久到达的新窗口请求算它发起的（脚本点击时
             # isUserInitiated 是 False，见 page._on_new_window）
             self._browser.note_model_action()
@@ -197,6 +197,10 @@ class BrowserBridge(QObject):
                 self._grab(req, args)
             elif op == "mouse":
                 self._mouse(req, args)
+            elif op == "key":
+                self._key(req, args)
+            elif op == "drag":
+                self._drag(req, args)
             elif op == "cursor":
                 # 输入中 / 被挡住：只挪画在网页上的指针，不发任何事件
                 self.cursor_event.emit(self._browser.current_id, float(args.get("x", 0)),
@@ -354,7 +358,15 @@ class BrowserBridge(QObject):
         page_mod.load_url(page, QUrl(args["url"]),
                           clear_first=not blank, page_loading=getattr(page, "lx_loading", False),
                           still_wanted=lambda: not (req.get("cancelled") or req.get("replied")
-                                                    or self._open_req is not req))
+                                                    or self._open_req is not req),
+                          on_go=lambda was_loading: self._on_open_sent(req, was_loading))
+
+    def _on_open_sent(self, req, was_loading):
+        """导航发出去了。那一刻页面正在加载（用户在面板里点的链接、热更新整页刷新……）：
+        新导航顶替在途的那个，Qt 不再发 loadStarted，接下来那个 loadFinished 就是这次的——
+        以前它被当成「上一个导航的迟到信号」丢掉，open 卡满超时报失败，页面其实已经打开了。"""
+        if was_loading and req is self._open_req and not req.get("replied"):
+            self._open_started = True
 
     def _finish_open(self, req, *, ok, loaded, error, http_status=None):
         # 发起时的那一页：加载期间当前标签可能换了（页面自己开了新标签）
@@ -457,7 +469,12 @@ class BrowserBridge(QObject):
                     url = child.url().toString()
                 except Exception:
                     url = "?"
-                info.append({"path": p, "url": url})
+                try:
+                    size = child.size()           # 视口里的大小：工具层按它把 iframe 对上号
+                    w, h = float(size.width()), float(size.height())
+                except Exception:
+                    w = h = -1.0
+                info.append({"path": p, "url": url, "w": w, "h": h})
                 walk(child, p)
 
         walk(self._browser.page.mainFrame(), "f")
@@ -508,6 +525,100 @@ class BrowserBridge(QObject):
             typing_in.setFocus(Qt.FocusReason.OtherFocusReason)
         self._reply(req, {"ok": True})
 
+    def _input_target(self, req):
+        """真实输入事件发给谁：view 的 focusProxy。面板没显示 / 太小时 Chromium 不收，回 None。"""
+        view = self._browser.view
+        if not shiboken6.isValid(view) or not view.isVisible() or view.width() < 50:
+            self._reply(req, {"ok": False, "error": "面板没显示，收不到键盘 / 鼠标事件"})
+            return None
+        return view.focusProxy() or view
+
+    def _take_focus(self, target):
+        """同 _mouse：用户没在灵犀输入框里打字才把焦点交给网页；返回要还回去的控件。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+        from src.browser import page as page_mod
+        typing_in = QApplication.focusWidget() if page_mod.user_typing_recently() else None
+        if typing_in is None:
+            target.setFocus(Qt.FocusReason.MouseFocusReason)
+        return typing_in
+
+    def _give_back_focus(self, typing_in, target):
+        from PySide6.QtCore import Qt
+        view = self._browser.view
+        if typing_in is not None and shiboken6.isValid(typing_in) and typing_in is not target \
+                and not view.isAncestorOf(typing_in):
+            typing_in.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _key(self, req, args):
+        """往页面发一次真实按键（按下 + 抬起），送给页面里有焦点的地方。key 写法见
+        page.parse_key（Escape / Enter / ArrowDown / Tab / a / Control+a …）。"""
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtWidgets import QApplication
+        from src.browser import page as page_mod
+        parsed = page_mod.parse_key(str(args.get("key") or ""))
+        if parsed is None:
+            self._reply(req, {"ok": False, "error": f"不认识的按键: {args.get('key')!r}"})
+            return
+        target = self._input_target(req)
+        if target is None:
+            return
+        qt_key, mods, text = parsed
+        typing_in = self._take_focus(target)
+        for etype in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            QApplication.sendEvent(target, QKeyEvent(etype, qt_key, mods, text))
+        self._give_back_focus(typing_in, target)
+        self._reply(req, {"ok": True})
+
+    def _drag(self, req, args):
+        """真实鼠标拖拽：移到起点、按下、分几步移到终点（每步之间让页面处理一下 pointermove）、
+        抬起。坐标是页面 CSS 像素（顶层视口），同 _mouse 按缩放换算、不动系统鼠标。"""
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QApplication
+        target = self._input_target(req)
+        if target is None:
+            return
+        zoom = self._browser.page.zoomFactor() or 1.0
+        p1 = QPoint(int(args["x1"] * zoom), int(args["y1"] * zoom))
+        p2 = QPoint(int(args["x2"] * zoom), int(args["y2"] * zoom))
+        if not (target.rect().contains(p1) and target.rect().contains(p2)):
+            self._reply(req, {"ok": False, "error": "起点或终点不在可见区域里"})
+            return
+        steps = max(2, min(int(args.get("steps") or 12), 60))
+        typing_in = self._take_focus(target)
+        left, none = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+        tab = self._browser.current_id
+
+        def send(etype, pt, button, buttons):
+            QApplication.sendEvent(target, QMouseEvent(
+                etype, QPointF(pt), QPointF(target.mapToGlobal(pt)), button, buttons,
+                Qt.KeyboardModifier.NoModifier))
+
+        send(QEvent.Type.MouseMove, p1, none, none)
+        send(QEvent.Type.MouseButtonPress, p1, left, left)
+        done = [0]
+
+        def step():
+            if req.get("cancelled") or not shiboken6.isValid(target):
+                self._reply(req, {"ok": False, "error": "拖到一半页面没了"})
+                return
+            done[0] += 1
+            t = done[0] / steps
+            pt = QPoint(round(p1.x() + (p2.x() - p1.x()) * t), round(p1.y() + (p2.y() - p1.y()) * t))
+            send(QEvent.Type.MouseMove, pt, none, left)
+            self.cursor_event.emit(tab, pt.x() / zoom, pt.y() / zoom, "move",
+                                   str(args.get("label") or ""))
+            if done[0] < steps:
+                QTimer.singleShot(16, self, step)
+                return
+            send(QEvent.Type.MouseButtonRelease, p2, left, none)
+            self._give_back_focus(typing_in, target)
+            self._reply(req, {"ok": True})
+
+        QTimer.singleShot(16, self, step)
+
     def _grab(self, req, args):
         """截页面当前可见区域（view.grab），PNG base64。宽度超过 max_width 等比缩小。
         view 不显示（面板收起 / 尺寸为零）时截出来是空白，直接说清楚，不交一张白图去识别。"""
@@ -525,6 +636,21 @@ class BrowserBridge(QObject):
             return
         max_w = int(args.get("max_width") or 1280)
         img = pix.toImage()
+        crop = args.get("crop")
+        if crop:
+            # 只截一块（局部截图）：crop 是页面 CSS 像素，换成图上的物理像素；小块放大一些，
+            # 识别模型看小字更清楚
+            from PySide6.QtCore import QRect
+            scale = (self._browser.page.zoomFactor() or 1.0) * (pix.devicePixelRatio() or 1.0)
+            rect = QRect(int(crop["x"] * scale), int(crop["y"] * scale),
+                         int(crop["w"] * scale), int(crop["h"] * scale)).intersected(img.rect())
+            if rect.width() < 8 or rect.height() < 8:
+                self._reply(req, {"ok": False, "error": "要截的那块不在可见区域里"})
+                return
+            img = img.copy(rect)
+            if img.width() < 640:
+                img = img.scaledToWidth(min(img.width() * 3, 960),
+                                        Qt.TransformationMode.SmoothTransformation)
         if img.width() > max_w:
             img = img.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
         data = QByteArray()

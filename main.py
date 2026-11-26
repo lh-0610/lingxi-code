@@ -47,6 +47,12 @@ if __name__ == "__main__":
     )
     # WebEngine 要求共享 OpenGL 上下文，必须在 QApplication 创建前设（§11.2）
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    # 侧栏浏览器转码视频用的 lxmedia: 协议：要在任何 QtWebEngine 对象之前登记（见 browser/media.py）
+    try:
+        from src.browser import media as _media
+        _media.register_scheme()
+    except Exception:
+        pass
     app = QApplication(sys.argv)
 
     # 只开一个：已经有一个在跑，就把它的窗口叫出来，自己退出。放在加载界面之前——界面要好几秒，

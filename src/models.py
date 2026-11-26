@@ -651,10 +651,13 @@ def _image_content_block_for_model(model_index, path, b64):
     }
 
 
-def describe_images_with_vision(user_text, images):
+def describe_images_with_vision(user_text, images, *, as_question=False):
     """用视觉模型把图片转成文本描述，供非视觉强模型继续处理。
 
     images: [(path, base64), ...]
+    as_question：user_text 是调用方写好的完整问题（浏览器截图：直接回答问的那件事），原样
+    交给识别模型，不套「只做识别、不回答问题」的通用说明——两段要求打架时识别模型会把整页
+    从头描述一遍，问的那行小字反倒没读出来。
     返回: (vision_model_name, description)
     """
     vision_idx = get_vision_model_index()
@@ -669,9 +672,10 @@ def describe_images_with_vision(user_text, images):
         content.append(_image_content_block_for_model(vision_idx, path, b64))
 
     original_question = (user_text or "").strip() or "用户只上传了图片，没有附加文字。"
-    content.append({
-        "type": "text",
-        "text": (
+    if as_question:
+        text = original_question
+    else:
+        text = (
             "你是图片识别/OCR 助手。请把图片内容转换成给另一个更强文本/代码模型使用的中文上下文。\n"
             "要求：\n"
             "1. 客观描述图片里可见的信息，不要脑补。\n"
@@ -679,8 +683,8 @@ def describe_images_with_vision(user_text, images):
             "3. 如果图片里有代码，请尽量按原样抄录关键片段。\n"
             "4. 不要直接解决用户问题，不要写最终答案，只输出识别结果。\n\n"
             f"用户原始问题：{original_question}"
-        ),
-    })
+        )
+    content.append({"type": "text", "text": text})
 
     resp = vision_llm.invoke([HumanMessage(content=content)])
     desc = getattr(resp, "content", str(resp))

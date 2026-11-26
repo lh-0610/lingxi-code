@@ -182,6 +182,68 @@ _STALE_REF = ("ref 已失效：页面已换文档，或该 ref 不是当前快�
               "重新 browser_snapshot 拿新 ref 再操作。")
 
 
+def _ref_scope(ref, frame):
+    """ref 该按哪个 frame 用。返回 (frame, 给模型的说明)。
+
+    ref 编号在一个标签里各个 frame 之间是接着数的、不重号。调用时没带 frame（或带错了）、
+    而这个 ref 恰好只在当前标签的另一个 frame 里签发过：就按那个 frame 操作，并告诉模型下次
+    带上。以前直接报「ref 已失效：页面已换文档」，模型以为页面在刷新（用户实测一局里 4 次）。"""
+    if not ref or (_fk(frame), ref) in _issued:
+        return frame, ""
+    tab = _cur_tab()
+    owners = {k[0][1] for k in _issued if k[1] == ref and k[0][0] == tab}
+    if len(owners) != 1:
+        return frame, ""
+    owner = next(iter(owners)) or None
+    if owner:
+        return owner, f"\n（ref={ref} 是在 frame={owner} 里签发的，已按它操作；下次调用带上 frame=\"{owner}\"）"
+    return None, f"\n（ref={ref} 是在顶层页面签发的，已按顶层页面操作；下次别带 frame）"
+
+
+def _frame_offset(frame):
+    """frame（f.0 / f.0.1）的内容区左上角在顶层视口里的位置 (x, y)，顶层是 (0, 0)。
+
+    iframe 里的坐标加上它才能发真实鼠标事件。跨域 iframe 里拿不到 frameElement，只能从外层
+    量：外层文档列出各个 iframe 的位置和大小，按 Qt 那边这个 frame 的大小（尺寸不唯一时再比
+    地址）对上号；对不上 / 不唯一返回 None（调用方退回脚本点击，或如实说做不了）。
+    iframe 有一截在外层视口外面时先把它滚进来。"""
+    if not frame:
+        return 0.0, 0.0
+    fr = _bridge_call("frames")
+    if not fr.get("ok"):
+        return None
+    by_path = {f.get("path"): f for f in fr.get("frames") or []}
+    parts = frame.split(".")
+    ox = oy = 0.0
+    parent = None
+    for i in range(2, len(parts) + 1):
+        path = ".".join(parts[:i])
+        me = by_path.get(path)
+        if me is None or (me.get("w") or 0) <= 0:
+            return None
+        box = None
+        for _attempt in range(2):
+            boxes = _lx("frameBoxes", {}, parent)
+            if not boxes.get("ok"):
+                return None
+            cands = [b for b in boxes.get("frames") or []
+                     if abs(b["w"] - me["w"]) <= 2 and abs(b["h"] - me["h"]) <= 2]
+            if len(cands) > 1:
+                cands = [b for b in cands if b.get("src") == me.get("url")]
+            if len(cands) != 1:
+                return None
+            box = cands[0]
+            inside = (box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["w"] <= boxes["vw"] + 1
+                      and box["y"] + box["h"] <= boxes["vh"] + 1)
+            if inside or _attempt:
+                break
+            _lx("revealFrame", {"index": box["index"]}, parent)
+        ox += box["x"]
+        oy += box["y"]
+        parent = path
+    return ox, oy
+
+
 def _remember_refs(r, frame):
     doc = r.get("docId") or ""
     fk = _fk(frame)
@@ -249,12 +311,14 @@ def _gate(action, url, *, consequential=False, card="", extra_url=None, origin=N
     if ui is None:
         from .tools import _no_ui_refusal
         return _no_ui_refusal("操作浏览器")
+    from .browser import page as _page
     try:
-        allowed, feedback = ui.confirm_command(
-            card, kind=_pm.KIND_BROWSER,
-            browser_origin=security.parse_origin(extra_url or url),
-            browser_action=action,
-            browser_consequential=consequential)
+        with _page.model_waiting():     # 卡片开着时用户在网页上点出来的框归用户
+            allowed, feedback = ui.confirm_command(
+                card, kind=_pm.KIND_BROWSER,
+                browser_origin=security.parse_origin(extra_url or url),
+                browser_action=action,
+                browser_consequential=consequential)
     except Exception as e:
         logger.warning(f"浏览器确认对话框异常，默认拒绝: {e}")
         return f"用户确认对话框出错，已拒绝浏览器操作: {e}"
@@ -686,13 +750,14 @@ def browser_read_text(max_chars: int = 8000, frame: str | None = None) -> str:
 
 @tool
 @_exclusive
-def browser_screenshot(question: str, ref: str | None = None) -> str:
+def browser_screenshot(question: str, ref: str | None = None, frame: str | None = None) -> str:
     """截浏览器当前可见区域，交给图片识别模型，按 question 回答它在图上看到的。
 
     核对"看起来对不对"用它：颜色 / 高亮 / 图标 / 图表 / canvas / 布局——文字树和
     动作后的样式核对都说不清的东西。question 要具体，只问图上看得出来的事，例如
     「"买牛奶"那一行有没有删除线」「日历里 11 月 3 日是什么底色」；别问"页面对不对"。
-    ref：先把这个元素滚到可见区域再截。
+    ref：只截这个元素附近那一块（放大后交给识别模型，看小字、看局部更准）；frame：ref 所在的
+    iframe（漏写时按签发 ref 的 frame 自动对上）。不给 ref 截整个可见区域。
     返回的是识别模型的文字回答，不是原图；它也可能看错，关键结论能用文字树 / 正文核对的就再核对。
     需要先在「设置 → 图片识别模型」配好能看图的模型。"""
     question = (question or "").strip()
@@ -705,31 +770,46 @@ def browser_screenshot(question: str, ref: str | None = None) -> str:
     if get_vision_model_index() < 0:
         return ("截图失败: 没有可用的图片识别模型。请在「设置 → 图片识别模型」里选一个"
                 "能看图的模型（如 GPT-4o / Claude / Gemini / Qwen-VL）。")
+    crop, scope_note, part = None, "", ""
     if ref:
         url, err = _page_url()
         if err:
             return err
-        st = _lx("state")
-        if not st.get("ok"):
-            return _err(st, "读取页面状态")
-        if (_fk(None), ref) not in _issued or _issued[(_fk(None), ref)] != (st.get("docId") or ""):
-            return _STALE_REF
-        r = _lx("reveal", {"ref": ref})
+        frame, scope_note = _ref_scope(ref, frame)
+        _doc, err = _checked_ref(ref, frame)
+        if err:
+            return err
+        r = _lx("reveal", {"ref": ref}, frame)
         if not r.get("ok"):
             return _STALE_REF
         _bridge_call("settle", ms=150)
-    shot = _bridge_call("grab")
+        # 只截这一块（四周留一点上下文），放大后交给识别模型：整屏截图里的小字常读不出来
+        rect = _lx("rectOf", {"ref": ref}, frame)
+        off = _frame_offset(frame)
+        if rect.get("ok") and off is not None:
+            pad = 40
+            crop = {"x": max(0.0, rect["x"] + off[0] - pad), "y": max(0.0, rect["y"] + off[1] - pad),
+                    "w": rect["w"] + 2 * pad, "h": rect["h"] + 2 * pad}
+            part = "里这个元素附近的一块（已放大）"
+    shot = _bridge_call("grab", crop=crop) if crop else _bridge_call("grab")
     if not shot.get("ok"):
         return _err(shot, "截图")
-    prompt = (f"这是浏览器页面的截图（{shot.get('url', '')}）。请回答：{question}\n"
+    # 直接回答问题：通用的识图提示词要求「只做识别、不回答问题」，套在这里识别模型就把整页
+    # 从头描述一遍，问的那行小字反倒没读出来（用户实测一局里截了 12 次）
+    prompt = (f"这是浏览器页面{part}的截图（{shot.get('url', '')}）。请直接回答下面这个问题，"
+              "只回答问题本身，不用描述页面的其它部分：\n"
+              f"{question}\n"
               "只说图上能看到的；看不清、图上没有的就直说看不清 / 没有，不要猜。")
     try:
-        vision_name, desc = describe_images_with_vision(prompt, [("browser.png", shot["png"])])
+        with _page.model_waiting():     # 等识别模型的十几秒里，用户点出来的框归用户
+            vision_name, desc = describe_images_with_vision(
+                prompt, [("browser.png", shot["png"])], as_question=True)
     except Exception as e:
         return f"截图失败: 图片识别模型出错（{e}）"
     if not desc:
         return f"截图完成，但识别模型（{vision_name}）没返回内容"
-    return (f"[浏览器截图 · {shot.get('width')}×{shot.get('height')} · 识别模型 {vision_name}]\n"
+    return (f"[浏览器截图{'（局部放大）' if crop else ''} · {shot.get('width')}×{shot.get('height')}"
+            f" · 识别模型 {vision_name}]{scope_note}\n"
             f"{desc}\n（这是识别模型看图的回答，不是原图；它也可能看错）")
 
 
@@ -744,6 +824,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
     url, err = _page_url()
     if err:
         return err
+    frame, scope_note = _ref_scope(ref, frame)
     frame_url = url
     if frame:
         frame_url, err = _page_url(frame)
@@ -785,7 +866,7 @@ def browser_click(ref: str, frame: str | None = None, delta: bool = True) -> str
                     "（关掉弹窗 / 遮罩、等加载层消失），再重新 browser_snapshot。挡在上面的是：\n"
                     + tree.fence(r.get("by") or "", frame_url))
         return _err(r, "点击")
-    return (f"已点击 {_describe_for_model(info, ref)}{note}"
+    return (f"已点击 {_describe_for_model(info, ref)}{note}{scope_note}"
             + _after_action(before, frame, frame_url, tabs0, cur0))
 
 
@@ -803,29 +884,37 @@ def _press(ref, expect, frame, label=""):
     元素、面板没显示时退回脚本点击（el.click()）。返回 (结果, 补充说明)。
 
     真实事件的好处：靠 mousedown / pointerdown 打开的组件（antd Select、Radix 菜单）点得开；
-    被遮罩挡住的按钮点不中（和真人一样，报出来而不是假装点中了）；点开的新窗口算用户发起。"""
+    被遮罩挡住的按钮点不中（和真人一样，报出来而不是假装点中了）；点开的新窗口算用户发起。
+
+    iframe 里的元素：算出 iframe 在整页里的位置（_frame_offset）后同样发真实事件——网页游戏、
+    嵌入的编辑器多在 iframe 里，靠 pointerdown 的交互（会躲开鼠标的按钮、拖拽）脚本点击触发
+    不了；位置对不上时才退回脚本点击。"""
+    ox = oy = 0.0
     if frame:
-        return _lx("click", {"ref": ref, "expect": expect}, frame), ""
+        off = None if _view_hidden() else _frame_offset(frame)
+        if off is None:
+            return _lx("click", {"ref": ref, "expect": expect}, frame), ""
+        ox, oy = off
     if _view_hidden():
         # 面板没显示：Chromium 不收输入事件（视口也可能是 0 尺寸），只能脚本点
         return (_lx("click", {"ref": ref, "expect": expect}),
                 "（面板没显示，改用脚本点击；靠按下鼠标才打开的组件可能没反应）")
-    p = _lx("pointOf", {"ref": ref, "expect": expect})
+    p = _lx("pointOf", {"ref": ref, "expect": expect}, frame)
     if not p.get("ok"):
         if p.get("occluded") and p.get("x") is not None:
             # 画在网页上的指针变红、停在被挡的那一点：和结果里的「被挡住」对得上
-            _bridge_call("cursor", kind="blocked", x=p["x"], y=p["y"], label="被挡住了")
+            _bridge_call("cursor", kind="blocked", x=p["x"] + ox, y=p["y"] + oy, label="被挡住了")
         return p, ""
     if p.get("synthetic"):
-        return _lx("click", {"ref": ref, "expect": expect}), ""
-    m = _bridge_call("mouse", x=p["x"], y=p["y"], label=label)
+        return _lx("click", {"ref": ref, "expect": expect}, frame), ""
+    m = _bridge_call("mouse", x=p["x"] + ox, y=p["y"] + oy, label=label)
     if not m.get("ok"):
-        # 面板没显示：Chromium 不收输入事件，只能脚本点
-        return (_lx("click", {"ref": ref, "expect": expect}),
+        # 面板没显示 / 点不在可见区域：Chromium 收不到，只能脚本点
+        return (_lx("click", {"ref": ref, "expect": expect}, frame),
                 "（面板没显示，改用脚本点击；靠按下鼠标才打开的组件可能没反应）")
     # 事件是异步送进页面的：确认真的到了这个元素再往下（一般第一下就到了）
     for _ in range(_PRESS_CONFIRM_TRIES):
-        a = _lx("pointArrived")
+        a = _lx("pointArrived", frame=frame)
         if a.get("down") or a.get("click"):
             return {"ok": True}, ""
         _bridge_call("settle", ms=30)
@@ -843,6 +932,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
     url, err = _page_url()
     if err:
         return err
+    frame, scope_note = _ref_scope(ref, frame)
     frame_url = url
     if frame:
         frame_url, err = _page_url(frame)
@@ -905,7 +995,7 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
     if r.get("secret"):
         # 密码框不回显（复审 #18）：值会进模型上下文和会话历史
         state_ = "已填写" if r.get("filled") else "为空"
-        return (f"已向 {target} 输入，密码框不回显内容（当前{state_}）"
+        return (f"已向 {target} 输入，密码框不回显内容（当前{state_}）{scope_note}"
                 + _after_action(before, frame, frame_url, tabs0, cur0))
     raw = r.get("value", "")
     if raw in (text[:100], ""):
@@ -913,8 +1003,185 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
     else:
         # 页面的输入处理改过值（格式化、自动补全……）：那是页面写的字，进围栏
         shown_value = "（页面改过，见下）\n" + tree.fence(raw, frame_url)
-    return (f"已向 {target} 输入，当前值: {shown_value}"
+    return (f"已向 {target} 输入，当前值: {shown_value}{scope_note}"
             + _after_action(before, frame, frame_url, tabs0, cur0))
+
+
+def _checked_ref(ref, frame):
+    """ref 还能不能用（是当前文档的快照 / find 签发的）。返回 (当前文档编号, 错误文案)。"""
+    st = _lx("state", frame=frame)
+    if not st.get("ok"):
+        return "", _err(st, "读取页面状态")
+    cur_doc = st.get("docId") or ""
+    if (_fk(frame), ref) not in _issued or _issued[(_fk(frame), ref)] != cur_doc:
+        return "", _STALE_REF
+    return cur_doc, ""
+
+
+def _plain_before(frame):
+    """没有 ref 的动作（直接按键）：动作前的 all 快照 + 导航序号，给 _after_action 算变化。"""
+    before = _lx("snapshot", {"mode": "all", "maxChars": _DIFF_SNAPSHOT_CHARS}, frame)
+    q = _bridge_call("qturl")
+    if isinstance(before, dict) and q.get("ok"):
+        before["_nav0"] = q.get("nav") or 0
+    return before
+
+
+@tool
+@_exclusive
+def browser_press_key(key: str, ref: str | None = None, frame: str | None = None,
+                      delta: bool = True) -> str:
+    """按一个键（真实键盘事件）：Escape、Enter、Tab、ArrowUp / ArrowDown / ArrowLeft / ArrowRight、
+    Space、Backspace、Delete、Home、End、PageUp、PageDown、F1–F12、单个字符，可带修饰键
+    （Control+a、Shift+Tab）。名字照网页的 KeyboardEvent.key。
+    ref：先把焦点交给这个元素再按（按键送给有焦点的地方）；不给 ref 时送给当前焦点，
+    给 frame 时先把焦点交给那个 iframe（游戏、编辑器在 iframe 里时用）。
+    往输入框里打字用 browser_type；这个工具用来按快捷键、关弹窗（Escape）、移动选择、翻页、玩游戏。
+    默认附"变化行 diff"。可能先问用户；Enter 可能提交表单，按「回车提交」的规矩每次都问。"""
+    from .browser import page as _page
+    key = (key or "").strip()
+    if _page.parse_key(key) is None:
+        return ("按键失败: 不认识的按键 " + json.dumps(key, ensure_ascii=False)
+                + "。写法照 KeyboardEvent.key：Escape、Enter、Tab、ArrowDown、a、Control+a、Shift+Tab……")
+    url, err = _page_url()
+    if err:
+        return err
+    frame, scope_note = _ref_scope(ref, frame)
+    frame_url = url
+    if frame:
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+    info, cur_doc = None, ""
+    if ref:
+        cur_doc, err = _checked_ref(ref, frame)
+        if err:
+            return err
+        info, err = _element_info(ref, frame)
+        if err:
+            return err
+    origin = _origin_for(_session.current_session(), "interact", url, frame_url if frame else None)
+    is_enter = key.split("+")[-1].strip().lower() in ("enter", "return")
+    if is_enter:
+        # 回车 = 提交：有元素就按它的结构判（表单内回车按默认提交按钮的名字），没有就同
+        # 「表单外回车即发送」——信任的本机来源不问，其余都问
+        cons = (security.is_consequential(info, submit=True, origin=origin) if info
+                else origin != security.ORIGIN_TRUSTED)
+    else:
+        cons = False
+    where = _describe(info, ref) if info else (f"iframe {frame} 里当前的焦点" if frame else "页面当前的焦点")
+    card = f"将在浏览器按键 {key}（送给 {where}）\n页面: {url}"
+    if frame:
+        card += f"\niframe: {frame_url}"
+    if cons:
+        card += "\n⚠ 此动作可能有后果（回车可能提交表单 / 发送），请仔细核对。"
+    refusal = _gate("interact", url, consequential=cons, card=card,
+                    extra_url=frame_url if frame else None, origin=origin)
+    if refusal:
+        return refusal
+    tabs0, cur0 = _tab_ids(), _cur_tab()
+    if ref:
+        before = _before_action(ref, frame) if delta else None
+        f = _lx("focusRef", {"ref": ref, "expect": {"doc": cur_doc, "fp": info.get("fp")}}, frame)
+        if not f.get("ok"):
+            return _err(f, "聚焦元素")
+    else:
+        before = _plain_before(frame) if delta else None
+        if frame:
+            _lx("focusWindow", {}, frame)
+    _lx("keyWatch", {}, frame)
+    k = _bridge_call("key", key=key)
+    if not k.get("ok"):
+        return _err(k, "按键")
+    arrived = False
+    for _ in range(_PRESS_CONFIRM_TRIES):
+        if _lx("keyArrived", {}, frame).get("key"):
+            arrived = True
+            break
+        _bridge_call("settle", ms=30)
+    note = "" if arrived else (
+        "\n（按键已发出，但没确认送到" + (f" frame={frame}" if frame else "顶层页面")
+        + "：焦点可能在别处（比如某个 iframe 里）。给 ref 指定接收按键的元素，或给 frame）")
+    head = f"已按 {key}" + (f"（焦点在 {_describe_for_model(info, ref)}）" if info else "")
+    return head + note + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
+
+
+@tool
+@_exclusive
+def browser_drag(ref: str, to_ref: str | None = None, dx: float = 0, dy: float = 0,
+                 frame: str | None = None, delta: bool = True) -> str:
+    """把 ref 元素拖到 to_ref 元素上（或从它出发移动 dx / dy 像素）：真实鼠标按下 → 分几步移动
+    → 抬起。拖滑块、拖拽排序、把东西拖进框里、拖拽类小游戏用它。两个 ref 要在同一个 frame
+    里、都在可见区域。浏览器原生的 HTML5 拖放（draggable=true）可能不响应，那种页面多半另有
+    按钮可点。默认附"变化行 diff"。可能先问用户。"""
+    url, err = _page_url()
+    if err:
+        return err
+    frame, scope_note = _ref_scope(ref, frame)
+    frame_url = url
+    if frame:
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+    if not to_ref and not (dx or dy):
+        return "拖拽失败: 要给 to_ref（拖到哪个元素上），或给 dx / dy（移动多少像素）。"
+    cur_doc, err = _checked_ref(ref, frame)
+    if err:
+        return err
+    if to_ref and ((_fk(frame), to_ref) not in _issued or _issued[(_fk(frame), to_ref)] != cur_doc):
+        return "拖拽失败: to_ref 不是这个页面（同一个 frame）当前签发的 ref。" + _STALE_REF
+    info, err = _element_info(ref, frame)
+    if err:
+        return err
+    to_info = None
+    if to_ref:
+        to_info, err = _element_info(to_ref, frame)
+        if err:
+            return err
+    if _view_hidden():
+        return "拖拽失败: 浏览器面板没显示，收不到鼠标事件（拖拽要真实鼠标）。打开右侧的浏览器面板再试。"
+    origin = _origin_for(_session.current_session(), "interact", url, frame_url if frame else None)
+    dest = _describe(to_info, to_ref) if to_info else f"偏移 ({dx:g}, {dy:g}) 像素处"
+    card = f"将在浏览器把 {_describe(info, ref)} 拖到 {dest}\n页面: {url}"
+    if frame:
+        card += f"\niframe: {frame_url}"
+    refusal = _gate("interact", url, consequential=False, card=card,
+                    extra_url=frame_url if frame else None, origin=origin)
+    if refusal:
+        return refusal
+    off = _frame_offset(frame)
+    if off is None:
+        return "拖拽失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个），拖不了。"
+    ox, oy = off
+    tabs0, cur0 = _tab_ids(), _cur_tab()
+    before = _before_action(ref, frame) if delta else None
+    p = _lx("pointOf", {"ref": ref, "expect": {"doc": cur_doc, "fp": info.get("fp")}}, frame)
+    if not p.get("ok"):
+        if p.get("occluded"):
+            return ("拖拽失败：要拖的元素被别的东西挡住了。挡在上面的是：\n"
+                    + tree.fence(p.get("by") or "", frame_url))
+        return _err(p, "定位要拖的元素")
+    if p.get("synthetic"):
+        return "拖拽失败: 要拖的元素没有可见的大小，或不在可见区域里。"
+    if to_ref:
+        t = _lx("rectOf", {"ref": to_ref}, frame)
+        if not t.get("ok"):
+            return _err(t, "定位目标元素")
+        x2, y2 = t["x"] + t["w"] / 2, t["y"] + t["h"] / 2
+        if not (0 <= x2 < t["vw"] and 0 <= y2 < t["vh"]):
+            return "拖拽失败: 目标元素不在可见区域里（先让它露出来，比如把两者都滚到一屏里）。"
+    else:
+        x2, y2 = p["x"] + dx, p["y"] + dy
+    m = _bridge_call("drag", x1=p["x"] + ox, y1=p["y"] + oy, x2=x2 + ox, y2=y2 + oy,
+                     label=_cursor_label("拖动", info))
+    if not m.get("ok"):
+        return _err(m, "拖拽")
+    note = ""
+    if not _lx("pointArrived", frame=frame).get("down"):
+        note = "（鼠标已拖过去，但没确认按在了这个元素上，可能被页面换掉了；看下面的变化核对）"
+    return (f"已把 {_describe_for_model(info, ref)} 拖到 "
+            + (_describe_for_model(to_info, to_ref) if to_info else f"偏移 ({dx:g}, {dy:g}) 处")
+            + note + scope_note + _after_action(before, frame, frame_url, tabs0, cur0))
 
 
 @tool

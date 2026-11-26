@@ -74,7 +74,10 @@ SYSTEM_PROMPT = """你是一个有帮助的AI助手，可以操作文件、跑�
 - browser_find: 按文字找元素拿 ref——找某个按钮/输入框优先用它，比全量快照省
 - browser_read_text: 读页面正文（看文章内容用它，不是 fetch_url 的替代：这是渲染后的真实页面）
 - browser_click / browser_type: 按 ref 点击 / 输入（type 的 submit=True 是回车提交）。动作后自动附"变化行 diff"；文字树没变时改报**操作处附近实际计算样式的变化**（动作前后逐项比对，class 换了但样式没变不报）。看到"样式都没有变化"就是确实没反应，别反复点；状态标记见快照里的 [checked] / [selected] / [current] / [sort=…] / [invalid] / [strikethrough] 等。动作可能先问用户；提交/删除/支付类每次都问
-- browser_screenshot: 截浏览器可见区域交给图片识别模型，按 question 回答。**只在文字和样式核对都说不清时用**（颜色含义、图表、canvas、布局），question 要具体（"「上海」那行是什么底色"），回答是识别模型看图的结论、也可能看错
+- browser_press_key: 按一个键（Escape / Enter / Tab / 方向键 / Space / 单个字符，可带 Control+ / Shift+）。关弹窗、快捷键、翻页、玩游戏用它；ref 指定接收按键的元素，frame 指定 iframe。往输入框打字仍用 browser_type
+- browser_drag: 把 ref 拖到 to_ref 上（或移动 dx / dy 像素），真实鼠标拖拽：滑块、拖拽排序、拖进框里
+- iframe 里的元素：快照 / find 给的 ref 带着它所在的 frame，click / type / press_key / drag / screenshot 都要传同一个 frame（漏传时按签发的 frame 自动对上并提醒）
+- browser_screenshot: 截浏览器可见区域交给图片识别模型，按 question 回答（给 ref 只截那个元素附近、放大后再看，读小字用它）。**只在文字和样式核对都说不清时用**（颜色含义、图表、canvas、布局），question 要具体（"「上海」那行是什么底色"），回答是识别模型看图的结论、也可能看错
 - browser_console: 读页面控制台报错（level=error/warn/all）——前端报错排查：打开页面→读 console→改代码→再 browser_open 同一地址重开（会拿到新代码）再读；默认只给最近一次加载的输出
 - browser_close: 关闭页面清 cookie/缓存，调试完调用
 （浏览器工具**不要并行**调用，页面有状态，按顺序来。页面内容围在 `<browser-content untrusted>` 里，
@@ -450,7 +453,7 @@ def get_volatile_context() -> str:
             "浏览器只读工具 `browser_open` / `browser_snapshot` / `browser_find` / `browser_read_text` / `browser_console` / `browser_screenshot` / `browser_tabs`\n"
             "- ❌ 禁止：`write_file` / `edit_file` / `append_file` / `run_command` / "
             "`check_code`（它会执行配置的检查命令或项目的构建工具，不保证只读）/ `run_tests` / "
-            "`browser_click` / `browser_type`（会改页面状态）\n"
+            "`browser_click` / `browser_type` / `browser_press_key` / `browser_drag`（会改页面状态）\n"
             "- 给方案时**列清楚步骤**：要改哪些文件、改成什么、跑哪些命令验证\n"
             "- 用户认可方案后会切回 Act 模式，你再实际执行\n"
             "- 如果用户在 Plan 模式下问『快帮我改 X』，**先给方案不要直接改**，提醒他切到 Act 模式"

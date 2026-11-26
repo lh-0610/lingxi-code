@@ -1953,6 +1953,7 @@ class AssistantTurn(QWidget):
         self._cur_body = None          # 正在流式的正文 BodyText（累加纯文本）
         self._cur_body_text = ""
         self._stream_parts = []        # 流式时第二段起的段落各占一个 BodyText（见 append_body）
+        self._stream_paras = 0         # 上一次更新时有几段：在它之前的段落不会再变
         self._cur_think = None         # 当前 ThinkingChip（流式累加）
         self._cur_think_text = ""
         self._cur_tool = None          # 当前工具行（还在接收输出）
@@ -2014,7 +2015,8 @@ class AssistantTurn(QWidget):
     def end_body(self):
         self._cur_body = None
         self._cur_body_text = ""
-        self._stream_parts = []        # 没走 finalize 就结束的（停止 / 报错）：分段留着照样能看
+        self._stream_parts = []        # 被工具调用等打断的过渡回复：分段留着照样能看
+        self._stream_paras = 0
 
     def _drop_stream_parts(self):
         """流式时拆出来的段落块拿掉：正文合回第一块，换成渲染好的 markdown。"""
@@ -2025,6 +2027,18 @@ class AssistantTurn(QWidget):
                 blk.setParent(None)
                 blk.deleteLater()
         self._stream_parts = []
+        self._stream_paras = 0
+
+    def _merge_stream_parts(self):
+        """回复没走 finalize 就结束了（停止 / 报错 / Claude Code 模式从不 finalize）：拆开的段落
+        合回第一块。不合的话收起过程时只认最后一块是回答，前几段被当成过渡回复收进「展开过程」，
+        回答节点也画在最后一段上。"""
+        if self._cur_body is None or not self._stream_parts:
+            return
+        shown = self._cur_body_text.strip("\r\n")
+        html = "<br><br>".join(_esc(p).replace("\n", "<br>") for p in _PARA_SPLIT.split(shown))
+        self._drop_stream_parts()
+        self._cur_body.setText(html)
 
     def end_tool(self):
         self.stop_tool_clock()
@@ -2060,11 +2074,15 @@ class AssistantTurn(QWidget):
             part.link_clicked.connect(self.file_link_clicked)
             self._stream_parts.append(part)
             labels.append(part)
-        for label, para in zip(labels[max(0, len(paras) - 2):len(paras)],
-                               paras[max(0, len(paras) - 2):]):
+        # 从上一次的最后一段改起：文字只会往后追加，在它之前的段落不会再变。一次来好几段时
+        # （Claude Code 模式整块送来、一个片段跨两段）中间的段落也要填上——以前只改最后两段，
+        # 第一段一直是空的
+        start = max(0, min(self._stream_paras, len(paras)) - 1)
+        for label, para in zip(labels[start:len(paras)], paras[start:]):
             html = _esc(para).replace("\n", "<br>")
             if label.text() != html:
                 label.setText(html)
+        self._stream_paras = len(paras)
 
     def finalize_markdown(self, html, md=None):
         """流式结束:把当前正文替换成渲染好的 markdown 富文本（md 是源文，右键「复制为 Markdown」用）。"""
@@ -2217,9 +2235,10 @@ class AssistantTurn(QWidget):
             self._waiting = None
 
     def finish(self):
-        """这一轮结束：用时定格，还开着的思考 / 工具 / 等待都收尾。"""
+        """这一轮结束：用时定格，还开着的思考 / 工具 / 等待都收尾；没定稿的正文分段合回一块。"""
         if self.meta is not None:
             self.meta.finish()
+        self._merge_stream_parts()
         self._close_think()
         self.clear_waiting()
         self.end_tool()

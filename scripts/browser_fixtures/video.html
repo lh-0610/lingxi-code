@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>视频</title></head>
+<body>
+<!-- H.264 + AAC 的 mp4：QtWebEngine 不带专有编解码器，直接放会报错（media.py 转码后能放） -->
+<video id="v" src="clip.mp4" muted playsinline width="160" height="120"></video>
+<p id="out">-</p>
+<script>
+  const v = document.getElementById('v'), out = document.getElementById('out');
+  v.addEventListener('error', () => { out.textContent = 'error ' + (v.error && v.error.code); });
+  v.addEventListener('playing', () => { out.textContent = 'playing'; });
+  v.play().catch(e => { if (out.textContent === '-') out.textContent = 'play-rejected ' + e.name; });
+</script>
+</body>
+</html>
