@@ -1001,8 +1001,8 @@ def _frame_at_point(x, y, frame):
         if len(match) > 1:
             match = [f for f in match if f.get("url") == box.get("src")]
         if len(match) != 1:
-            return None, x, y, ("点击失败: 这一点落在 iframe 里，但对不上是哪一个"
-                                "（页面里尺寸相同的 iframe 不止一个）。用 browser_snapshot 列出 frame，"
+            return None, x, y, ("点击失败: 这一点落在 iframe 里，但对不上是哪一个 iframe。"
+                                "用 browser_snapshot 列出 frame，"
                                 "带 frame 参数和相对那个 iframe 的坐标再点。")
         path = match[0]["path"]
         note = f"\n（坐标落在 iframe {path} 里，已换算成它视口里的坐标 ({x - box['x']:.0f}, {y - box['y']:.0f}) 操作）"
@@ -1037,7 +1037,7 @@ def browser_click_at(x: float, y: float, frame: str | None = None, delta: bool =
             return err
     off = _frame_offset(frame)
     if off is None:
-        return "点击失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个），点不了。"
+        return "点击失败: 算不出这个 iframe 在页面里的位置（对不上是页面里的哪一个 iframe），点不了。"
     ox, oy = off
     scope_note = ""
     d = _lx("describeAt", {"x": x, "y": y}, frame)
@@ -1347,7 +1347,7 @@ def browser_drag(ref: str, to_ref: str | None = None, dx: float = 0, dy: float =
         return refusal
     off = _frame_offset(frame)
     if off is None:
-        return "拖拽失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个），拖不了。"
+        return "拖拽失败: 算不出这个 iframe 在页面里的位置（对不上是页面里的哪一个 iframe），拖不了。"
     ox, oy = off
     tabs0, cur0 = _tab_ids(), _cur_tab()
     before = _before_action(ref, frame) if delta else None
@@ -1454,7 +1454,7 @@ def browser_scroll(direction: str = "down", amount: float | None = None,
         return _err(si, "滚动")
     off = _frame_offset(frame)
     if off is None:
-        return "滚动失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个），滚不了。"
+        return "滚动失败: 算不出这个 iframe 在页面里的位置（对不上是页面里的哪一个 iframe），滚不了。"
     ox, oy = off
     if amount is None:
         amount = (si["cw"] if horizontal else si["ch"]) * 0.8
@@ -1524,7 +1524,7 @@ def browser_hover(ref: str, frame: str | None = None, delta: bool = True) -> str
         return err
     off = _frame_offset(frame)
     if off is None:
-        return "悬停失败: 算不出这个 iframe 在页面里的位置（页面里尺寸相同的 iframe 不止一个）。"
+        return "悬停失败: 算不出这个 iframe 在页面里的位置（对不上是页面里的哪一个 iframe）。"
     ox, oy = off
     tabs0, cur0 = _tab_ids(), _cur_tab()
     # 滚到可见是我们自己的副作用，要在动作前快照之前做完（同 click 的 watchPrepare）；

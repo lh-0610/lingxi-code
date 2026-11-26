@@ -466,6 +466,15 @@ class BrowserBridge(QObject):
 
     def _frames(self, req):
         info = []
+        # QWebEngineFrame.size() 是物理像素（乘过屏幕缩放），页面里量到的是 CSS 像素：
+        # 除掉屏幕缩放和页面缩放再交出去。不除的话高 DPI 屏上（Windows 缩放 150%）
+        # 尺寸永远对不上，iframe 位置算不出来，iframe 里的真实点击 / 拖拽 / 坐标点击 / 局部截图
+        # 全部失效（用户实测；测试环境缩放是 1 倍，看不出来）
+        try:
+            dpr = float(self._browser.view.devicePixelRatioF()) or 1.0
+        except Exception:
+            dpr = 1.0
+        scale = dpr * (self._browser.page.zoomFactor() or 1.0)
 
         def walk(frame, path):
             for i, child in enumerate(frame.children()):
@@ -476,7 +485,7 @@ class BrowserBridge(QObject):
                     url = "?"
                 try:
                     size = child.size()           # 视口里的大小：工具层按它把 iframe 对上号
-                    w, h = float(size.width()), float(size.height())
+                    w, h = float(size.width()) / scale, float(size.height()) / scale
                 except Exception:
                     w = h = -1.0
                 info.append({"path": p, "url": url, "w": w, "h": h})

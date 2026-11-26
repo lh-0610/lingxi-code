@@ -1237,3 +1237,59 @@ class TestCompactView:
         joined = "".join(lines)
         assert "run_tests" in joined and "git_diff" in joined, "英文词不能被切开"
         assert max(len(ln) for ln in _soft_wrap("Z" * 300).splitlines()) <= 42, "超长单词照样硬切"
+
+
+
+def test_redraw_while_the_run_is_going_draws_no_running_card(isolated_memory, monkeypatch):
+    """切回正在生成的会话 / 生成中切主题都会重画：以前把还没跑完的这一轮画成一张空的
+    「本轮仍在运行」卡（打着完成的勾、挂着「上次」）。现在不出卡，跑完时真正的卡照常画。"""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from src.ui import result_card as rc
+    from src.ui.run_results import RunResultMixin
+
+    class _Sig:
+        def connect(self, *a):
+            pass
+
+    class _Card:
+        def __init__(self, view):
+            self.view = view
+            self.view_diff_requested = self.view_output_requested = _Sig()
+            self.continue_requested = self.open_file_requested = _Sig()
+
+    monkeypatch.setattr(rc, "ResultCard", _Card)
+
+    class _Area:
+        def __init__(self):
+            self.cards = []
+
+        def add_result_card(self, card):
+            self.cards.append(card)
+
+    class Host(RunResultMixin):
+        def __init__(self):
+            self.chat_area = _Area()
+            self._rendered_result_run_id = ""
+
+        def __getattr__(self, name):          # 卡片信号要连的槽：这里用不到
+            if name.startswith("_on_result") or name == "_open_file_in_panel":
+                return lambda *a, **k: None
+            raise AttributeError(name)
+
+    sess = _new_session()
+    _saved(sess)
+    session.set_active(sess)
+    run_records.begin_run(sess)
+    sess.is_generating = True
+    host = Host()
+    try:
+        host._redraw_result_card()
+        assert host.chat_area.cards == [], "还在跑的这一轮不该出卡"
+        assert host._rendered_result_run_id == "", "不能记成画过：跑完的卡会被当成重复信号挡掉"
+        sess.is_generating = False
+        snapshot = _finish(sess, "failed")      # 失败的一轮一定出卡（什么都没改的完成不出）
+        host._on_run_result(sess, snapshot["run_id"], snapshot)
+        assert [c.view["run_id"] for c in host.chat_area.cards] == [snapshot["run_id"]]
+    finally:
+        sess.is_generating = False

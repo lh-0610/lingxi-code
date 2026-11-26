@@ -56,6 +56,11 @@ class RunResultMixin:
         view = result_view.describe(snapshot, live_run_id=live)
         if not view:
             return
+        if view.get("tone") == "running":
+            # 这一轮还在跑（切回正在生成的会话、生成中切主题，重画时会走到这里）：不出卡。
+            # 以前画出一张空的「本轮仍在运行」，打着完成的勾、挂着「上次」，夹在历史和正在写的
+            # 回复中间（用户实测）。也不记成「这一轮画过卡」——跑完时真正的结果卡要能画出来
+            return
         if view.get("quiet"):
             # 纯问答 / 调研：没改文件、没跑检查、不用继续——不出卡（判断在 result_view）
             self._rendered_result_run_id = view.get("run_id") or ""
