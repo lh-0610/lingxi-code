@@ -59,6 +59,7 @@
 
 ## 会话重命名与跨会话搜索（src/memory.py + src/ui/sidebar.py）
 - **重命名 `rename_session(session_id, title)`**：与 `move_sessions_to_no_project` 同样的"三处一起改"，同一 `_LOCK` 临界区内改 ① 内存里已打开会话的 `current_session_title`（经 `live_sessions()` 取一致快照；只改磁盘的话下次 `save_session` 会用旧内存标题覆盖回去——正常流程必现）② index.json 的 title ③ `<id>.json` 正文 title。**不刷新 `updated`**：改名是元数据编辑、不是新活动，不该把会话顶到分组最前打乱历史顺序。用户标题只折叠空白 + 截断 100 字符（`_sanitize_user_title`，不像自动标题那样剥标点/书名号）；空标题抛 `ValueError`。UI 走会话行右键菜单「重命名」→ `dialogs.get_text` 主题输入框（生成中也可改名，标题不动历史/运行态）。
+- **自动标题 `maybe_generate_session_title`**：首轮结束后后台线程调一次模型（关思考）。提示里除了首句，还带第一轮助手最后一条有正文的回复开头（`_first_reply_text`，600 字）：首句只有网址 +「答一下」时，只看首句模型猜不出在做什么（实测回了「无法确定」，侧栏就叫这个）。模型整句回的是「无法确定 / 不确定 / 未知 / 抱歉…」这类（`_VAGUE_TITLE`，整句匹配，「不能启动排查」这种正常标题不误杀）就退回首句截断。测试 `scripts/test_session_title.py`
 - **跨会话搜索 `search_sessions(query, *, kind=None, project="__all__")`**：先 `list_sessions` 拿索引（只在读 index 时持 `_LOCK`，读完即释放），再**锁外**逐个读正文（`_atomic_write_json` 保证读到完整旧/新文件）。只搜真实用户输入 + 助手可见正文（`content_text` 跳过思考块），跳过 SystemMessage / 内部消息（`lingxi_internal`）/ 工具结果；大小写不敏感。结果按索引顺序（更新时间倒序），每项含 `snippet`（首个命中处上下文预览）/ `match_in_title` / `match_count`。单个正文读不出（损坏/版本过新）只跳过其正文、保留标题命中，不中断整次搜索。
 - **搜索 UI 不卡主线程**：侧栏「历史记录」下的搜索框防抖 250ms（回车立即搜），扫描放 daemon worker，结果经 `SignalBridge.session_search_done(str, object)` 回主线程渲染。**worker 必须继承启动时刻的数据根**（`paths.get_data_dir()` → 线程内 `set_data_dir`，与 send worker 同套路）：`set_data_dir` 是线程本地的，不继承则 Web 多用户模式读到默认根（别人的数据）、测试读不到隔离目录。搜索态下 `_refresh_session_list` 改渲染扁平结果行（标题 + 项目名 + 命中预览，点击 `_load_session` 跳转）；过期结果（查询词已变）丢弃；切工作区（`switch_workspace`）清空搜索（kind 变了旧结果失效）。
 

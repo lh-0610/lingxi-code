@@ -1006,6 +1006,30 @@ def _first_user_text():
     return ""
 
 
+def _first_reply_text():
+    """第一轮里助手最后一条有正文的回复（第一句只有网址 / 「答一下」时，标题得看它才知道在做什么）。"""
+    from langchain_core.messages import AIMessage
+    seen_user = False
+    reply = ""
+    for msg in state.chat_history:
+        if isinstance(msg, HumanMessage):
+            if seen_user:
+                break
+            seen_user = True
+        elif seen_user and isinstance(msg, AIMessage):
+            text = _extract_text_content(msg).strip()
+            if text:
+                reply = text
+    return reply
+
+
+# 标题模型看不出在做什么时的回答（实测首句只有网址 +「答一下」，回了「无法确定」）：不当标题用
+# （整句就是这些才算；「不能启动排查」这种正常标题不能误杀）
+_VAGUE_TITLE = re.compile(
+    r"(无法|不能)(确定|判断|生成|识别|得知|总结)(标题)?|不确定|未知|不清楚|无标题|新对话|标题|未命名"
+    r"|(抱歉|对不起).*")
+
+
 def _extract_text_content(resp):
     """从 LLM 响应里取纯文本。
 
@@ -1084,11 +1108,17 @@ def maybe_generate_session_title():
                 "要求：不超过10个汉字，不要标点，不要解释，只输出标题。\n\n"
                 f"用户：{first_text[:500]}"
             )
+            reply = _first_reply_text()
+            if reply:
+                prompt += f"\n\n助手（回复开头）：{reply[:600]}"
             resp = title_llm.invoke([
                 SystemMessage(content="你只负责生成聊天标题。"),
                 HumanMessage(content=prompt),
             ])
             title = _sanitize_title(_extract_text_content(resp))
+            if _VAGUE_TITLE.fullmatch(title):
+                logger.info(f"标题模型没给出内容（{title}），用首句截断")
+                title = ""
         except Exception as e:
             logger.warning(f"自动生成标题失败: {e}，使用首句截断作为标题")
             title = ""

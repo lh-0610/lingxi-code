@@ -144,7 +144,7 @@
       if (tag === "INPUT" && (t === "submit" || t === "button" || t === "reset"))
         return clean(el.value || t, NAME_MAX);
     }
-    if (tag === "IMG") return clean(el.getAttribute("alt") || "", NAME_MAX);
+    if (tag === "IMG") return clean(el.getAttribute("alt") || el.title || imgFileName(el), NAME_MAX);
     if (role === "textbox" && el.isContentEditable) {
       // 富文本框（Quill / 自己包的编辑器组件）多半没有 aria-label：表单标签写着「内容」，可它的 for
       // 指向一个不存在的 id，读屏和快照里都只剩一个无名 textbox，模型分不清哪个是标题哪个是正文
@@ -162,6 +162,21 @@
     const img = el.querySelector && el.querySelector("img[alt]");
     if (img) return clean(img.getAttribute("alt"), NAME_MAX);
     return "";
+  }
+
+  // 没写 alt 的图（题目里的票据、截图）以前只剩一行无名的「- img」，模型分不清是哪张，
+  // 只好拿旁边输入框的 ref 去截图（实测：簿记模试的納品書截成了一个空输入框）。
+  // 用地址里的文件名当名字；data: / blob: 这种没有文件名的不给
+  function imgFileName(el) {
+    const src = el.currentSrc || el.getAttribute("src") || "";
+    if (!src || /^(data|blob):/i.test(src)) return "";
+    let seg = "";
+    try {
+      seg = new URL(src, location.href).pathname.split("/").filter(Boolean).pop() || "";
+    } catch (e) {
+      return "";
+    }
+    try { return decodeURIComponent(seg); } catch (e) { return seg; }
   }
 
   function visible(el) {
@@ -352,7 +367,8 @@
         const isInteractive = INTERACTIVE.has(role);
         const click = (!isInteractive && !LANDMARK.has(role) && role !== "heading" && role !== "img")
           ? clickMarker(el) : "";
-        const withRef = isInteractive || LANDMARK.has(role) || role === "heading" || !!click;
+        // 图也发 ref：browser_screenshot(ref=…) 直接截那张图看内容
+        const withRef = isInteractive || LANDMARK.has(role) || role === "heading" || role === "img" || !!click;
         if (mode === "interactive") {
           if (isInteractive || LANDMARK.has(role) || role === "heading" || role === "img" || click)
             selfLine = lineFor(el, role, nameOf(el, role, !!click), depth, withRef, click);

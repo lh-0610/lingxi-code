@@ -1201,6 +1201,37 @@ def test_standard_states_in_the_tree(browser, servers):
     assert "[expanded=false]" in line("更多")
 
 
+def test_images_get_a_ref_and_a_name(browser, servers):
+    """没写 alt 的图（题目里的票据）以前只有一行无名「- img」、没有 ref，模型拿旁边输入框的
+    ref 去截图，截到一个空框（实测簿记模试）。现在图都发 ref；名字 alt > title > 文件名，
+    data: 图没有文件名就不给名字；alt="" 是装饰图，照旧不进树。"""
+    base_a, _ = servers
+    _call(browser, "open", url=base_a + "/states.html", timeout=20)
+    _call(browser, "js", code=(
+        "document.body.insertAdjacentHTML('beforeend', `"
+        "<input aria-label='金额'>"
+        "<img src='/up/2021/mondai7-04c.jpg?v=2' style='width:120px;height:60px'>"
+        "<img src='/up/%E7%B4%8D%E5%93%81%E6%9B%B8.png' style='width:50px;height:50px'>"
+        "<img alt='店铺标志' src='/up/logo.png' style='width:50px;height:50px'>"
+        "<img title='签名' src='/up/s.png' style='width:50px;height:50px'>"
+        "<img alt='' src='/up/deco.png' style='width:50px;height:50px'>"
+        "<img id='dataimg' src='data:image/gif;base64,R0lGODlhAQABAAAAACw=' style='width:40px;height:40px'>`);"
+        " true"))
+    for mode in ("all", "interactive"):
+        t = _call(browser, "lx", method="snapshot", args={"mode": mode})["tree"]
+        imgs = [ln.strip() for ln in t.splitlines() if ln.strip().startswith("- img")]
+        assert any(ln.startswith('- img "mondai7-04c.jpg" [ref=e') for ln in imgs), (mode, imgs)
+        assert any(ln.startswith('- img "納品書.png" [ref=e') for ln in imgs), (mode, imgs)
+        assert any(ln.startswith('- img "店铺标志" [ref=e') for ln in imgs), (mode, imgs)
+        assert any(ln.startswith('- img "签名" [ref=e') for ln in imgs), (mode, imgs)
+        assert any(re.match(r"- img \[ref=e\d+\]$", ln) for ln in imgs), (mode, imgs)   # data: 图
+        assert len(imgs) == 5 and "deco" not in t, (mode, imgs)
+    # ref 指的就是那张图（截图按它取位置）
+    ref = re.search(r'- img "mondai7-04c.jpg" \[ref=(e\d+)\]', t).group(1)
+    r = _call(browser, "lx", method="rectOf", args={"ref": ref})
+    assert r.get("ok") and (round(r["w"]), round(r["h"])) == (120, 60), r
+
+
 def test_values_and_editors_in_the_tree(browser, servers):
     """复审 #7 / #11 / #4：数字框、滑块的值看得到；可编辑区只有最外层是输入框（里面的段落
     不各占一个 ref），正文当值给；只给读屏软件的 aria-live 播报区不进树。"""
