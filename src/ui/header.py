@@ -104,6 +104,8 @@ class HeaderMixin:
 
         # 侧栏浏览器（模型和人共用的那个页面）：已开就切过去，关过就开上次的地址，没有就空白页
         self.browser_btn = self._header_button("", "icon", "浏览器：模型和你共用的侧栏页面")
+        # 同任务面板按钮：浏览器开着（右侧面板显示着、当前是网页标签）时按下态，再点收起
+        self.browser_btn.setCheckable(True)
         self.browser_btn.clicked.connect(lambda _=False: self._open_browser_from_header())
         layout.addWidget(self.browser_btn)
 
@@ -125,9 +127,33 @@ class HeaderMixin:
         parent_layout.addWidget(header)
         self._refresh_header_icons()
 
+    def _browser_shown(self) -> bool:
+        """右侧面板显示着、而且当前是网页标签（不是文件 / 后台标签）。"""
+        from .file_panel import is_browser_key
+        fp = getattr(self, "file_panel", None)
+        return bool(fp is not None and not fp.isHidden() and is_browser_key(fp.current_path()))
+
     def _open_browser_from_header(self):
-        self.file_panel.open_last_browser()
-        self._settle_file_panel()
+        """顶栏地球：浏览器开着就收起（同标签条上的「收起 ×」，标签和网页都保留），
+        没开 / 面板在看别的标签就打开或切到浏览器。"""
+        if self._browser_shown():
+            self.file_panel.collapse()
+        else:
+            self.file_panel.open_last_browser()
+            self._settle_file_panel()
+        self._sync_browser_btn()
+
+    def _sync_browser_btn(self):
+        """地球按钮的按下态跟着面板走：模型拉起浏览器、点「收起 ×」、切标签、关标签都会变。"""
+        btn = getattr(self, "browser_btn", None)
+        if btn is None:
+            return
+        shown = self._browser_shown()
+        if btn.isChecked() != shown:
+            btn.setChecked(shown)
+        btn.setIcon(self._svg_icon("globe.svg", self._header_icon_color(btn)))
+        btn.setToolTip("收起浏览器（标签和网页都保留）" if shown
+                       else "浏览器：模型和你共用的侧栏页面")
 
     def _header_button(self, text, kind, tip=""):
         btn = QPushButton(text)

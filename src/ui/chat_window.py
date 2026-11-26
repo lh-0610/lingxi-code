@@ -1027,6 +1027,9 @@ class ChatUI(ConfirmBarsMixin, MarkdownRenderMixin, SearchOverlayMixin,
         self.file_panel.max_width_fn = self._file_panel_max_width
         self.file_panel.width_changed.connect(self._on_file_panel_width_changed)
         self.file_panel.closed.connect(self._on_file_panel_closed)
+        # 顶栏地球按钮的按下态：面板显示 / 隐藏、切标签都要跟上
+        self.file_panel.shown_changed.connect(self._sync_browser_btn)
+        self.file_panel.tabs.currentChanged.connect(lambda _i: self._sync_browser_btn())
         self.file_panel.browser_stop_requested.connect(self._stop_browser_driver)
         self.file_panel.background_requested.connect(self._open_background_panel)
         # 模型首次拉起浏览器 → 自动开面板标签并切过去（复审 7：用户看得见、view 不 hidden）

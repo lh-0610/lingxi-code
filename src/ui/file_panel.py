@@ -177,6 +177,7 @@ class FilePanel(QFrame):
     DEFAULT_HINT = "此刻相对上次提交的差异（当前状态，不是哪一轮保存下来的历史）"
 
     closed = Signal()              # 面板收起了（标签都关完了 / 点了「收起 ×」）
+    shown_changed = Signal()       # 面板显示 / 隐藏了（顶栏地球按钮的「开着」跟着它）
     browser_stop_requested = Signal()   # 浏览器状态卡「停止」→ ChatUI 停驱动浏览器的那个会话
     background_requested = Signal()     # 浏览器错误页「去后台看看」→ ChatUI 开后台标签
     width_changed = Signal(int)    # 拖完松手时发，ChatUI 记进界面偏好
@@ -688,6 +689,14 @@ class FilePanel(QFrame):
             if v is view:
                 return key
         return ""
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.shown_changed.emit()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.shown_changed.emit()
 
     def _show_self(self):
         self._user_collapsed = False

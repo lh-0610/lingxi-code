@@ -1281,3 +1281,34 @@ def test_manual_open_browser_button(ui, qapp, fp_server):
     assert any("form.html" in p["url"] for p in recent_pages()), "上次那页在「最近打开」里"
     fp.close_all()
     _pump(qapp, 10)
+
+
+
+def test_globe_button_shows_the_browser_is_open_and_collapses_it(browser_ui, qapp, browser_server):
+    """顶栏地球按钮同任务面板按钮：浏览器开着（面板显示、当前是网页标签）时按下态，再点收起；
+    收起 ×、切到文件标签、模型拉起浏览器都要跟上（用户实测：浏览器开着时地球不亮）。"""
+    ui = browser_ui
+    btn = ui.browser_btn
+    assert not btn.isChecked()
+    btn.click()                                   # 打开浏览器
+    _pump(qapp)
+    assert ui.file_panel.isVisible() and btn.isChecked(), "浏览器开着，地球要按下"
+    btn.click()                                   # 再点 = 收起
+    _pump(qapp)
+    assert not ui.file_panel.isVisible() and not btn.isChecked()
+    assert ui.file_panel.is_user_collapsed(), "和「收起 ×」一样：只藏起来、标签和网页都保留"
+    btn.click()
+    _pump(qapp)
+    assert btn.isChecked()
+    ui.file_panel.close_btn.click()               # 标签条上的「收起 ×」
+    _pump(qapp)
+    assert not btn.isChecked(), "用收起 × 藏起来，地球也要弹起"
+    ui.file_panel.open_browser(browser_server + "/form.html")   # 别的入口打开（模型 / 链接）
+    _pump(qapp)
+    assert btn.isChecked(), "不是点地球打开的，也要按下"
+    ui._open_background_panel()                   # 面板切到「后台」标签：浏览器不在眼前
+    _pump(qapp)
+    assert ui.file_panel.isVisible() and not btn.isChecked()
+    btn.click()                                   # 这时点地球是切回浏览器，不是收起面板
+    _pump(qapp)
+    assert ui.file_panel.isVisible() and btn.isChecked()
