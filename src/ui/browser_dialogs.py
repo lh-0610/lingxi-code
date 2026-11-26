@@ -13,7 +13,7 @@ import os
 
 from PySide6.QtCore import QStandardPaths, Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget,
+    QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout,
 )
 
 from ..browser import security

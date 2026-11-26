@@ -646,7 +646,7 @@ class BrowserBridge(QObject):
         """往页面发一次真实滚轮事件（滚动加载 / 虚拟列表 / 轮播常听 wheel，scrollBy 触发不了）。
         dx / dy 是想让内容滚动的像素（正 = 向右 / 向下），落点是页面 CSS 坐标（顶层视口），
         同 _mouse 按缩放换算、不动系统鼠标、不碰键盘焦点。"""
-        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtCore import QPoint, QPointF, Qt
         from PySide6.QtGui import QWheelEvent
         from PySide6.QtWidgets import QApplication
         target = self._input_target(req)
