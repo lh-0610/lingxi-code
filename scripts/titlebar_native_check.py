@@ -9,6 +9,7 @@
 import ctypes
 import os
 import sys
+import time
 
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
@@ -80,36 +81,51 @@ def snap():
     return (bool(user32.IsZoomed(hwnd)), w.isMaximized(), btns.max_btn.maximized)
 
 
-btns.toggle_maximized(); pump()
-check("按钮最大化：系统、Qt、按钮图标都是最大化", snap() == (True, True, True), snap())
-btns.toggle_maximized(); pump()
-check("按钮还原：三处都回到普通", snap() == (False, False, False), snap())
+def expect(name, want, timeout=3.0):
+    """等状态到位再判（全量测试时机器忙，固定等 300ms 不够），最多等 timeout 秒。"""
+    end = time.time() + timeout
+    while snap() != want and time.time() < end:
+        pump(50)
+    check(name, snap() == want, snap())
 
-user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0); pump()
-check("系统最大化：按钮图标跟上", snap() == (True, True, True), snap())
-btns.toggle_maximized(); pump()
-check("系统最大化后点按钮能还原", snap() == (False, False, False), snap())
 
-btns.toggle_maximized(); pump()
-user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0); pump()
-check("系统还原（如拖标题栏）：Qt 和按钮图标跟上", snap() == (False, False, False), snap())
+def wait_qt_max(want=True, timeout=3.0):
+    end = time.time() + timeout
+    while w.isMaximized() != want and time.time() < end:
+        pump(50)
+
+
+btns.toggle_maximized()
+expect("按钮最大化：系统、Qt、按钮图标都是最大化", (True, True, True))
+btns.toggle_maximized()
+expect("按钮还原：三处都回到普通", (False, False, False))
+
+user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0)
+expect("系统最大化：按钮图标跟上", (True, True, True))
+btns.toggle_maximized()
+expect("系统最大化后点按钮能还原", (False, False, False))
+
+btns.toggle_maximized()
+expect("再次按钮最大化", (True, True, True))
+user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0)
+expect("系统还原（如拖标题栏）：Qt 和按钮图标跟上", (False, False, False))
 
 # 别处调了 Qt 的 showMaximized（只摆成屏幕大小，系统不认）：按钮以系统为准显示「最大化」，
 # 点一下变成真最大化，而不是对系统眼里没最大化的窗口发「还原」、按钮失灵
-w.showMaximized(); pump()
+w.showMaximized(); wait_qt_max()
 btns.sync_state()
 check("Qt 假最大化：按钮图标按系统状态显示", btns.max_btn.maximized is False, snap())
-btns.toggle_maximized(); pump()
-check("Qt 假最大化后点按钮：变成系统最大化", snap() == (True, True, True), snap())
-btns.toggle_maximized(); pump()
-check("再点还原", snap() == (False, False, False), snap())
+btns.toggle_maximized()
+expect("Qt 假最大化后点按钮：变成系统最大化", (True, True, True))
+btns.toggle_maximized()
+expect("再点还原", (False, False, False))
 
 # Qt 假最大化时双击标题栏（系统最大化）：Qt 状态本来就是最大化、不发 WindowStateChange，
 # 按钮图标只能靠 WM_SIZE 跟上
-w.showMaximized(); pump()
+w.showMaximized(); wait_qt_max()
 btns.sync_state()
-user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0); pump()
-check("Qt 假最大化时系统最大化：按钮图标跟上", snap() == (True, True, True), snap())
+user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0)
+expect("Qt 假最大化时系统最大化：按钮图标跟上", (True, True, True))
 btns.toggle_maximized(); pump()
 
 w.close()

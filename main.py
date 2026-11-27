@@ -42,6 +42,13 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 if __name__ == "__main__":
+    # 崩溃（Qt / PySide 里的访问违例）时把所有线程的 Python 堆栈写进 logs/crash_*.log
+    try:
+        from src import crash_log as _crash_log
+        from src.paths import LOG_DIR as _LOG_DIR
+        _crash_log.enable(_LOG_DIR)
+    except Exception:
+        pass
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

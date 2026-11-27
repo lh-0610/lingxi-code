@@ -139,10 +139,10 @@ def test_no_browser_tool_is_parallel_safe():
     from src.streaming import PARALLEL_SAFE_TOOLS
     from src.tools import ALL_TOOLS
     browser = [t.name for t in ALL_TOOLS if t.name.startswith("browser_")]
-    assert len(browser) == 16, ("16 个浏览器工具（P1 的 8 个 + browser_screenshot + browser_tabs"
+    assert len(browser) == 17, ("17 个浏览器工具（P1 的 8 个 + browser_screenshot + browser_tabs"
                                 " + browser_press_key + browser_drag"
-                                " + browser_click_at + browser_scroll + browser_hover + browser_wait），"
-                                "注册漏了这里会先发现")
+                                " + browser_click_at + browser_scroll + browser_hover + browser_wait"
+                                " + browser_fill_form），注册漏了这里会先发现")
     assert not any(n in PARALLEL_SAFE_TOOLS for n in browser), \
         "连只读的 browser_snapshot 也不并行：快照会重置 ref，和动作互相踩"
 

@@ -7,6 +7,7 @@
 只有装不上 WebEngine 的环境才 skip（CI 已装齐 PySide6_Addons，不允许在 CI skip）。
 """
 import http.server
+import json
 import importlib.util
 import os
 import re
@@ -1318,6 +1319,224 @@ def test_refs_leave_no_trace_in_the_page(browser, servers):
 def _outside_fences(text):
     import re
     return re.sub(r"<browser-content [^>]*>.*?</browser-content>", "", text, flags=re.S)
+
+
+_FORM_HTML = (
+    "<input aria-label='金额1'>"
+    "<select aria-label='科目1'><option value=''></option><option>現金</option><option>仕入</option></select>"
+    "<input type='checkbox' aria-label='补助簿1'>"
+    "<input type='checkbox' aria-label='已勾的' checked>"
+    "<input type='checkbox' aria-label='补助簿2'>"
+    "<input type='radio' name='r' aria-label='甲' checked><input type='radio' name='r' aria-label='乙'>"
+    "<input type='password' aria-label='密码框'>"
+    "<div role='checkbox' aria-checked='false' aria-label='自定义勾' tabindex='0' "
+    "onclick=\"this.setAttribute('aria-checked', this.getAttribute('aria-checked')==='true'?'false':'true')\">x</div>"
+    "<input aria-label='格式化' oninput='this.value=this.value.toUpperCase()'>"
+    "<button aria-label='交卷'>交卷</button>"
+)
+
+
+def _open_form(browser, servers, tb):
+    _tool(browser, tb.browser_open.func, servers[0] + "/states.html")
+    _call(browser, "js", code=(
+        "document.body.insertAdjacentHTML('beforeend', `" + _FORM_HTML + "`);"
+        "window.__changes = [];"
+        "document.addEventListener('change', e => __changes.push(e.target.getAttribute('aria-label')));"
+        " true"))
+    return _tool(browser, tb.browser_snapshot.func, mode="all")
+
+
+_OPTS = "<option></option><option>現金</option><option>仕入</option>"
+_TABLES_HTML = (
+    # 题目表里套答题表（簿记模试的分录题）：外层第一格是题号，答题表第一行是列头，下拉框被
+    # 没字的 <label> 包着（以前名字成了全部选项「現金 仕入」）
+    "<table><tr><td>10</td><td>建物を売却した。<table>"
+    "<tr><td>借方科目</td><td>金額</td><td>貸方科目</td><td>金額</td></tr>"
+    "<tr><td><label><select>" + _OPTS + "</select></label></td><td><input></td>"
+    "<td><label><select>" + _OPTS + "</select></label></td><td><input></td></tr>"
+    "<tr><td><label><select>" + _OPTS + "</select></label></td><td><input></td>"
+    "<td><label><select>" + _OPTS + "</select></label></td><td><input></td></tr>"
+    "</table></td></tr></table>"
+    # 资产负债表：行首是科目名，「△」不算名字，「雑[ ] | [ ]」两格都叫「雑」
+    "<table><tr><td>現金</td><td></td><td><input></td></tr>"
+    "<tr><td>貸倒引当金</td><td>△</td><td><input></td><td>未払消費税</td><td><input></td></tr>"
+    "<tr><td>雑<input></td><td><input></td></tr></table>"
+    # T 字账：右半边的「〃」是右边上一行的日期，不是左半边的
+    "<table><tr><td>×8.4/1</td><td><select>" + _OPTS + "</select></td>"
+    "<td>×9.3/31</td><td><select>" + _OPTS + "</select></td></tr>"
+    "<tr><td>×8.12/1</td><td><select>" + _OPTS + "</select></td>"
+    "<td>〃</td><td><select>" + _OPTS + "</select></td></tr></table>"
+    # 勾选表：行号 + 列头
+    "<table><tr><td></td><td>仕入帳</td><td>売上帳</td></tr>"
+    "<tr><td>1</td><td><input type='checkbox'></td><td><input type='checkbox'></td></tr>"
+    "<tr><td>2</td><td><input type='checkbox'></td><td><input type='checkbox'></td></tr></table>"
+    # 跨行的格子（rowspan）：第二行的格子要按真实的列对上列头
+    "<table><tr><td>区分</td><td>科目</td><td>金額</td><td>備考</td></tr>"
+    "<tr><td rowspan='2'>費用</td><td>仕入</td><td><input></td><td><input></td></tr>"
+    "<tr><td>支払利息</td><td><input></td><td><input></td></tr></table>"
+    # 上面一行是填好数字的数据行（没有输入框）：不当表头，列名还是「金額」
+    "<table><tr><td>期間</td><td>売上金額</td></tr><tr><td>前期</td><td>500,000</td></tr>"
+    "<tr><td>当期</td><td><input></td></tr></table>"
+    # 本来有名字的不动：<label> 里的字（不带选项）、aria-label、placeholder
+    "<table><tr><td>别的</td><td><label>城市 <select><option>北京</option><option>上海</option></select></label></td>"
+    "<td><input aria-label='备注'></td><td><input placeholder='邮编'></td></tr></table>"
+)
+
+
+def test_unnamed_inputs_in_tables_get_row_and_column_names(browser, servers):
+    """实测（簿记模试）：几百个格子没名字，模型按「每行 4 格」数 ref，第 10 题借贷整行填反，
+    回头核对也看不出哪格是哪格。没名字的输入格按表格起名：外层题号 · 行首（没有就第几行）·
+    列头（重复的列头带上左边那个）。"""
+    base_a, _ = servers
+    _call(browser, "open", url=base_a + "/states.html", timeout=20)
+    _call(browser, "js", code="document.body.insertAdjacentHTML('beforeend', `" + _TABLES_HTML + "`); true")
+    t = _call(browser, "lx", method="snapshot", args={"mode": "interactive"})["tree"]
+    names = re.findall(r'- (?:combobox|textbox|checkbox) "([^"]*)"', t)
+    for want in ["10 · 第1行 · 借方科目", "10 · 第1行 · 借方科目 金額", "10 · 第1行 · 貸方科目",
+                 "10 · 第1行 · 貸方科目 金額", "10 · 第2行 · 借方科目", "10 · 第2行 · 貸方科目 金額",
+                 "現金", "未払消費税", "1 · 仕入帳", "2 · 売上帳", "城市", "备注", "邮编",
+                 "仕入 · 金額", "仕入 · 備考", "支払利息 · 金額", "支払利息 · 備考", "当期 · 売上金額"]:
+        assert want in names, (want, names)
+    assert names.count("貸倒引当金") == 1 and names.count("雑") == 2, names
+    assert names.count("×9.3/31") == 2 and names.count("×8.12/1") == 1, ("〃 是右边上一行的日期", names)
+    assert not any("現金 仕入" in n or "北京" in n for n in names), "选项文字不当名字"
+
+
+def test_fill_form_fills_every_kind_of_field_in_one_call(browser, servers, trusted_tools):
+    """批量填表：输入框、下拉框（按选项文字）、复选框、单选框、密码框、自定义勾选框一次填完；
+    页面的 change 事件照常触发；密码不回显；页面自己改了格式的值进围栏报出来。"""
+    tb = trusted_tools
+    snap = _open_form(browser, servers, tb)
+    r = lambda name: _ref_of(snap, name)   # noqa: E731
+    out = _tool(browser, tb.browser_fill_form.func, [
+        {"ref": r("金额1"), "value": "120,000"},
+        {"ref": r("科目1"), "value": "仕入"},
+        {"ref": r("补助簿1"), "value": True},
+        {"ref": r("已勾的"), "value": "false"},
+        {"ref": r("乙"), "value": True},
+        {"ref": r("密码框"), "value": "s3cret-Value"},
+        {"ref": r("自定义勾"), "value": True},
+        {"ref": r("格式化"), "value": "abc"},
+        {"ref": r("补助簿2"), "value": False},          # 本来就没勾：不能点一下点反了
+    ], delta=False)
+    assert out.startswith("已填写 9/9 个字段（没有提交）"), out
+    assert "s3cret-Value" not in out
+    assert "ABC" in out and "ABC" not in _outside_fences(out), "页面改过的值是页面写的字，进围栏"
+    got = _call(browser, "js", code=(
+        "JSON.stringify([document.querySelector(\"[aria-label='金额1']\").value,"
+        " document.querySelector(\"[aria-label='科目1']\").value,"
+        " document.querySelector(\"[aria-label='补助簿1']\").checked,"
+        " document.querySelector(\"[aria-label='已勾的']\").checked,"
+        " document.querySelector(\"[aria-label='乙']\").checked,"
+        " document.querySelector(\"[aria-label='甲']\").checked,"
+        " document.querySelector(\"[aria-label='密码框']\").value,"
+        " document.querySelector(\"[aria-label='自定义勾']\").getAttribute('aria-checked'),"
+        " document.querySelector(\"[aria-label='补助簿2']\").checked,"
+        " __changes])"))
+    vals = json.loads(got["value"])
+    assert vals[:9] == ["120,000", "仕入", True, False, True, False, "s3cret-Value", "true", False], vals
+    assert {"科目1", "补助簿1", "已勾的", "乙", "金额1"} <= set(vals[9]), "页面要收到 change 事件"
+
+
+def test_fill_form_checks_everything_before_filling_anything(browser, servers, trusted_tools):
+    """有一项不对（按钮、复选框给了认不出的值、失效的 ref）就整批不填，列出每个问题。"""
+    tb = trusted_tools
+    snap = _open_form(browser, servers, tb)
+    r = lambda name: _ref_of(snap, name)   # noqa: E731
+    out = _tool(browser, tb.browser_fill_form.func, [
+        {"ref": r("金额1"), "value": "1"},
+        {"ref": r("交卷"), "value": "x"},
+        {"ref": r("补助簿1"), "value": "也许"},
+    ], delta=False)
+    assert out.startswith("没有填"), out
+    assert "不是能填的字段" in out and "true 或 false" in out, out
+    # 下拉框下面那行 option 的 ref 当成下拉框来填：说清楚是选项、该用哪个 ref
+    lines = snap.splitlines()
+    i = next(k for k, ln in enumerate(lines) if '"科目1"' in ln)
+    opt = re.search(r"- option.*\[ref=(e\d+)\]", lines[i + 1]).group(1)
+    wrong = _tool(browser, tb.browser_fill_form.func, [{"ref": opt, "value": "仕入"}], delta=False)
+    assert wrong.startswith("没有填") and f"option（ref={opt}）" in wrong and "combobox 那一行" in wrong, wrong
+    stale = _tool(browser, tb.browser_fill_form.func,
+                  [{"ref": r("金额1"), "value": "1"}, {"ref": "e9999", "value": "1"}], delta=False)
+    assert "e9999" in stale and "一个都没填" in stale, stale
+    assert _call(browser, "js", code="document.querySelector(\"[aria-label='金额1']\").value")["value"] == ""
+
+
+def test_fill_form_reports_each_failure_and_keeps_going(browser, servers, trusted_tools):
+    """填的时候某项失败（下拉框没这个选项、单选框不能直接取消），其它照填，失败的逐项报，
+    下拉框的可选值（页面写的）进围栏。"""
+    tb = trusted_tools
+    snap = _open_form(browser, servers, tb)
+    r = lambda name: _ref_of(snap, name)   # noqa: E731
+    out = _tool(browser, tb.browser_fill_form.func, [
+        {"ref": r("科目1"), "value": "売掛金"},
+        {"ref": r("甲"), "value": False},
+        {"ref": r("金额1"), "value": 300},
+    ], delta=False)
+    assert out.startswith("已填写 1/3 个字段"), out
+    assert "select 没有匹配的选项" in out and "单选框不能直接取消" in out, out
+    assert "仕入" in out and "仕入" not in _outside_fences(out), "可选值是页面写的，进围栏"
+    assert _call(browser, "js", code="document.querySelector(\"[aria-label='金额1']\").value")["value"] == "300"
+
+
+def test_fill_form_asks_once_for_the_whole_batch(browser, servers, monkeypatch):
+    """整批只问一次：卡片列出每个字段要填什么，密码不显示；拒绝了就一个都不填。"""
+    from src import permission_modes as pm
+    from src import session as _session
+    from src import state as _state
+    from src import tools_browser as tb
+    sess = _session.current_session()
+    old_mode = pm.current(sess)
+    pm.apply(sess, "manual")
+    cards, kws, answer = [], [], {"ok": False, "during": None}
+
+    class _UI:
+        def confirm_command(self, text, **kw):
+            cards.append(text)
+            kws.append(kw)
+            if answer["during"]:            # 卡片开着的时候页面自己改了东西
+                tb._bridge_call("js", code=answer["during"])
+            return answer["ok"], ""
+
+    monkeypatch.setattr(_state, "ui_ref", _UI())
+    try:
+        snap = _open_form(browser, servers, tb)
+        r = lambda name: _ref_of(snap, name)   # noqa: E731
+        fields = [{"ref": r("金额1"), "value": "120,000"}, {"ref": r("科目1"), "value": "仕入"},
+                  {"ref": r("密码框"), "value": "s3cret-Value"}, {"ref": r("补助簿1"), "value": True}]
+        no = _tool(browser, tb.browser_fill_form.func, fields, delta=False)
+        assert "已拒绝" in no and len(cards) == 1, (no, cards)
+        card = cards[0]
+        assert card.startswith("将在浏览器填写 4 个字段（不提交）"), card
+        assert '"120,000"' in card and '"仕入"' in card and "勾上" in card, card
+        assert "s3cret-Value" not in card and "密码，不显示" in card, card
+        assert _call(browser, "js", code="document.querySelector(\"[aria-label='金额1']\").value")["value"] == ""
+        answer["ok"] = True
+        yes = _tool(browser, tb.browser_fill_form.func, fields, delta=False)
+        assert yes.startswith("已填写 4/4") and len(cards) == 2, (yes, cards)
+        assert kws[-1].get("browser_consequential") is False
+
+        # 有一项看起来有后果（名字带「删除」）：整批按有后果问（永远问、不给记住）
+        _call(browser, "js", code=(
+            "document.body.insertAdjacentHTML('beforeend', `<input aria-label='删除理由'>`); true"))
+        snap2 = _tool(browser, tb.browser_snapshot.func, mode="all")
+        _tool(browser, tb.browser_fill_form.func,
+              [{"ref": _ref_of(snap2, "删除理由"), "value": "重复"},
+               {"ref": _ref_of(snap2, "格式化"), "value": "x"}], delta=False)
+        assert kws[-1].get("browser_consequential") is True and "⚠" in cards[-1], cards[-1]
+
+        # 批准之后、填之前页面改了某个字段（名字变了）：这一项不填，其它照填
+        answer["during"] = ("document.querySelector(\"[aria-label='补助簿1']\")"
+                            ".setAttribute('aria-label', '别的东西'); true")
+        snap3 = _tool(browser, tb.browser_snapshot.func, mode="all")
+        out = _tool(browser, tb.browser_fill_form.func,
+                    [{"ref": _ref_of(snap3, "补助簿1"), "value": False},
+                     {"ref": _ref_of(snap3, "金额1"), "value": "7"}], delta=False)
+        assert out.startswith("已填写 1/2") and "已被页面修改" in out, out
+        assert _call(browser, "js", code=(
+            "document.querySelector(\"[aria-label='别的东西']\").checked"))["value"] is True
+    finally:
+        pm.apply(sess, old_mode)
 
 
 def test_page_written_text_stays_inside_the_fence(browser, servers, trusted_tools):

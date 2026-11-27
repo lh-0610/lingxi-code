@@ -3369,7 +3369,7 @@ from .tools_browser import (  # noqa: E402
     browser_open, browser_snapshot, browser_find, browser_read_text,
     browser_click, browser_type, browser_console, browser_close, browser_screenshot,
     browser_tabs, browser_press_key, browser_drag,
-    browser_click_at, browser_scroll, browser_hover, browser_wait,
+    browser_click_at, browser_scroll, browser_hover, browser_wait, browser_fill_form,
 )
 
 # 导出
@@ -3399,7 +3399,7 @@ ALL_TOOLS = [
     browser_open, browser_snapshot, browser_find, browser_read_text,
     browser_click, browser_type, browser_console, browser_close, browser_screenshot,
     browser_tabs, browser_press_key, browser_drag,
-    browser_click_at, browser_scroll, browser_hover, browser_wait,
+    browser_click_at, browser_scroll, browser_hover, browser_wait, browser_fill_form,
 ]
 
 
@@ -3489,6 +3489,7 @@ TOOL_DISPLAY_NAMES = {
     "browser_click": "🌐 浏览器点击",
     "browser_click_at": "🌐 浏览器坐标点击",
     "browser_type": "🌐 浏览器输入",
+    "browser_fill_form": "🌐 浏览器填表",
     "browser_press_key": "🌐 浏览器按键",
     "browser_drag": "🌐 浏览器拖拽",
     "browser_scroll": "🌐 浏览器滚动",

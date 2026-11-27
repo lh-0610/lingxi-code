@@ -86,6 +86,10 @@ def describe_tool_call(name: str, args: dict) -> tuple[str, str]:
         detail = str(args.get("url") or "")
     elif name == "web_search":
         detail = str(args.get("query") or "")
+    elif name == "browser_fill_form":
+        # 通用参数串会把几百个字段整段铺在头上
+        n = len(args.get("fields") or [])
+        detail = f"{n} 个字段" + (f"（frame {args['frame']}）" if args.get("frame") else "")
     elif name == "search_in_file":
         detail = f"{args.get('path', '')} → '{args.get('keyword', '')}'"
     elif name == "apply_patch":
@@ -231,6 +235,10 @@ _PLAN_REJECT_NOTES = {
     "browser_type": (
         "Plan 模式只调研：浏览器输入会改页面状态（回车还可能提交表单）。"
         "可以用只读的浏览器工具看页面，把要填什么写进方案，由用户切到 Act 后再操作。"
+    ),
+    "browser_fill_form": (
+        "Plan 模式只调研：浏览器填表会改页面状态。"
+        "可以用只读的浏览器工具看页面，把每个字段要填什么写进方案，由用户切到 Act 后再操作。"
     ),
     "browser_press_key": (
         "Plan 模式只调研：浏览器按键会改页面状态（回车还可能提交表单）。"

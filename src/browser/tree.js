@@ -123,6 +123,148 @@
     return "";
   }
 
+  // 元素里「给人看的」文字：跳过表单控件自己的内容（下拉框的全部选项、文本域里的字）
+  const CONTROL_TEXT_TAGS = new Set(["SELECT", "OPTION", "TEXTAREA", "SCRIPT", "STYLE", "TEMPLATE"]);
+  function plainText(node) {
+    let out = "";
+    const walk = (n) => {
+      if (n.nodeType === 3) { out += n.textContent; return; }
+      if (n.nodeType !== 1 || CONTROL_TEXT_TAGS.has(n.tagName)) return;
+      for (const c of n.childNodes) walk(c);
+      if (n.tagName === "TD" || n.tagName === "TH" || n.tagName === "BR") out += " ";
+    };
+    walk(node);
+    return out.replace(/\s+/g, " ").trim();
+  }
+
+  // ── 表格里没名字的输入格：按行列起名 ──
+  // 实测（簿记模试）：几百个下拉框 / 输入框都没有名字，模型只能按「每行 4 格」数 ref，数错一格
+  // 整行借贷就反了，回头核对也看不出哪格是哪格。表格本身写着答案：列头（借方科目 / 金額）、
+  // 行首（現金 / 貸倒引当金）、外层表格的题号。只给本来没名字的控件用
+  const TABLE_ROW_CAP = 200;
+  const HAS_WORD = /[\p{L}\p{N}]/u;
+  const AMOUNT = /^[\d,.\s]+$/;
+  const DITTO = /^(〃|″|”|"|同上)$/;
+
+  function hasControl(cell) {
+    return !!cell.querySelector("input:not([type=hidden]),select,textarea");
+  }
+
+  // 表格的格子网格（处理 rowspan / colspan）：返回 { grid[r][c] = 格子, pos: 格子 -> {r, c} }
+  function tableGrid(table) {
+    const rows = Array.from(table.rows).filter(tr => tr.closest("table") === table);
+    if (rows.length > TABLE_ROW_CAP) return null;
+    const grid = [], pos = new Map();
+    rows.forEach((tr, r) => {
+      grid[r] = grid[r] || [];
+      let c = 0;
+      for (const cell of tr.cells) {
+        while (grid[r][c]) c++;
+        pos.set(cell, { r, c });
+        const rs = Math.max(1, Math.min(cell.rowSpan || 1, rows.length - r));
+        const cs = Math.max(1, Math.min(cell.colSpan || 1, 50));
+        for (let i = 0; i < rs; i++)
+          for (let j = 0; j < cs; j++) (grid[r + i] = grid[r + i] || [])[c + j] = cell;
+        c += cs;
+      }
+    });
+    return { grid, pos, rows };
+  }
+
+  // 像表头的一行：在 thead 里、全是 th，或者没有输入控件、也没有金额那样的数字格
+  function headerLike(tr, cells) {
+    if (tr.parentElement && tr.parentElement.tagName === "THEAD") return true;
+    const own = Array.from(tr.cells);
+    if (own.length && own.every(c => c.tagName === "TH")) return true;
+    if (cells.some(hasControl)) return false;
+    const texts = own.map(plainText).filter(Boolean);
+    return texts.length > 0 && !texts.some(t => AMOUNT.test(t) && /\d/.test(t));
+  }
+
+  function usableLabel(t) {
+    return !!t && HAS_WORD.test(t) && !(AMOUNT.test(t) && t.replace(/\D/g, "").length > 3) && t.length <= 40;
+  }
+
+  function tableContextName(el) {
+    const cell = el.closest("td,th");
+    const table = cell && cell.closest("table");
+    if (!table) return "";
+    const g = tableGrid(table);
+    if (!g || !g.pos.has(cell)) return "";
+    const { r, c } = g.pos.get(cell);
+    const parts = [];
+
+    // 外层表格（题目表里套着答题表）：外层这一行的第一格是短的编号就带上（「10」）
+    const outerCell = table.parentElement && table.parentElement.closest("td,th");
+    if (outerCell && outerCell.parentElement) {
+      const first = outerCell.parentElement.cells[0];
+      if (first && first !== outerCell && !first.contains(table)) {
+        const t = plainText(first);
+        if (t && t.length <= 6 && HAS_WORD.test(t)) parts.push(t);
+      }
+    }
+
+    // 行名：控件自己格子里的字（「当期純[  ]」「雑[  ]」），否则往左找最近一个有字的格子
+    // （格子里另有输入框也行：「雑[  ] | [  ]」右边那格也叫「雑」）。「〃」是同上：
+    // 往上找同一列的字（T 字账右半边「〃」指的是右边上一行的日期，不是左半边的）
+    let rowLabel = "";
+    const ownText = plainText(cell);
+    if (usableLabel(ownText)) rowLabel = ownText;
+    for (let cc = c - 1; !rowLabel && cc >= 0; cc--) {
+      const left = g.grid[r][cc];
+      if (!left || left === cell) continue;
+      const t = plainText(left);
+      if (DITTO.test(t)) {
+        for (let rr = r - 1; rr >= 0 && !rowLabel; rr--) {
+          const up = g.grid[rr] && g.grid[rr][cc];
+          const ut = up ? plainText(up) : "";
+          if (usableLabel(ut)) rowLabel = ut;
+          else if (!DITTO.test(ut)) break;
+        }
+        break;
+      }
+      if (usableLabel(t)) rowLabel = t;
+    }
+
+    // 列名：往上最近一行像表头的，同一列那一格的字；列名重复（借方「金額」、贷方「金額」）时
+    // 带上左边最近的另一个列名
+    let colLabel = "", headerRow = -1;
+    for (let rr = r - 1; rr >= 0; rr--) {
+      const rowCells = (g.grid[rr] || []).filter(Boolean);
+      if (!headerLike(g.rows[rr], rowCells)) continue;
+      const h = g.grid[rr][c];
+      const t = h ? plainText(h) : "";
+      if (!t || !HAS_WORD.test(t)) break;
+      colLabel = t;
+      headerRow = rr;
+      const texts = (g.grid[rr] || []).map(x => (x ? plainText(x) : ""));
+      if (texts.filter(x => x === t).length > 1) {
+        for (let cc = c - 1; cc >= 0; cc--) {
+          const p = texts[cc];
+          if (p && p !== t) { colLabel = p + " " + t; break; }
+        }
+      }
+      break;
+    }
+
+    // 没有行名时用第几行（表头以下、有控件的行里数）
+    if (!rowLabel && colLabel) {
+      let n = 0, total = 0;
+      for (let rr = headerRow + 1; rr < g.rows.length; rr++) {
+        if (Array.from(g.rows[rr].cells).some(hasControl)) {
+          total++;
+          if (rr <= r) n = total;
+        }
+      }
+      if (total > 1) rowLabel = "第" + n + "行";
+    }
+    if (rowLabel) parts.push(rowLabel);
+    if (colLabel && colLabel !== rowLabel) parts.push(colLabel);
+    // 只有外层编号、没有本表的行列信息：不算名字
+    if (!rowLabel && !colLabel) return "";
+    return parts.join(" · ");
+  }
+
   function nameOf(el, role, useText) {
     const labelledby = el.getAttribute("aria-labelledby");
     if (labelledby) {
@@ -136,13 +278,20 @@
     if (label && label.trim()) return clean(label, NAME_MAX);
     const tag = el.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
-      if (el.labels && el.labels.length)
-        return clean(Array.from(el.labels).map(l => l.textContent).join(" "), NAME_MAX);
+      // 标签文字不算控件自己的内容：<label><select>…</select></label> 这种包法，以前下拉框的
+      // 名字成了「現金 立替金 買掛金…」（全部选项）。只剩选项文字的标签当作没有标签
+      if (el.labels && el.labels.length) {
+        const lab = clean(Array.from(el.labels).map(plainText).join(" "), NAME_MAX);
+        if (lab) return lab;
+      }
       const ph = el.getAttribute("placeholder");
       if (ph) return clean(ph, NAME_MAX);
       const t = (el.type || "").toLowerCase();
       if (tag === "INPUT" && (t === "submit" || t === "button" || t === "reset"))
         return clean(el.value || t, NAME_MAX);
+      if (el.title) return clean(el.title, NAME_MAX);
+      const ctx = tableContextName(el);
+      if (ctx) return clean(ctx, NAME_MAX);
     }
     if (tag === "IMG") return clean(el.getAttribute("alt") || el.title || imgFileName(el), NAME_MAX);
     if (role === "textbox" && el.isContentEditable) {
@@ -825,6 +974,86 @@
     return { ok: true, results };
   }
 
+  // ── 批量填表（browser_fill_form）──────────────────────────────────
+  // 实测：模试页 130 个下拉框 + 193 个输入框，模型觉得逐个 browser_type 不现实，绕去找外部
+  // Chrome 的调试端口，二十多轮一个空没填。fillInfo 一次取齐每个 ref 的结构信息和能填成什么，
+  // 用户整批批准后 fill 一次填完；单个字段失败不影响其它，各自报原因。
+
+  // 这个元素能怎么填："text" / "select" / "checkbox" / "radio"；不能填（按钮、链接……）返回 ""
+  function fieldKind(el) {
+    if (el.tagName === "SELECT") return "select";
+    if (el.tagName === "TEXTAREA") return "text";
+    if (el.tagName === "INPUT") {
+      const t = (el.type || "text").toLowerCase();
+      if (t === "checkbox") return "checkbox";
+      if (t === "radio") return "radio";
+      if (["submit", "button", "reset", "image", "file", "hidden"].includes(t)) return "";
+      return "text";
+    }
+    if (el.isContentEditable) return "text";
+    const role = roleOf(el);
+    // 自己做的勾选框（div[role=checkbox]）：点一下切换，状态看 aria-checked
+    if (role === "checkbox" || role === "switch") return "checkbox";
+    if (role === "radio") return "radio";
+    return "";
+  }
+
+  function isChecked(el) {
+    if (el.tagName === "INPUT") return !!el.checked;
+    return (el.getAttribute("aria-checked") || "").toLowerCase() === "true";
+  }
+
+  function fillInfo(opts) {
+    const out = [];
+    for (const ref of (opts && opts.refs) || []) {
+      const r = resolve(ref);
+      if (!r.ok) { out.push({ ref, ok: false, error: r.error }); continue; }
+      const kind = fieldKind(r.el);
+      out.push({ ref, ok: true, kind, secret: isSecret(r.el),
+                 disabled: !!(r.el.disabled || r.el.getAttribute("aria-disabled") === "true"),
+                 ...infoOf(r.el) });
+    }
+    return { ok: true, docId, items: out };
+  }
+
+  function fill(opts) {
+    const results = [];
+    for (const f of (opts && opts.fields) || []) {
+      const r = resolve(f.ref);
+      if (!r.ok) { results.push({ ref: f.ref, ok: false, error: r.error }); continue; }
+      const el = r.el;
+      const bad = checkExpect(f, el);
+      if (bad) { results.push({ ref: f.ref, ...bad }); continue; }
+      const kind = fieldKind(el);
+      if (kind === "text" || kind === "select") {
+        const t = type({ ref: f.ref, text: String(f.value), clear: true });
+        results.push({ ref: f.ref, kind, ...t });
+        continue;
+      }
+      if (kind === "checkbox" || kind === "radio") {
+        const want = !!f.value;
+        if (isChecked(el) === want) {
+          results.push({ ref: f.ref, kind, ok: true, checked: want, unchanged: true });
+          continue;
+        }
+        if (kind === "radio" && !want) {
+          results.push({ ref: f.ref, kind, ok: false,
+                         error: "单选框不能直接取消：选同一组里的另一个" });
+          continue;
+        }
+        el.scrollIntoView({ block: "center" });
+        el.click();
+        const now = isChecked(el);
+        results.push(now === want
+          ? { ref: f.ref, kind, ok: true, checked: now }
+          : { ref: f.ref, kind, ok: false, checked: now, error: "点了但勾选状态没变（页面拦下了）" });
+        continue;
+      }
+      results.push({ ref: f.ref, ok: false, error: "不是能填的字段" });
+    }
+    return { ok: true, docId, results };
+  }
+
   // console 通道：隔离世界拦不到页面 console.*（那些走 Python javaScriptConsoleMessage）。
   // 这里只收资源加载失败（捕获 phase 的 error 事件，img/script/link/iframe）——
   // Qt 不暴露响应状态码，只记失败 URL（设计文档已知限制）。
@@ -1229,6 +1458,7 @@
     reveal, pointOf, pointArrived, anchorOf, describeAt,
     frameBoxes, revealFrame, rectOf, focusRef, focusWindow, keyWatch, keyArrived,
     scrollInfo, scrollState, scrollSet, scrollByPx, hoverWatch, hoverArrived, hasRef,
+    fillInfo, fill,
     console: (opts) => { const out = consoleBuf.slice(); if (opts && opts.clear) consoleBuf.length = 0; return { ok: true, entries: out, url: location.href, docId }; },
     state: () => ({ ok: true, url: location.href, title: document.title, readyState: document.readyState, generation, docId }),
   };

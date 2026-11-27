@@ -19,6 +19,7 @@ import re
 import threading
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 from . import permission_modes as _pm
 from . import session as _session
@@ -1194,6 +1195,178 @@ def browser_type(ref: str, text: str, clear: bool = True, submit: bool = False,
         shown_value = "（页面改过，见下）\n" + tree.fence(raw, frame_url)
     return (f"已向 {target} 输入，当前值: {shown_value}{scope_note}"
             + _after_action(before, frame, frame_url, tabs0, cur0))
+
+
+_FILL_MAX = 500          # 一次最多填这么多个字段
+_FILL_CARD_LINES = 40    # 确认卡片列这么多项，其余只给个数
+_TRUE_WORDS = {"true", "1", "yes", "on", "checked", "勾选", "是", "选中"}
+_FALSE_WORDS = {"false", "0", "no", "off", "unchecked", "不勾选", "取消", "否", "不选"}
+
+
+def _as_bool(value):
+    """复选框 / 单选框的值：布尔或常见写法；认不出返回 None。"""
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in _TRUE_WORDS:
+        return True
+    if s in _FALSE_WORDS:
+        return False
+    return None
+
+
+def _field_pairs(fields):
+    """fields 的每项可能是 dict，也可能是校验后的对象：统一成 [(ref, value)]。"""
+    pairs = []
+    for f in fields or []:
+        if isinstance(f, dict):
+            ref, value = f.get("ref"), f.get("value")
+        else:
+            ref, value = getattr(f, "ref", None), getattr(f, "value", None)
+        pairs.append((str(ref or "").strip(), value))
+    return pairs
+
+
+class FormField(BaseModel):
+    """browser_fill_form 的一个字段。"""
+    ref: str = Field(description="字段的 ref")
+    value: str | bool | int | float = Field(
+        description="输入框填文字；下拉框填选项的值或文字；复选框 / 单选框填 true（勾上）或 false")
+
+
+@tool(parse_docstring=True)
+@_exclusive
+def browser_fill_form(fields: list[FormField], frame: str | None = None,
+                      delta: bool = True) -> str:
+    """一次填多个表单字段（输入框、下拉框、复选框、单选框），整批只问一次，不提交。要填的字段多时用它，别逐个 browser_type。
+
+    Args:
+        fields: 要填的字段，每项 {"ref": "e12", "value": "現金"}。
+        frame: 这些 ref 所在的 iframe（一次只填同一个 frame 里的）。
+        delta: 是否附页面变化，默认 True。
+    """
+    pairs = _field_pairs(fields)
+    if not pairs:
+        return "没有要填的字段：fields 至少给一项 {\"ref\": …, \"value\": …}。"
+    if len(pairs) > _FILL_MAX:
+        return f"一次最多填 {_FILL_MAX} 个字段（这次 {len(pairs)} 个），分几批调用。"
+    if any(not ref for ref, _ in pairs):
+        return "有字段没给 ref。"
+    url, err = _page_url()
+    if err:
+        return err
+    frame, scope_note = _ref_scope(pairs[0][0], frame)
+    frame_url = url
+    if frame:
+        frame_url, err = _page_url(frame)
+        if err:
+            return err
+    st = _lx("state", frame=frame)
+    if not st.get("ok"):
+        return _err(st, "读取页面状态")
+    cur_doc = st.get("docId") or ""
+    stale = [ref for ref, _ in pairs if _issued.get((_fk(frame), ref)) != cur_doc]
+    if stale:
+        more = f" 等 {len(stale)} 个" if len(stale) > 10 else ""
+        return (f"这些 ref 不能用：{'、'.join(stale[:10])}{more}。" + _STALE_REF
+                + "（一次只填同一个 frame 里的字段；一个都没填）")
+
+    fi = _lx("fillInfo", {"refs": [ref for ref, _ in pairs]}, frame, timeout=60)
+    if not fi.get("ok"):
+        return _err(fi, "读取字段")
+    infos = {it.get("ref"): it for it in fi.get("items") or []}
+    problems = []
+    for ref, value in pairs:
+        it = infos.get(ref) or {}
+        if not it.get("ok"):
+            problems.append(f"- {ref}：{it.get('error') or '定位不到'}")
+        elif not it.get("kind") and it.get("selfTag") == "option":
+            # 实测：模型把快照里下拉框下面那行 option 的 ref 当成下拉框来填，以前报「combobox
+            # 不是能填的字段」（角色按外层算），它看不出错在哪，原样重发了一遍
+            problems.append(f"- option（ref={ref}）：这是下拉框里的一个选项，不是下拉框本身——"
+                            "填下拉框用 combobox 那一行的 ref，value 写选项文字")
+        elif not it.get("kind"):
+            problems.append(f"- {_describe_for_model(it, ref)}：不是能填的字段（按钮、链接用 browser_click）")
+        elif it.get("disabled"):
+            problems.append(f"- {_describe_for_model(it, ref)}：已禁用，填不了")
+        elif it["kind"] in ("checkbox", "radio") and _as_bool(value) is None:
+            problems.append(f"- {_describe_for_model(it, ref)}：复选框 / 单选框的值要给 true 或 false")
+    if problems:
+        return "没有填：下面这些字段有问题，改好后整批重发：\n" + "\n".join(problems)
+
+    origin = _origin_for(_session.current_session(), "interact", url,
+                         frame_url if frame else None)
+    if not (security.is_localhost(url) and security.is_localhost(frame_url)):
+        from .secret_mask import collect_secrets
+        secrets = collect_secrets()
+        for ref, value in pairs:
+            if isinstance(value, str):
+                hit = security.secret_in_text(value, secrets)
+                if hit:
+                    return f"已拒绝：{ref} 的值里含配置/环境中的密钥（{hit}），不能填进公网页面。一个都没填。"
+    cons = any(security.is_consequential(infos[ref], origin=origin) for ref, _ in pairs)
+
+    lines = []
+    for ref, value in pairs[:_FILL_CARD_LINES]:
+        it = infos[ref]
+        if it["kind"] in ("checkbox", "radio"):
+            shown = "勾上" if _as_bool(value) else "不勾"
+        elif it.get("secret"):
+            shown = "（密码，不显示）"
+        else:
+            s = str(value)
+            shown = json.dumps(s if len(s) <= 60 else s[:60] + "…", ensure_ascii=False)
+        lines.append(f"- {_describe(it, ref)} → {shown}")
+    if len(pairs) > _FILL_CARD_LINES:
+        lines.append(f"…另 {len(pairs) - _FILL_CARD_LINES} 项")
+    card = f"将在浏览器填写 {len(pairs)} 个字段（不提交）:\n" + "\n".join(lines) + f"\n页面: {url}"
+    if frame:
+        card += f"\niframe: {frame_url}"
+    if cons:
+        card += "\n⚠ 其中有看起来有后果的字段，请仔细核对。"
+    refusal = _gate("interact", url, consequential=cons, card=card,
+                    extra_url=frame_url if frame else None, origin=origin)
+    if refusal:
+        return refusal
+
+    tabs0, cur0 = _tab_ids(), _cur_tab()
+    before = _plain_before(frame) if delta else None
+    payload = []
+    for ref, value in pairs:
+        it = infos[ref]
+        v = _as_bool(value) if it["kind"] in ("checkbox", "radio") else value
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        payload.append({"ref": ref, "value": v, "expect": {"doc": cur_doc, "fp": it.get("fp")}})
+    r = _lx("fill", {"fields": payload}, frame, timeout=120)
+    if not r.get("ok"):
+        return _err(r, "填写")
+    results = r.get("results") or []
+    ok_n = sum(1 for x in results if x.get("ok"))
+    failed, page_text, changed = [], [], []
+    want = dict(pairs)
+    for x in results:
+        ref = x.get("ref")
+        target = _describe_for_model(infos.get(ref) or {}, ref)
+        if not x.get("ok"):
+            failed.append(f"- {target}：{x.get('error') or '失败'}")
+            if x.get("options") is not None:
+                # 选项文字是页面写的：进围栏
+                page_text.append(f"{ref} 的可选值：\n" + "\n".join(x["options"]))
+            continue
+        if x.get("secret") or x.get("kind") not in ("text", "select") or "value" not in x:
+            continue
+        raw, asked = x.get("value", ""), str(want.get(ref, ""))
+        if raw not in (asked[:100], "") and x.get("kind") == "text":
+            changed.append(f"{ref}: {raw}")
+    out = f"已填写 {ok_n}/{len(pairs)} 个字段（没有提交）。"
+    if failed:
+        out += "\n没填上的：\n" + "\n".join(failed)
+    if page_text:
+        out += "\n" + tree.fence("\n\n".join(page_text), frame_url)
+    if changed:
+        out += "\n页面自己改了格式的值（页面写的，见下）：\n" + tree.fence("\n".join(changed), frame_url)
+    return out + scope_note + _after_action(before, frame, frame_url, tabs0, cur0)
 
 
 def _checked_ref(ref, frame):
